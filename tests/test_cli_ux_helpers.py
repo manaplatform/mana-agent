@@ -98,27 +98,9 @@ def test_render_coding_sections_contains_expected_blocks() -> None:
     assert "Next Step" in rendered
 
 
-def test_index_command_text_output_includes_key_fields(monkeypatch, tmp_path: Path) -> None:
-    class _FakeIndexService:
-        def index(self, target_path: str, index_dir: Path, rebuild: bool = False) -> dict:
-            _ = (target_path, rebuild)
-            return {
-                "indexed_files": 1,
-                "deleted_files": 0,
-                "total_files": 1,
-                "new_chunks": 2,
-                "removed_chunks": 0,
-                "index_dir": str(index_dir),
-            }
-
-    monkeypatch.setattr("mana_analyzer.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_analyzer.commands.cli.build_index_service", lambda _s: _FakeIndexService())
-
-    idx = tmp_path / "idx"
-    result = runner.invoke(cli.app, ["index", str(tmp_path), "--index-dir", str(idx)])
-    assert result.exit_code == 0
-    assert "indexed_files: 1" in result.stdout
-    assert "new_chunks: 2" in result.stdout
+def test_index_command_is_retired(tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, ["index", str(tmp_path)])
+    assert result.exit_code != 0
 
 
 def test_ask_command_text_output_includes_mode_trace_warnings_and_sources(monkeypatch, tmp_path: Path) -> None:

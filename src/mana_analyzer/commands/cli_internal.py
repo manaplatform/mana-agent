@@ -4,10 +4,12 @@ import os
 import sys
 import json
 import logging
+import tempfile
+import hashlib
 from pathlib import Path
 from typing import Any
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 import typer
 import asyncio
 from asyncio.subprocess import PIPE
@@ -27,12 +29,17 @@ from mana_analyzer.config.settings import (
     default_logs_dir,
     mana_root_dir,
 )
+from mana_analyzer.commands import ui_helpers as _ui_helpers
+from mana_analyzer.commands.ui_helpers import *  # noqa: F401,F403
+from mana_analyzer.commands.ui_helpers import _resolve_agent_max_steps
 from mana_analyzer.analysis.checks import PythonStaticAnalyzer
 from mana_analyzer.analysis.chunker import CodeChunker
 from mana_analyzer.parsers.multi_parser import MultiLanguageParser
 from mana_analyzer.vector_store.faiss_store import FaissStore
 from mana_analyzer.services.analyze_service import AnalyzeService
 from mana_analyzer.services.ask_service import AskService
+from mana_analyzer.services.chat_service import ChatService
+from mana_analyzer.services.coding_memory_service import CodingMemoryService
 from mana_analyzer.describe.build import build_describe_service
 from mana_analyzer.services.index_service import IndexService
 from mana_analyzer.services.search_service import SearchService
@@ -40,6 +47,16 @@ from mana_analyzer.services.structure_service import StructureService
 from mana_analyzer.services.dependency_service import DependencyService
 from mana_analyzer.services.vulnerability_service import VulnerabilityService
 from mana_analyzer.services.report_service import ReportService
+from mana_analyzer.utils.index_discovery import discover_index_dirs
+from mana_analyzer.utils.project_discovery import discover_subprojects
+from mana_analyzer.llm.analyze_chain import AnalyzeChain
+from mana_analyzer.llm.ask_agent import AskAgent
+from mana_analyzer.llm.qna_chain import QnAChain
+from mana_analyzer.llm.coding_agent import CodingAgent
+from mana_analyzer.llm.tool_worker_process import ToolWorkerClient
+from mana_analyzer.llm.tools_executor import LocalToolsExecutor, RedisRQToolsExecutor, ToolsExecutionConfig
+from mana_analyzer.llm.tools_manager import ToolsManagerOrchestrator
+from mana_analyzer.llm.run_logger import LlmRunLogger
 # The deep‐flow LLM chain:
 from mana_analyzer.describe.llm_chains.deep_flow import DeepFlowChain
 from .output import build_output_sink, get_shared_console
@@ -49,6 +66,44 @@ console = get_shared_console()
 app = typer.Typer(help="mana-analyzer CLI")
 
 OUTPUT_DIR: Path | None = None
+
+for _name in dir(_ui_helpers):
+    if _name.startswith("_") and not _name.startswith("__"):
+        globals().setdefault(_name, getattr(_ui_helpers, _name))
+
+
+def _make_ephemeral_index_dir(prefix: str = "mana_index_") -> tuple[tempfile.TemporaryDirectory, Path]:
+    tmp = tempfile.TemporaryDirectory(prefix=prefix)
+    return tmp, Path(tmp.name).resolve()
+
+
+def _stable_subdir_name(path: str | Path) -> str:
+    resolved = str(Path(path).resolve())
+    digest = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:12]
+    return f"{Path(path).name or 'root'}-{digest}"
+
+
+def _index_has_chunks(index_dir: str | Path) -> bool:
+    return (Path(index_dir) / "chunks.jsonl").exists()
+
+
+def _index_has_search_data(index_dir: str | Path) -> bool:
+    root = Path(index_dir)
+    return (root / "faiss").exists() or (root / "chunks.jsonl").exists()
+
+
+def _index_service_index_compat(
+    index_service: Any,
+    *,
+    target_path: str | Path,
+    index_dir: str | Path,
+    rebuild: bool = False,
+    vectors: bool = True,
+) -> dict:
+    try:
+        return index_service.index(target_path=target_path, index_dir=index_dir, rebuild=rebuild, vectors=vectors)
+    except TypeError:
+        return index_service.index(target_path=target_path, index_dir=index_dir, rebuild=rebuild)
 
 
 
@@ -296,17 +351,34 @@ def build_ask_service(
         temperature=0,
     )
 
-    file_agent = build_file_agent(llm, root_dir=root)
-
     ask_agent = AskAgent(
         api_key=settings.openai_api_key,
         model=model,
+        search_service=build_search_service(settings),
         base_url=settings.openai_base_url,
         project_root=root,
-        file_agent=file_agent,
     )
 
-    return AskService(qna_chain=qna_chain, ask_agent=ask_agent)
+    return AskService(
+        store=build_store(settings),
+        qna_chain=qna_chain,
+        ask_agent=ask_agent,
+        search_service=build_search_service(settings),
+    )
+
+
+def _build_ask_service_compat(
+    settings: Settings,
+    model_override: str | None = None,
+    *,
+    project_root: Path | None = None,
+) -> AskService:
+    public_cli = sys.modules.get("mana_analyzer.commands.cli")
+    builder = getattr(public_cli, "build_ask_service", build_ask_service) if public_cli is not None else build_ask_service
+    try:
+        return builder(settings, model_override=model_override, project_root=project_root)
+    except TypeError:
+        return builder(settings, model_override=model_override)
 
 
 # ---------------------------------------------------------------------------

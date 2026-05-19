@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from .cli_internal import *
 from .output import build_output_sink
 
@@ -50,7 +52,9 @@ def ask(
     )
 
     # For agent tools, project_root matters (file reads/commands).
-    service = _build_ask_service_compat(settings, model_override=model, project_root=root)
+    public_cli = sys.modules.get("mana_analyzer.commands.cli")
+    build_ask = getattr(public_cli, "_build_ask_service_compat", _build_ask_service_compat) if public_cli is not None else _build_ask_service_compat
+    service = build_ask(settings, model_override=model, project_root=root)
 
     tmp_single: tempfile.TemporaryDirectory | None = None
     tmp_dir_mode_root: tempfile.TemporaryDirectory | None = None

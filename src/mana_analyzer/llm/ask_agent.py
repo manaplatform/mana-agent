@@ -94,7 +94,7 @@ class AskAgent:
         self.coding_memory_service = coding_memory_service
         self._resolved_index = default_index_dir(self.project_root)
         self._resolved_indexes = [self._resolved_index]
-        self.run_logger = LlmRunLogger(log_file=str(Path))
+        self.run_logger = LlmRunLogger()
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []

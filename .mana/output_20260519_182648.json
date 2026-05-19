@@ -1,0 +1,14 @@
+{
+  "answer": "Tool loop reached the step limit before a final answer.",
+  "sources": [],
+  "mode": "agent-tools",
+  "trace": [
+    {
+      "tool_name": "read_file",
+      "args_summary": "path='docs' mode='full' start=1 end=200",
+      "duration_ms": 0.33529099891893566,
+      "status": "error",
+      "output_preview": "[Errno 21] Is a directory: '/Users/ah/Documents/mana-agent/docs'"
+    }
+  ]
+}

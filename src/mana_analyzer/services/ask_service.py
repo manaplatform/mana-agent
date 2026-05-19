@@ -146,7 +146,7 @@ class AskService:
         for source in sources:
             source_path = Path(source.file_path).resolve()
             for index_dir in grouped.keys():
-                subproject_root = index_dir.parent
+                subproject_root = index_dir.parent.parent if index_dir.parent.name == ".mana" else index_dir.parent
                 if subproject_root in source_path.parents:
                     grouped[index_dir].append(source)
 
@@ -156,7 +156,7 @@ class AskService:
                 result.append(
                     SourceGroup(
                         index_dir=str(index_dir),
-                        subproject_root=str(index_dir.parent),
+                        subproject_root=str(index_dir.parent.parent if index_dir.parent.name == ".mana" else index_dir.parent),
                         sources=hits,
                     )
                 )

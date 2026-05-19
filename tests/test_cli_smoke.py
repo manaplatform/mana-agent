@@ -263,23 +263,18 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
 
     idx = tmp_path / "idx"
 
-    result_index = runner.invoke(app, ["index", str(tmp_path), "--index-dir", str(idx), "--json"])
-    assert result_index.exit_code == 0
-    assert "indexed_files" in result_index.stdout
-
-    result_search = runner.invoke(app, ["search", "add", "--index-dir", str(idx), "--json"])
-    assert result_search.exit_code == 0
-    assert "symbol_name" in result_search.stdout
-
-    result_analyze = runner.invoke(app, ["analyze", str(tmp_path), "--fail-on", "error", "--json"])
+    result_analyze = runner.invoke(app, ["analyze", str(tmp_path), "--query", "add", "--json"])
     assert result_analyze.exit_code == 0
+    payload = json.loads(result_analyze.stdout)
+    assert set(payload) >= {"meta", "index", "search", "dependencies", "graph", "findings", "describe", "structure", "security", "flow", "warnings"}
+    assert payload["search"]["query"] == "add"
+    assert payload["search"]["results"][0]["symbol_name"] == "add"
 
     result_analyze_llm = runner.invoke(
         app,
         [
             "analyze",
             str(tmp_path),
-            "--with-llm",
             "--model",
             "gpt-test",
             "--llm-max-files",
@@ -301,52 +296,34 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
     assert result_ask_agent.exit_code == 0
     assert "Tool answer" in result_ask_agent.stdout
 
-    result_analyze_structure_json = runner.invoke(
-        app,
-        ["analyze", str(tmp_path), "--full-structure", "--output-format", "json", "--json"],
-    )
-    assert result_analyze_structure_json.exit_code == 0
-    assert "project_root" in result_analyze_structure_json.stdout
-    assert "summarization" in result_analyze_structure_json.stdout
-    assert "architecture_summary" in result_analyze_structure_json.stdout
-    assert "tech_summary" in result_analyze_structure_json.stdout
-
     result_analyze_structure_md = runner.invoke(
         app,
-        ["analyze", str(tmp_path), "--full-structure", "--output-format", "markdown"],
+        ["analyze", str(tmp_path), "--output-format", "markdown"],
     )
     assert result_analyze_structure_md.exit_code == 0
-    assert "Project Structure Analysis" in result_analyze_structure_md.stdout
-    assert "Repository Summary" in result_analyze_structure_md.stdout
+    assert "Unified Analyze Report" in result_analyze_structure_md.stdout
+    assert "Repository Description" in result_analyze_structure_md.stdout
     assert "Architecture" in result_analyze_structure_md.stdout
     assert "Technology" in result_analyze_structure_md.stdout
 
     result_analyze_structure_llm = runner.invoke(
         app,
-        ["analyze", str(tmp_path), "--with-llm", "--full-structure", "--output-format", "json", "--json"],
+        ["analyze", str(tmp_path), "--output-format", "json", "--json"],
     )
     assert result_analyze_structure_llm.exit_code == 0
-    assert "summarization" in result_analyze_structure_llm.stdout
-    assert describe_build_calls == [False, False, True]
+    assert "describe" in result_analyze_structure_llm.stdout
+    assert describe_build_calls
 
-    result_deps = runner.invoke(app, ["deps", str(tmp_path), "--json"])
-    assert result_deps.exit_code == 0
-    assert "frameworks" in result_deps.stdout
-
-    result_graph = runner.invoke(app, ["graph", str(tmp_path), "--json"])
-    assert result_graph.exit_code == 0
-    assert "project_root" in result_graph.stdout
-
-    result_describe = runner.invoke(app, ["describe", str(tmp_path), "--no-llm"])
-    assert result_describe.exit_code == 0
-    assert "Repository Description" in result_describe.stdout
+    for retired in ("index", "search", "deps", "graph", "describe", "report", "flow"):
+        result_retired = runner.invoke(app, [retired, str(tmp_path)])
+        assert result_retired.exit_code != 0
 
     result_ask_dir_mode = runner.invoke(
         app,
         ["ask", "what", "--dir-mode", "--root-dir", str(tmp_path), "--json"],
     )
     assert result_ask_dir_mode.exit_code == 0
-    assert "Dir answer" in result_ask_dir_mode.stdout
+    assert "Dir tool answer" in result_ask_dir_mode.stdout
 
     result_ask_dir_mode_tools = runner.invoke(
         app,
@@ -427,7 +404,7 @@ def test_analyze_fail_on_merged_findings(monkeypatch, tmp_path: Path) -> None:
         ),
     )
 
-    result = runner.invoke(app, ["analyze", str(tmp_path), "--with-llm", "--fail-on", "warning"])
+    result = runner.invoke(app, ["analyze", str(tmp_path), "--fail-on", "warning"])
     assert result.exit_code == 1
 
 
@@ -440,25 +417,30 @@ def test_analyze_full_structure_writes_markdown_artifact(monkeypatch, tmp_path: 
     monkeypatch.setattr("mana_analyzer.commands.cli.StructureService", FakeStructureService)
     monkeypatch.setattr("mana_analyzer.commands.cli.build_describe_service", lambda *_args, **_kwargs: FakeDescribeService())
 
-    result = runner.invoke(app, ["analyze", str(tmp_path), "--full-structure", "--output-format", "all"])
+    result = runner.invoke(app, ["analyze", str(tmp_path), "--output-format", "all"])
     assert result.exit_code == 0
 
-    out_dir = tmp_path / ".mana/logs"
-    md_files = sorted(out_dir.glob("*-analyze.md"))
-    json_files = sorted(out_dir.glob("*-analyze.json"))
+    out_dir = tmp_path / ".mana"
+    md_file = out_dir / "analyze.md"
+    json_file = out_dir / "analyze.json"
+    html_file = out_dir / "analyze.html"
+    dot_file = out_dir / "analyze.dot"
+    graphml_file = out_dir / "analyze.graphml"
 
-    assert md_files, "expected analyze markdown artifact"
-    assert json_files, "expected analyze json artifact"
+    assert md_file.exists(), "expected analyze markdown artifact"
+    assert json_file.exists(), "expected analyze json artifact"
+    assert html_file.exists(), "expected analyze html artifact"
+    assert dot_file.exists(), "expected analyze dot artifact"
+    assert graphml_file.exists(), "expected analyze graphml artifact"
 
-    markdown = md_files[-1].read_text(encoding="utf-8")
-    payload = json.loads(json_files[-1].read_text(encoding="utf-8"))
+    markdown = md_file.read_text(encoding="utf-8")
+    payload = json.loads(json_file.read_text(encoding="utf-8"))
 
-    assert "Analyze Findings" in markdown
+    assert "Findings" in markdown
     assert "missing-docstring" in markdown
-    assert "Project Structure Analysis" in markdown
-    assert "Repository Summary" in markdown
-    assert payload["findings"][0]["rule_id"] == "missing-docstring"
-    assert payload["summarization"]["architecture_summary"] == "arch"
+    assert "Repository Description" in markdown
+    assert payload["findings"]["merged"][0]["rule_id"] == "missing-docstring"
+    assert payload["describe"]["architecture_summary"] == "arch"
 
 
 def test_ask_dir_mode_no_auto_index_missing(monkeypatch, tmp_path: Path) -> None:

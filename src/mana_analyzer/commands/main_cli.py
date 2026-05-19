@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from .cli_internal import *
 from .output import build_output_sink
 

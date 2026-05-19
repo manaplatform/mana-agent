@@ -1,12 +1,12 @@
 # mana-analyzer
 
-**AI-powered, installable Python CLI for deep codebase analysis, search, and agent-driven automation**
+**AI-powered, installable Python CLI for unified codebase analysis and agent-driven automation**
 
 ---
 
 ## Overview
 
-`mana-analyzer` is a **tool-aware, LLM-augmented code analysis framework** designed to understand, analyze, and interact with real-world software repositories.
+`mana-analyzer` is a **tool-aware, LLM-augmented code analysis framework** designed to understand, analyze, and interact with real-world software repositories through one primary `analyze` workflow.
 
 It combines:
 - static analysis,
@@ -21,24 +21,25 @@ The system is optimized for **large, multi-language repositories** and is safe-b
 
 ## What Problems It Solves
 
-- 🔍 *"Where is this logic implemented?"* → semantic search with line-level citations
-- 🧠 *"Explain this repository"* → architecture, technology, and structure summaries
+- 🔍 *"Where is this logic implemented?"* → `analyze --query` semantic search with line-level citations
+- 🧠 *"Explain this repository"* → unified architecture, technology, structure, dependency, and security report
 - 🛠️ *"Fix this bug"* → coding agent that reads code, plans, patches, and verifies
 - 🔐 *"Is this project secure?"* → dependency + vulnerability scanning
-- 📊 *"Show dependencies"* → import graphs (JSON / DOT / GraphML)
+- 📊 *"Show dependencies"* → analyze artifacts with JSON / DOT / GraphML dependency graphs
 - 🤖 *"Let the agent work"* → tool-aware chat with multi-step execution
 
 ---
 
 ## Key Features
 
+- ✅ **Unified analysis** – indexing, search, findings, describe, deps, graph, report, and flow in one command
 - ✅ **Incremental indexing** – only changed files are re-embedded
 - 🌍 **Multi-language parsing** – Python, JS/TS, Go, Rust, JVM, C/C++, Bash, Markdown, etc.
 - 📐 **Static analysis** – complexity, unused imports, docstrings, nesting, patterns
-- 🔎 **Semantic search** – FAISS-backed vector similarity search
+- 🔎 **Semantic search** – FAISS-backed vector similarity search via `analyze --query`
 - 🧠 **RAG Q&A (`ask`)** – grounded answers with file + line references
 - 🧩 **Architecture & technology detection** – frameworks, languages, layout
-- 🔗 **Dependency graphs** – JSON, DOT, GraphML
+- 🔗 **Dependency graphs** – JSON, DOT, GraphML emitted by `analyze`
 - 🧪 **Security scans** – `pip list --outdated`, `safety` (optional)
 - 💬 **Interactive chat** – tool-aware, stateful REPL
 - 🧑‍💻 **Coding agent** – plans → reads → edits → verifies
@@ -112,20 +113,20 @@ All settings can also be defined via `.env` or `settings.toml`.
 ## Quick Start
 
 ```bash
-# Index a repository
-mana-analyzer index /path/to/project
-
-# Semantic search
-mana-analyzer search "authentication flow"
-
-# Ask a question (RAG)
-mana-analyzer ask "How is configuration loaded?"
-
-# Run static analysis
+# Run the unified LLM analysis pipeline
 mana-analyzer analyze /path/to/project
 
+# Include semantic search results in the same report
+mana-analyzer analyze /path/to/project --query "authentication flow"
+
+# Machine-readable output
+mana-analyzer analyze /path/to/project --json
+
+# Ask an indexed question (interactive Q&A remains separate)
+mana-analyzer ask "How is configuration loaded?"
+
 # Start interactive agent chat
-mana-analyzer chat --agent-tools --coding-agent
+mana-analyzer chat
 ```
 
 ---
@@ -134,19 +135,19 @@ mana-analyzer chat --agent-tools --coding-agent
 
 | Command | Purpose |
 |-------|--------|
-| `index` | Build / refresh semantic index |
-| `search` | Vector similarity search |
 | `ask` | RAG-based Q&A |
-| `analyze` | Static analysis + summaries |
-| `deps` | Dependency detection |
-| `graph` | Dependency graphs |
-| `describe` | Repo description |
-| `report` | Combined reports |
-| `scan` | Security checks |
+| `analyze` | Unified index, optional search, static + LLM findings, describe, deps, graph, security, flow, and report artifacts |
 | `chat` | Interactive agent session |
-| `flow` | Inspect coding memory |
 
-All commands support `--help`, `--json`, and `--verbose` flags.
+`analyze` writes:
+
+- `<project>/.mana/analyze.json`
+- `<project>/.mana/analyze.md`
+- `<project>/.mana/analyze.html`
+- `<project>/.mana/analyze.dot`
+- `<project>/.mana/analyze.graphml`
+
+`analyze`, `ask`, and `chat` support `--help`; `analyze` and `ask` support `--json`.
 Text mode uses a unified Rich UI output layer; `--json` remains strict machine-readable JSON.
 `--verbose` streams debug logs to console (`stderr`) and writes them to `.mana_logs/...`.
 
@@ -170,12 +171,12 @@ Safety rules:
 
 Flow state is persisted at:
 ```
-<project>/.mana_index/chat_memory.sqlite3
+<project>/.mana/index/chat_memory.sqlite3
 ```
 
-Inspect it with:
+The active flow snapshot is included in `analyze` output:
 ```bash
-mana-analyzer flow .
+mana-analyzer analyze .
 ```
 
 ---

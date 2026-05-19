@@ -1,0 +1,15 @@
+{
+  "answer": "Dir tool answer",
+  "sources": [
+    {
+      "score": 0.77,
+      "file_path": "/tmp/mono/pkg-a/a.py",
+      "start_line": 1,
+      "end_line": 2,
+      "symbol_name": "a",
+      "snippet": "snippet"
+    }
+  ],
+  "mode": "agent-tools",
+  "trace": []
+}

@@ -1,0 +1,12 @@
+Tool-based answer
+
+Mode: agent-tools
+
+Tool Trace:
+- semantic_search [ok] 2.2ms args=query=flow
+
+Warnings:
+- planner fallback: deterministic checklist
+
+Sources:
+- /tmp/a.py:1-2

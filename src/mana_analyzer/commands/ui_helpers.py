@@ -36,6 +36,33 @@ from mana_analyzer.services.coding_memory_service import CodingMemoryService
 logger = logging.getLogger('mana_analyzer.commands.cli')
 UNLIMITED_AGENT_MAX_STEPS = 1_000_000_000
 
+
+def _sanitize_full_auto_answer_text(
+    text: str,
+    *,
+    changed_files_count: int = 0,
+    terminal_reason: str = "",
+) -> str:
+    """Replace interactive full-auto prompts with executable status text."""
+    raw = str(text or "").strip()
+    lower = raw.lower()
+    prompt_signals = (
+        "if you want",
+        "reply yes",
+        "please choose",
+        "need a scope choice",
+        "please share permission",
+        "need to read the current repository files",
+    )
+    if any(signal in lower for signal in prompt_signals):
+        return (
+            "Status: executing full-auto workflow. "
+            f"Changed files so far: {changed_files_count}. "
+            f"Terminal reason: {terminal_reason or 'unknown'}."
+        )
+    return raw
+
+
 class RichToolCallbackHandler(BaseCallbackHandler):
     """Logs tool start/end so LiveLogBuffer can show it."""
 

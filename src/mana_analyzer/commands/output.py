@@ -68,7 +68,7 @@ class OutputSink:
     def emit_json(self, payload: Any) -> None:
         text = json.dumps(payload, indent=2)
         # JSON mode must stay script-friendly: no ANSI decoration.
-        self.console.print(text, markup=False, highlight=False)
+        self.console.out(text, highlight=False)
         self._write_mirror(text)
 
     def emit_text(self, text: str) -> None:

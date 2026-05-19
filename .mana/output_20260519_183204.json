@@ -1,0 +1,6 @@
+mana-analyzer chat
+- index: /Users/ah/Documents/mana-agent/.mana/index
+- k: 8
+- ephemeral-index: False
+- coding-agent: True
+- coding-memory: True
