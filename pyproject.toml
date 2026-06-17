@@ -42,5 +42,10 @@ dependencies = [
   "tenacity>=8.0.0,<9.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9.0",
+]
+
 [project.scripts]
 mana-analyzer = "mana_analyzer.commands.cli:app"
