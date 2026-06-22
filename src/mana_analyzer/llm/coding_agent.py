@@ -34,7 +34,7 @@ from mana_analyzer.llm.prompts import (
     FULL_AUTO_EXECUTION_PROMPT,
     TOOLSMANAGER_PROMPT
 )
-from mana_analyzer.llm.tools_manager import ToolsManagerOrchestrator
+from mana_analyzer.llm.tools_manager import QueueManager
 from mana_analyzer.llm.coding_agent_models import (
     AskAgentLike,
     DynamicReadPolicy,
@@ -44,7 +44,6 @@ from mana_analyzer.llm.coding_agent_models import (
     as_jsonable,
 )
 from mana_analyzer.llm.coding_agent_prompt import CODING_SYSTEM_PROMPT
-from mana_analyzer.llm.coding_agent_tools_provider import CodingAgentToolsManagerDecisionProvider
 
 
 from mana_analyzer.llm.tool_worker_process import (
@@ -400,7 +399,7 @@ class CodingAgent:
         self.tool_worker_client = tool_worker_client
         self.full_auto_mode = bool(full_auto_mode)
         self.planner_model = str(planner_model).strip() if planner_model else None
-        self.tools_manager_orchestrator: ToolsManagerOrchestrator | None = None
+        self.tools_manager_orchestrator: QueueManager | None = None
         self._setup_planner()
 
         if hasattr(self.ask_agent, "tools"):
@@ -484,14 +483,113 @@ class CodingAgent:
                 ]
             )
         
-    def set_tools_manager_orchestrator(self, manager: ToolsManagerOrchestrator):
+    def set_tools_manager_orchestrator(self, manager: QueueManager):
         """
-        Bind the ToolsManager to the Core LLM Orchestrator.
+        Bind the queue manager as this agent's execution backend.
+
+        The queue manager is deterministic and drives the AgentWorkQueue
+        directly, so no LLM decision provider is attached.
         """
-        if hasattr(manager, "attach_decision_provider"):
-            provider = CodingAgentToolsManagerDecisionProvider(self)
-            manager.attach_decision_provider(provider)
         self.tools_manager_orchestrator = manager
+
+    def run_via_work_queue(
+        self,
+        request: str,
+        *,
+        seeds: "Sequence[Any] | None" = None,
+        tool_policy: dict[str, Any] | None = None,
+        index_dir: str | None = None,
+        flow_id: str | None = None,
+        max_steps: int = 60,
+        max_reads: int = 40,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Drive a request through the Live Agent Work Queue.
+
+        The coding agent sits at the top of the hierarchy here: it seeds the
+        queue, the executor claims runnable jobs and runs them through the tool
+        worker, the EventBus broadcasts every transition to the TaskBoard, and
+        the agent's sniffer live-analyzes each result and emits follow-up jobs.
+
+        Returns a dict with the run report, the rendered board, and the final
+        job list. Falls back gracefully if no tool worker is attached.
+        """
+        from mana_analyzer.llm.agent_work_queue import (
+            AgentWorkQueue,
+            TaskBoard,
+            WorkItem,
+            WorkQueueRunner,
+        )
+        from mana_analyzer.llm.agent_work_queue_adapters import (
+            CodingAgentSniffer,
+            make_worker_executor,
+        )
+        from mana_analyzer.llm.goal_profiles import active_goal_profile
+
+        if self.tool_worker_client is None:
+            return {
+                "ok": False,
+                "error": "no_tool_worker_client",
+                "report": None,
+                "board": "",
+            }
+
+        queue = AgentWorkQueue()
+        board = TaskBoard(queue=queue)
+
+        profile = active_goal_profile(request)
+        if profile is not None:
+            def _relevant(path: str) -> bool:
+                return profile.is_relevant(path, self.repo_root)
+        else:
+            def _relevant(path: str) -> bool:
+                return True
+
+        seed_items: list[WorkItem] = []
+        if seeds:
+            for seed in seeds:
+                seed_items.append(seed if isinstance(seed, WorkItem) else WorkItem(**dict(seed)))
+        else:
+            seed_items.append(
+                WorkItem(
+                    kind="discover",
+                    tool_name="repo_search",
+                    tool_args={"query": request},
+                    question=f"Locate files relevant to: {request}",
+                    gate="locate_candidates",
+                    priority=10,
+                )
+            )
+        queue.submit_many(seed_items)
+
+        execute = make_worker_executor(
+            worker_client=self.tool_worker_client,
+            repo_root=self.repo_root,
+            on_event=self._log_worker_event,
+            default_timeout=int(timeout_seconds),
+            tool_policy=tool_policy,
+            index_dir=index_dir,
+            flow_id=flow_id,
+        )
+        sniffer = CodingAgentSniffer(
+            repo_root=self.repo_root,
+            max_reads=int(max_reads),
+            relevant=_relevant,
+        )
+        runner = WorkQueueRunner(
+            queue=queue,
+            execute=execute,
+            sniffer=sniffer,
+            board=board,
+            max_steps=int(max_steps),
+        )
+        report = runner.run()
+        return {
+            "ok": report.failed == 0 and report.blocked == 0,
+            "report": report.model_dump(),
+            "board": board.render(),
+            "snapshot": queue.snapshot(),
+        }
 
     @staticmethod
     def _normalize_prechecklist(checklist: FlowChecklist, *, source: str) -> dict[str, Any]:
@@ -1840,7 +1938,7 @@ class CodingAgent:
         k: "int | None" = None,
         flow_context: "str | None" = None,
     ) -> "ToolRunResponse":
-        """Route a ToolRunRequest through ToolsManagerOrchestrator when available.
+        """Route a ToolRunRequest through the QueueManager when available.
 
         Using the manager as the single gateway prevents the same command from
         being dispatched to the worker subprocess more than once when multiple

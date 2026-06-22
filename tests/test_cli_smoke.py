@@ -109,7 +109,7 @@ def test_continue_command_uses_root_dir_and_loops_until_complete(monkeypatch, tm
 
     monkeypatch.setattr("mana_analyzer.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_analyzer.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_analyzer.commands.cli.ToolsManagerOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("mana_analyzer.commands.cli.QueueManager", _FakeOrchestrator)
 
     result = runner.invoke(app, ["continue", "--root-dir", str(tmp_path), "--run-id", "abc123"])
 
@@ -1223,7 +1223,7 @@ def test_chat_plan_trigger_auto_execute_without_coding_agent_hides_progress(monk
     monkeypatch.setattr("mana_analyzer.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_analyzer.commands.cli.build_ask_service", lambda _s, model_override=None: FakeAskService())
     monkeypatch.setattr("mana_analyzer.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_analyzer.commands.cli.ToolsManagerOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("mana_analyzer.commands.cli.QueueManager", _FakeOrchestrator)
 
     result = runner.invoke(
         app,
@@ -1300,7 +1300,7 @@ def test_chat_redis_backend_falls_back_to_local_executor_when_unavailable(monkey
     monkeypatch.setattr("mana_analyzer.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_analyzer.commands.cli.build_ask_service", lambda _s, model_override=None: FakeAskService())
     monkeypatch.setattr("mana_analyzer.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_analyzer.commands.cli.ToolsManagerOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("mana_analyzer.commands.cli.QueueManager", _FakeOrchestrator)
     monkeypatch.setattr(
         "mana_analyzer.commands.cli.RedisRQToolsExecutor",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("redis unavailable")),
@@ -1383,7 +1383,7 @@ def test_chat_planning_mode_auto_executes_after_clarifications(monkeypatch, tmp_
     monkeypatch.setattr("mana_analyzer.commands.chat_cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_analyzer.commands.chat_cli.build_ask_service", lambda _s, model_override=None: _AskService())
     monkeypatch.setattr("mana_analyzer.commands.chat_cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_analyzer.commands.chat_cli.ToolsManagerOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("mana_analyzer.commands.chat_cli.QueueManager", _FakeOrchestrator)
     monkeypatch.setattr(
         "mana_analyzer.commands.chat_cli._generate_planning_question_llm",
         lambda **kwargs: f"Clarification question {int(kwargs['asked_count']) + 1}?",
@@ -3571,7 +3571,7 @@ def test_chat_full_auto_tools_manager_path_auto_resumes_docs_update_pass_cap(mon
     monkeypatch.setattr("mana_analyzer.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_analyzer.commands.cli.build_ask_service", lambda _s, model_override=None: FakeAskService())
     monkeypatch.setattr("mana_analyzer.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_analyzer.commands.cli.ToolsManagerOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr("mana_analyzer.commands.cli.QueueManager", _FakeOrchestrator)
 
     result = runner.invoke(
         app,

@@ -493,7 +493,7 @@ def chat(
     coding_agent_instance: CodingAgent | None = None
     coding_memory_service: CodingMemoryService | None = None
     tool_worker_client: ToolWorkerClient | None = None
-    tools_manager_orchestrator: ToolsManagerOrchestrator | None = None
+    tools_manager_orchestrator: QueueManager | None = None
     tools_executor_instance: LocalToolsExecutor | RedisRQToolsExecutor | None = None
     coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
     coding_agent_is_custom = coding_agent_cls is not CodingAgent
@@ -559,7 +559,7 @@ def chat(
 
     if coding_agent_instance is not None and auto_execute_plan and tool_worker_client is not None:
         tools_executor_instance = _build_tools_executor(tool_worker_client)
-        tools_manager_orchestrator_cls = _public_symbol("ToolsManagerOrchestrator", ToolsManagerOrchestrator)
+        tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
         tools_manager_orchestrator = tools_manager_orchestrator_cls(
             api_key=settings.openai_api_key,
             model=effective_model,
@@ -887,7 +887,7 @@ def chat(
                 "max_semantic_k": 50,
             }
 
-        def _ensure_tools_manager_orchestrator() -> ToolsManagerOrchestrator | None:
+        def _ensure_tools_manager_orchestrator() -> QueueManager | None:
             nonlocal tool_worker_client
             nonlocal tools_manager_orchestrator
             nonlocal tools_executor_instance
@@ -914,7 +914,7 @@ def chat(
                 return None
             if tools_executor_instance is None:
                 tools_executor_instance = _build_tools_executor(tool_worker_client)
-            tools_manager_orchestrator_cls = _public_symbol("ToolsManagerOrchestrator", ToolsManagerOrchestrator)
+            tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
             tools_manager_orchestrator = tools_manager_orchestrator_cls(
                 api_key=settings.openai_api_key,
                 model=model or settings.openai_chat_model,

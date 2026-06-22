@@ -57,7 +57,7 @@ from mana_analyzer.llm.qna_chain import QnAChain
 from mana_analyzer.llm.coding_agent import CodingAgent
 from mana_analyzer.llm.tool_worker_process import ToolWorkerClient, ToolWorkerProcessError
 from mana_analyzer.llm.tools_executor import LocalToolsExecutor, RedisRQToolsExecutor, ToolsExecutionConfig
-from mana_analyzer.llm.tools_manager import ToolsManagerOrchestrator
+from mana_analyzer.llm.tools_manager import QueueManager
 from mana_analyzer.llm.run_logger import LlmRunLogger
 from mana_analyzer.tools.search_internet import build_search_internet_tool
 from mana_analyzer.utils.project_search import project_search
@@ -177,7 +177,7 @@ def continue_command(
 
     settings_cls = _public_symbol("Settings", Settings)
     worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
-    tools_manager_orchestrator_cls = _public_symbol("ToolsManagerOrchestrator", ToolsManagerOrchestrator)
+    tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
     settings = settings_cls()
     index_dir = default_index_dir(root)
     worker = worker_client_cls(
