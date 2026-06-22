@@ -2,6 +2,18 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-06-22
+
+- Removed keyword-based ToolsManager planner intent recovery so unstructured markdown/list planner output now goes through planner repair instead of deriving `search`, `edit`, `verify`, or `answer` from words like `find` or `update`.
+- Prevented edit-shaped `find ... update <file>` chat prompts from taking the exact-search fast path before the coding agent can handle them.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_chat_direct_commands.py tests/test_tools_manager.py -q` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_analyzer/commands/ui_helpers.py src/mana_analyzer/llm/tools_manager.py src/mana_analyzer/llm/coding_agent_tools_provider.py tests/test_chat_direct_commands.py tests/test_tools_manager.py` passed.
+
+## 2026-06-21
+
+- Fixed coding-agent tool activity rendering so live-capable terminals use transient live updates and every chat/full-auto resume turn prints exactly one final `Tool activity` panel, with worker events from all resume cycles flowing into the same activity.
+- Hid the synthetic `Auto-execute ended without a direct answer from tool runs` pass-cap diagnostic from normal full-auto chat output while preserving it in lower-level result metadata.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_ux_helpers.py tests/test_cli_smoke.py -k "tool_activity or full_auto"` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_analyzer/commands/ui_helpers.py src/mana_analyzer/commands/chat_cli.py tests/test_cli_ux_helpers.py tests/test_cli_smoke.py` passed.
+
 ## 2026-06-18
 
 - Routed active coding-agent chat sessions through CodingAgent for general analysis/tool-inventory turns, matching the startup banner instead of falling back to classic missing-index search.

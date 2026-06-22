@@ -60,3 +60,7 @@ def test_extract_exact_search_query() -> None:
     assert _extract_exact_search_query('search for "foo bar"') == "foo bar"
     assert _extract_exact_search_query("where is login") == "login"
     assert _extract_exact_search_query("how does login work?") is None
+
+
+def test_extract_exact_search_query_ignores_edit_requests() -> None:
+    assert _extract_exact_search_query("find all models and update docs/models.md") is None

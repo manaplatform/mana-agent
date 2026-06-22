@@ -480,19 +480,6 @@ class ToolsManagerOrchestrator:
         raise ValueError("No valid JSON object found")
 
     @staticmethod
-    def _intent_from_text(text: str) -> Literal["inspect", "search", "edit", "verify", "answer"]:
-        lowered = str(text or "").lower()
-        if any(token in lowered for token in ("search", "semantic", "find", "lookup")):
-            return "search"
-        if any(token in lowered for token in ("edit", "patch", "write", "update", "change", "refactor")):
-            return "edit"
-        if any(token in lowered for token in ("verify", "test", "lint", "mypy", "ruff", "check")):
-            return "verify"
-        if any(token in lowered for token in ("answer", "summar", "final", "report")):
-            return "answer"
-        return "inspect"
-
-    @staticmethod
     def _status_from_text(text: str) -> StepStatus:
         lowered = str(text or "").strip().lower()
         if lowered in {"pending", "in_progress", "done", "blocked"}:
@@ -591,88 +578,6 @@ class ToolsManagerOrchestrator:
             finalize_action=finalize_action,
         )
 
-    def _plan_from_markdown_text(
-        self,
-        text: str,
-        *,
-        request: str,
-        previous_plan: ToolsPlan | None = None,
-    ) -> ToolsPlan | None:
-        raw = str(text or "").strip()
-        if not raw:
-            return None
-        if "\\n" in raw and "\n" not in raw:
-            raw = raw.replace("\\n", "\n")
-
-        objective = ""
-        extracted_steps: list[dict[str, str]] = []
-
-        for line in raw.splitlines():
-            item = line.strip()
-            if not item:
-                continue
-            lowered = item.lower()
-            if lowered.startswith("objective:"):
-                objective = item.split(":", 1)[1].strip()
-                continue
-            if lowered in {"plan:", "execution plan:", "**plan**", "**execution plan**"}:
-                continue
-
-            match = re.match(r"^(?:\d+[.)]\s+|[-*]\s+)(.+)$", item)
-            if not match:
-                continue
-            payload = match.group(1).strip()
-            status = "pending"
-            status_match = re.match(r"^\[(pending|in_progress|done|blocked)\]\s+(.+)$", payload, flags=re.IGNORECASE)
-            if status_match:
-                status = status_match.group(1).lower()
-                payload = status_match.group(2).strip()
-            if payload:
-                extracted_steps.append({"title": payload[:220], "status": status})
-
-        if not extracted_steps and previous_plan is not None and previous_plan.steps:
-            extracted_steps = [
-                {
-                    "title": str(item.title),
-                    "status": str(item.status),
-                }
-                for item in previous_plan.steps
-            ]
-
-        if not extracted_steps:
-            return None
-
-        steps: list[ToolsPlanStep] = []
-        for idx, item in enumerate(extracted_steps, start=1):
-            title = str(item.get("title", "") or f"Step {idx}").strip()
-            status = self._status_from_text(item.get("status", "pending"))
-            if idx == 1 and status == "pending":
-                status = "in_progress"
-            steps.append(
-                ToolsPlanStep(
-                    id=f"s{idx}",
-                    title=title,
-                    tool_intent=self._intent_from_text(title),
-                    args_hint="Derived from planner markdown fallback",
-                    success_signal="",
-                    fallback="Use repository evidence and continue safely.",
-                    status=status,
-                )
-            )
-
-        resolved_objective = objective or (" ".join((request or "").strip().split())[:220] or "Execute requested plan")
-        return self._normalize_plan(
-            ToolsPlan(
-                objective=resolved_objective,
-                steps=steps,
-                decision="continue",
-                decision_reason="Recovered plan from markdown/text output.",
-                stop_conditions=[],
-                finalize_action="Return final answer with completed work.",
-            ),
-            previous_plan=previous_plan,
-        )
-
     def _deterministic_fallback_plan(
         self,
         *,
@@ -724,17 +629,7 @@ class ToolsManagerOrchestrator:
             parsed = self._parse_model(raw_text, ToolsPlan)
             return self._normalize_plan(parsed, previous_plan=previous_plan)
         except Exception:
-            pass
-        direct = self._plan_from_markdown_text(raw_text, request=request, previous_plan=previous_plan)
-        if direct is not None:
-            return direct
-        for candidate in self._collect_candidates(raw_text):
-            if not isinstance(candidate, str):
-                continue
-            parsed_text = self._plan_from_markdown_text(candidate, request=request, previous_plan=previous_plan)
-            if parsed_text is not None:
-                return parsed_text
-        return None
+            return None
 
     def _normalize_batch(self, batch: ToolsManagerBatch, *, planner_step_id: str) -> ToolsManagerBatch:
         requests: list[ToolsManagerRequest] = []

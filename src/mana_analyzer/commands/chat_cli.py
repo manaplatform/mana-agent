@@ -1958,7 +1958,7 @@ def chat(
                     use_live_activity = _use_live_tool_activity(console)
                     try:
                         live_context = (
-                            Live(activity, console=console, refresh_per_second=12, transient=False)
+                            Live(activity, console=console, refresh_per_second=12, transient=True)
                             if use_live_activity
                             else nullcontext()
                         )
@@ -1999,8 +1999,7 @@ def chat(
                                 continue
                     finally:
                         set_active_tool_activity(None)
-                        if not use_live_activity:
-                            console.print(activity)
+                        console.print(activity)
 
                 except ToolWorkerProcessError as exc:
                     _log_exception("coding_agent.generate.worker", exc)

@@ -149,10 +149,12 @@ def test_tool_activity_live_is_disabled_for_recorded_output() -> None:
 
 def test_tool_activity_can_use_live_without_fallback_duplicate(monkeypatch) -> None:
     live_entries = 0
+    live_transient_values: list[object] = []
 
     class _FakeLive:
         def __init__(self, *args, **kwargs) -> None:
-            _ = (args, kwargs)
+            _ = args
+            live_transient_values.append(kwargs.get("transient"))
 
         def __enter__(self):
             nonlocal live_entries
@@ -182,7 +184,8 @@ def test_tool_activity_can_use_live_without_fallback_duplicate(monkeypatch) -> N
 
     assert result == {"ok": True}
     assert live_entries == 1
-    assert console.export_text().count("Tool activity") == 0
+    assert live_transient_values == [True]
+    assert console.export_text().count("Tool activity") == 1
 
 
 def test_tool_activity_can_share_one_box_across_request_cycles() -> None:

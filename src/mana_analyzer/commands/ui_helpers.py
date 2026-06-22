@@ -68,6 +68,15 @@ def _sanitize_full_auto_answer_text(
         "please share permission",
         "need to read the current repository files",
     )
+    if (
+        str(terminal_reason or "").strip().lower() == "pass_cap_reached"
+        and lower.startswith("auto-execute ended without a direct answer from tool runs.")
+    ):
+        return (
+            "Status: executing full-auto workflow. "
+            f"Changed files so far: {changed_files_count}. "
+            f"Terminal reason: {terminal_reason or 'unknown'}."
+        )
     if any(signal in lower for signal in prompt_signals):
         return (
             "Status: executing full-auto workflow. "
@@ -569,6 +578,8 @@ def _extract_exact_search_query(question: str) -> str | None:
     match = _EXACT_SEARCH_PATTERN.match(text)
     if not match:
         return None
+    if _looks_like_edit_request(text):
+        return None
     term = match.group(1).strip()
     # Strip a single matching pair of surrounding quotes.
     if len(term) >= 2 and term[0] == term[-1] and term[0] in "\"'":
@@ -737,11 +748,12 @@ def _run_with_live_buffer(
     root_logger.addHandler(log_buf)
     if manage_live:
         set_active_tool_activity(live_activity)
+    use_live_activity = bool(manage_live and _use_live_tool_activity(console))
 
     try:
         if manage_live:
-            if _use_live_tool_activity(console):
-                with Live(live_activity, console=console, refresh_per_second=12, transient=False):
+            if use_live_activity:
+                with Live(live_activity, console=console, refresh_per_second=12, transient=True):
                     result = fn(callbacks=callbacks or [])
             else:
                 result = fn(callbacks=callbacks or [])
@@ -751,8 +763,7 @@ def _run_with_live_buffer(
         root_logger.removeHandler(log_buf)
         if manage_live:
             set_active_tool_activity(None)
-            if not _use_live_tool_activity(console):
-                console.print(live_activity)
+            console.print(live_activity)
 
     return result, log_buf.tail(35).strip()
 

@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from mana_analyzer.analysis.models import AskResponse, AskResponseWithTrace, Finding, SearchHit
 from mana_analyzer.commands.cli import _render_coding_sections, _sanitize_full_auto_answer_text, app
+from mana_analyzer.commands.ui_helpers import emit_tool_event
 
 runner = CliRunner()
 
@@ -2386,6 +2387,18 @@ def test_sanitize_full_auto_answer_text_replaces_confirmation_prompts() -> None:
     assert cleaned.startswith("Status: executing")
 
 
+def test_sanitize_full_auto_answer_text_replaces_synthetic_pass_cap_diagnostic() -> None:
+    text = (
+        "Auto-execute ended without a direct answer from tool runs.\n"
+        "terminal_reason=pass_cap_reached\n"
+        "passes=8\n"
+        "toolsmanager_requests=19"
+    )
+    cleaned = _sanitize_full_auto_answer_text(text, changed_files_count=0, terminal_reason="pass_cap_reached")
+    assert cleaned.startswith("Status: executing")
+    assert "Auto-execute ended without a direct answer" not in cleaned
+
+
 def test_sanitize_full_auto_answer_text_replaces_non_hard_blocker_prompts() -> None:
     text = "Blocker: I need a scope choice. Please choose option 1 or 2."
     cleaned = _sanitize_full_auto_answer_text(text, changed_files_count=0, terminal_reason="planner_finalize")
@@ -2710,7 +2723,7 @@ def test_chat_full_auto_profile_forces_auto_execute_for_edit_requests(monkeypatc
     assert result.exit_code == 0
     assert _FakeCodingAgent.auto_calls
     assert int(_FakeCodingAgent.auto_calls[0].get("pass_cap", 0) or 0) == 10
-    assert "Execution profile:" in result.stdout
+    assert "execution profile" in result.stdout
     assert "full-auto" in result.stdout
 
 
@@ -2886,9 +2899,26 @@ def test_chat_full_auto_pass_cap_auto_resumes_until_completion(monkeypatch, tmp_
 
         def generate_auto_execute(self, *_args: object, **_kwargs: object) -> dict:
             _FakeCodingAgent.auto_calls += 1
+            emit_tool_event(
+                "start",
+                "tool_worker",
+                args=f"cycle {_FakeCodingAgent.auto_calls}",
+                event_id=f"cycle-{_FakeCodingAgent.auto_calls}",
+            )
+            emit_tool_event(
+                "end",
+                "tool_worker",
+                duration=0.0,
+                event_id=f"cycle-{_FakeCodingAgent.auto_calls}",
+            )
             if _FakeCodingAgent.auto_calls == 1:
                 return {
-                    "answer": "working",
+                    "answer": (
+                        "Auto-execute ended without a direct answer from tool runs.\n"
+                        "terminal_reason=pass_cap_reached\n"
+                        "passes=2\n"
+                        "toolsmanager_requests=1"
+                    ),
                     "changed_files": [],
                     "warnings": [],
                     "diff": "",
@@ -2969,9 +2999,13 @@ def test_chat_full_auto_pass_cap_auto_resumes_until_completion(monkeypatch, tmp_
     )
     assert result.exit_code == 0
     assert _FakeCodingAgent.auto_calls == 2
+    assert result.stdout.count("Tool activity") == 1
+    assert result.stdout.count("tool_worker") == 2
     assert result.stdout.count("Full-auto Checkpoint") == 1
     assert "checklist: done 1 | pending 1 | blocked 0 | total 2" in result.stdout
     assert "Status: executing (pass_cap_reached)." not in result.stdout
+    assert "Auto-execute ended without a direct answer" not in result.stdout
+    assert "done" in result.stdout
 
 
 def test_chat_full_auto_checkpoint_window_is_non_overlapping(monkeypatch, tmp_path: Path) -> None:

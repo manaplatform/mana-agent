@@ -47,7 +47,7 @@ def test_tools_manager_planner_schema_parses_strict_json(tmp_path: Path, monkeyp
     assert len(plan.steps) == 1
 
 
-def test_tools_manager_planner_parser_accepts_markdown_plan_text(tmp_path: Path) -> None:
+def test_tools_manager_planner_parser_rejects_markdown_plan_text(tmp_path: Path) -> None:
     orchestrator = _build_orchestrator(tmp_path)
     markdown_plan = (
         "Execution Plan:\\n"
@@ -56,10 +56,62 @@ def test_tools_manager_planner_parser_accepts_markdown_plan_text(tmp_path: Path)
         "3. Verify with tests\\n"
     )
     plan = orchestrator.parse_tools_plan(markdown_plan, request="implement planner", previous_plan=None)
-    assert isinstance(plan, ToolsPlan)
-    assert plan is not None
-    assert plan.decision == "continue"
-    assert len(plan.steps) >= 3
+    assert plan is None
+
+
+def test_tools_manager_planner_parser_does_not_infer_keyword_intents(tmp_path: Path) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    keyword_plan = (
+        "Execution Plan:\\n"
+        "1. find all models\\n"
+        "2. update docs/models.md\\n"
+        "3. test the docs report\\n"
+    )
+    plan = orchestrator.parse_tools_plan(
+        keyword_plan,
+        request="find all models and update docs/models.md",
+        previous_plan=None,
+    )
+    assert plan is None
+
+
+def test_tools_manager_markdown_planner_output_uses_repaired_llm_intent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    markdown_plan = (
+        "Execution Plan:\\n"
+        "1. find all models\\n"
+        "2. update docs/models.md\\n"
+    )
+    repaired_plan = (
+        '{"objective":"Document models","steps":['
+        '{"id":"s1","title":"Inspect models","tool_intent":"inspect","args_hint":"read model files"},'
+        '{"id":"s2","title":"Update docs/models.md","tool_intent":"edit","args_hint":"apply docs patch"},'
+        '{"id":"s3","title":"Verify docs","tool_intent":"verify","args_hint":"run focused checks"}'
+        '],"current_step_id":"s2","decision":"continue","stop_conditions":["done"],'
+        '"finalize_action":"summarize"}'
+    )
+
+    def _invoke_model(*, system_prompt: str, human_prompt: str) -> str:
+        _ = human_prompt
+        if system_prompt == "tools_planner":
+            return markdown_plan
+        if system_prompt == "tools_planner_repair":
+            return repaired_plan
+        raise AssertionError(f"unexpected prompt: {system_prompt}")
+
+    monkeypatch.setattr(orchestrator, "_invoke_model", _invoke_model)
+
+    plan, warnings = orchestrator._plan(
+        request="find all models and update docs/models.md",
+        flow_context=None,
+    )
+
+    assert warnings == ["head_tools_planner parse failed; attempting repair"]
+    assert plan.current_step_id == "s2"
+    assert [step.tool_intent for step in plan.steps] == ["inspect", "edit", "verify"]
 
 
 def test_tools_manager_planner_parser_accepts_wrapped_payload(tmp_path: Path) -> None:
