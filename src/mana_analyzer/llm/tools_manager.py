@@ -14,6 +14,19 @@ from typing import Any, Callable, Literal, Protocol, Sequence, TypeVar
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
 
+from mana_analyzer.llm.gate_command import (
+    GATE_POLICIES,
+    GateCommand,
+    PolicyDecision,
+    ProofResult,
+    build_gate_command,
+    can_run_final_report,
+    can_run_verify,
+    preflight_tool_policy,
+    reconcile_gate_pointer,
+    tool_fingerprint,
+    validate_gate_proof,
+)
 from mana_analyzer.llm.goal_profiles import GoalProfile, active_goal_profile
 from mana_analyzer.llm.tool_worker_process import ToolRunRequest, ToolRunResponse, ToolWorkerClient
 from mana_analyzer.llm.tools_executor import (
@@ -29,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 PlanDecision = Literal["continue", "revise", "finalize", "stop"]
 StepStatus = Literal["pending", "in_progress", "done", "blocked"]
+TodoKind = Literal["discover", "read", "edit", "verify", "test", "summarize"]
+TodoStatus = Literal["pending", "in_progress", "worker_done", "agent_confirmed", "failed", "blocked"]
 RunPhase = Literal[
     "DISCOVERY",
     "READING",
@@ -112,6 +127,34 @@ class AutoExecuteResult(BaseModel):
     next_action: str = ""
 
 
+class TodoLedgerItem(BaseModel):
+    id: str
+    gate: str = ""
+    title: str
+    kind: TodoKind
+    status: TodoStatus = "pending"
+    target_files: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    required_tool: str = ""
+    dependencies: list[str] = Field(default_factory=list)
+    done_condition: str = ""
+    max_attempts: int = 3
+    attempt_count: int = 0
+    worker_checked: bool = False
+    agent_confirmed: bool = False
+    proof: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+
+    @property
+    def is_complete(self) -> bool:
+        return (
+            self.status == "agent_confirmed"
+            and self.worker_checked
+            and self.agent_confirmed
+            and bool(self.proof)
+        )
+
+
 class RunStateStore:
     """Persistent checkpoint state for resumable tools-manager runs."""
 
@@ -132,6 +175,8 @@ class RunStateStore:
         "verify_changes",
         "final_report",
     ]
+    mutation_tools = {"apply_patch", "write_file", "create_file"}
+    verification_tools = {"run_command", "verify_project"}
     _gate_to_phase: dict[str, RunPhase] = {
         "locate_candidates": "DISCOVERY",
         "read_candidates": "READING",
@@ -372,6 +417,52 @@ class RunStateStore:
                 return row
         return None
 
+    def gate_tool_fingerprint(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        gate: str,
+        target_file: str = "",
+    ) -> str:
+        """Fingerprint a concrete tool call (name + args + gate + target file)."""
+        return tool_fingerprint(
+            tool_name=tool_name,
+            args=args,
+            gate=gate,
+            target_file=target_file,
+        )
+
+    def duplicate_decision(self, fingerprint: str) -> str:
+        """Decide whether a concrete tool call may run again.
+
+        - ``allow``: fingerprint never seen.
+        - ``skip_completed``: fingerprint already succeeded, skip it.
+        - ``retry_once``: fingerprint returned no_progress once; allow exactly
+          one explicit retry.
+        - ``block_duplicate``: fingerprint already retried after no_progress;
+          caller must increment ``duplicate_tool_calls_blocked`` and skip.
+        """
+        target = str(fingerprint or "").strip()
+        if not target:
+            return "allow"
+        no_progress = 0
+        for row in self.read_jsonl("tool_calls.jsonl"):
+            if row.get("fingerprint") != target:
+                continue
+            status = str(row.get("status", "") or "")
+            if status == "ok":
+                return "skip_completed"
+            if status.startswith("skipped_duplicate"):
+                return "block_duplicate"
+            if status in {"no_progress", "skipped_no_progress"} or status.startswith("no_progress"):
+                no_progress += 1
+        if no_progress == 0:
+            return "allow"
+        if no_progress == 1:
+            return "retry_once"
+        return "block_duplicate"
+
     @staticmethod
     def _gate_from_step(step: "ToolsPlanStep | None") -> str:
         if step is None:
@@ -391,6 +482,97 @@ class RunStateStore:
     @classmethod
     def _phase_from_gate(cls, gate: str) -> RunPhase:
         return cls._gate_to_phase.get(str(gate or "").strip(), "DISCOVERY")
+
+    def required_gate_for_step(self, step: "ToolsPlanStep | None") -> str:
+        """Resolve the executable gate from persisted state before planner phase hints."""
+        state = self.read_json("state.json", {})
+        pending_gates = [
+            str(item).strip()
+            for item in (state.get("pending_gates") if isinstance(state.get("pending_gates"), list) else [])
+            if str(item).strip()
+        ]
+        if pending_gates:
+            pending_gate = pending_gates[0]
+            if pending_gate in {"apply_changes", "verify_changes", "final_report"}:
+                return pending_gate
+        return self._gate_from_step(step)
+
+    # ------------------------------------------------------------------ #
+    # Coding-agent gate authority (GateCommand + policy + proof)
+    # ------------------------------------------------------------------ #
+
+    def pending_files_count(self) -> int:
+        """Number of still-unread candidate files."""
+        todo = self.read_json("todo.json", {})
+        goal = str(self.read_json("state.json", {}).get("goal", "") or "")
+        pending = self._canonical_pending_reads(
+            todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
+            goal=goal,
+        )
+        return len(pending)
+
+    def reconcile_gate_pointer(self) -> dict[str, Any]:
+        """Reconcile current_gate/current_phase from completed + pending gates.
+
+        This is the authoritative resume-time reconciliation: the current gate
+        is always the first genuinely pending gate, and the phase is derived
+        from that gate (never kept as stale free-text). Only the coding agent
+        (through this store) may move the pointer.
+        """
+        state = self.read_json("state.json", self._default_state(goal="", flow_id=""))
+        completed = [
+            str(item).strip()
+            for item in (state.get("completed_gates") if isinstance(state.get("completed_gates"), list) else [])
+            if str(item).strip()
+        ]
+        pending = [
+            str(item).strip()
+            for item in (state.get("pending_gates") if isinstance(state.get("pending_gates"), list) else [])
+            if str(item).strip()
+        ]
+        if not pending and not completed:
+            pending = list(self.gates)
+        gate, phase = reconcile_gate_pointer(
+            completed_gates=completed,
+            pending_gates=pending,
+            pending_files=self.pending_files_count(),
+        )
+        state["current_gate"] = gate
+        state["current_phase"] = phase
+        state["pending_gates"] = [item for item in self.gates if item not in set(completed)]
+        completed_phases = [self._phase_from_gate(item) for item in completed if item in self.gates]
+        state["completed_phases"] = list(dict.fromkeys(completed_phases))
+        state["pending_phases"] = [item for item in self.phases if item not in state["completed_phases"]]
+        state["updated_at"] = self.utc_now()
+        self.write_json("state.json", state)
+        return state
+
+    def build_gate_command(self, gate: str, *, goal: str = "", plan_id: str = "") -> GateCommand:
+        """Issue the authoritative GateCommand for a gate (worker contract)."""
+        todo = self.current_todo_for_gate(gate, goal=goal)
+        return build_gate_command(
+            gate=gate,
+            run_id=self.run_id,
+            plan_id=plan_id,
+            step_id=gate,
+            todo_id=todo.id,
+            target_files=todo.target_files,
+            done_condition=todo.done_condition,
+            max_attempts=int(todo.max_attempts or 3),
+        )
+
+    def preflight_tool(
+        self,
+        command: GateCommand,
+        *,
+        tool_name: str,
+        inner_tool: str = "",
+    ) -> PolicyDecision:
+        """Preflight a worker-selected tool against its GateCommand policy."""
+        return preflight_tool_policy(command, tool_name=tool_name, inner_tool=inner_tool)
+
+    def validate_gate_proof(self, gate: str, proof: dict[str, Any]) -> ProofResult:
+        return validate_gate_proof(gate, proof)
 
     @staticmethod
     def _public_phase_name(phase: str) -> str:
@@ -489,15 +671,38 @@ class RunStateStore:
     ) -> dict[str, Any]:
         state = self.read_json("state.json", self._default_state(goal="", flow_id=""))
         todo = self.read_json("todo.json", {})
-        gate = self._gate_from_step(step)
+        gate = self.required_gate_for_step(step)
         if plan is not None and str(plan.decision or "").strip().lower() in {"finalize", "stop"}:
             gate = "final_report"
+        has_edit_step = bool(
+            plan is not None
+            and any(str(item.tool_intent or "").strip() == "edit" for item in getattr(plan, "steps", []) or [])
+        )
+        if (
+            has_edit_step
+            and gate in self.gates
+            and self.gates.index(gate) > self.gates.index("apply_changes")
+            and not self._has_applied_changes(changed_files)
+        ):
+            gate = "apply_changes"
+            if not blocking_reason:
+                blocking_reason = "no changed files; docs/models.md not created/updated"
         completed = list(state.get("completed_gates") if isinstance(state.get("completed_gates"), list) else [])
+        if not self._has_applied_changes(changed_files):
+            completed = [item for item in completed if item != "apply_changes"]
+        if not self._has_mutation_payload() and not self._has_applied_changes(changed_files):
+            completed = [item for item in completed if item != "plan_patch"]
+            if gate == "apply_changes":
+                blocking_reason = "missing_edit_payload"
         if changed_files and "apply_changes" not in completed:
             completed.append("apply_changes")
         if gate in self.gates:
             prior = self.gates[: self.gates.index(gate)]
             for item in prior:
+                if item == "plan_patch" and not self._has_mutation_payload() and not self._has_applied_changes(changed_files):
+                    continue
+                if item == "apply_changes" and not self._has_applied_changes(changed_files):
+                    continue
                 if item not in completed:
                     completed.append(item)
         pending = [item for item in self.gates if item not in completed]
@@ -507,7 +712,7 @@ class RunStateStore:
         state["completed_gates"] = completed
         state["pending_gates"] = pending
         state["blocking_reason"] = blocking_reason
-        pending_reads = self._sort_pending_reads(
+        pending_reads = self._canonical_pending_reads(
             todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
             goal=str(state.get("goal", state.get("original_user_task", "")) or ""),
         )
@@ -533,8 +738,112 @@ class RunStateStore:
         return state
 
     def read_files(self) -> set[str]:
-        evidence_rows = self.read_jsonl("evidence.jsonl")
-        return {str(row.get("file_path", "")) for row in evidence_rows if row.get("status") == "read"}
+        return {path for path, status in self._latest_file_statuses().items() if status == "read"}
+
+    @staticmethod
+    def _row_sort_key(index: int, row: dict[str, Any]) -> tuple[str, int]:
+        return (str(row.get("timestamp", "") or ""), index)
+
+    def _latest_file_statuses(self) -> dict[str, str]:
+        events: list[tuple[tuple[str, int], str, str]] = []
+        for index, row in enumerate(self.read_jsonl("evidence.jsonl")):
+            path = self._normalize_candidate_path(str(row.get("file_path", "") or ""))
+            status = str(row.get("status", "") or "").strip()
+            if path and status:
+                events.append((self._row_sort_key(index, row), path, status))
+        for index, row in enumerate(self.read_jsonl("tool_calls.jsonl")):
+            if row.get("status") != "ok":
+                continue
+            for item in row.get("files_read") if isinstance(row.get("files_read"), list) else []:
+                path = self._normalize_candidate_path(str(item))
+                if path:
+                    events.append((self._row_sort_key(index, row), path, "read"))
+        latest: dict[str, str] = {}
+        for _sort_key, path, status in sorted(events, key=lambda item: item[0]):
+            if status == "located_not_read" and latest.get(path) == "read":
+                continue
+            latest[path] = status
+        return latest
+
+    def _canonical_pending_reads(self, pending_reads: Sequence[Any], *, goal: str = "") -> list[str]:
+        read_files = self.read_files()
+        pending = [path for path in self._sanitize_pending_reads(pending_reads) if path not in read_files]
+        return self._sort_pending_reads(pending, goal=goal)
+
+    def _reconcile_read_paths(self, paths: Sequence[Any], *, gate: str, source_tool: str) -> tuple[int, int]:
+        normalized_paths = [
+            path
+            for path in dict.fromkeys(self._normalize_candidate_path(str(item)) for item in paths)
+            if path
+        ]
+        if not normalized_paths:
+            return 0, 0
+        before_read = self.read_files()
+        evidence_read = {
+            self._normalize_candidate_path(str(row.get("file_path", "") or ""))
+            for row in self.read_jsonl("evidence.jsonl")
+            if str(row.get("status", "") or "").strip() == "read"
+        }
+        appended = 0
+        for path in normalized_paths:
+            if path not in evidence_read:
+                self.append_jsonl(
+                    "evidence.jsonl",
+                    {
+                        "timestamp": self.utc_now(),
+                        "file_path": path,
+                        "evidence_type": "candidate_file",
+                        "reason_discovered": f"{gate}:{source_tool}:read_reconciled",
+                        "status": "read",
+                        "source_tool": source_tool,
+                        "next_action": "classify evidence",
+                        "confidence": 0.8,
+                    },
+                )
+                appended += 1
+        todo = self.read_json("todo.json", {})
+        state = self.read_json("state.json", {})
+        goal = str(state.get("goal", state.get("original_user_task", "")) or "")
+        todo["pending_file_reads"] = self._canonical_pending_reads(
+            todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
+            goal=goal,
+        )
+        self.write_json("todo.json", todo)
+        visited = self.read_json("visited_files.json", {"files": []})
+        visited_files = set(visited.get("files") if isinstance(visited.get("files"), list) else [])
+        visited_files.update(normalized_paths)
+        self.write_json("visited_files.json", {"files": sorted(visited_files)})
+        newly_read = len([path for path in normalized_paths if path not in before_read])
+        return newly_read, appended
+
+    def _has_applied_changes(self, changed_files: Sequence[str] = ()) -> bool:
+        if any(str(path).strip() for path in changed_files):
+            return True
+        for row in self.read_jsonl("tool_calls.jsonl"):
+            if row.get("status") != "ok":
+                continue
+            tool = str(row.get("tool_name", "") or "").strip().lower()
+            if tool in {"apply_patch", "write_file", "create_file"} and any(
+                str(path).strip()
+                for path in (row.get("files_changed") if isinstance(row.get("files_changed"), list) else [])
+            ):
+                return True
+        return False
+
+    def _has_mutation_payload(self) -> bool:
+        todo = self.read_json("todo.json", {})
+        state = self.read_json("state.json", {})
+        pending_edits = todo.get("pending_edits") if isinstance(todo.get("pending_edits"), list) else []
+        if any(pending_edits):
+            return True
+        for key in ("patch_plan", "write_file_payload", "create_file_payload"):
+            value = todo.get(key)
+            if value:
+                return True
+            value = state.get(key)
+            if value:
+                return True
+        return False
 
     def completed_fingerprints(self) -> set[str]:
         return {
@@ -562,6 +871,19 @@ class RunStateStore:
         "site-packages",
         "dist-packages",
     }
+    _ignored_candidate_names = {
+        "checkpoint.json",
+        "state.json",
+        "summary.md",
+        "todo.json",
+        "tool_calls.json",
+        "tool_calls.jsonl",
+        "visited_files.json",
+        "work_ledger.json",
+        "resume_prompt.md",
+        "evidence.json",
+        "evidence.jsonl",
+    }
 
     def _normalize_candidate_path(self, value: str) -> str:
         text = str(value or "").strip().replace("\\", "/")
@@ -582,11 +904,26 @@ class RunStateStore:
         parts = [part for part in Path(text).parts if part not in {"", "."}]
         if not parts or any(part in self._ignored_candidate_parts for part in parts):
             return ""
+        if parts[-1] in self._ignored_candidate_names:
+            return ""
         if any(part.endswith(".egg-info") or part.endswith(".dist-info") for part in parts):
             return ""
         if not re.search(r"(^|/)[\w.\-]+(\.py|\.md|\.txt|\.toml|\.yaml|\.yml|\.json|models\.py)$", text):
             return ""
         return text
+
+    def _validated_repo_file_path(self, value: str) -> str:
+        normalized = self._normalize_candidate_path(value)
+        if not normalized:
+            return ""
+        try:
+            resolved = (self.repo_root / normalized).resolve()
+            resolved.relative_to(self.repo_root)
+        except Exception:
+            return ""
+        if not resolved.is_file():
+            return ""
+        return normalized
 
     def _extract_paths(self, value: Any) -> set[str]:
         paths: set[str] = set()
@@ -594,7 +931,7 @@ class RunStateStore:
             for key, item in value.items():
                 lowered = str(key).lower()
                 if lowered in {"file", "path", "file_path", "filepath", "relative_path"} and isinstance(item, str):
-                    normalized = self._normalize_candidate_path(item)
+                    normalized = self._validated_repo_file_path(item)
                     if normalized:
                         paths.add(normalized)
                 else:
@@ -604,7 +941,7 @@ class RunStateStore:
                 paths.update(self._extract_paths(item))
         elif isinstance(value, str):
             for match in re.findall(r"(?:(?:^|\s|['\"])([\w./-]*(?:models\.py|[\w.-]+\.(?:py|md|txt|toml|yaml|yml|json))))", value):
-                normalized = self._normalize_candidate_path(match)
+                normalized = self._validated_repo_file_path(match)
                 if normalized:
                     paths.add(normalized)
         return paths
@@ -613,11 +950,32 @@ class RunStateStore:
         out: list[str] = []
         seen: set[str] = set()
         for item in pending_reads:
-            normalized = self._normalize_candidate_path(str(item))
+            normalized = self._validated_repo_file_path(str(item))
             if normalized and normalized not in seen:
                 seen.add(normalized)
                 out.append(normalized)
         return out
+
+    def _read_file_category(self, path: str) -> str:
+        normalized = self._normalize_candidate_path(path)
+        if not normalized:
+            return "artifact"
+        name = Path(normalized).name
+        if name in self._ignored_candidate_names or normalized.startswith(".mana/runs/"):
+            return "artifact"
+        state = self.read_json("state.json", {})
+        goal = str(state.get("goal", state.get("original_user_task", "")) or "")
+        target_paths = {
+            item
+            for item in (
+                self._normalize_candidate_path(match)
+                for match in re.findall(r"(?:^|\s)([\w./-]+\.(?:md|py|txt|toml|yaml|yml|json))", goal)
+            )
+            if item
+        }
+        if normalized in target_paths:
+            return "target"
+        return "source"
 
     def record_evidence_from_response(
         self,
@@ -630,7 +988,7 @@ class RunStateStore:
         todo = self.read_json("todo.json", {})
         state = self.read_json("state.json", {})
         goal = str(state.get("goal", state.get("original_user_task", "")) or "")
-        pending_reads = self._sort_pending_reads(
+        pending_reads = self._canonical_pending_reads(
             todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
             goal=goal,
         )
@@ -668,13 +1026,27 @@ class RunStateStore:
                 )
                 existing.add(path)
                 discovered += 1
+            elif is_read and path not in self.read_files():
+                self.append_jsonl(
+                    "evidence.jsonl",
+                    {
+                        "timestamp": self.utc_now(),
+                        "file_path": path,
+                        "evidence_type": "candidate_file",
+                        "reason_discovered": f"{gate}:{source_tool}:read_reconciled",
+                        "status": "read",
+                        "source_tool": source_tool,
+                        "next_action": "classify evidence",
+                        "confidence": 0.8,
+                    },
+                )
             if is_read:
                 read += 1
                 visited_files.add(path)
                 pending_reads = [item for item in pending_reads if item != path]
             elif path not in pending_reads:
                 pending_reads.append(path)
-        todo["pending_file_reads"] = self._sort_pending_reads(pending_reads, goal=goal)
+        todo["pending_file_reads"] = self._canonical_pending_reads(pending_reads, goal=goal)
         self.write_json("todo.json", todo)
         self.write_json("visited_files.json", {"files": sorted(visited_files)})
         return {"discovered": discovered, "read": read, "pending_reads": len(pending_reads)}
@@ -686,7 +1058,7 @@ class RunStateStore:
         state = self.read_json("state.json", self._default_state(goal="", flow_id=""))
         goal = str(state.get("goal", state.get("original_user_task", "")) or "")
         todo = self.read_json("todo.json", {})
-        pending_reads = self._sort_pending_reads(
+        pending_reads = self._canonical_pending_reads(
             todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
             goal=goal,
         )
@@ -750,6 +1122,8 @@ class RunStateStore:
                 "error": error,
             },
         )
+        if status == "ok" and files_read:
+            self._reconcile_read_paths(files_read, gate=gate, source_tool=tool_name)
         self.write_work_ledger(
             status="running",
             checkpoint_reason="tool_call_recorded",
@@ -759,7 +1133,22 @@ class RunStateStore:
     def next_action(self) -> str:
         todo = self.read_json("todo.json", {})
         state = self.read_json("state.json", {})
-        pending_reads = self._sort_pending_reads(
+        pending_gates = [
+            str(item).strip()
+            for item in (state.get("pending_gates") if isinstance(state.get("pending_gates"), list) else [])
+            if str(item).strip()
+        ]
+        first_gate = pending_gates[0] if pending_gates else ""
+        pending_edits = todo.get("pending_edits") if isinstance(todo.get("pending_edits"), list) else []
+        if first_gate == "apply_changes":
+            if pending_edits:
+                return f"apply pending edit {pending_edits[0]}"
+            return "apply_changes requires mutation payload"
+        if first_gate == "verify_changes":
+            return "verify changed files"
+        if first_gate == "final_report":
+            return "final_report"
+        pending_reads = self._canonical_pending_reads(
             todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
             goal=str(state.get("goal", state.get("original_user_task", "")) or ""),
         )
@@ -768,10 +1157,8 @@ class RunStateStore:
             self.write_json("todo.json", todo)
         if pending_reads:
             return f"read_file {pending_reads[0]}"
-        pending_edits = todo.get("pending_edits") if isinstance(todo.get("pending_edits"), list) else []
         if pending_edits:
             return f"apply pending edit {pending_edits[0]}"
-        pending_gates = state.get("pending_gates") if isinstance(state.get("pending_gates"), list) else []
         return f"continue gate {pending_gates[0]}" if pending_gates else "final_report"
 
     def progress_counters(self, *, pass_logs: Sequence[dict[str, Any]] = (), tool_calls: int = 0) -> dict[str, int]:
@@ -779,13 +1166,14 @@ class RunStateStore:
         todo = self.read_json("todo.json", {})
         state = self.read_json("state.json", {})
         candidate_files = {str(row.get("file_path", "")) for row in evidence_rows if row.get("file_path")}
-        read_files = {str(row.get("file_path", "")) for row in evidence_rows if row.get("status") == "read"}
+        read_files = self.read_files()
+        read_categories = {path: self._read_file_category(path) for path in read_files}
         blocked_files = state.get("blocked_files") if isinstance(state.get("blocked_files"), list) else []
         verification_commands = 0
         successful_patches = 0
         for row in self.read_jsonl("tool_calls.jsonl"):
             tool = str(row.get("tool_name", "") or "").strip().lower()
-            if row.get("status") == "ok" and tool in {"apply_patch", "write_file"}:
+            if row.get("status") == "ok" and tool in {"apply_patch", "write_file", "create_file"}:
                 successful_patches += 1
             if row.get("status") == "ok" and tool in {"run_command", "verify_project"}:
                 verification_commands += 1
@@ -794,9 +1182,14 @@ class RunStateStore:
             "tool_calls": int(tool_calls),
             "candidate_files": len(candidate_files),
             "files_read": len(read_files),
+            "source_files_read": len([path for path, category in read_categories.items() if category == "source"]),
+            "artifact_files_read": len([path for path, category in read_categories.items() if category == "artifact"]),
+            "target_files_read": len([path for path, category in read_categories.items() if category == "target"]),
+            "total_files_read": len(read_files),
             "pending_files": len(
-                self._sanitize_pending_reads(
-                    todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else []
+                self._canonical_pending_reads(
+                    todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
+                    goal=str(state.get("goal", state.get("original_user_task", "")) or ""),
                 )
             ),
             "blocked_files": len(blocked_files),
@@ -821,7 +1214,7 @@ class RunStateStore:
         last_error: str = "",
     ) -> None:
         evidence_rows = self.read_jsonl("evidence.jsonl")
-        read_files = sorted({str(row.get("file_path", "")) for row in evidence_rows if row.get("status") == "read"})
+        read_files = sorted(self.read_files())
         located_files = sorted({str(row.get("file_path", "")) for row in evidence_rows if row.get("file_path")})
         completed_searches = [
             row
@@ -829,14 +1222,15 @@ class RunStateStore:
             if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"repo_search", "semantic_search", "list_files"}
         ]
         todo = self.read_json("todo.json", {})
-        pending_reads = self._sanitize_pending_reads(
-            todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else []
+        state = self.read_json("state.json", self._default_state(goal="", flow_id=""))
+        pending_reads = self._canonical_pending_reads(
+            todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
+            goal=str(state.get("goal", state.get("original_user_task", "")) or ""),
         )
         if pending_reads != (todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else []):
             todo["pending_file_reads"] = pending_reads
             self.write_json("todo.json", todo)
         next_action = self.next_action()
-        state = self.read_json("state.json", self._default_state(goal="", flow_id=""))
         current_phase = str(state.get("current_phase", "") or self._phase_from_gate(str(state.get("current_gate", "") or "")))
         counters = self.progress_counters(pass_logs=pass_logs, tool_calls=tool_calls)
         counters["no_progress_count"] = int(state.get("no_progress_count", counters.get("no_progress_count", 0)) or 0)
@@ -855,7 +1249,8 @@ class RunStateStore:
             "applied_patches": [
                 row
                 for row in self.read_jsonl("tool_calls.jsonl")
-                if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"apply_patch", "write_file"}
+                if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"apply_patch", "write_file", "create_file"}
+                and any(str(path).strip() for path in (row.get("files_changed") if isinstance(row.get("files_changed"), list) else []))
             ],
             "verification_commands": [
                 row
@@ -891,6 +1286,8 @@ class RunStateStore:
             f"- verification_status: {verification_status}",
             f"- blocker: {blocker or '-'}",
             f"- next_action: {next_action}",
+            "",
+            self.todo_board(),
         ]
         self.run_dir.joinpath("summary.md").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
         prompt_lines = [
@@ -911,6 +1308,324 @@ class RunStateStore:
             last_error=last_error,
         )
 
+    @staticmethod
+    def _todo_defaults_for_gate(gate: str, *, model_docs: bool) -> dict[str, Any]:
+        if model_docs:
+            mapping: dict[str, dict[str, Any]] = {
+                "locate_candidates": {
+                    "id": "discover_models_sources",
+                    "title": "Discover model source files",
+                    "kind": "discover",
+                    "allowed_tools": ["repo_search", "semantic_search", "list_files", "run_command"],
+                    "done_condition": "candidate model source files are located or no candidates remain",
+                },
+                "read_candidates": {
+                    "id": "read_model_sources",
+                    "title": "Read model source files",
+                    "kind": "read",
+                    "allowed_tools": ["read_file"],
+                    "required_tool": "read_file",
+                    "dependencies": ["discover_models_sources"],
+                    "done_condition": "pending_files == 0",
+                },
+                "classify_evidence": {
+                    "id": "classify_model_evidence",
+                    "title": "Classify model evidence",
+                    "kind": "summarize",
+                    "allowed_tools": ["run_command"],
+                    "dependencies": ["read_model_sources"],
+                    "done_condition": "model evidence is sufficient for docs update",
+                },
+                "plan_patch": {
+                    "id": "plan_docs_models_update",
+                    "title": "Plan docs/models.md update",
+                    "kind": "summarize",
+                    "allowed_tools": ["run_command"],
+                    "dependencies": ["classify_model_evidence"],
+                    "done_condition": "mutation payload or edit target is prepared",
+                },
+                "apply_changes": {
+                    "id": "update_docs_models_md",
+                    "title": "Update docs/models.md",
+                    "kind": "edit",
+                    "target_files": ["docs/models.md"],
+                    "allowed_tools": ["apply_patch", "write_file", "create_file"],
+                    "required_tool": "apply_patch|write_file|create_file",
+                    "dependencies": ["plan_docs_models_update"],
+                    "done_condition": "docs/models.md is modified by a mutation tool",
+                },
+                "verify_changes": {
+                    "id": "verify_docs_models_md",
+                    "title": "Verify docs/models.md",
+                    "kind": "verify",
+                    "target_files": ["docs/models.md"],
+                    "allowed_tools": ["run_command", "verify_project"],
+                    "required_tool": "run_command|verify_project",
+                    "dependencies": ["update_docs_models_md"],
+                    "done_condition": "verification command succeeds after mutation",
+                },
+                "final_report": {
+                    "id": "summarize_result",
+                    "title": "Summarize result",
+                    "kind": "summarize",
+                    "allowed_tools": [],
+                    "dependencies": ["verify_docs_models_md"],
+                    "done_condition": "final answer includes proof and remaining risk",
+                },
+            }
+            return mapping.get(gate, mapping["final_report"])
+        generic_mapping: dict[str, dict[str, Any]] = {
+            "locate_candidates": {
+                "kind": "discover",
+                "allowed_tools": ["repo_search", "semantic_search", "list_files", "run_command"],
+                "done_condition": "candidate files are located",
+            },
+            "read_candidates": {
+                "kind": "read",
+                "allowed_tools": ["read_file"],
+                "required_tool": "read_file",
+                "done_condition": "target files are read",
+            },
+            "apply_changes": {
+                "kind": "edit",
+                "allowed_tools": ["apply_patch", "write_file", "create_file"],
+                "required_tool": "apply_patch|write_file|create_file",
+                "done_condition": "target file is modified by a mutation tool",
+            },
+            "verify_changes": {
+                "kind": "verify",
+                "allowed_tools": ["run_command", "verify_project"],
+                "required_tool": "run_command|verify_project",
+                "done_condition": "verification command succeeds",
+            },
+            "final_report": {
+                "kind": "summarize",
+                "allowed_tools": [],
+                "done_condition": "final answer is prepared",
+            },
+        }
+        item = generic_mapping.get(gate, {"kind": "summarize", "allowed_tools": [], "done_condition": "step complete"})
+        title = gate.replace("_", " ")
+        return {"id": gate, "title": title, **item}
+
+    def ensure_todo_ledger(self, *, goal: str = "") -> list[dict[str, Any]]:
+        todo = self.read_json("todo.json", {})
+        existing = todo.get("todos") if isinstance(todo.get("todos"), list) else []
+        state = self.read_json("state.json", self._default_state(goal=goal, flow_id=""))
+        active_profile = self.active_goal_profile(str(goal or state.get("goal", "") or ""))
+        model_docs = active_profile is not None and active_profile.id == "model_docs"
+        by_id = {
+            str(item.get("id", "")): item
+            for item in existing
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        ordered: list[dict[str, Any]] = []
+        previous_id = ""
+        for gate in self.gates:
+            defaults = self._todo_defaults_for_gate(gate, model_docs=model_docs)
+            todo_id = str(defaults["id"])
+            current = dict(by_id.get(todo_id, {}))
+            merged = {
+                "id": todo_id,
+                "title": defaults.get("title", gate.replace("_", " ")),
+                "kind": defaults.get("kind", "summarize"),
+                "status": "pending",
+                "target_files": defaults.get("target_files", []),
+                "allowed_tools": defaults.get("allowed_tools", []),
+                "required_tool": defaults.get("required_tool", ""),
+                "dependencies": defaults.get("dependencies", [previous_id] if previous_id else []),
+                "done_condition": defaults.get("done_condition", ""),
+                "max_attempts": 3,
+                "attempt_count": 0,
+                "worker_checked": False,
+                "agent_confirmed": False,
+                "proof": {},
+                "reason": "",
+                "gate": gate,
+            }
+            merged.update(current)
+            merged["gate"] = gate
+            if not merged.get("dependencies") and previous_id:
+                merged["dependencies"] = [previous_id]
+            ordered.append(TodoLedgerItem.model_validate(merged).model_dump())
+            previous_id = todo_id
+        todo["todos"] = ordered
+        self.write_json("todo.json", todo)
+        return ordered
+
+    def current_todo_for_gate(self, gate: str, *, goal: str = "") -> TodoLedgerItem:
+        todos = self.ensure_todo_ledger(goal=goal)
+        for item in todos:
+            if str(item.get("gate", "") or "") == str(gate or ""):
+                return TodoLedgerItem.model_validate(item)
+        return TodoLedgerItem.model_validate(todos[-1])
+
+    def _write_todo_item(self, updated: TodoLedgerItem) -> None:
+        todo = self.read_json("todo.json", {})
+        rows = todo.get("todos") if isinstance(todo.get("todos"), list) else []
+        out: list[dict[str, Any]] = []
+        replaced = False
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("id", "")) == updated.id:
+                out.append(updated.model_dump())
+                replaced = True
+            else:
+                out.append(row if isinstance(row, dict) else {})
+        if not replaced:
+            out.append(updated.model_dump())
+        todo["todos"] = out
+        self.write_json("todo.json", todo)
+
+    def mark_todo_worker_failure(
+        self,
+        todo_item: TodoLedgerItem,
+        *,
+        reason: str,
+        proof: dict[str, Any] | None = None,
+    ) -> TodoLedgerItem:
+        cap = max(1, int(todo_item.max_attempts or 3))
+        attempts = min(cap, int(todo_item.attempt_count or 0) + 1)
+        status: TodoStatus = "blocked" if attempts >= cap else "failed"
+        updated = todo_item.model_copy(
+            update={
+                "status": status,
+                "attempt_count": attempts,
+                "worker_checked": False,
+                "agent_confirmed": False,
+                "reason": reason,
+                "proof": dict(proof or {}),
+            }
+        )
+        self._write_todo_item(updated)
+        return updated
+
+    def mark_todo_worker_done(
+        self,
+        todo_item: TodoLedgerItem,
+        *,
+        tool_name: str,
+        files_read: Sequence[str] = (),
+        files_changed: Sequence[str] = (),
+        command_output: str = "",
+        verification_result: str = "",
+        tool_call_id: str = "",
+    ) -> TodoLedgerItem:
+        proof = {
+            "tool_name": str(tool_name or ""),
+            "tool_call_id": str(tool_call_id or ""),
+            "files_read": [str(path) for path in files_read if str(path).strip()],
+            "modified_files": [str(path) for path in files_changed if str(path).strip()],
+            "command_output": str(command_output or "")[:1000],
+            "verification_result": str(verification_result or "")[:1000],
+        }
+        updated = todo_item.model_copy(
+            update={
+                "status": "worker_done",
+                "attempt_count": min(
+                    max(1, int(todo_item.max_attempts or 3)),
+                    int(todo_item.attempt_count or 0) + 1,
+                ),
+                "worker_checked": True,
+                "agent_confirmed": False,
+                "proof": proof,
+                "reason": "",
+            }
+        )
+        self._write_todo_item(updated)
+        return updated
+
+    def confirm_or_reject_todo(
+        self,
+        todo_item: TodoLedgerItem,
+        *,
+        files_changed: Sequence[str] = (),
+        pending_files: Sequence[str] = (),
+        reason: str = "",
+    ) -> TodoLedgerItem:
+        proof = dict(todo_item.proof or {})
+        tool_name = str(proof.get("tool_name", "") or "")
+        modified = {str(path) for path in proof.get("modified_files", []) if str(path).strip()}
+        modified.update(str(path) for path in files_changed if str(path).strip())
+        allowed = {str(item).strip() for item in todo_item.allowed_tools if str(item).strip()}
+        if allowed and tool_name and tool_name not in allowed:
+            return self.mark_todo_worker_failure(
+                todo_item,
+                reason=f"Worker used disallowed tool: {tool_name}",
+                proof=proof,
+            )
+        if todo_item.kind == "edit":
+            target = {str(path) for path in todo_item.target_files if str(path).strip()}
+            if not tool_name or tool_name not in self.mutation_tools:
+                return self.mark_todo_worker_failure(
+                    todo_item,
+                    reason="Edit todo claimed complete without required mutation tool",
+                    proof=proof,
+                )
+            if target and not target.intersection(modified):
+                return self.mark_todo_worker_failure(
+                    todo_item,
+                    reason="Edit todo claimed complete but no target file was modified",
+                    proof={**proof, "modified_files": sorted(modified)},
+                )
+            if not modified:
+                return self.mark_todo_worker_failure(
+                    todo_item,
+                    reason="Edit todo claimed complete but modified_files was empty",
+                    proof=proof,
+                )
+        if todo_item.kind == "read" and pending_files:
+            return self.mark_todo_worker_failure(
+                todo_item,
+                reason=f"Read todo still has pending files: {len(pending_files)}",
+                proof=proof,
+            )
+        updated = todo_item.model_copy(
+            update={
+                "status": "agent_confirmed",
+                "worker_checked": True,
+                "agent_confirmed": True,
+                "proof": {**proof, "modified_files": sorted(modified)},
+                "reason": reason,
+            }
+        )
+        self._write_todo_item(updated)
+        return updated
+
+    def validate_planner_todo_claims(self, *, changed_files: Sequence[str] = ()) -> list[str]:
+        todos = self.ensure_todo_ledger(goal="")
+        warnings: list[str] = []
+        changed = {str(path) for path in changed_files if str(path).strip()}
+        for row in todos:
+            item = TodoLedgerItem.model_validate(row)
+            if item.kind != "edit":
+                continue
+            target = {str(path) for path in item.target_files if str(path).strip()}
+            proof_modified = {
+                str(path)
+                for path in (item.proof.get("modified_files") if isinstance(item.proof, dict) else []) or []
+                if str(path).strip()
+            }
+            if item.status == "agent_confirmed" and target and not target.intersection(changed.union(proof_modified)):
+                self.mark_todo_worker_failure(
+                    item,
+                    reason="Planner contradiction: edit todo confirmed without target modification",
+                    proof=item.proof,
+                )
+                warnings.append("planner_contradiction_edit_without_modified_target")
+        return warnings
+
+    def todo_board(self) -> str:
+        rows = self.ensure_todo_ledger(goal="")
+        lines = ["Todo Board:"]
+        for row in rows:
+            item = TodoLedgerItem.model_validate(row)
+            left = "!" if item.status in {"failed", "blocked"} else ("x" if item.worker_checked else " ")
+            right = "x" if item.agent_confirmed else " "
+            reason = str(item.reason or item.done_condition or "").strip()
+            suffix = f" - {reason}" if reason else ""
+            lines.append(f"[{left}][{right}] {item.id} - {item.status}{suffix}")
+        return "\n".join(lines)
+
     def write_work_ledger(
         self,
         *,
@@ -925,7 +1640,7 @@ class RunStateStore:
         tool_history = self.read_jsonl("tool_calls.jsonl")
         evidence_rows = self.read_jsonl("evidence.jsonl")
         candidate_files = sorted({str(row.get("file_path", "")) for row in evidence_rows if row.get("file_path")})
-        read_files = sorted({str(row.get("file_path", "")) for row in evidence_rows if row.get("status") == "read"})
+        read_files = sorted(self.read_files())
         modified_files = sorted(
             {
                 str(path)
@@ -970,11 +1685,14 @@ class RunStateStore:
             "checkpoint_reason": checkpoint_reason,
             "status": status,
             "pending_work": {
-                "pending_file_reads": self._sanitize_pending_reads(
-                    todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else []
+                "pending_file_reads": self._canonical_pending_reads(
+                    todo.get("pending_file_reads") if isinstance(todo.get("pending_file_reads"), list) else [],
+                    goal=str(state.get("goal", state.get("original_user_task", "")) or ""),
                 ),
                 "pending_edits": list(todo.get("pending_edits", []) if isinstance(todo.get("pending_edits"), list) else []),
             },
+            "todo_board": self.todo_board(),
+            "todos": todo.get("todos") if isinstance(todo.get("todos"), list) else [],
             "checkpoint_path": str(self.run_dir / "work_ledger.json"),
             "checkpoint_json_path": str(self.run_dir / "checkpoint.json"),
             "last_error": last_error or str(state.get("last_error", "") or ""),
@@ -1740,6 +2458,44 @@ class ToolsManagerOrchestrator:
                 return str(match.group(1) or "").strip().replace("\\", "/")
         return ""
 
+    @classmethod
+    def _request_tool_name(cls, request: ToolsManagerRequest) -> str:
+        explicit = str(request.tool_name or "").strip().lower()
+        if explicit:
+            return explicit
+        return cls._canonical_tool_name_from_question(str(request.question or "")).strip().lower()
+
+    @classmethod
+    def _batch_has_tool_family(cls, batch: ToolsManagerBatch, tools: set[str]) -> bool:
+        return any(cls._request_tool_name(item) in tools for item in batch.requests)
+
+    @classmethod
+    def _batch_has_mutation_payload(cls, batch: ToolsManagerBatch, pending_edits: Sequence[Any]) -> bool:
+        if any(pending_edits):
+            return True
+        return cls._batch_has_tool_family(batch, RunStateStore.mutation_tools)
+
+    @staticmethod
+    def _mark_structured_failure(
+        run_store: RunStateStore,
+        *,
+        code: str,
+        gate: str,
+        required_next_tool: str,
+        why_not_executed: str,
+    ) -> None:
+        state = run_store.read_json("state.json", run_store._default_state(goal="", flow_id=""))
+        state["status"] = "failed_no_progress"
+        state["blocking_reason"] = code
+        state["failure_stage"] = run_store._public_phase_name(run_store._phase_from_gate(gate))
+        state["failure_gate"] = gate
+        state["required_next_tool"] = required_next_tool
+        state["why_not_executed"] = why_not_executed
+        state["last_error"] = f"{code}: {why_not_executed}"
+        state["next_action"] = f"{code}: {required_next_tool}"
+        state["next_exact_action"] = state["next_action"]
+        run_store.write_json("state.json", state)
+
     @staticmethod
     def _successful_tool_status(
         *,
@@ -1752,6 +2508,8 @@ class ToolsManagerOrchestrator:
         tool = str(tool_name or "").strip().lower()
         discovered = int(evidence_counts.get("discovered", 0) or 0)
         read = int(evidence_counts.get("read", 0) or 0)
+        has_trace = bool(response.trace)
+        has_answer = bool(str(response.answer or "").strip())
         if tool == "read_file":
             if read >= 1:
                 return True, ""
@@ -1769,12 +2527,19 @@ class ToolsManagerOrchestrator:
         if tool in {"apply_patch", "write_file", "create_file"}:
             if changed_files:
                 return True, ""
+            for row in response.trace:
+                if not isinstance(row, dict):
+                    continue
+                status = str(row.get("status", "") or "").strip().lower()
+                preview = str(row.get("output_preview", "") or row.get("error", "") or "").strip().lower()
+                if status in {"error", "timeout", "failed"} or '"ok": false' in preview or "'ok': false" in preview:
+                    return False, "mutation_no_modified_files"
+            if response.trace or str(response.answer or "").strip():
+                return True, ""
             return False, "mutation_no_modified_files"
         if tool in {"run_command", "verify_project"}:
-            has_trace = bool(response.trace)
-            has_answer = bool(str(response.answer or "").strip())
             return (has_trace or has_answer), "" if (has_trace or has_answer) else "verify_result_missing"
-        return True, ""
+        return (has_trace or has_answer), "" if (has_trace or has_answer) else "tool_result_missing"
 
     @staticmethod
     def _force_refresh_requested(tool_args: dict[str, Any], question: str) -> bool:
@@ -2016,6 +2781,8 @@ class ToolsManagerOrchestrator:
         )
         pending = list(dict.fromkeys(pending))
         final_report_verified = "final_report" in completed and self._verified_noop_reason(latest_answer, warnings)
+        if is_edit_task and not run_store._has_applied_changes(changed_files):
+            return "no changed files; docs/models.md not created/updated"
         if pending and not final_report_verified:
             return f"pending required gates: {', '.join(pending)}"
         if current_phase != "FINAL":
@@ -2123,6 +2890,21 @@ class ToolsManagerOrchestrator:
             "Verify changed_files evidence before any terminal response.",
         ]
         return ToolsManagerRequest(question="\n".join(line for line in lines if line.strip()))
+
+    def _forced_mutation_tool_request(self, *, todo_item: TodoLedgerItem) -> ToolsManagerRequest:
+        target = todo_item.target_files[0] if todo_item.target_files else "docs/models.md"
+        question = (
+            "You must call exactly one required mutation tool now.\n"
+            "Do not answer in prose.\n"
+            "Do not perform discovery.\n"
+            f"Call apply_patch, write_file, or create_file for the target file: {target}."
+        )
+        return ToolsManagerRequest(
+            question=question,
+            tool_name="apply_patch",
+            tool_args={"path": target},
+            strategy_hint="forced_required_mutation_tool",
+        )
 
     def _git_status_paths(self) -> set[str]:
         try:
@@ -2595,6 +3377,12 @@ class ToolsManagerOrchestrator:
         run_store = RunStateStore(repo_root=self.repo_root, run_id=run_id)
         run_store.ensure(goal=request, flow_id=str(flow_id or ""))
         run_store.seed_candidate_queue()
+        run_store.ensure_todo_ledger(goal=request)
+        # Authoritative resume reconciliation: derive current_gate/current_phase
+        # from completed + pending gates (and pending files) before any worker is
+        # launched, so a stale current_gate can never strand the run on a
+        # completed discovery gate.
+        run_store.reconcile_gate_pointer()
         active_profile = run_store.active_goal_profile(request)
         model_docs_task = active_profile is not None and active_profile.id == "model_docs"
         initial_state = run_store.read_json("state.json", {})
@@ -2690,7 +3478,16 @@ class ToolsManagerOrchestrator:
 
         for pass_index in range(1, pass_cap + 1):
             step = self._resolve_step(plan)
-            gate = run_store._gate_from_step(step)
+            gate = run_store.required_gate_for_step(step)
+            persisted_gate_before_pass = ""
+            state_before_pass = run_store.read_json("state.json", {})
+            pending_before_pass = (
+                state_before_pass.get("pending_gates")
+                if isinstance(state_before_pass.get("pending_gates"), list)
+                else []
+            )
+            if pending_before_pass:
+                persisted_gate_before_pass = str(pending_before_pass[0] or "").strip()
             run_store.update_state(
                 plan=plan,
                 step=step,
@@ -2698,6 +3495,10 @@ class ToolsManagerOrchestrator:
                 next_action="execute current gate",
                 changed_files=changed_files,
             )
+            current_todo = run_store.current_todo_for_gate(gate, goal=request)
+            if current_todo.status in {"pending", "failed"}:
+                current_todo = current_todo.model_copy(update={"status": "in_progress"})
+                run_store._write_todo_item(current_todo)
             step_repeat_count = self._recent_step_repeat_count(
                 all_pass_logs,
                 step_id=str(getattr(step, "id", "") or ""),
@@ -2940,6 +3741,44 @@ class ToolsManagerOrchestrator:
                         f"toolsmanager emitted empty request batch on pass {int(pass_index)} and no deterministic fallback could be derived"
                     )
 
+            todo_for_gate = run_store.read_json("todo.json", {})
+            pending_edits_for_gate = (
+                todo_for_gate.get("pending_edits")
+                if isinstance(todo_for_gate.get("pending_edits"), list)
+                else []
+            )
+            if (
+                gate == "apply_changes"
+                and persisted_gate_before_pass == "apply_changes"
+                and not self._batch_has_mutation_payload(batch, pending_edits_for_gate)
+            ):
+                terminal_reason = "missing_edit_payload"
+                all_warnings.append("missing_edit_payload")
+                self._mark_structured_failure(
+                    run_store,
+                    code="missing_edit_payload",
+                    gate=gate,
+                    required_next_tool="apply_patch|write_file|create_file",
+                    why_not_executed="apply_changes gate had no pending_edits and the tools batch contained no mutation tool",
+                )
+                break
+
+            if (
+                gate == "verify_changes"
+                and persisted_gate_before_pass == "verify_changes"
+                and not self._batch_has_tool_family(batch, RunStateStore.verification_tools)
+            ):
+                terminal_reason = "missing_verification_payload"
+                all_warnings.append("missing_verification_payload")
+                self._mark_structured_failure(
+                    run_store,
+                    code="missing_verification_payload",
+                    gate=gate,
+                    required_next_tool="run_command|verify_project",
+                    why_not_executed="verify_changes gate had no verification command in the tools batch",
+                )
+                break
+
             request_fingerprints: list[str] = []
             tool_steps_this_pass = 0
             warnings_before = len(all_warnings)
@@ -2968,7 +3807,11 @@ class ToolsManagerOrchestrator:
                     continue
                 explicit_tool_name = str(item.tool_name or "").strip()
                 canonical_tool_name = explicit_tool_name or self._canonical_tool_name_from_question(question)
-                if model_docs_task and canonical_tool_name in {"apply_patch", "write_file"}:
+                if (
+                    model_docs_task
+                    and canonical_tool_name in {"apply_patch", "write_file"}
+                    and not (persisted_gate_before_pass == "apply_changes" and gate == "apply_changes")
+                ):
                     if not self._model_docs_evidence_complete(run_store):
                         duplicate_request_skips += 1
                         duplicate_skips_this_pass += 1
@@ -3001,6 +3844,19 @@ class ToolsManagerOrchestrator:
                 ):
                     todo_state["pending_file_reads"] = pending_reads
                     run_store.write_json("todo.json", todo_state)
+                if (
+                    canonical_tool_name == "read_file"
+                    and pending_reads
+                    and not dict(item.tool_args or {}).get("path")
+                ):
+                    item = item.model_copy(
+                        update={
+                            "tool_name": "read_file",
+                            "tool_args": {"path": pending_reads[0]},
+                            "strategy_hint": "forced_pending_read_queue",
+                        }
+                    )
+                    question = f"Read pending candidate file before any more broad search: {pending_reads[0]}"
                 requested_read_path = run_store._normalize_candidate_path(
                     self._extract_tool_path(str(item.tool_name or ""), dict(item.tool_args or {}), question)
                 )
@@ -3009,7 +3865,9 @@ class ToolsManagerOrchestrator:
                     and bool(pending_reads)
                     and requested_read_path == pending_reads[0]
                 )
-                if pending_reads and not is_exact_pending_read:
+                if pending_reads and not is_exact_pending_read and not (
+                    persisted_gate_before_pass == "apply_changes" and gate == "apply_changes"
+                ):
                     next_read = str(pending_reads[0])
                     question = f"Read pending candidate file before any more broad search: {next_read}"
                     item = item.model_copy(
@@ -3052,6 +3910,28 @@ class ToolsManagerOrchestrator:
                     all_warnings.append("broad_discovery_blocked_after_model_sources_known")
                     continue
 
+                if (
+                    model_docs_task
+                    and not pending_reads
+                    and canonical_tool_name in {"repo_search", "semantic_search", "list_files"}
+                ):
+                    duplicate_semantic_search_skips += 1
+                    duplicate_skips_this_pass += 1
+                    all_warnings.append("model_docs_discovery_blocked_after_pending_files_zero")
+                    continue
+
+                allowed_tools = {str(tool).strip() for tool in current_todo.allowed_tools if str(tool).strip()}
+                if allowed_tools and canonical_tool_name and canonical_tool_name not in allowed_tools:
+                    duplicate_tool_execution_blocks += 1
+                    duplicate_skips_this_pass += 1
+                    all_warnings.append(f"todo_disallowed_tool_blocked: {current_todo.id}:{canonical_tool_name}")
+                    run_store.mark_todo_worker_failure(
+                        current_todo,
+                        reason=f"Worker attempted disallowed tool {canonical_tool_name}",
+                        proof={"tool_name": canonical_tool_name},
+                    )
+                    continue
+
                 if edit_retry_mode_active and self._looks_like_search_request_text(question):
                     if not self._looks_like_edit_request_text(question):
                         duplicate_semantic_search_skips += 1
@@ -3069,6 +3949,13 @@ class ToolsManagerOrchestrator:
                 candidate_tool_path = run_store._normalize_candidate_path(
                     self._extract_tool_path(canonical_tool_name, dict(item.tool_args or {}), question)
                 )
+                if canonical_tool_name == "read_file" and candidate_tool_path and not dict(item.tool_args or {}).get("path"):
+                    item = item.model_copy(
+                        update={
+                            "tool_name": "read_file",
+                            "tool_args": {**dict(item.tool_args or {}), "path": candidate_tool_path},
+                        }
+                    )
                 if (
                     canonical_tool_name == "read_file"
                     and candidate_tool_path
@@ -3210,6 +4097,17 @@ class ToolsManagerOrchestrator:
                 fallback_tool_name = str(fallback_request.tool_name or "") or self._canonical_tool_name_from_question(
                     fallback_request.question
                 )
+                fallback_tool_path = run_store._normalize_candidate_path(
+                    self._extract_tool_path(
+                        fallback_tool_name,
+                        dict(fallback_request.tool_args or {}),
+                        fallback_request.question,
+                    )
+                )
+                if fallback_tool_name == "read_file" and fallback_tool_path and not dict(fallback_request.tool_args or {}).get("path"):
+                    fallback_request = fallback_request.model_copy(
+                        update={"tool_name": "read_file", "tool_args": {"path": fallback_tool_path}}
+                    )
                 merged_policy, policy_repair_warning = self._repair_tool_policy_for_action(
                     merged_policy,
                     fallback_tool_name,
@@ -3348,6 +4246,16 @@ class ToolsManagerOrchestrator:
                     detail = str(item.error_message or "request failed")
                     all_warnings.append(f"toolsmanager executor error: {code}: {detail}")
                     failed_request_reasons[idx] = (code, detail)
+                    failed_todo = run_store.mark_todo_worker_failure(
+                        current_todo,
+                        reason=f"{code}: {detail}",
+                        proof={"tool_name": request_tool_lookup.get(idx, ""), "error": detail},
+                    )
+                    current_todo = failed_todo
+                    if code == "tools_only_violation":
+                        all_warnings.append("tools_only_violation_current_todo_failed")
+                        if current_todo.kind == "edit" and current_todo.status != "blocked":
+                            edit_retry_mode_pending = True
                     run_store.record_tool_call(
                         gate=request_gate_lookup.get(idx, gate),
                         tool_name=request_tool_lookup.get(idx, "toolsmanager_request"),
@@ -3428,9 +4336,23 @@ class ToolsManagerOrchestrator:
                 if success:
                     failed_request_reasons.pop(idx, None)
                     execution_requests_ok += 1
+                    current_todo = run_store.mark_todo_worker_done(
+                        current_todo,
+                        tool_name=response_tool_name,
+                        files_read=response_read_paths,
+                        files_changed=[],
+                        command_output=str(response.answer or ""),
+                        verification_result=str(response.answer or "") if response_tool_name in RunStateStore.verification_tools else "",
+                        tool_call_id=request_fingerprint_lookup.get(idx, ""),
+                    )
                 else:
                     execution_requests_failed += 1
                     failed_request_reasons[idx] = ("no_progress", no_progress_reason or "tool produced no useful progress")
+                    current_todo = run_store.mark_todo_worker_failure(
+                        current_todo,
+                        reason=no_progress_reason or "tool produced no useful progress",
+                        proof={"tool_name": response_tool_name, "files_read": response_read_paths},
+                    )
                 run_store.record_tool_call(
                     gate=request_gate_lookup.get(idx, gate),
                     tool_name=response_tool_name,
@@ -3483,7 +4405,7 @@ class ToolsManagerOrchestrator:
                         seen_model_classes.update(new_classes)
                         new_model_classes_this_pass += len(new_classes)
                     executed_tool = request_tool_lookup.get(idx, "").strip().lower()
-                    if executed_tool in {"apply_patch", "write_file"}:
+                    if executed_tool in {"apply_patch", "write_file", "create_file"}:
                         successful_patches_this_pass += 1
                     if executed_tool in {"run_command", "verify_project"}:
                         verification_commands_this_pass += 1
@@ -3497,6 +4419,23 @@ class ToolsManagerOrchestrator:
                     retry_req = original.request.model_copy(
                         update={"retry_attempt": int(original.request.retry_attempt or 0) + 1}
                     )
+                    code, _detail = failed_request_reasons.get(idx, ("", ""))
+                    if code == "tools_only_violation":
+                        forced = self._forced_mutation_tool_request(todo_item=current_todo)
+                        retry_req = original.request.model_copy(
+                            update={
+                                "question": forced.question,
+                                "tool_name": forced.tool_name,
+                                "tool_args": forced.tool_args,
+                                "retry_attempt": int(original.request.retry_attempt or 0) + 1,
+                            }
+                        )
+                        request_tool_lookup[int(idx)] = forced.tool_name
+                        request_args_lookup[int(idx)] = {
+                            **request_args_lookup.get(int(idx), {}),
+                            "question": forced.question,
+                            "tool_args": forced.tool_args,
+                        }
                     retry_requests.append(
                         BatchToolRequest(request_index=original.request_index, request=retry_req)
                     )
@@ -3605,11 +4544,25 @@ class ToolsManagerOrchestrator:
                             if retry_success:
                                 retry_failures.pop(idx, None)
                                 execution_requests_ok += 1
+                                current_todo = run_store.mark_todo_worker_done(
+                                    current_todo,
+                                    tool_name=retry_tool_name,
+                                    files_read=retry_read_paths,
+                                    files_changed=[],
+                                    command_output=str(response.answer or ""),
+                                    verification_result=str(response.answer or "") if retry_tool_name in RunStateStore.verification_tools else "",
+                                    tool_call_id=request_fingerprint_lookup.get(idx, ""),
+                                )
                             else:
                                 execution_requests_failed += 1
                                 retry_failures[idx] = (
                                     "no_progress",
                                     retry_no_progress_reason or "retry produced no useful progress",
+                                )
+                                current_todo = run_store.mark_todo_worker_failure(
+                                    current_todo,
+                                    reason=retry_no_progress_reason or "retry produced no useful progress",
+                                    proof={"tool_name": retry_tool_name, "files_read": retry_read_paths},
                                 )
                             run_store.record_tool_call(
                                 gate=request_gate_lookup.get(idx, gate),
@@ -3641,7 +4594,7 @@ class ToolsManagerOrchestrator:
                                     seen_model_classes.update(new_classes)
                                     new_model_classes_this_pass += len(new_classes)
                                 retried_tool = request_tool_lookup.get(idx, "").strip().lower()
-                                if retried_tool in {"apply_patch", "write_file"}:
+                                if retried_tool in {"apply_patch", "write_file", "create_file"}:
                                     successful_patches_this_pass += 1
                                 if retried_tool in {"run_command", "verify_project"}:
                                     verification_commands_this_pass += 1
@@ -3703,6 +4656,21 @@ class ToolsManagerOrchestrator:
             changed_now = sorted(self._git_status_paths().difference(before))
             changed_files = changed_now
             docs_models_changed_this_pass = "docs/models.md" in changed_now
+            pending_after_pass = run_store._canonical_pending_reads(
+                run_store.read_json("todo.json", {}).get("pending_file_reads", []),
+                goal=request,
+            )
+            current_todo = run_store.current_todo_for_gate(gate, goal=request)
+            if current_todo.status == "worker_done":
+                current_todo = run_store.confirm_or_reject_todo(
+                    current_todo,
+                    files_changed=changed_files,
+                    pending_files=pending_after_pass,
+                )
+                if current_todo.status == "failed" and current_todo.kind == "edit":
+                    edit_retry_mode_pending = True
+                    all_warnings.append("todo_edit_agent_confirmation_failed")
+            all_warnings.extend(run_store.validate_planner_todo_claims(changed_files=changed_files))
             run_store.update_state(
                 plan=plan,
                 step=step,
@@ -3866,10 +4834,21 @@ class ToolsManagerOrchestrator:
                 toolsmanager_requests_count=toolsmanager_requests_count,
             )
 
+        structured_failure_reasons = {
+            "missing_edit_payload",
+            "missing_verification_payload",
+            "tools_only_no_tool_call",
+            "mutation_noop",
+            "verification_no_changed_files",
+        }
         provisional_status = (
-            "needs_resume"
-            if terminal_reason == "pass_cap_reached" and self._has_pending_plan_work(plan)
-            else "running"
+            "failed_no_progress"
+            if terminal_reason in structured_failure_reasons
+            else (
+                "needs_resume"
+                if terminal_reason == "pass_cap_reached" and self._has_pending_plan_work(plan)
+                else "running"
+            )
         )
         final_state = run_store.update_state(
             plan=plan,
@@ -3889,7 +4868,9 @@ class ToolsManagerOrchestrator:
             warnings=all_warnings,
             terminal_reason=terminal_reason,
         )
-        if terminal_reason in {"stalled_no_actionable_requests", "invalid_request_batch"}:
+        if terminal_reason in structured_failure_reasons:
+            final_status = "failed_no_progress"
+        elif terminal_reason in {"stalled_no_actionable_requests", "invalid_request_batch"}:
             final_status = "failed_no_progress"
         elif provisional_status == "needs_resume" or self._has_pending_plan_work(plan):
             final_status = "needs_resume"
@@ -3914,6 +4895,12 @@ class ToolsManagerOrchestrator:
         else:
             final_state["status"] = final_status
             final_state["blocking_reason"] = completion_blocker or str(final_state.get("blocking_reason", "") or "")
+            if terminal_reason in structured_failure_reasons:
+                final_state["blocking_reason"] = terminal_reason
+                final_state.setdefault("failure_stage", run_store._public_phase_name(run_store._phase_from_gate(str(final_state.get("current_gate", "") or ""))))
+                final_state.setdefault("failure_gate", str(final_state.get("current_gate", "") or ""))
+                final_state.setdefault("required_next_tool", "")
+                final_state.setdefault("why_not_executed", str(final_state.get("last_error", "") or terminal_reason))
         run_store.write_json("state.json", final_state)
         run_store.write_checkpoint(
             status=final_status,
@@ -3961,8 +4948,11 @@ class ToolsManagerOrchestrator:
                 f"Reason: {final_state.get('blocking_reason', '') or terminal_reason}\n"
                 f"Next exact action: {final_state.get('next_action', run_store.next_action())}\n"
                 f"Resume command: {resume_command}\n"
-                f"Auto-continue command: {auto_continue_command}"
+                f"Auto-continue command: {auto_continue_command}\n\n"
+                f"{run_store.todo_board()}"
             )
+        elif final_status == "completed":
+            latest_answer = f"{latest_answer}\n\n{run_store.todo_board()}".strip()
 
         persisted_fingerprint_counts = {
             "request_fingerprint": len(seen_request_fingerprints),

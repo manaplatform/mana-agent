@@ -88,18 +88,14 @@ def _model_docs_priority(path: str, repo_root: Path) -> int:
         return 99
     if re.fullmatch(r"src/(?:.*/)?models\.py", text) or re.fullmatch(r"src/(?:.*/)?[\w.-]*_models\.py", text):
         return 1
-    if name == "models.py" or name.endswith("_models.py"):
-        return 1
-    if text == "config/settings.py":
-        return 2
-    if parts & {"tests", "test"} and text.endswith(".py"):
-        return 3
     if text == "docs/models.md" or name in {"readme.md", "readme.rst"}:
         return 4
+    if parts & {"tests", "test"} and text.endswith(".py"):
+        return 99
     if parts & {"admin", "serializers", "frontend", "front", "cli", "commands"}:
-        return 5
+        return 99
     if "/migrations/" in f"/{text}/" and text.endswith(".py"):
-        return 6
+        return 99
     return 9
 
 
@@ -111,30 +107,28 @@ class ModelDocsGoalProfile(GoalProfile):
             goal_matcher=_model_docs_goal_matcher,
             discovery_globs=(
                 "src/**/models.py",
-                "src/**/*models.py",
                 "src/**/*_models.py",
-                "**/models.py",
-                "**/*_models.py",
-                "config/settings.py",
-                "**/*.py",
+                "src/**/*.py",
                 "docs/models.md",
             ),
             include_patterns=(
                 re.compile(r"(^|/)docs/models\.md$"),
-                re.compile(r"(^|/)models\.py$"),
-                re.compile(r"(^|/)[\w.-]*_models\.py$"),
+                re.compile(r"^src/(?:.*/)?models\.py$"),
+                re.compile(r"^src/(?:.*/)?[\w.-]*_models\.py$"),
             ),
             exclude_patterns=(
                 re.compile(r"(^|/)(__init__\.py|apply_patch\.py|github_search\.py)$"),
                 re.compile(r"(^|/)project_structure_analysis\.json$"),
                 re.compile(r"(^|/)package-lock\.json$"),
                 re.compile(r"(^|)(\.mana|node_modules|venv|\.venv|env|site-packages|dist-packages)(/|$)"),
+                re.compile(r"(^|)(build|dist|tests|test)(/|$)"),
+                re.compile(r"(^|/)build/lib/"),
+                re.compile(r"(^|/)src/(?:.*/)?(commands|cli|tools|utils?|helpers?|frontend|front|admin|serializers)(/|$)"),
             ),
             content_matchers=(
                 re.compile(r"\bclass\s+\w+\s*\([^)]*(?:BaseModel|TypedDict|Enum|models\.Model)[^)]*\)"),
                 re.compile(r"@dataclass\b"),
-                re.compile(r"\b(BaseSettings|BaseModel|TypedDict|dataclass|Enum)\b"),
-                re.compile(r"\b(CreateModel|AddField|AlterField|AddConstraint|AlterUniqueTogether)\b"),
+                re.compile(r"\bclass\s+\w+\s*\([^)]*dataclass[^)]*\)"),
             ),
             priority_fn=_model_docs_priority,
         )
@@ -143,29 +137,24 @@ class ModelDocsGoalProfile(GoalProfile):
         text = _clean_path(path)
         if not text or self.is_excluded(text) or self.priority(text, repo_root) >= 99:
             return False
-        if text == "docs/models.md" or text.endswith("/models.py") or text.endswith("_models.py"):
+        if text == "docs/models.md":
             return True
-        if text == "config/settings.py":
+        if not text.startswith("src/") or not text.endswith(".py"):
+            return False
+        content = _read_text(Path(repo_root) / text)
+        if text.endswith("/coding_agent_models.py"):
             return bool(
-                re.search(
-                    r"\b(BaseSettings|BaseModel|TypedDict|dataclass|Enum)\b",
-                    _read_text(Path(repo_root) / text),
-                )
+                re.search(r"\bclass\s+\w+\s*\([^)]*(?:BaseModel|TypedDict|Enum|models\.Model)[^)]*\)", content)
+                or re.search(r"@dataclass\b", content)
             )
-        if "/migrations/" in f"/{text}/" and text.endswith(".py"):
-            return bool(
-                re.search(
-                    r"\b(CreateModel|AddField|AlterField|AddConstraint|AlterUniqueTogether)\b",
-                    _read_text(Path(repo_root) / text),
-                )
-            )
+        if text.endswith("/models.py") or text.endswith("_models.py"):
+            return True
         if text.endswith(".py"):
-            content = _read_text(Path(repo_root) / text)
             if re.search(r"\bclass\s+\w+\s*\([^)]*(?:BaseModel|TypedDict|Enum|models\.Model)[^)]*\)", content):
                 return True
             if re.search(r"@dataclass\b", content):
                 return True
-        return self.priority(text, repo_root) <= 4
+        return False
 
 
 BUILTIN_GOAL_PROFILES: tuple[GoalProfile, ...] = (ModelDocsGoalProfile(),)

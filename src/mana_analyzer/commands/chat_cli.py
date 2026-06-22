@@ -256,6 +256,11 @@ def chat(
         max=12,
         help="Maximum planner->toolsmanager execution passes per turn.",
     ),
+    auto_continue: bool = typer.Option(
+        True,
+        "--auto-continue/--no-auto-continue",
+        help="Automatically resume auto-execute checkpoints until work completes or blocks.",
+    ),
     execution_profile: str = typer.Option(
         "balanced",
         "--execution-profile",
@@ -355,6 +360,7 @@ def chat(
             "planning_max_questions": planning_max_questions,
             "auto_execute_plan": auto_execute_plan,
             "auto_execute_max_passes": auto_execute_max_passes,
+            "auto_continue": auto_continue,
             "execution_profile": execution_profile,
             "full_auto": full_auto,
             "full_auto_status_every": full_auto_status_every,
@@ -387,6 +393,7 @@ def chat(
         # Keep user override when they pass a non-default value.
         if int(auto_execute_max_passes) == 4:
             auto_execute_max_passes = 10
+    chat_auto_continue = bool(auto_continue and auto_execute_plan)
     full_auto_status_every = max(0, int(full_auto_status_every))
     planning_question_limit = max(1, min(planning_max_questions, 6))
     auto_execute_max_passes = max(1, min(int(auto_execute_max_passes), 12))
@@ -808,6 +815,7 @@ def chat(
                 status_rows.append(("flow memory", "active — new flow on first request"))
         auto_execute_status = "automatic" if auto_execute_plan else "disabled by legacy override"
         status_rows.append(("auto-execute", f"{auto_execute_status} (max passes: {auto_execute_max_passes})"))
+        status_rows.append(("auto-continue", "on" if chat_auto_continue else "off"))
         status_rows.append(("execution profile", execution_profile))
         if execution_profile == "full-auto":
             if full_auto_status_every > 0:
@@ -1214,7 +1222,7 @@ def chat(
                     turn_passes_total += _ingest_full_auto_pass_payload(payload)
                 terminal_reason = str(payload.get("terminal_reason", "") or "").strip().lower()
                 run_status = str(payload.get("run_status", "") or "").strip().lower()
-                if run_full_auto and (terminal_reason == "pass_cap_reached" or run_status == "needs_resume"):
+                if chat_auto_continue and (terminal_reason == "pass_cap_reached" or run_status == "needs_resume"):
                     resumed_from_pass_cap = True
                     resume_cycles += 1
                     turn_checkpoints_emitted += _emit_full_auto_pass_checkpoints(resume_cycles=resume_cycles)
@@ -1985,7 +1993,7 @@ def chat(
                                     manage_live=False,
                                 )
                                 if not (
-                                    execution_profile == "full-auto"
+                                    chat_auto_continue
                                     and execute_plan_now
                                     and isinstance(result, dict)
                                 ):

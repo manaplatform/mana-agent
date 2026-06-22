@@ -169,14 +169,15 @@ def test_tools_manager_model_docs_fallback_uses_repository_local_evidence(tmp_pa
 
 
 def test_run_state_model_docs_queue_prioritizes_relevant_files(tmp_path: Path) -> None:
-    (tmp_path / "back" / "billing").mkdir(parents=True)
-    (tmp_path / "back" / "billing" / "models.py").write_text("from django.db import models\n", encoding="utf-8")
+    (tmp_path / "src" / "billing").mkdir(parents=True)
+    (tmp_path / "src" / "billing" / "models.py").write_text("from django.db import models\n", encoding="utf-8")
+    (tmp_path / "src" / "billing" / "invoice_models.py").write_text("class Invoice(BaseModel):\n    pass\n", encoding="utf-8")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "models.md").write_text("# Models\n", encoding="utf-8")
     (tmp_path / "Front").mkdir()
     (tmp_path / "Front" / "package-lock.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "back" / "billing" / "migrations").mkdir()
-    (tmp_path / "back" / "billing" / "migrations" / "0001_initial.py").write_text(
+    (tmp_path / "src" / "billing" / "migrations").mkdir()
+    (tmp_path / "src" / "billing" / "migrations" / "0001_initial.py").write_text(
         "migrations.CreateModel(name='Invoice')\n",
         encoding="utf-8",
     )
@@ -187,11 +188,12 @@ def test_run_state_model_docs_queue_prioritizes_relevant_files(tmp_path: Path) -
 
     pending = store.read_json("todo.json", {})["pending_file_reads"]
     assert pending[:3] == [
-        "back/billing/models.py",
+        "src/billing/invoice_models.py",
+        "src/billing/models.py",
         "docs/models.md",
-        "back/billing/migrations/0001_initial.py",
     ]
     assert "Front/package-lock.json" not in pending
+    assert "src/billing/migrations/0001_initial.py" not in pending
 
 
 def test_model_docs_goal_profile_matching() -> None:
@@ -202,39 +204,156 @@ def test_model_docs_goal_profile_matching() -> None:
 
 def test_model_docs_goal_profile_candidate_priority_and_excludes(tmp_path: Path) -> None:
     profile = ModelDocsGoalProfile()
-    (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "models.py").write_text("from django.db import models\n", encoding="utf-8")
-    (tmp_path / "app" / "foo_models.py").write_text("class Item(BaseModel):\n    pass\n", encoding="utf-8")
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "models.py").write_text("from django.db import models\n", encoding="utf-8")
+    (tmp_path / "src" / "app" / "foo_models.py").write_text("class Item(BaseModel):\n    pass\n", encoding="utf-8")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "models.md").write_text("# Models\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "models.py").write_text("class Bad(BaseModel):\n    pass\n", encoding="utf-8")
+    (tmp_path / "build" / "lib" / "src" / "app").mkdir(parents=True)
+    (tmp_path / "build" / "lib" / "src" / "app" / "models.py").write_text("class Bad(BaseModel):\n    pass\n", encoding="utf-8")
 
-    assert profile.priority("app/models.py", tmp_path) == 1
-    assert profile.priority("app/foo_models.py", tmp_path) == 1
+    assert profile.priority("src/app/models.py", tmp_path) == 1
+    assert profile.priority("src/app/foo_models.py", tmp_path) == 1
     assert profile.is_relevant("docs/models.md", tmp_path)
+    assert profile.is_relevant("src/app/models.py", tmp_path)
     assert not profile.is_relevant("node_modules/models.py", tmp_path)
+    assert not profile.is_relevant("build/lib/src/app/models.py", tmp_path)
     assert not profile.is_relevant("package-lock.json", tmp_path)
 
 
 def test_run_state_profile_sorting_and_generic_goal_behavior(tmp_path: Path) -> None:
-    (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "models.py").write_text("from django.db import models\n", encoding="utf-8")
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "models.py").write_text("from django.db import models\n", encoding="utf-8")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "models.md").write_text("# Models\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Readme\n", encoding="utf-8")
     store = RunStateStore(repo_root=tmp_path, run_id="profile-sort")
     store.ensure(goal="update docs/models.md")
 
-    assert store._sort_pending_reads(["README.md", "app/models.py", "docs/models.md"], goal="update docs/models.md") == [
-        "app/models.py",
-        "README.md",
+    assert store._sort_pending_reads(["README.md", "src/app/models.py", "docs/models.md"], goal="update docs/models.md") == [
+        "src/app/models.py",
         "docs/models.md",
     ]
-    assert store._sort_pending_reads(["README.md", "app/models.py"], goal="summarize files") == [
+    assert store._sort_pending_reads(["README.md", "src/app/models.py"], goal="summarize files") == [
         "README.md",
-        "app/models.py",
+        "src/app/models.py",
     ]
     assert not hasattr(store, "_is_model_docs_goal")
+
+
+def test_todo_edit_cannot_complete_with_empty_modified_files(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="todo-edit-empty")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    todo = store.current_todo_for_gate("apply_changes", goal="update docs/models.md")
+    worker_done = store.mark_todo_worker_done(
+        todo,
+        tool_name="apply_patch",
+        files_changed=[],
+        tool_call_id="tool-1",
+    )
+
+    result = store.confirm_or_reject_todo(worker_done, files_changed=[])
+
+    assert result.status == "failed"
+    assert result.worker_checked is False
+    assert result.agent_confirmed is False
+    assert "no target file was modified" in result.reason
+
+
+def test_todo_edit_confirms_only_when_target_file_modified(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="todo-edit-target")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    todo = store.current_todo_for_gate("apply_changes", goal="update docs/models.md")
+    worker_done = store.mark_todo_worker_done(
+        todo,
+        tool_name="write_file",
+        files_changed=["docs/models.md"],
+        tool_call_id="tool-2",
+    )
+
+    result = store.confirm_or_reject_todo(worker_done, files_changed=["docs/models.md"])
+
+    assert result.status == "agent_confirmed"
+    assert result.worker_checked is True
+    assert result.agent_confirmed is True
+
+
+def test_todo_worker_cannot_use_tool_outside_allowed_tools(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="todo-disallowed")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    todo = store.current_todo_for_gate("apply_changes", goal="update docs/models.md")
+    worker_done = store.mark_todo_worker_done(
+        todo,
+        tool_name="repo_search",
+        tool_call_id="tool-3",
+    )
+
+    result = store.confirm_or_reject_todo(worker_done, files_changed=["docs/models.md"])
+
+    assert result.status == "failed"
+    assert "disallowed tool" in result.reason
+
+
+def test_todo_board_prints_worker_and_agent_state(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="todo-board")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    todo = store.current_todo_for_gate("apply_changes", goal="update docs/models.md")
+    failed = store.mark_todo_worker_done(todo, tool_name="apply_patch", tool_call_id="tool-4")
+    store.confirm_or_reject_todo(failed, files_changed=[])
+
+    board = store.todo_board()
+
+    assert "Todo Board:" in board
+    assert "[!][ ] update_docs_models_md - failed" in board
+
+
+def test_planner_cannot_confirm_edit_without_worker_modified_proof(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="todo-contradiction")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    todo = store.current_todo_for_gate("apply_changes", goal="update docs/models.md")
+    store._write_todo_item(
+        todo.model_copy(
+            update={
+                "status": "agent_confirmed",
+                "worker_checked": True,
+                "agent_confirmed": True,
+                "proof": {"tool_name": "apply_patch", "modified_files": []},
+            }
+        )
+    )
+
+    warnings = store.validate_planner_todo_claims(changed_files=[])
+    result = store.current_todo_for_gate("apply_changes", goal="update docs/models.md")
+
+    assert warnings == ["planner_contradiction_edit_without_modified_target"]
+    assert result.status == "failed"
+
+
+def test_polluted_candidate_paths_are_rejected_unless_real_repo_files(tmp_path: Path) -> None:
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "models.md").write_text("# Models\n", encoding="utf-8")
+    store = RunStateStore(repo_root=tmp_path, run_id="polluted")
+    store.ensure(goal="create docs/models.md for all models", flow_id="")
+
+    response = ToolRunResponse(
+        answer="apply_patch.py docsmodels.md docs/models.md src/app/models.py /tmp/outside/models.py",
+        trace=[{"tool_name": "repo_search", "status": "ok", "output_preview": "apply_patch.py docsmodels.md"}],
+    )
+    counts = store.record_evidence_from_response(
+        gate="locate_candidates",
+        source_tool="repo_search",
+        response=response,
+    )
+
+    pending = store.read_json("todo.json")["pending_file_reads"]
+    assert counts["discovered"] == 2
+    assert pending == ["src/app/models.py", "docs/models.md"]
+    assert "apply_patch.py" not in pending
+    assert "docsmodels.md" not in pending
 
 
 def test_run_state_action_fingerprint_ignores_planner_prose(tmp_path: Path) -> None:
@@ -252,6 +371,36 @@ def test_run_state_action_fingerprint_ignores_planner_prose(tmp_path: Path) -> N
         filters={"k": 50},
     )
     assert first == second
+
+
+def test_tools_manager_successful_tool_status_initializes_trace_flags() -> None:
+    empty_response = ToolRunResponse(answer="", sources=[], mode="agent-tools", trace=[], warnings=[])
+    traced_response = ToolRunResponse(
+        answer="",
+        sources=[],
+        mode="agent-tools",
+        trace=[{"tool_name": "custom_tool", "status": "ok"}],
+        warnings=[],
+    )
+
+    assert ToolsManagerOrchestrator._successful_tool_status(
+        tool_name="verify_project",
+        evidence_counts={},
+        response_paths=[],
+        response=empty_response,
+    ) == (False, "verify_result_missing")
+    assert ToolsManagerOrchestrator._successful_tool_status(
+        tool_name="custom_tool",
+        evidence_counts={},
+        response_paths=[],
+        response=empty_response,
+    ) == (False, "tool_result_missing")
+    assert ToolsManagerOrchestrator._successful_tool_status(
+        tool_name="custom_tool",
+        evidence_counts={},
+        response_paths=[],
+        response=traced_response,
+    ) == (True, "")
 
 
 def test_tools_manager_planner_parser_accepts_wrapped_payload(tmp_path: Path) -> None:
@@ -1415,8 +1564,8 @@ def test_tools_manager_edit_retry_mode_suppresses_new_search_after_patch_noop(tm
 
 
 def test_tools_manager_model_docs_blocks_mutation_until_inventory_read(tmp_path: Path, monkeypatch) -> None:
-    (tmp_path / "back" / "accounts").mkdir(parents=True)
-    (tmp_path / "back" / "accounts" / "models.py").write_text(
+    (tmp_path / "src" / "accounts").mkdir(parents=True)
+    (tmp_path / "src" / "accounts" / "models.py").write_text(
         "from django.db import models\nclass Customer(models.Model):\n    pass\n",
         encoding="utf-8",
     )
@@ -1463,20 +1612,20 @@ def test_tools_manager_model_docs_blocks_mutation_until_inventory_read(tmp_path:
         def run_batch(self, *, run_id: str, requests, on_event=None):  # noqa: ANN001
             _ = (run_id, on_event)
             assert requests[0].request.tool_name == "read_file"
-            assert requests[0].request.tool_args["path"] == "back/accounts/models.py"
+            assert requests[0].request.tool_args["path"] == "src/accounts/models.py"
             return [
                 BatchExecutionResult(
                     request_index=int(requests[0].request_index),
                     ok=True,
                     response={
                         "answer": "class Customer(models.Model): pass",
-                        "sources": [{"file_path": "back/accounts/models.py"}],
+                        "sources": [{"file_path": "src/accounts/models.py"}],
                         "mode": "agent-tools",
                         "trace": [
                             {
                                 "tool_name": "read_file",
                                 "status": "ok",
-                                "output_preview": '{"file_path":"back/accounts/models.py"}',
+                                "output_preview": '{"file_path":"src/accounts/models.py"}',
                             }
                         ],
                         "warnings": [],
@@ -1838,6 +1987,8 @@ def test_tools_manager_pass_cap_docs_update_emits_resumable_status_and_local_fal
 
 
 def test_tools_manager_pass_cap_writes_persistent_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
     orchestrator = _build_orchestrator(tmp_path)
     monkeypatch.setattr(orchestrator, "_git_status_paths", lambda: set())
     monkeypatch.setattr(orchestrator, "_compute_effective_pass_cap", lambda **_kwargs: 1)
@@ -1922,6 +2073,8 @@ def test_tools_manager_pass_cap_writes_persistent_checkpoint(tmp_path: Path, mon
 
 
 def test_tools_manager_writes_public_work_ledger_and_trace_metadata(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
     orchestrator = _build_orchestrator(tmp_path)
     monkeypatch.setattr(orchestrator, "_git_status_paths", lambda: set())
     monkeypatch.setattr(orchestrator, "_compute_effective_pass_cap", lambda **_kwargs: 1)
@@ -1990,6 +2143,8 @@ def test_tools_manager_writes_public_work_ledger_and_trace_metadata(tmp_path: Pa
 
 
 def test_tools_manager_pending_read_queue_forces_read_before_search(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
     orchestrator = _build_orchestrator(tmp_path)
     monkeypatch.setattr(orchestrator, "_git_status_paths", lambda: set())
     monkeypatch.setattr(orchestrator, "_compute_effective_pass_cap", lambda **_kwargs: 1)
@@ -2113,6 +2268,9 @@ def test_tools_manager_resume_uses_existing_run_and_skips_completed_search(tmp_p
 
 
 def test_tools_manager_resume_starts_from_exact_pending_read(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "back" / "billing").mkdir(parents=True)
+    (tmp_path / "back" / "billing" / "admin.py").write_text("from .models import Invoice\n", encoding="utf-8")
+    (tmp_path / "back" / "billing" / "models.py").write_text("class Invoice(BaseModel):\n    pass\n", encoding="utf-8")
     orchestrator = _build_orchestrator(tmp_path)
     monkeypatch.setattr(orchestrator, "_git_status_paths", lambda: set())
     monkeypatch.setattr(orchestrator, "_compute_effective_pass_cap", lambda **_kwargs: 1)
@@ -2190,6 +2348,143 @@ def test_tools_manager_resume_starts_from_exact_pending_read(tmp_path: Path, mon
     assert checkpoint["pending_files"] == ["back/billing/models.py"]
 
 
+def test_run_state_located_not_read_then_successful_read_updates_checkpoint(tmp_path: Path) -> None:
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
+    store = RunStateStore(repo_root=tmp_path, run_id="read-reconcile")
+    store.ensure(goal="read model docs", flow_id="")
+    store.write_json(
+        "todo.json",
+        {"pending_file_reads": ["src/app/models.py"], "pending_edits": [], "verification_status": "pending"},
+    )
+    store.append_jsonl(
+        "evidence.jsonl",
+        {
+            "timestamp": "2026-06-22T00:00:00+00:00",
+            "file_path": "src/app/models.py",
+            "status": "located_not_read",
+            "evidence_type": "candidate_file",
+        },
+    )
+
+    counts = store.record_evidence_from_response(
+        gate="read_candidates",
+        source_tool="read_file",
+        response=ToolRunResponse(
+            answer="read src/app/models.py",
+            trace=[{"tool_name": "read_file", "path": "src/app/models.py", "status": "ok"}],
+        ),
+    )
+    store.record_tool_call(
+        gate="read_candidates",
+        tool_name="read_file",
+        normalized_args={"path": "src/app/models.py"},
+        fingerprint="read-src-app-models",
+        status="ok",
+        files_read=["src/app/models.py"],
+    )
+    store.update_state(status="needs_resume", next_action=store.next_action())
+    store.write_checkpoint(
+        status="needs_resume",
+        completed_gates=["locate_candidates", "read_candidates"],
+        pending_gates=["classify_evidence"],
+        files_changed=[],
+        verification_status="pending",
+    )
+
+    checkpoint = store.read_json("checkpoint.json")
+    ledger = store.read_json("work_ledger.json")
+    state = store.read_json("state.json")
+    summary = (store.run_dir / "summary.md").read_text(encoding="utf-8")
+    resume_prompt = (store.run_dir / "resume_prompt.md").read_text(encoding="utf-8")
+    assert counts["read"] == 1
+    assert store.read_files() == {"src/app/models.py"}
+    assert checkpoint["read_files"] == ["src/app/models.py"]
+    assert checkpoint["progress_counters"]["files_read"] == 1
+    assert checkpoint["pending_files"] == []
+    assert ledger["read_files"] == checkpoint["read_files"]
+    assert ledger["pending_work"]["pending_file_reads"] == []
+    assert state["next_action"] == checkpoint["next_action"] == ledger["next_action"]
+    assert "- files_read: 1" in summary
+    assert f"Next action: {checkpoint['next_action']}" in resume_prompt
+
+
+def test_run_state_skipped_no_progress_then_retry_read_wins(tmp_path: Path) -> None:
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
+    store = RunStateStore(repo_root=tmp_path, run_id="retry-read")
+    store.ensure(goal="read retry", flow_id="")
+    store.write_json(
+        "todo.json",
+        {"pending_file_reads": ["src/app/models.py"], "pending_edits": [], "verification_status": "pending"},
+    )
+    store.mark_read_skipped("src/app/models.py", reason="read_file_no_files_read")
+
+    counts = store.record_evidence_from_response(
+        gate="read_candidates",
+        source_tool="read_file",
+        response=ToolRunResponse(
+            answer="retry read src/app/models.py",
+            trace=[{"tool_name": "read_file", "path": "src/app/models.py", "status": "ok"}],
+        ),
+    )
+    store.record_tool_call(
+        gate="read_candidates",
+        tool_name="read_file",
+        normalized_args={"path": "src/app/models.py"},
+        fingerprint="retry-src-app-models",
+        status="ok",
+        files_read=["src/app/models.py"],
+    )
+    store.write_checkpoint(
+        status="needs_resume",
+        completed_gates=["locate_candidates", "read_candidates"],
+        pending_gates=["classify_evidence"],
+        files_changed=[],
+        verification_status="pending",
+    )
+
+    assert counts["read"] == 1
+    assert store._latest_file_statuses()["src/app/models.py"] == "read"
+    assert store.read_json("todo.json")["pending_file_reads"] == []
+    assert store.read_json("visited_files.json")["files"] == ["src/app/models.py"]
+    checkpoint = store.read_json("checkpoint.json")
+    assert checkpoint["read_files"] == ["src/app/models.py"]
+    assert checkpoint["progress_counters"]["files_read"] == 1
+
+
+def test_run_state_tool_call_files_read_reconciles_evidence_and_visited(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="tool-call-files-read")
+    store.ensure(goal="read via tool call", flow_id="")
+    store.write_json(
+        "todo.json",
+        {"pending_file_reads": ["src/app/models.py"], "pending_edits": [], "verification_status": "pending"},
+    )
+
+    store.record_tool_call(
+        gate="read_candidates",
+        tool_name="read_file",
+        normalized_args={"path": "src/app/models.py"},
+        fingerprint="read-tool-call-only",
+        status="ok",
+        files_read=["src/app/models.py"],
+    )
+    store.write_checkpoint(
+        status="needs_resume",
+        completed_gates=["locate_candidates", "read_candidates"],
+        pending_gates=["classify_evidence"],
+        files_changed=[],
+        verification_status="pending",
+    )
+
+    assert store.read_files() == {"src/app/models.py"}
+    assert store.read_json("todo.json")["pending_file_reads"] == []
+    assert store.read_json("visited_files.json")["files"] == ["src/app/models.py"]
+    checkpoint = store.read_json("checkpoint.json")
+    assert checkpoint["read_files"] == ["src/app/models.py"]
+    assert checkpoint["progress_counters"]["files_read"] == 1
+
+
 def test_tools_manager_resume_without_decision_provider_uses_deterministic_fallback(
     tmp_path: Path,
     monkeypatch,
@@ -2238,11 +2533,319 @@ def test_tools_manager_resume_without_decision_provider_uses_deterministic_fallb
 
 
 def test_run_state_store_loop_detector_next_action_prefers_pending_read(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
     store = RunStateStore(repo_root=tmp_path, run_id="loop")
     store.ensure(goal="loop", flow_id="")
     store.write_json("todo.json", {"pending_file_reads": ["a/models.py"], "pending_edits": [], "verification_status": "pending"})
 
     assert store.next_action() == "read_file a/models.py"
+
+
+def test_run_state_apply_changes_not_completed_without_changed_files(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="no-apply-complete")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    plan = ToolsPlan(
+        objective="Update docs/models.md",
+        steps=[
+            ToolsPlanStep(id="s1", title="Read", tool_intent="inspect"),
+            ToolsPlanStep(id="s2", title="Patch docs", tool_intent="edit"),
+            ToolsPlanStep(id="s3", title="Verify", tool_intent="verify"),
+        ],
+        current_step_id="s3",
+        decision="continue",
+    )
+
+    state = store.update_state(
+        plan=plan,
+        step=plan.steps[2],
+        status="needs_resume",
+        changed_files=[],
+    )
+
+    assert state["current_gate"] == "apply_changes"
+    assert "apply_changes" not in state["completed_gates"]
+    assert "apply_changes" in state["pending_gates"]
+    assert state["blocking_reason"] == "missing_edit_payload"
+
+
+def test_tools_manager_resumed_apply_changes_routes_to_mutation_not_pending_read(tmp_path: Path, monkeypatch) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    git_calls = {"n": 0}
+
+    def _git_status_paths() -> set[str]:
+        git_calls["n"] += 1
+        return set() if git_calls["n"] == 1 else {"docs/models.md"}
+
+    monkeypatch.setattr(orchestrator, "_git_status_paths", _git_status_paths)
+    store = RunStateStore(repo_root=tmp_path, run_id="resume-apply-mutation")
+    store.ensure(goal="find all models and update docs/models.md", flow_id="flow")
+    store.write_json(
+        "todo.json",
+        {
+            "pending_file_reads": ["src/app/models.py"],
+            "pending_edits": [],
+            "verification_status": "pending",
+        },
+    )
+    state = store.read_json("state.json")
+    state["current_phase"] = "DISCOVERY"
+    state["current_gate"] = "locate_candidates"
+    state["completed_gates"] = ["locate_candidates", "read_candidates", "classify_evidence", "plan_patch"]
+    state["pending_gates"] = ["apply_changes", "verify_changes", "final_report"]
+    store.write_json("state.json", state)
+
+    plan = ToolsPlan(
+        objective="Find all models and update docs/models.md",
+        steps=[ToolsPlanStep(id="s1", title="Accidental discovery step", tool_intent="search")],
+        current_step_id="s1",
+        decision="continue",
+    )
+    monkeypatch.setattr(orchestrator, "_plan_with_source", lambda **_kwargs: (plan, [], "planner"))
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_batch",
+        lambda **_kwargs: (
+            ToolsManagerBatch(
+                planner_step_id="s1",
+                batch_reason="resume apply",
+                requests=[
+                    ToolsManagerRequest(
+                        question="apply_patch docs/models.md",
+                        tool_name="apply_patch",
+                        tool_args={"path": "docs/models.md", "patch": "*** Begin Patch\n*** End Patch\n"},
+                    )
+                ],
+            ),
+            [],
+        ),
+    )
+    seen_tools: list[str] = []
+
+    class _Executor:
+        def run_batch(self, *, run_id: str, requests, on_event=None):  # noqa: ANN001
+            _ = (run_id, on_event)
+            seen_tools.extend(str(req.request.tool_name) for req in requests)
+            assert requests[0].request.tool_name == "apply_patch"
+            return [
+                BatchExecutionResult(
+                    request_index=0,
+                    ok=True,
+                    response=ToolRunResponse(
+                        answer="patched docs/models.md",
+                        trace=[{"tool_name": "apply_patch", "status": "ok"}],
+                    ).model_dump(),
+                    backend="local",
+                )
+            ]
+
+    orchestrator.executor = _Executor()
+    result = orchestrator.run(
+        request="find all models and update docs/models.md",
+        flow_context="resume",
+        flow_id="flow",
+        index_dir=tmp_path / ".mana/index",
+        index_dirs=None,
+        k=8,
+        max_steps=6,
+        timeout_seconds=30,
+        tool_policy={},
+        pass_cap=1,
+        run_id="resume-apply-mutation",
+    )
+
+    assert seen_tools == ["apply_patch"]
+    assert "pending_read_queue_forced_progress" not in result.warnings
+    assert result.changed_files == ["docs/models.md"]
+
+
+def test_tools_manager_resumed_apply_changes_missing_payload_fails_without_search_loop(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    monkeypatch.setattr(orchestrator, "_git_status_paths", lambda: set())
+    store = RunStateStore(repo_root=tmp_path, run_id="resume-apply-missing-payload")
+    store.ensure(goal="find all models and update docs/models.md", flow_id="flow")
+    store.write_json(
+        "todo.json",
+        {
+            "pending_file_reads": ["src/app/models.py"],
+            "pending_edits": [],
+            "verification_status": "pending",
+        },
+    )
+    state = store.read_json("state.json")
+    state["current_phase"] = "DISCOVERY"
+    state["current_gate"] = "locate_candidates"
+    state["completed_gates"] = ["locate_candidates", "read_candidates", "classify_evidence", "plan_patch"]
+    state["pending_gates"] = ["apply_changes", "verify_changes", "final_report"]
+    store.write_json("state.json", state)
+
+    plan = ToolsPlan(
+        objective="Find all models and update docs/models.md",
+        steps=[ToolsPlanStep(id="s1", title="Accidental discovery step", tool_intent="search")],
+        current_step_id="s1",
+        decision="continue",
+    )
+    monkeypatch.setattr(orchestrator, "_plan_with_source", lambda **_kwargs: (plan, [], "planner"))
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_batch",
+        lambda **_kwargs: (
+            ToolsManagerBatch(
+                planner_step_id="s1",
+                batch_reason="bad resumed discovery",
+                requests=[ToolsManagerRequest(question="repo_search models.py", tool_name="repo_search")],
+            ),
+            [],
+        ),
+    )
+
+    class _Executor:
+        def run_batch(self, **_kwargs):  # noqa: ANN001
+            raise AssertionError("missing edit payload should fail before search/read execution")
+
+    orchestrator.executor = _Executor()
+    result = orchestrator.run(
+        request="find all models and update docs/models.md",
+        flow_context="resume",
+        flow_id="flow",
+        index_dir=tmp_path / ".mana/index",
+        index_dirs=None,
+        k=8,
+        max_steps=6,
+        timeout_seconds=30,
+        tool_policy={},
+        pass_cap=1,
+        run_id="resume-apply-missing-payload",
+    )
+
+    state_after = RunStateStore(repo_root=tmp_path, run_id="resume-apply-missing-payload").read_json("state.json")
+    assert result.run_status == "failed_no_progress"
+    assert result.terminal_reason == "missing_edit_payload"
+    assert "missing_edit_payload" in result.warnings
+    assert state_after["failure_gate"] == "apply_changes"
+    assert state_after["required_next_tool"] == "apply_patch|write_file|create_file"
+    assert "no mutation tool" in state_after["why_not_executed"]
+
+
+def test_tools_only_violation_retries_same_edit_todo_with_required_mutation_tool(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    git_calls = {"n": 0}
+
+    def _git_status_paths() -> set[str]:
+        git_calls["n"] += 1
+        return set() if git_calls["n"] == 1 else {"docs/models.md"}
+
+    monkeypatch.setattr(orchestrator, "_git_status_paths", _git_status_paths)
+    store = RunStateStore(repo_root=tmp_path, run_id="tools-only-edit-retry")
+    store.ensure(goal="find all models and update docs/models.md", flow_id="flow")
+    state = store.read_json("state.json")
+    state["completed_gates"] = ["locate_candidates", "read_candidates", "classify_evidence", "plan_patch"]
+    state["pending_gates"] = ["apply_changes", "verify_changes", "final_report"]
+    store.write_json("state.json", state)
+
+    plan = ToolsPlan(
+        objective="Find all models and update docs/models.md",
+        steps=[ToolsPlanStep(id="s1", title="Update docs/models.md", tool_intent="edit")],
+        current_step_id="s1",
+        decision="continue",
+    )
+    monkeypatch.setattr(orchestrator, "_plan_with_source", lambda **_kwargs: (plan, [], "planner"))
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_batch",
+        lambda **_kwargs: (
+            ToolsManagerBatch(
+                planner_step_id="s1",
+                batch_reason="edit",
+                requests=[
+                    ToolsManagerRequest(
+                        question="worker must mutate docs/models.md",
+                        tool_name="write_file",
+                        tool_args={"path": "docs/models.md", "content": "# Models\n"},
+                    )
+                ],
+            ),
+            [],
+        ),
+    )
+    seen_batches: list[list[str]] = []
+
+    class _Executor:
+        def run_batch(self, *, run_id: str, requests, on_event=None):  # noqa: ANN001
+            _ = (run_id, on_event)
+            seen_batches.append([str(req.request.tool_name) for req in requests])
+            if len(seen_batches) == 1:
+                return [
+                    BatchExecutionResult(
+                        request_index=0,
+                        ok=False,
+                        error_code="tools_only_violation",
+                        error_message="tools-only mode requires at least one successful tool call",
+                        backend="local",
+                    )
+                ]
+            assert requests[0].request.tool_name == "apply_patch"
+            return [
+                BatchExecutionResult(
+                    request_index=0,
+                    ok=True,
+                    response=ToolRunResponse(
+                        answer="patched docs/models.md",
+                        trace=[{"tool_name": "apply_patch", "status": "ok"}],
+                    ).model_dump(),
+                    backend="local",
+                )
+            ]
+
+    orchestrator.executor = _Executor()
+    result = orchestrator.run(
+        request="find all models and update docs/models.md",
+        flow_context="resume",
+        flow_id="flow",
+        index_dir=tmp_path / ".mana/index",
+        index_dirs=None,
+        k=8,
+        max_steps=6,
+        timeout_seconds=30,
+        tool_policy={},
+        pass_cap=1,
+        run_id="tools-only-edit-retry",
+    )
+    todo_after = RunStateStore(repo_root=tmp_path, run_id="tools-only-edit-retry").current_todo_for_gate(
+        "apply_changes",
+        goal="find all models and update docs/models.md",
+    )
+
+    assert seen_batches == [["write_file"], ["apply_patch"]]
+    assert "tools_only_violation_current_todo_failed" in result.warnings
+    assert result.changed_files == ["docs/models.md"]
+    assert todo_after.status == "agent_confirmed"
+
+
+def test_run_state_plan_patch_not_completed_without_mutation_payload(tmp_path: Path) -> None:
+    store = RunStateStore(repo_root=tmp_path, run_id="plan-patch-needs-payload")
+    store.ensure(goal="update docs/models.md", flow_id="")
+    plan = ToolsPlan(
+        objective="Update docs/models.md",
+        steps=[
+            ToolsPlanStep(id="s1", title="Plan patch", tool_intent="edit"),
+            ToolsPlanStep(id="s2", title="Verify", tool_intent="verify"),
+        ],
+        current_step_id="s2",
+        decision="continue",
+    )
+
+    state = store.update_state(plan=plan, step=plan.steps[1], status="needs_resume", changed_files=[])
+
+    assert "plan_patch" not in state["completed_gates"]
+    assert "plan_patch" in state["pending_gates"]
+    assert state["blocking_reason"] == "missing_edit_payload"
 
 
 def test_run_state_read_file_action_key_includes_nested_tool_args_path(tmp_path: Path) -> None:
@@ -2262,6 +2865,10 @@ def test_run_state_store_sanitizes_dependency_pending_reads(tmp_path: Path) -> N
     store.ensure(goal="loop", flow_id="")
     dependency_path = tmp_path / "back" / "venv" / "lib" / "python3.14" / "site-packages" / "django" / "forms" / "models.py"
     app_path = tmp_path / "back" / "billing" / "models.py"
+    dependency_path.parent.mkdir(parents=True)
+    dependency_path.write_text("class Dependency:\n    pass\n", encoding="utf-8")
+    app_path.parent.mkdir(parents=True)
+    app_path.write_text("class Invoice(BaseModel):\n    pass\n", encoding="utf-8")
     store.write_json(
         "todo.json",
         {
@@ -2302,6 +2909,47 @@ def test_run_state_model_docs_queue_prioritizes_model_schema_files(tmp_path: Pat
     assert pending[-1] == "docs/models.md"
 
 
+def test_run_state_model_docs_profile_excludes_build_lib_and_broad_tests(tmp_path: Path) -> None:
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "models.py").write_text("class User(BaseModel):\n    pass\n")
+    (tmp_path / "build" / "lib" / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "build" / "lib" / "src" / "pkg" / "models.py").write_text("class Built(BaseModel):\n    pass\n")
+    (tmp_path / "dist" / "pkg").mkdir(parents=True)
+    (tmp_path / "dist" / "pkg" / "models.py").write_text("class Dist(BaseModel):\n    pass\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_models.py").write_text("class Fixture(BaseModel):\n    pass\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "models.md").write_text("# Models\n")
+
+    store = RunStateStore(repo_root=tmp_path, run_id="model-docs-excludes")
+    store.ensure(goal="update docs/models.md for all models", flow_id="")
+    store.seed_candidate_queue()
+
+    pending = store.read_json("todo.json")["pending_file_reads"]
+    assert pending == ["src/pkg/models.py", "docs/models.md"]
+    assert not any(path.startswith(("build/", "dist/", "tests/")) for path in pending)
+
+
+def test_run_state_model_docs_profile_does_not_queue_unrelated_utility_files(tmp_path: Path) -> None:
+    (tmp_path / "src" / "pkg" / "commands").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "models.py").write_text("class User(BaseModel):\n    pass\n")
+    (tmp_path / "src" / "pkg" / "commands" / "sync.py").write_text("class SyncCommand:\n    pass\n")
+    (tmp_path / "src" / "pkg" / "utils.py").write_text("def normalize(value):\n    return str(value).strip()\n")
+    (tmp_path / "src" / "pkg" / "typed_payload.py").write_text("class Payload(TypedDict):\n    id: str\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "models.md").write_text("# Models\n")
+
+    store = RunStateStore(repo_root=tmp_path, run_id="model-docs-utilities")
+    store.ensure(goal="update docs/models.md for all models", flow_id="")
+    store.seed_candidate_queue()
+
+    pending = store.read_json("todo.json")["pending_file_reads"]
+    assert "src/pkg/models.py" in pending
+    assert "src/pkg/typed_payload.py" in pending
+    assert "src/pkg/commands/sync.py" not in pending
+    assert "src/pkg/utils.py" not in pending
+
+
 def test_run_state_model_docs_goal_accepts_create_in_docs_wording(tmp_path: Path) -> None:
     (tmp_path / "src" / "pkg").mkdir(parents=True)
     (tmp_path / "src" / "pkg" / "models.py").write_text("class User(BaseModel):\n    pass\n")
@@ -2324,6 +2972,8 @@ def test_run_state_model_docs_goal_accepts_create_in_docs_wording(tmp_path: Path
 
 
 def test_tools_manager_repairs_forced_read_policy_and_rejects_noop_success(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "models.py").write_text("class User(BaseModel):\n    pass\n", encoding="utf-8")
     orchestrator = _build_orchestrator(tmp_path)
     monkeypatch.setattr(orchestrator, "_git_status_paths", lambda: set())
     monkeypatch.setattr(orchestrator, "_compute_effective_pass_cap", lambda **_kwargs: 1)
