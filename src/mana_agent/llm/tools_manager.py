@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol, Sequence, TypeVar
+from typing import Any, Callable, Container, Literal, Protocol, Sequence, TypeVar
 
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
@@ -1860,6 +1860,148 @@ def _resolve_mutation_target_path(task: str, repo_root: Path, target_files: Sequ
     return ""
 
 
+# Minimum size (bytes) a deliverable must reach to count as a real write rather
+# than an empty placeholder. Verification rejects anything smaller.
+_MIN_DELIVERABLE_SIZE = 1
+
+# "in/under/inside <dir>" trailing clause used to normalize bare filenames under
+# a requested directory (e.g. "create A and B in docs" -> docs/A, docs/B).
+_DIRECTORY_CLAUSE_RE = re.compile(
+    r"\b(?:in|under|inside|into|within)\s+(?:the\s+)?"
+    r"(?P<dir>[\w./-]+?)\s*(?:directory|folder|dir)?\b",
+    re.IGNORECASE,
+)
+
+
+def _shared_directory_clause(text: str) -> str:
+    """Return the last ``in/under/inside <dir>`` directory mentioned, or ''.
+
+    Bare filenames in a multi-file request inherit this directory so that
+    "create 01-overview.md & 02-installation.md in docs" lands both files under
+    ``docs/`` instead of the repository root.
+    """
+    directory = ""
+    for match in _DIRECTORY_CLAUSE_RE.finditer(str(text or "")):
+        candidate = match.group("dir").strip().strip("`'\"/ ")
+        # Skip filenames accidentally captured as the directory token.
+        if candidate and not candidate.lower().endswith(_DETERMINISTIC_ARTIFACT_SUFFIXES):
+            directory = candidate
+    return directory
+
+
+def _resolve_required_deliverables(
+    request: str, repo_root: Path, target_files: Sequence[str] = ()
+) -> list[str]:
+    """Extract every required output file from the request, normalized under repo.
+
+    Unlike :func:`_resolve_mutation_target_path` (which returns a single primary
+    target), this returns the full ordered list of deliverables the request
+    demands. The run is held to *all* of them by the verification gate.
+    """
+    explicit: list[str] = []
+    for item in target_files:
+        rel = _safe_relative_path(repo_root, item)
+        if rel and rel not in explicit:
+            explicit.append(rel)
+    if explicit:
+        return explicit
+
+    text = str(request or "")
+    # README-attach requests retain single-target semantics: the primary
+    # deliverable is the non-README artifact and README is updated as a side
+    # effect by the deterministic fallback, not tracked as its own deliverable.
+    if _README_ATTACH_RE.search(text):
+        single = _resolve_mutation_target_path(text, repo_root, target_files)
+        return [single] if single else []
+
+    directory = _shared_directory_clause(text)
+    normalized: list[str] = []
+    for match in _EXPLICIT_FILE_RE.finditer(text):
+        raw = match.group("path")
+        candidate = f"{directory}/{raw}" if directory and "/" not in raw else raw
+        rel = _safe_relative_path(repo_root, candidate)
+        if rel and rel not in normalized:
+            normalized.append(rel)
+    if normalized:
+        return normalized
+
+    single = _resolve_mutation_target_path(text, repo_root, target_files)
+    return [single] if single else []
+
+
+def _required_file_satisfied(
+    repo_root: Path,
+    rel: str,
+    *,
+    min_size: int = _MIN_DELIVERABLE_SIZE,
+    changed: Container[str] = (),
+) -> bool:
+    """True when ``rel`` is a real deliverable.
+
+    A deliverable is satisfied when the file exists under ``repo_root`` with at
+    least ``min_size`` bytes, or when an authoritative mutation already reported
+    it in ``changed`` (the trace-proven changed-files set). The on-disk check is
+    the strong signal that catches partial writes and wrong-directory artifacts;
+    ``changed`` honors mutations the worker proved happened.
+    """
+    if not rel:
+        return False
+    if rel in changed:
+        return True
+    target = (repo_root / rel)
+    try:
+        return target.is_file() and target.stat().st_size >= int(min_size)
+    except OSError:
+        return False
+
+
+def _missing_required_files(
+    repo_root: Path, required_files: Sequence[str], *, changed: Container[str] = ()
+) -> list[str]:
+    """Required deliverables that are neither on disk nor proven changed."""
+    return [path for path in required_files if not _required_file_satisfied(repo_root, path, changed=changed)]
+
+
+def _mutation_tool_stats(trace: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Per-tool mutation accounting derived from the authoritative trace."""
+    called: list[str] = []
+    successful = 0
+    failed = 0
+    for row in trace:
+        if not isinstance(row, dict):
+            continue
+        tool = _trace_tool_name(row)
+        if tool not in _MUTATION_TOOLS:
+            continue
+        called.append(tool)
+        status = _trace_status(row)
+        changed = _extract_changed_files_from_value(row)
+        if changed and status not in _NON_PROGRESS_STATUSES and status not in {"error", "failed", "timeout"}:
+            successful += 1
+        elif status in {"error", "failed", "timeout"}:
+            failed += 1
+    return {
+        "mutation_tools_called": called,
+        "successful_mutations": successful,
+        "failed_mutations": failed,
+    }
+
+
+def _forced_mutation_prompt(request: str, target_file: str) -> str:
+    """The MUTATION_REQUIRED retry prompt that forbids natural-language answers."""
+    lines = [
+        "Your previous response failed because no mutation tool was called.",
+        "You are in MUTATION_REQUIRED mode.",
+        "You must call exactly one mutation tool now.",
+        "Allowed tools: create_file, write_file, apply_patch.",
+        "Do not answer in natural language.",
+    ]
+    if target_file:
+        lines.append(f"Target file: {target_file}")
+    lines.append(f"User request: {request}")
+    return "\n".join(lines)
+
+
 def _mutation_fallback_tool_allowed(tool_name: str, *, target_exists: bool, prior_target_evidence: bool) -> bool:
     tool = str(tool_name or "").strip()
     if tool in _MUTATION_FALLBACK_ALLOWED_TOOLS:
@@ -2267,6 +2409,7 @@ def _compose_final_answer(
     terminal_reason: str,
     worker_answer: str,
     fallback: str,
+    missing_required_files: Sequence[str] = (),
 ) -> str:
     """Rebuild the final answer from authoritative execution state.
 
@@ -2274,12 +2417,24 @@ def _compose_final_answer(
     only appended when it does not contradict what the trace proves happened.
     """
     changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
+    missing = [str(path).strip() for path in (missing_required_files or []) if str(path).strip()]
     mutated = bool(mutation_state.get("mutation_succeeded")) or bool(changed)
     no_op_reason = str(mutation_state.get("no_op_reason") or "").strip()
     worker_answer = str(worker_answer or "").strip()
 
     if run_status == "blocked":
         reason = str(terminal_reason or "").strip() or "blocked"
+        if reason == "mutation_required_but_missing_files":
+            # Partial success: surface what landed and what is still missing so
+            # the caller (or a resumed run) knows exactly which files to finish.
+            lines = []
+            if changed:
+                lines.append(f"Applied changes to {len(changed)} file(s):")
+                lines.extend(f"- {path}" for path in changed)
+                lines.append("")
+            lines.append("Required files still missing:")
+            lines.extend(f"- {path}" for path in (missing or ["(unknown)"]))
+            return "\n".join(lines).strip()
         lines = ["The edit could not be completed."]
         if reason == "mutation_required_but_no_mutation_tool_attempted":
             lines.append(
@@ -2401,7 +2556,12 @@ class QueueManager:
         mutation_required = _mutation_required_from_policy(resolved_tool_policy, requires_edit) or _mutation_required_from_text(request)
         if mutation_required:
             resolved_tool_policy["mutation_required"] = True
-        resolved_target_path = _resolve_mutation_target_path(request, self.repo_root, target_files)
+        required_files = _resolve_required_deliverables(request, self.repo_root, target_files)
+        resolved_target_path = (
+            required_files[0]
+            if required_files
+            else _resolve_mutation_target_path(request, self.repo_root, target_files)
+        )
         queue = AgentWorkQueue()
         board = TaskBoard(queue=queue)
         profile = active_goal_profile(request)
@@ -2499,82 +2659,110 @@ class QueueManager:
         deterministic_fallback_ran = False
         deterministic_fallback_changed_files = False
         warnings: list[str] = []
-        if (
-            mutation_required
-            and not mutation_state.get("mutation_succeeded")
-            and not mutation_state.get("no_op_reason")
-            and resolved_target_path
-            and _can_run_deterministic_artifact_fallback(request, self.repo_root, resolved_target_path)
-        ):
-            deterministic_fallback_ran = True
-            fallback_row = _run_deterministic_create_file_fallback(
-                repo_root=self.repo_root,
-                request=request,
-                target_path=resolved_target_path,
-                trace=trace,
-            )
-            trace.append(fallback_row)
-            changed_files.extend(_extract_changed_files_from_value(fallback_row))
-            changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
-            mutation_state = _mutation_state_from_trace(trace, changed_files)
-            deterministic_fallback_changed_files = bool(mutation_state.get("changed_files"))
-            if deterministic_fallback_changed_files:
-                answers.append(f"Created or updated {resolved_target_path}.")
-            else:
-                warnings.append("deterministic_mutation_fallback_failed")
-        if mutation_required and not mutation_state.get("mutation_succeeded") and not mutation_state.get("no_op_reason"):
-            forced_retry_ran = True
-            forced_policy = {
-                **resolved_tool_policy,
-                "mutation_required": True,
-                "mutation_strict": True,
-                "allowed_tools": ["apply_patch", "write_file", "create_file", "git_diff", "git_status"],
-                "verify_requires_mutation": True,
-            }
-            forced_execute = make_worker_executor(
-                worker_client=self.worker_client,
-                repo_root=self.repo_root,
-                on_event=on_event,
-                default_timeout=int(timeout_seconds),
-                default_k=int(k),
-                default_max_steps=max(1, int(max_steps)),
-                tool_policy=forced_policy,
-                index_dir=str(index_dir) if index_dir else None,
-                flow_id=flow_id,
-                run_id=store.run_id,
-            )
-            target_file = resolved_target_path
-            forced_item = WorkItem(
-                kind="edit",
-                tool_name="write_file" if target_file and (self.repo_root / target_file).exists() else ("create_file" if target_file else ""),
-                tool_args={"path": target_file} if target_file else {},
-                question=(
-                    "Mutation is required and previous work produced no changed files. "
-                    "Run exactly one mutation-only apply_changes attempt using only "
-                    "apply_patch, write_file, or create_file. "
-                    f"User request: {request}"
-                    + (f" Target file: {target_file}." if target_file else "")
-                ),
-                gate="apply_changes",
-                priority=1,
-                created_by="forced_mutation_retry",
-            )
-            forced_result = forced_execute(forced_item)
-            if forced_result.answer:
-                answers.append(forced_result.answer)
-            sources.extend(forced_result.sources)
-            trace.extend(forced_result.trace)
-            changed_files.extend(forced_result.files_changed)
-            changed_files.extend(_extract_changed_files_from_value(forced_result.trace))
-            changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
-            mutation_state = _mutation_state_from_trace(trace, changed_files)
-            forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
-            forced_retry_changed_files = bool(mutation_state.get("changed_files"))
-            if not forced_retry_mutation_attempted:
-                warnings.append("forced_mutation_retry_no_mutation_tool_attempted")
-            elif not forced_retry_changed_files:
-                warnings.append("forced_mutation_retry_no_changed_files")
 
+        def _refresh_mutation_state() -> None:
+            nonlocal mutation_state
+            changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
+            mutation_state = _mutation_state_from_trace(trace, changed_files)
+
+        # The deliverables the request demands. The run is held to ALL of them,
+        # not just the first, so "create A and B in docs" cannot finish with only
+        # one file written. Falls back to the single primary target when the
+        # request named no explicit files (e.g. generic "fix the bug").
+        deliverables = list(required_files) or ([resolved_target_path] if resolved_target_path else [])
+
+        # --- Deterministic fallback: create each required file directly. ---
+        # We do not depend on the LLM deciding to call a tool: every deliverable
+        # the worker did not already mutate is written here when it qualifies as a
+        # generatable artifact. This also handles partial success (one file made,
+        # another missing) by only acting on the not-yet-changed files.
+        if mutation_required and not mutation_state.get("no_op_reason") and deliverables:
+            already_changed = set(mutation_state.get("changed_files") or [])
+            for path in deliverables:
+                if path in already_changed:
+                    continue
+                if not _can_run_deterministic_artifact_fallback(request, self.repo_root, path):
+                    continue
+                deterministic_fallback_ran = True
+                fallback_row = _run_deterministic_create_file_fallback(
+                    repo_root=self.repo_root,
+                    request=request,
+                    target_path=path,
+                    trace=trace,
+                )
+                trace.append(fallback_row)
+                changed_files.extend(_extract_changed_files_from_value(fallback_row))
+                _refresh_mutation_state()
+                already_changed = set(mutation_state.get("changed_files") or [])
+                if path in already_changed:
+                    answers.append(f"Created or updated {path}.")
+            deterministic_fallback_changed_files = bool(mutation_state.get("changed_files"))
+            if deterministic_fallback_ran and not deterministic_fallback_changed_files:
+                warnings.append("deterministic_mutation_fallback_failed")
+
+        # --- Forced mutation retry: one file at a time, mutation tool required. ---
+        # For any deliverable still missing after the fallback (or, when no files
+        # were named, when nothing was mutated) re-run the worker under a strict
+        # MUTATION_REQUIRED prompt that forbids natural-language-only answers.
+        if mutation_required and not mutation_state.get("no_op_reason"):
+            if deliverables:
+                forced_targets = _missing_required_files(
+                    self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
+                )
+            elif not mutation_state.get("mutation_succeeded"):
+                forced_targets = [resolved_target_path]
+            else:
+                forced_targets = []
+            for target_file in forced_targets:
+                forced_retry_ran = True
+                forced_policy = {
+                    **resolved_tool_policy,
+                    "mutation_required": True,
+                    "mutation_strict": True,
+                    "allowed_tools": ["apply_patch", "write_file", "create_file", "git_diff", "git_status"],
+                    "verify_requires_mutation": True,
+                }
+                forced_execute = make_worker_executor(
+                    worker_client=self.worker_client,
+                    repo_root=self.repo_root,
+                    on_event=on_event,
+                    default_timeout=int(timeout_seconds),
+                    default_k=int(k),
+                    default_max_steps=max(1, int(max_steps)),
+                    tool_policy=forced_policy,
+                    index_dir=str(index_dir) if index_dir else None,
+                    flow_id=flow_id,
+                    run_id=store.run_id,
+                )
+                forced_item = WorkItem(
+                    kind="edit",
+                    tool_name="write_file" if target_file and (self.repo_root / target_file).exists() else ("create_file" if target_file else ""),
+                    tool_args={"path": target_file} if target_file else {},
+                    question=_forced_mutation_prompt(request, target_file),
+                    gate="apply_changes",
+                    priority=1,
+                    created_by="forced_mutation_retry",
+                )
+                forced_result = forced_execute(forced_item)
+                if forced_result.answer:
+                    answers.append(forced_result.answer)
+                sources.extend(forced_result.sources)
+                trace.extend(forced_result.trace)
+                changed_files.extend(forced_result.files_changed)
+                changed_files.extend(_extract_changed_files_from_value(forced_result.trace))
+                _refresh_mutation_state()
+            if forced_retry_ran:
+                forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
+                forced_retry_changed_files = bool(mutation_state.get("changed_files"))
+                if not forced_retry_mutation_attempted:
+                    warnings.append("forced_mutation_retry_no_mutation_tool_attempted")
+                elif not forced_retry_changed_files:
+                    warnings.append("forced_mutation_retry_no_changed_files")
+
+        # --- Verification gate: every required deliverable must exist on disk. ---
+        missing_required_files = _missing_required_files(
+            self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
+        )
         terminal_reason = report.terminal_reason
         run_status = "completed"
         if mutation_required and not mutation_state.get("no_op_reason"):
@@ -2584,6 +2772,9 @@ class QueueManager:
             elif not mutation_state.get("changed_files"):
                 run_status = "blocked"
                 terminal_reason = "mutation_required_but_no_changed_files"
+            elif missing_required_files:
+                run_status = "blocked"
+                terminal_reason = "mutation_required_but_missing_files"
         changed_files = list(mutation_state.get("changed_files") or changed_files)
         # Final answer is rebuilt from authoritative execution state (trace,
         # changed_files, mutation_state, verification), never from the last
@@ -2604,6 +2795,12 @@ class QueueManager:
             terminal_reason=terminal_reason,
             worker_answer=_latest_useful_answer(answers),
             fallback=board.render(),
+            missing_required_files=missing_required_files,
+        )
+        mutation_tool_stats = _mutation_tool_stats(trace)
+        verification_passed = bool(
+            (not mutation_required or not missing_required_files)
+            and (not verification.get("ran") or verification.get("passed"))
         )
         return AutoExecuteResult(
             answer=final_answer,
@@ -2641,6 +2838,12 @@ class QueueManager:
                     "blocked_non_mutation_tools_in_fallback": sorted(_MUTATION_FALLBACK_BLOCKED_TOOLS),
                     "deterministic_fallback_ran": deterministic_fallback_ran,
                     "deterministic_fallback_changed_files": deterministic_fallback_changed_files,
+                    "required_files": list(deliverables),
+                    "missing_required_files": list(missing_required_files),
+                    "verification_passed": verification_passed,
+                    "mutation_tools_called": mutation_tool_stats["mutation_tools_called"],
+                    "successful_mutations": mutation_tool_stats["successful_mutations"],
+                    "failed_mutations": mutation_tool_stats["failed_mutations"],
                 }
             ],
             run_id=store.run_id,

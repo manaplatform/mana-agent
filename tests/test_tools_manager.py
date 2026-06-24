@@ -13,7 +13,11 @@ from mana_agent.llm.tools_manager import (
     ToolsManagerRequest,
     ToolsPlan,
     ToolsPlanStep,
+    _forced_mutation_prompt,
+    _missing_required_files,
     _mutation_fallback_tool_allowed,
+    _required_file_satisfied,
+    _resolve_required_deliverables,
 )
 from mana_agent.llm.tools_executor import BatchExecutionResult
 from mana_agent.services.coding_memory_service import CodingMemoryService
@@ -684,3 +688,146 @@ def _inspect_only_plan() -> ToolsPlan:
         current_step_id="s1",
         decision="continue",
     )
+
+
+# ---------------------------------------------------------------------------
+# Strict multi-file mutation workflow (required deliverables + verification)
+# ---------------------------------------------------------------------------
+
+
+class _OneFileWorker:
+    """Worker that writes exactly one of the requested files, then goes idle.
+
+    Simulates partial success: the LLM produces only ``made_path`` and the
+    supervisor must create the remaining required file deterministically.
+    """
+
+    def __init__(self, repo_root: Path, made_path: str, content: str = "installation guide body\n") -> None:
+        self.repo_root = Path(repo_root)
+        self.made_path = made_path
+        self.content = content
+        self.made = False
+        self.questions: list[str] = []
+
+    def run_tools(self, request, on_event=None):  # noqa: ANN001
+        _ = on_event
+        self.questions.append(str(getattr(request, "question", "") or ""))
+        if not self.made:
+            self.made = True
+            target = self.repo_root / self.made_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(self.content, encoding="utf-8")
+            return ToolRunResponse(
+                answer="created installation guide",
+                sources=[],
+                mode="agent-tools",
+                trace=[{"tool_name": "create_file", "status": "ok", "files_changed": [self.made_path]}],
+                warnings=[],
+            )
+        return ToolRunResponse(answer="ok", sources=[], mode="agent-tools", trace=[], warnings=[])
+
+
+def test_resolve_required_deliverables_handles_and_and_ampersand(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    assert _resolve_required_deliverables("create 01-overview.md & 02-installation.md in docs", tmp_path) == [
+        "docs/01-overview.md",
+        "docs/02-installation.md",
+    ]
+    assert _resolve_required_deliverables("create 01-overview.md and 02-installation.md in docs", tmp_path) == [
+        "docs/01-overview.md",
+        "docs/02-installation.md",
+    ]
+
+
+def test_create_two_files_in_docs_creates_both_under_docs(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    worker = _NoopWorker()
+
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="create 01-overview.md & 02-installation.md in docs",
+        index_dir=str(tmp_path / ".mana" / "index"),
+        requires_edit=True,
+        pass_cap=1,
+        max_steps=1,
+    )
+
+    assert (tmp_path / "docs" / "01-overview.md").exists()
+    assert (tmp_path / "docs" / "02-installation.md").exists()
+    # The wrong (repo-root) paths must NOT be created.
+    assert not (tmp_path / "01-overview.md").exists()
+    assert not (tmp_path / "02-installation.md").exists()
+    assert result.run_status == "completed"
+    assert result.changed_files == ["docs/01-overview.md", "docs/02-installation.md"]
+    decision = result.planner_decisions[0]
+    assert decision["required_files"] == ["docs/01-overview.md", "docs/02-installation.md"]
+    assert decision["missing_required_files"] == []
+    assert decision["verification_passed"] is True
+
+
+def test_partial_success_creates_missing_required_file(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    worker = _OneFileWorker(tmp_path, made_path="docs/02-installation.md")
+
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="create 01-overview.md and 02-installation.md in docs",
+        index_dir=str(tmp_path / ".mana" / "index"),
+        requires_edit=True,
+        pass_cap=1,
+        max_steps=1,
+    )
+
+    # Worker only produced 02; the supervisor must fill in the missing 01.
+    assert (tmp_path / "docs" / "01-overview.md").exists()
+    assert (tmp_path / "docs" / "02-installation.md").exists()
+    assert result.run_status == "completed"
+    assert result.changed_files == ["docs/01-overview.md", "docs/02-installation.md"]
+    assert result.planner_decisions[0]["missing_required_files"] == []
+
+
+def test_missing_required_file_blocks_completion(tmp_path: Path) -> None:
+    # "refactor" intent is a mutation but not a create/analysis artifact, so the
+    # deterministic generator declines and the missing file cannot be produced.
+    worker = _NoopWorker()
+
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="refactor docs/01-overview.md and docs/02-installation.md in docs",
+        index_dir=str(tmp_path / ".mana" / "index"),
+        requires_edit=True,
+        pass_cap=1,
+        max_steps=1,
+    )
+
+    assert result.run_status == "blocked"
+    assert not (tmp_path / "docs" / "01-overview.md").exists()
+    decision = result.planner_decisions[0]
+    assert decision["verification_passed"] is False
+    assert set(decision["missing_required_files"]) == {
+        "docs/01-overview.md",
+        "docs/02-installation.md",
+    }
+
+
+def test_wrong_path_at_repo_root_does_not_satisfy_docs_requirement(tmp_path: Path) -> None:
+    # File created at repo root must NOT satisfy a docs/ deliverable.
+    (tmp_path / "01-overview.md").write_text("body\n", encoding="utf-8")
+    assert _required_file_satisfied(tmp_path, "01-overview.md") is True
+    assert _required_file_satisfied(tmp_path, "docs/01-overview.md") is False
+    assert _missing_required_files(tmp_path, ["docs/01-overview.md"]) == ["docs/01-overview.md"]
+
+
+def test_empty_file_does_not_satisfy_requirement(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "01-overview.md").write_text("", encoding="utf-8")
+    assert _required_file_satisfied(tmp_path, "docs/01-overview.md") is False
+
+
+def test_forced_mutation_prompt_forbids_natural_language() -> None:
+    prompt = _forced_mutation_prompt("create docs/01-overview.md", "docs/01-overview.md")
+    assert "Your previous response failed because no mutation tool was called." in prompt
+    assert "You are in MUTATION_REQUIRED mode." in prompt
+    assert "You must call exactly one mutation tool now." in prompt
+    assert "Allowed tools: create_file, write_file, apply_patch." in prompt
+    assert "Do not answer in natural language." in prompt
+    assert "Target file: docs/01-overview.md" in prompt
