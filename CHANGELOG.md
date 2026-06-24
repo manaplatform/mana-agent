@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-06-25
+
+- Relaxed mutation-required work-queue policy for discovery/read jobs so strict tool-worker mode no longer rejects `repo_search` before an edit can run, and allowed deterministic analysis fallback for `update README.md` requests.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_manager.py::test_update_readme_analysis_fallback_does_not_strict_block_discovery tests/test_agent_work_queue.py::test_queue_manager_blocks_edit_when_no_mutation_tool_attempted tests/test_agent_work_queue.py::test_queue_manager_blocks_edit_when_mutation_has_no_changed_files -q` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_agent/llm/tools_manager.py src/mana_agent/llm/agent_work_queue_adapters.py tests/test_tools_manager.py` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_manager.py tests/test_agent_work_queue.py -q` passed.
+
 ## 2026-06-24
 
 - Improved mutation-required artifact fallback so full-project analysis requests can deterministically create `analyze.md` with repository structure, command entry points, and a Mermaid diagram, and attach it to `README.md` when requested instead of ending after read-only tool loops.

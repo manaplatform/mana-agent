@@ -203,6 +203,10 @@ def make_worker_executor(
             item_policy["require_read_files"] = 0
             item_policy["mutation_required"] = True
             item_policy["verify_requires_mutation"] = True
+        else:
+            item_policy.pop("mutation_required", None)
+            item_policy.pop("mutation_strict", None)
+            item_policy.pop("verify_requires_mutation", None)
         tool_args = dict(item.tool_args or {})
         if (item.tool_name or "").strip().lower() == "read_file" and tool_args.get("path"):
             tool_args["path"] = _normalized_path(str(tool_args.get("path")))

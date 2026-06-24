@@ -1794,6 +1794,7 @@ _MUTATION_FALLBACK_BLOCKED_TOOLS = frozenset(
     }
 )
 _CREATE_ARTIFACT_INTENT_RE = re.compile(r"\b(create|write|generate|add(?:\s+file)?)\b", re.IGNORECASE)
+_ANALYSIS_ARTIFACT_INTENT_RE = re.compile(r"\b(analy[sz]e|analysis|report|document|summarize)\b", re.IGNORECASE)
 _DETERMINISTIC_ARTIFACT_SUFFIXES = (".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg")
 _README_ATTACH_RE = re.compile(r"\b(?:attach|add|link|include|update)\b.*\breadme(?:\.md)?\b", re.IGNORECASE)
 
@@ -1818,6 +1819,8 @@ def _safe_relative_path(repo_root: Path, raw: str) -> str:
     cleaned = re.sub(r"[,.):;\]]+$", "", cleaned).lstrip("./")
     if not cleaned or cleaned.startswith("/") or "\x00" in cleaned:
         return ""
+    if cleaned.lower() == "readme.md" and (repo_root / "README.md").exists():
+        cleaned = "README.md"
     parts = [part for part in cleaned.split("/") if part not in {"", "."}]
     if not parts or any(part == ".." for part in parts):
         return ""
@@ -1869,12 +1872,15 @@ def _mutation_fallback_tool_allowed(tool_name: str, *, target_exists: bool, prio
 
 
 def _can_run_deterministic_artifact_fallback(request: str, repo_root: Path, target_path: str) -> bool:
-    if not target_path.endswith(_DETERMINISTIC_ARTIFACT_SUFFIXES):
+    if not target_path.lower().endswith(_DETERMINISTIC_ARTIFACT_SUFFIXES):
         return False
+    text = str(request or "")
     target = repo_root / target_path
     if not target.exists():
+        return bool(_CREATE_ARTIFACT_INTENT_RE.search(text) or _ANALYSIS_ARTIFACT_INTENT_RE.search(text))
+    if Path(target_path).name.lower() == "readme.md" and _ANALYSIS_ARTIFACT_INTENT_RE.search(text):
         return True
-    return bool(_CREATE_ARTIFACT_INTENT_RE.search(str(request or "")))
+    return bool(_CREATE_ARTIFACT_INTENT_RE.search(text))
 
 
 def _fallback_trace_text(trace: Sequence[dict[str, Any]], *, limit: int = 4000) -> str:
@@ -2499,7 +2505,6 @@ class QueueManager:
             and not mutation_state.get("no_op_reason")
             and resolved_target_path
             and _can_run_deterministic_artifact_fallback(request, self.repo_root, resolved_target_path)
-            and (bool(_CREATE_ARTIFACT_INTENT_RE.search(str(request or ""))) or bool(_fallback_trace_text(trace)))
         ):
             deterministic_fallback_ran = True
             fallback_row = _run_deterministic_create_file_fallback(

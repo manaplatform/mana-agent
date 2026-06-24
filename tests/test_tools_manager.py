@@ -92,6 +92,43 @@ def test_analysis_artifact_fallback_attaches_to_readme(tmp_path: Path) -> None:
     assert result.planner_decisions[0]["deterministic_fallback_changed_files"] is True
 
 
+def test_update_readme_analysis_fallback_does_not_strict_block_discovery(tmp_path: Path) -> None:
+    (tmp_path / "src" / "mana_agent").mkdir(parents=True)
+    (tmp_path / "src" / "mana_agent" / "app.py").write_text("def main():\n    return 'ok'\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Old\n", encoding="utf-8")
+
+    class _StrictAwareWorker:
+        policies: list[dict]
+
+        def __init__(self) -> None:
+            self.policies = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            _ = on_event
+            policy = dict(request.tool_policy or {})
+            self.policies.append(policy)
+            if (request.tool_name or "") == "repo_search" and policy.get("mutation_required"):
+                raise AssertionError("discovery must not run with mutation_required")
+            return ToolRunResponse(answer="ok", sources=[], mode="agent-tools", trace=[], warnings=[])
+
+    worker = _StrictAwareWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="analyze whole project,and update readme.md",
+        index_dir=str(tmp_path / ".mana" / "index"),
+        requires_edit=True,
+        target_files=[],
+        pass_cap=1,
+        max_steps=1,
+    )
+
+    readme = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert "# Project Analysis" in readme
+    assert "```mermaid" in readme
+    assert result.run_status == "completed"
+    assert result.changed_files == ["README.md"]
+    assert worker.policies[0].get("mutation_required") is None
+
+
 def test_mutation_fallback_allowlist_blocks_discovery_tools() -> None:
     for tool in ("repo_search", "read_file", "ls", "list_files"):
         assert _mutation_fallback_tool_allowed(tool, target_exists=False, prior_target_evidence=True) is False
