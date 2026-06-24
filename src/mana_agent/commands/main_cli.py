@@ -43,6 +43,6 @@ def main(
         sink = build_output_sink(command_name="main", json_mode=False, console=console)
         sink.emit_warning(warning_msg)
     if ctx.invoked_subcommand is None:
-        from .chat_cli import chat
-
-        ctx.invoke(chat)
+        chat_command = ctx.command.commands["chat"]
+        with chat_command.make_context("chat", [], parent=ctx) as chat_ctx:
+            chat_command.invoke(chat_ctx)

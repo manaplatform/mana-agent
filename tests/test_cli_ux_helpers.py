@@ -340,7 +340,6 @@ def test_render_turn_transparency_preserves_multiline_command_preview() -> None:
         "Command surface:\n"
         "- `mana-agent` console script -> `mana_agent.commands.cli:app`\n\n"
         "Detected CLI subcommands:\n"
-        "- `mana-agent analyze`\n"
         "- `mana-agent ask`\n"
         "- `mana-agent chat`\n"
     )
@@ -356,7 +355,7 @@ def test_render_turn_transparency_preserves_multiline_command_preview() -> None:
     cli._render_turn_transparency(console, turn=turn, history=[turn])
     rendered = console.export_text()
     assert "Command surface:" in rendered
-    assert "mana-agent analyze" in rendered
+    assert "mana-agent ask" in rendered
     assert "Sources" in rendered
     assert "11" in rendered
     assert "00:34:27" in rendered

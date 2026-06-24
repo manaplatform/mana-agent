@@ -7,20 +7,62 @@ from mana_agent.llm.tool_worker_process import ToolRunResponse
 from mana_agent.llm.goal_profiles import ModelDocsGoalProfile, active_goal_profile
 from mana_agent.llm.tools_manager import (
     AutoExecuteResult,
+    QueueManager,
     RunStateStore,
     ToolsManagerBatch,
     ToolsManagerRequest,
     ToolsPlan,
     ToolsPlanStep,
+    _mutation_fallback_tool_allowed,
 )
 from mana_agent.llm.tools_executor import BatchExecutionResult
 from mana_agent.services.coding_memory_service import CodingMemoryService
 
 
 class _NoopWorker:
+    requests: list[object]
+
+    def __init__(self) -> None:
+        self.requests = []
+
     def run_tools(self, _request, on_event=None):  # noqa: ANN001
         _ = on_event
+        self.requests.append(_request)
         return ToolRunResponse(answer="ok", sources=[], mode="agent-tools", trace=[], warnings=[])
+
+
+def test_mutation_create_file_fallback_creates_docs_analyze(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "README.md").write_text("# Demo\n\nA small CLI project.\n", encoding="utf-8")
+    worker = _NoopWorker()
+    manager = QueueManager(worker_client=worker, repo_root=tmp_path)
+
+    result = manager.run(
+        request="analyze project and create a analyze.md in docs",
+        index_dir=str(tmp_path / ".mana" / "index"),
+        requires_edit=True,
+        target_files=[],
+        pass_cap=1,
+        max_steps=1,
+    )
+
+    target = tmp_path / "docs" / "analyze.md"
+    assert target.exists()
+    content = target.read_text(encoding="utf-8")
+    assert "# Project Analysis" in content
+    assert "## Structure" in content
+    assert result.changed_files == ["docs/analyze.md"]
+    assert "No edit tool" not in result.answer
+    assert result.planner_decisions[0]["mutation_tool_attempted"] is True
+    assert result.planner_decisions[0]["mutation_tool_successful"] is True
+
+
+def test_mutation_fallback_allowlist_blocks_discovery_tools() -> None:
+    for tool in ("repo_search", "read_file", "ls", "list_files"):
+        assert _mutation_fallback_tool_allowed(tool, target_exists=False, prior_target_evidence=True) is False
+    for tool in ("create_file", "write_file", "apply_patch"):
+        assert _mutation_fallback_tool_allowed(tool, target_exists=False, prior_target_evidence=True) is True
+    assert _mutation_fallback_tool_allowed("read_file", target_exists=True, prior_target_evidence=False) is True
 
 
 def test_run_state_model_docs_queue_prioritizes_relevant_files(tmp_path: Path) -> None:

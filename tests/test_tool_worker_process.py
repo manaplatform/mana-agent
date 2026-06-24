@@ -912,6 +912,33 @@ def test_run_tool_request_does_not_retry_tools_only_violation() -> None:
     assert calls["count"] == 1
 
 
+def test_run_tool_request_requires_mutation_tool_when_mutation_required() -> None:
+    class _FakeAskAgent:
+        def run(self, **_kwargs):
+            return SimpleNamespace(
+                answer="searched only",
+                sources=[],
+                mode="agent-tools",
+                trace=[SimpleNamespace(to_dict=lambda: {"tool_name": "repo_search", "status": "ok", "result": "README.md"})],
+                warnings=[],
+            )
+
+    with pytest.raises(twp.ToolWorkerProcessError) as excinfo:
+        twp._run_tool_request(
+            ask_agent=_FakeAskAgent(),  # type: ignore[arg-type]
+            req=twp.ToolRunRequest(
+                question="create docs/analyze.md",
+                index_dir="/tmp/.mana/index",
+                tool_policy={"mutation_required": True},
+            ),
+            tools_only_strict_default=True,
+            callbacks=None,
+        )
+
+    assert excinfo.value.code == "tools_only_violation"
+    assert "successful mutation tool call" in str(excinfo.value)
+
+
 def test_tool_worker_client_emits_request_events_for_tools_only_violation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

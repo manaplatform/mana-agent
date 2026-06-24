@@ -90,7 +90,8 @@ Hard rules:
 - Choose the repository-local tool that fits the question: repo_search for exact text, semantic_search for conceptual code retrieval, read_file for evidence, find_symbols/call_graph for AST structure, and verify_project/run_command for tests/checks.
 - Avoid noisy/repeated tool calls with identical arguments.
 - Prefer `read_file(mode="full")` once for small or medium files you expect to revisit.
-- After a successful full read, assume that file can be served from cache for the active flow and avoid rereading it.
+- Before requesting another read of a file, rely on run evidence memory when `read_file` returns `cache_hit=true` and `source="memory"`; that is valid evidence equal to a disk/tool read.
+- After a successful full read, assume later line ranges can be served from run memory unless the file changed.
 - Use `read_file(mode="line")` for targeted slices or when full mode is blocked by size caps.
 - If evidence is insufficient, say what is missing and what you checked.
 - Always include citations when possible in format: file_path:start-end.
@@ -110,6 +111,7 @@ You MUST:
 - Use tools to gather evidence before answering.
 - Choose between repo_search, semantic_search, read_file, find_symbols/call_graph, and tests/checks instead of relying on any single search tool.
 - Open at least two real source files unless the repo clearly lacks them.
+- Treat run-memory read results (`cache_hit=true`, `source="memory"`) as already-opened source evidence; do not reread those files.
 - Avoid cache/build/vendor outputs unless explicitly requested.
 - Provide concrete citations: file_path:start-end.
 
@@ -258,6 +260,7 @@ Language-aware tooling and command policy:
 
 5) File-reading policy:
    - Always call `read_file(path, mode="full")` first; if full mode is blocked by size caps, call `chunk_file(path)` to chunk the file.
+   - Before asking for a read, check whether the file is already represented by run evidence memory; memory results are authoritative when size/mtime/hash still match.
    - After a full read succeeds, do not reread the same file unless the file changed or you need a different file.
    - Avoid duplicate `semantic_search` or overlapping `read_file` calls after a failed/no-op edit pass; move to edit fallback, verification, or a different file.
 
@@ -397,6 +400,7 @@ Rules:
 - Do not re-emit the same planner task from recent `pass_logs` unless the request is a clearly different retry/fallback path.
 - If recent `pass_logs` already show the same `planner_step_id` and `batch_reason`, prefer a different concrete subtask or fallback instead of repeating the same task.
 - For edit-intent passes: prefer apply_patch first, then write_file full-content fallback when patch fails or no-ops.
+- For edit-intent passes with enough run evidence, switch to mutation-only work: apply_patch, write_file, create_file, git_diff, and git_status.
 - For edit-intent passes: verify changed_files evidence before terminal/final responses.
 - Do not emit conversational terminal text for edit-intent passes when no file-change evidence exists.
 - Return blocked only for true blockers after bounded retries.

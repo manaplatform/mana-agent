@@ -2013,6 +2013,7 @@ class CodingAgent:
                 pass_cap=max(1, pass_cap),
                 on_event=self._log_worker_event,
                 flow_id=flow_id,
+                run_id=tool_req.run_id,
             )
             return _TRR(
                 answer=str(orchestrated.answer or ""),
@@ -2055,6 +2056,7 @@ class CodingAgent:
                 tool_policy=tool_policy,
                 system_prompt=effective_prompt,
                 flow_id=flow_id,
+                run_id=flow_id,
             )
             try:
                 response = self._execute_via_manager(
@@ -2171,6 +2173,7 @@ class CodingAgent:
                 tool_policy=tool_policy,
                 system_prompt=effective_prompt,
                 flow_id=flow_id,
+                run_id=flow_id,
             )
             try:
                 response = self._execute_via_manager(

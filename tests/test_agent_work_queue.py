@@ -22,10 +22,15 @@ from mana_agent.llm.tool_worker_process import ToolRunResponse
 # --------------------------------------------------------------------------- #
 # Fingerprint / dedup
 # --------------------------------------------------------------------------- #
-def test_same_read_path_collapses_to_one_fingerprint():
+def test_same_read_path_collapses_to_one_fingerprint(tmp_path: Path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     a = compute_fingerprint(kind="read", tool_name="read_file", tool_args={"path": "src/x.py"})
     b = compute_fingerprint(kind="read", tool_name="read_file", tool_args={"path": "./src/x.py "})
+    c = compute_fingerprint(kind="read", tool_name="read_file", tool_args={"path": str(tmp_path / "src" / "x.py")})
     assert a == b
+    assert b == c
 
 
 def test_queue_rejects_duplicate_idempotent_jobs():
@@ -371,6 +376,60 @@ def test_sniffer_uses_planner_target_file_for_edit_job(tmp_path: Path):
     assert edit.tool_name == "write_file"
     assert edit.tool_args == {"path": "docs/analyze.md"}
     assert "Target file: docs/analyze.md" in edit.question
+
+
+def test_edit_with_evidence_uses_mutation_only_policy_without_duplicate_reads(tmp_path: Path):
+    from mana_agent.llm.evidence_memory import EvidenceMemory
+
+    (tmp_path / "src").mkdir()
+    target = tmp_path / "src" / "app.py"
+    target.write_text("old\n", encoding="utf-8")
+    memory = EvidenceMemory(repo_root=tmp_path, run_id="edit-memory")
+    memory.store(
+        original_path="src/app.py",
+        resolved=target.resolve(),
+        mode="full",
+        start_line=1,
+        end_line=1,
+        line_count=1,
+        content="old\n",
+        summary="full file read, 1 lines",
+    )
+
+    seen: list[object] = []
+
+    class _FakeWorker:
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            seen.append(request)
+            return ToolRunResponse(
+                answer="changed",
+                mode="agent-tools",
+                trace=[{"tool_name": "write_file", "status": "ok", "changed_files": ["src/app.py"]}],
+            )
+
+    executor = make_worker_executor(
+        worker_client=_FakeWorker(),
+        repo_root=tmp_path,
+        index_dir=str(tmp_path / ".mana/index"),
+        run_id="edit-memory",
+        tool_policy={"allowed_tools": ["read_file", "write_file"], "require_read_files": 2},
+    )
+    result = executor(
+        WorkItem(
+            kind="edit",
+            tool_name="write_file",
+            tool_args={"path": "src/app.py"},
+            question="Update src/app.py using existing evidence.",
+        )
+    )
+
+    assert result.ok is True
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.run_id == "edit-memory"
+    assert request.tool_policy["allowed_tools"] == ["apply_patch", "write_file", "create_file", "git_diff", "git_status"]
+    assert request.tool_policy["require_read_files"] == 0
+    assert request.tool_name == "write_file"
 
 
 def test_sniffer_skips_edit_for_non_mutating_request(tmp_path: Path):

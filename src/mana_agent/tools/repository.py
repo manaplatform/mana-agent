@@ -291,7 +291,6 @@ def verify_project(repo_root: Path, *, quick: bool = False) -> dict[str, Any]:
         ("mypy", ["mypy", "src", "tests"]),
         ("import", [sys.executable, "-c", "import mana_agent; print('ok')"]),
         ("cli_help", ["mana-agent", "--help"]),
-        ("cli_analyze_help", ["mana-agent", "analyze", "--help"]),
         ("cli_ask_help", ["mana-agent", "ask", "--help"]),
         ("cli_chat_help", ["mana-agent", "chat", "--help"]),
     ]

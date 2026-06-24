@@ -68,7 +68,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="read_file",
-            description="Safely read a repository file by full file or line range.",
+            description="Safely read a repository file by full file or line range, using run evidence memory before disk.",
             input_schema=_schema(
                 {
                     "path": {"type": "string"},
@@ -78,9 +78,23 @@ def coding_tool_contracts() -> list[ToolContract]:
                 },
                 ["path"],
             ),
-            output_schema=_schema({"file_path": {"type": "string"}, "content": {"type": "string"}}),
+            output_schema=_schema(
+                {
+                    "file_path": {"type": "string"},
+                    "normalized_path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "cache_hit": {"type": "boolean"},
+                    "source": {"enum": ["memory", "tool"]},
+                    "covered_range": {"type": "array"},
+                }
+            ),
             error_format=common_error,
-            safety_rules=["Reject paths outside the project root.", "Reject binary files.", "Cache successful reads for flow safety."],
+            safety_rules=[
+                "Reject paths outside the project root.",
+                "Reject binary files.",
+                "Check run-scoped evidence memory before disk reads.",
+                "Treat cache_hit=true/source=memory as valid evidence equal to a fresh tool read.",
+            ],
             examples=[{"input": {"path": "src/mana_agent/llm/ask_agent.py", "mode": "full"}}],
         ),
         ToolContract(

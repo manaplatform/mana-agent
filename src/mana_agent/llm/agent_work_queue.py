@@ -39,6 +39,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -80,7 +81,13 @@ def compute_fingerprint(*, kind: str, tool_name: str, tool_args: dict[str, Any],
     args = tool_args if isinstance(tool_args, dict) else {}
 
     def _norm_path(value: Any) -> str:
-        return _normalize_text(value).replace("\\", "/").lstrip("./").strip("/")
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return str(Path(text).resolve())
+        except Exception:
+            return _normalize_text(value).replace("\\", "/").lstrip("./").strip("/")
 
     if tool == "read_file":
         path = _norm_path(args.get("path") or args.get("file") or args.get("file_path"))

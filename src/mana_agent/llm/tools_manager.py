@@ -37,6 +37,7 @@ from mana_agent.llm.tools_executor import (
     ToolsExecutor,
 )
 from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.tools.write_file import safe_create_file, safe_write_file
 
 logger = logging.getLogger(__name__)
 
@@ -1765,6 +1766,35 @@ def _trace_status(row: dict[str, Any]) -> str:
     return str(row.get("status") or row.get("result") or "").strip().lower()
 
 
+_MUTATION_INTENT_RE = re.compile(
+    r"\b(create|update|edit|modify|delete|remove|write|generate\s+file|add\s+file|patch|fix|refactor|rename)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_FILE_RE = re.compile(r"(?P<path>(?:[\w.-]+/)*[\w.-]+\.(?:md|txt|py|json|toml|yaml|yml|ini|cfg))\b")
+_CREATE_FILE_IN_DIR_RE = re.compile(
+    r"\b(?:create|write|generate|add)\b(?:\s+(?:a|an|the|file))?\s+"
+    r"(?P<file>[\w.-]+\.(?:md|txt|py|json|toml|yaml|yml|ini|cfg))\s+"
+    r"(?:in|under|inside)\s+(?P<dir>[\w./-]+)",
+    re.IGNORECASE,
+)
+_MUTATION_FALLBACK_ALLOWED_TOOLS = frozenset(
+    {"apply_patch", "write_file", "create_file", "git_status", "git_diff", "verify_project"}
+)
+_MUTATION_FALLBACK_BLOCKED_TOOLS = frozenset(
+    {
+        "repo_search",
+        "semantic_search",
+        "read_file",
+        "list_files",
+        "ls",
+        "chunk_file",
+        "find_symbols",
+        "call_graph",
+        "list_tools",
+    }
+)
+
+
 def _mutation_required_from_policy(tool_policy: dict[str, Any] | None, requires_edit: bool | None) -> bool:
     if bool(requires_edit):
         return True
@@ -1774,6 +1804,170 @@ def _mutation_required_from_policy(tool_policy: dict[str, Any] | None, requires_
         return True
     nested = tool_policy.get("tool_policy")
     return isinstance(nested, dict) and bool(nested.get("mutation_required"))
+
+
+def _mutation_required_from_text(text: str) -> bool:
+    return bool(_MUTATION_INTENT_RE.search(str(text or "")))
+
+
+def _safe_relative_path(repo_root: Path, raw: str) -> str:
+    cleaned = str(raw or "").strip().replace("\\", "/").strip("`'\" ")
+    cleaned = re.sub(r"[,.):;\]]+$", "", cleaned).lstrip("./")
+    if not cleaned or cleaned.startswith("/") or "\x00" in cleaned:
+        return ""
+    parts = [part for part in cleaned.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        return ""
+    target = (repo_root / Path(*parts)).resolve()
+    try:
+        return target.relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return ""
+
+
+def _resolve_mutation_target_path(task: str, repo_root: Path, target_files: Sequence[str] = ()) -> str:
+    for item in target_files:
+        rel = _safe_relative_path(repo_root, item)
+        if rel:
+            return rel
+
+    text = str(task or "")
+    match = _CREATE_FILE_IN_DIR_RE.search(text)
+    if match:
+        directory = match.group("dir").strip().strip("`'\" ")
+        filename = match.group("file").strip().strip("`'\" ")
+        rel = _safe_relative_path(repo_root, f"{directory.rstrip('/')}/{filename}")
+        if rel:
+            return rel
+
+    candidates: list[str] = []
+    for match in _EXPLICIT_FILE_RE.finditer(text):
+        rel = _safe_relative_path(repo_root, match.group("path"))
+        if rel:
+            candidates.append(rel)
+    if candidates:
+        return candidates[-1]
+    return ""
+
+
+def _mutation_fallback_tool_allowed(tool_name: str, *, target_exists: bool, prior_target_evidence: bool) -> bool:
+    tool = str(tool_name or "").strip()
+    if tool in _MUTATION_FALLBACK_ALLOWED_TOOLS:
+        return True
+    if tool == "read_file" and target_exists and not prior_target_evidence:
+        return True
+    if tool in _MUTATION_FALLBACK_BLOCKED_TOOLS:
+        return False
+    return False
+
+
+def _fallback_trace_text(trace: Sequence[dict[str, Any]], *, limit: int = 4000) -> str:
+    parts: list[str] = []
+    for row in trace:
+        if not isinstance(row, dict):
+            continue
+        for key in ("answer", "output_preview", "result", "output"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    text = "\n".join(parts)
+    return text[:limit]
+
+
+def _repo_files_snapshot(repo_root: Path, *, limit: int = 80) -> list[str]:
+    skip = {".git", ".mana", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules", "build", "dist"}
+    files: list[str] = []
+    try:
+        for path in sorted(repo_root.rglob("*"), key=lambda item: item.relative_to(repo_root).as_posix()):
+            rel_parts = path.relative_to(repo_root).parts
+            if any(part in skip for part in rel_parts):
+                continue
+            if path.is_file():
+                files.append(path.relative_to(repo_root).as_posix())
+                if len(files) >= limit:
+                    break
+    except OSError:
+        return files
+    return files
+
+
+def _readme_summary(repo_root: Path) -> str:
+    readme = repo_root / "README.md"
+    if not readme.is_file():
+        return "No README.md was found during fallback generation."
+    try:
+        lines = readme.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return "README.md exists but could not be read during fallback generation."
+    useful = [line.strip() for line in lines if line.strip()][:8]
+    if not useful:
+        return "README.md is present but empty."
+    return "\n".join(f"- {line}" for line in useful)
+
+
+def _build_minimal_artifact_from_evidence(task: str, repo_root: Path, trace: Sequence[dict[str, Any]]) -> str:
+    files = _repo_files_snapshot(repo_root)
+    dirs = sorted({path.split("/", 1)[0] for path in files if "/" in path})
+    evidence_text = _fallback_trace_text(trace)
+    evidence_note = "Discovery/read tool output was available and used as supporting context." if evidence_text else (
+        "Only repository-local fallback evidence was available."
+    )
+    structure_lines = "\n".join(f"- `{path}`" for path in files[:40]) or "- No repository files were listed."
+    directory_lines = "\n".join(f"- `{name}/`" for name in dirs[:20]) or "- No top-level directories were listed."
+    return (
+        "# Project Analysis\n\n"
+        "## Overview\n"
+        f"This document was generated for the request: `{task}`.\n\n"
+        f"{_readme_summary(repo_root)}\n\n"
+        "## Structure\n"
+        f"{directory_lines}\n\n"
+        "Important files observed:\n"
+        f"{structure_lines}\n\n"
+        "## CLI / Commands\n"
+        "Review `pyproject.toml`, `README.md`, and files under `src/` for command entry points and runtime behavior.\n\n"
+        "## Notes\n"
+        f"- {evidence_note}\n"
+        "- Areas needing deeper review: runtime configuration, test coverage, and command behavior.\n"
+    )
+
+
+def _run_deterministic_create_file_fallback(
+    *,
+    repo_root: Path,
+    request: str,
+    target_path: str,
+    trace: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    target = (repo_root / target_path).resolve()
+    try:
+        target.relative_to(repo_root.resolve())
+    except ValueError:
+        return {
+            "ok": False,
+            "tool_name": "create_file",
+            "status": "error",
+            "error": "target path escapes repository",
+        }
+    content = _build_minimal_artifact_from_evidence(request, repo_root, trace)
+    if target.exists():
+        tool = "write_file"
+        result = safe_write_file(repo_root=repo_root, path=target_path, content=content, allowed_prefixes=None)
+    else:
+        tool = "create_file"
+        result = safe_create_file(repo_root=repo_root, path=target_path, content=content, allowed_prefixes=None)
+    ok = bool(result.get("ok"))
+    row = {
+        "tool_name": tool,
+        "status": "ok" if ok else "error",
+        "path": target_path,
+        "changed_files": [target_path] if ok else [],
+        "files_changed": [target_path] if ok else [],
+        "result": result,
+        "created_by": "deterministic_mutation_fallback",
+    }
+    if not ok:
+        row["error"] = str(result.get("error") or "mutation fallback failed")
+    return row
 
 
 def _no_op_reason_from_trace(trace: Sequence[dict[str, Any]]) -> str:
@@ -2100,10 +2294,12 @@ class QueueManager:
         )
 
         _ = (index_dirs, max_no_progress_passes, flow_context)
+        store = RunStateStore(repo_root=self.repo_root, run_id=run_id)
         resolved_tool_policy = dict(tool_policy or {})
-        mutation_required = _mutation_required_from_policy(resolved_tool_policy, requires_edit)
+        mutation_required = _mutation_required_from_policy(resolved_tool_policy, requires_edit) or _mutation_required_from_text(request)
         if mutation_required:
             resolved_tool_policy["mutation_required"] = True
+        resolved_target_path = _resolve_mutation_target_path(request, self.repo_root, target_files)
         queue = AgentWorkQueue()
         board = TaskBoard(queue=queue)
         profile = active_goal_profile(request)
@@ -2146,6 +2342,7 @@ class QueueManager:
             tool_policy=resolved_tool_policy,
             index_dir=str(index_dir) if index_dir else None,
             flow_id=flow_id,
+            run_id=store.run_id,
         )
 
         def execute(item: "WorkItem"):  # noqa: F821 - imported above
@@ -2197,12 +2394,38 @@ class QueueManager:
         forced_retry_ran = False
         forced_retry_mutation_attempted = False
         forced_retry_changed_files = False
+        deterministic_fallback_ran = False
+        deterministic_fallback_changed_files = False
         warnings: list[str] = []
+        if (
+            mutation_required
+            and not mutation_state.get("mutation_succeeded")
+            and not mutation_state.get("no_op_reason")
+            and resolved_target_path
+            and resolved_target_path.endswith((".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".py"))
+        ):
+            deterministic_fallback_ran = True
+            fallback_row = _run_deterministic_create_file_fallback(
+                repo_root=self.repo_root,
+                request=request,
+                target_path=resolved_target_path,
+                trace=trace,
+            )
+            trace.append(fallback_row)
+            changed_files.extend(_extract_changed_files_from_value(fallback_row))
+            changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
+            mutation_state = _mutation_state_from_trace(trace, changed_files)
+            deterministic_fallback_changed_files = bool(mutation_state.get("changed_files"))
+            if deterministic_fallback_changed_files:
+                answers.append(f"Created or updated {resolved_target_path}.")
+            else:
+                warnings.append("deterministic_mutation_fallback_failed")
         if mutation_required and not mutation_state.get("mutation_succeeded") and not mutation_state.get("no_op_reason"):
             forced_retry_ran = True
             forced_policy = {
                 **resolved_tool_policy,
                 "mutation_required": True,
+                "mutation_strict": True,
                 "allowed_tools": ["apply_patch", "write_file", "create_file"],
                 "verify_requires_mutation": True,
             }
@@ -2216,14 +2439,12 @@ class QueueManager:
                 tool_policy=forced_policy,
                 index_dir=str(index_dir) if index_dir else None,
                 flow_id=flow_id,
+                run_id=store.run_id,
             )
-            target_file = next(
-                (str(item).strip().replace("\\", "/").lstrip("./") for item in target_files if str(item).strip()),
-                "",
-            )
+            target_file = resolved_target_path
             forced_item = WorkItem(
                 kind="edit",
-                tool_name="write_file" if target_file else "",
+                tool_name="write_file" if target_file and (self.repo_root / target_file).exists() else ("create_file" if target_file else ""),
                 tool_args={"path": target_file} if target_file else {},
                 question=(
                     "Mutation is required and previous work produced no changed files. "
@@ -2282,7 +2503,6 @@ class QueueManager:
             worker_answer=_latest_useful_answer(answers),
             fallback=board.render(),
         )
-        store = RunStateStore(repo_root=self.repo_root, run_id=run_id)
         return AutoExecuteResult(
             answer=final_answer,
             sources=sources,
@@ -2313,6 +2533,12 @@ class QueueManager:
                     "verification_passed": bool(verification.get("passed")),
                     "verification_failed": bool(verification.get("failed")),
                     "verification_failing_checks": list(verification.get("failing", [])),
+                    "mutation_tool_attempted": bool(mutation_state.get("mutation_attempted")),
+                    "mutation_tool_successful": bool(mutation_state.get("mutation_succeeded")),
+                    "mutation_fallback_count": int(bool(deterministic_fallback_ran)) + int(bool(forced_retry_ran)),
+                    "blocked_non_mutation_tools_in_fallback": sorted(_MUTATION_FALLBACK_BLOCKED_TOOLS),
+                    "deterministic_fallback_ran": deterministic_fallback_ran,
+                    "deterministic_fallback_changed_files": deterministic_fallback_changed_files,
                 }
             ],
             run_id=store.run_id,

@@ -590,6 +590,26 @@ def _infer_trace_row_success(row: dict[str, Any]) -> bool:
     return False
 
 
+def _infer_trace_row_mutation_success(row: dict[str, Any]) -> bool:
+    tool_name = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
+    if tool_name not in {"apply_patch", "write_file", "create_file"}:
+        return False
+    if not _infer_trace_row_success(row):
+        return False
+    changed: list[str] = []
+    for key in ("files_changed", "changed_files", "modified_files"):
+        value = row.get(key)
+        if isinstance(value, list):
+            changed.extend(str(item).strip() for item in value if str(item).strip())
+    proof = row.get("proof")
+    if isinstance(proof, dict):
+        for key in ("modified_files", "changed_files"):
+            value = proof.get(key)
+            if isinstance(value, list):
+                changed.extend(str(item).strip() for item in value if str(item).strip())
+    return bool(changed)
+
+
 # ---------------------------------------------------------------------------
 # Pydantic Models
 # ---------------------------------------------------------------------------
@@ -609,6 +629,7 @@ class ToolRunRequest(BaseModel):
     index_dir: str | None = None
     index_dirs: list[str] | None = None
     flow_id: str | None = None
+    run_id: str | None = None
     k: int = 8
     max_steps: int = 6
     timeout_seconds: int = 30
@@ -1202,6 +1223,7 @@ def _run_tool_request(
             question=req.question,
             index_dirs=[Path(p) for p in req.index_dirs],
             flow_id=req.flow_id,
+            run_id=req.run_id,
             k=req.k,
             max_steps=req.max_steps,
             timeout_seconds=req.timeout_seconds,
@@ -1216,6 +1238,7 @@ def _run_tool_request(
             question=req.question,
             index_dir=Path(req.index_dir),
             flow_id=req.flow_id,
+            run_id=req.run_id,
             k=req.k,
             max_steps=req.max_steps,
             timeout_seconds=req.timeout_seconds,
@@ -1241,11 +1264,14 @@ def _run_tool_request(
         logger.debug("TRACE RAW [%d]: %s", i, json.dumps(row, default=str)[:500])
 
     ok_tools = 0
+    ok_mutation_tools = 0
     for i, row in enumerate(trace_rows_raw):
         success = _infer_trace_row_success(row)
         logger.debug("TRACE CHECK [%d] success=%s keys=%s", i, success, list(row.keys()))
         if success:
             ok_tools += 1
+        if _infer_trace_row_mutation_success(row):
+            ok_mutation_tools += 1
 
     logger.debug("Successful tools detected: %d", ok_tools)
 
@@ -1253,18 +1279,30 @@ def _run_tool_request(
     if req.tools_only_strict_override is not None:
         strict_required = bool(req.tools_only_strict_override)
 
-    logger.debug("Strict mode evaluation -> strict_required=%s ok_tools=%d", strict_required, ok_tools)
+    mutation_strict = bool((req.tool_policy or {}).get("mutation_required") or (req.tool_policy or {}).get("mutation_strict"))
+    logger.debug(
+        "Strict mode evaluation -> strict_required=%s mutation_strict=%s ok_tools=%d ok_mutation_tools=%d",
+        strict_required,
+        mutation_strict,
+        ok_tools,
+        ok_mutation_tools,
+    )
 
-    if strict_required and ok_tools <= 0:
+    if strict_required and ((ok_mutation_tools <= 0) if mutation_strict else (ok_tools <= 0)):
         logger.error("TOOLS ONLY VIOLATION")
         logger.error("TRACE DUMP START")
         for r in trace_rows_raw:
             logger.error(json.dumps(r, default=str))
         logger.error("TRACE DUMP END")
+        message = (
+            "tools-only mode requires at least one successful mutation tool call"
+            if mutation_strict
+            else "tools-only mode requires at least one successful tool call"
+        )
 
         raise ToolWorkerProcessError(
             code="tools_only_violation",
-            message="tools-only mode requires at least one successful tool call",
+            message=message,
             retriable=False,
             details={"trace_count": len(trace_rows_raw), "trace_sample": trace_rows_raw[:3]},
         )

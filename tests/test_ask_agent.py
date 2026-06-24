@@ -441,6 +441,49 @@ def test_ask_agent_read_file_full_mode_hits_persistent_flow_cache_on_repeat(tmp_
     assert second_payload["cache_source"] == "flow_full"
 
 
+def test_ask_agent_read_file_hits_run_evidence_memory_on_repeat(tmp_path: Path) -> None:
+    source_file = tmp_path / "run_cached.py"
+    source_file.write_text("one\ntwo\n", encoding="utf-8")
+    agent = _build_agent(tmp_path)
+
+    tools1, _traces1, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="run-cache-1")
+    read_file1 = [item for item in tools1 if item.name == "read_file"][0]
+    first_payload = json.loads(read_file1.invoke({"path": str(source_file), "mode": "full"}))
+
+    second = _build_agent(tmp_path)
+    tools2, _traces2, _, _ = second._build_tools(k_default=4, timeout_seconds=1, run_id="run-cache-1")
+    read_file2 = [item for item in tools2 if item.name == "read_file"][0]
+    second_payload = json.loads(read_file2.invoke({"path": str(source_file), "mode": "full"}))
+
+    rows = (tmp_path / ".mana" / "runs" / "run-cache-1" / "read_evidence.jsonl").read_text(encoding="utf-8").splitlines()
+    read_rows = [json.loads(row) for row in rows if row.strip() and json.loads(row).get("event") == "read"]
+    assert first_payload["cache_hit"] is False
+    assert first_payload["source"] == "tool"
+    assert second_payload["cache_hit"] is True
+    assert second_payload["source"] == "memory"
+    assert second_payload["normalized_path"] == str(source_file.resolve())
+    assert len(read_rows) == 1
+
+
+def test_ask_agent_read_file_relative_and_absolute_share_run_memory_entry(tmp_path: Path) -> None:
+    source_file = tmp_path / "pkg" / "mod.py"
+    source_file.parent.mkdir()
+    source_file.write_text("a\nb\n", encoding="utf-8")
+    agent = _build_agent(tmp_path)
+    tools, _traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="run-cache-abs-rel")
+    read_file = [item for item in tools if item.name == "read_file"][0]
+
+    first_payload = json.loads(read_file.invoke({"path": "pkg/mod.py", "mode": "full"}))
+    second_payload = json.loads(read_file.invoke({"path": str(source_file), "mode": "full"}))
+
+    rows = (tmp_path / ".mana" / "runs" / "run-cache-abs-rel" / "read_evidence.jsonl").read_text(encoding="utf-8").splitlines()
+    read_rows = [json.loads(row) for row in rows if row.strip() and json.loads(row).get("event") == "read"]
+    assert first_payload["cache_hit"] is False
+    assert second_payload["cache_hit"] is True
+    assert second_payload["normalized_path"] == str(source_file.resolve())
+    assert len(read_rows) == 1
+
+
 def test_ask_agent_read_file_line_mode_uses_full_cache_slice(tmp_path: Path) -> None:
     source_file = tmp_path / "slice.py"
     source_file.write_text("\n".join(f"line-{idx}" for idx in range(1, 8)) + "\n", encoding="utf-8")
@@ -476,6 +519,25 @@ def test_ask_agent_read_file_line_mode_uses_full_cache_slice(tmp_path: Path) -> 
     assert telemetry["read_cache_hits"] == 1
 
 
+def test_ask_agent_run_evidence_full_cache_serves_later_line_range(tmp_path: Path) -> None:
+    source_file = tmp_path / "slice_run.py"
+    source_file.write_text("\n".join(f"line-{idx}" for idx in range(1, 6)) + "\n", encoding="utf-8")
+    agent = _build_agent(tmp_path)
+    tools, _traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="run-cache-slice")
+    read_file = [item for item in tools if item.name == "read_file"][0]
+
+    full_payload = json.loads(read_file.invoke({"path": str(source_file), "mode": "full"}))
+    line_payload = json.loads(
+        read_file.invoke({"path": str(source_file), "mode": "line", "start_line": 2, "end_line": 4})
+    )
+
+    assert full_payload["cache_hit"] is False
+    assert line_payload["cache_hit"] is True
+    assert line_payload["source"] == "memory"
+    assert line_payload["covered_range"] == [2, 4]
+    assert line_payload["content"] == "line-2\nline-3\nline-4"
+
+
 def test_ask_agent_read_file_cache_invalidates_when_file_changes(tmp_path: Path) -> None:
     source_file = tmp_path / "stale.py"
     source_file.write_text("old-1\nold-2\n", encoding="utf-8")
@@ -506,6 +568,36 @@ def test_ask_agent_read_file_cache_invalidates_when_file_changes(tmp_path: Path)
     assert second_payload["cache_invalidated"] is True
     assert telemetry["read_cache_invalidations"] == 1
     assert second_payload["content"] == "new-1\nnew-2\nnew-3\n"
+
+
+def test_ask_agent_run_evidence_invalidates_when_file_stat_changes(tmp_path: Path) -> None:
+    source_file = tmp_path / "stale_run.py"
+    source_file.write_text("old\n", encoding="utf-8")
+    agent = _build_agent(tmp_path)
+    telemetry = {
+        "read_cache_hits": 0,
+        "read_cache_misses": 0,
+        "read_full_mode_used": 0,
+        "read_full_mode_blocked": 0,
+        "read_cache_invalidations": 0,
+    }
+    tools, _traces, _, _ = agent._build_tools(
+        k_default=4,
+        timeout_seconds=1,
+        run_id="run-cache-stale",
+        read_telemetry=telemetry,
+    )
+    read_file = [item for item in tools if item.name == "read_file"][0]
+
+    first_payload = json.loads(read_file.invoke({"path": str(source_file), "mode": "full"}))
+    source_file.write_text("new\nextra\n", encoding="utf-8")
+    second_payload = json.loads(read_file.invoke({"path": str(source_file), "mode": "full"}))
+
+    assert first_payload["cache_hit"] is False
+    assert second_payload["cache_hit"] is False
+    assert second_payload["cache_invalidated"] is True
+    assert second_payload["content"] == "new\nextra\n"
+    assert telemetry["read_cache_invalidations"] == 1
 
 
 def test_ask_agent_read_file_without_flow_id_uses_only_ephemeral_cache(tmp_path: Path) -> None:

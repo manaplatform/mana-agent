@@ -62,13 +62,11 @@ def test_continue_help_accepts_root_dir_option(tmp_path: Path) -> None:
     assert "--max-tool-c" in result.stdout
 
 
-def test_analyze_help_accepts_auto_continue_limits() -> None:
+def test_analyze_command_is_not_public() -> None:
     result = runner.invoke(app, ["analyze", "--help"])
 
-    assert result.exit_code == 0
-    assert "--auto-continue" in result.stdout
-    assert "--max-runtime-minu" in result.stdout
-    assert "--max-cost" in result.stdout
+    assert result.exit_code != 0
+    assert "No such command" in result.output
 
 
 def test_continue_command_uses_root_dir_and_loops_until_complete(monkeypatch, tmp_path: Path) -> None:
@@ -219,8 +217,9 @@ def test_root_help_exposes_commands_and_no_legacy_branding() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("chat", "analyze", "ask"):
+    for command in ("chat", "ask"):
         assert command in result.output
+    assert "analyze" not in result.output
     assert "mana-agent" in result.output
     assert "mana-analyzer" not in result.output
     assert "analyzor" not in result.output
@@ -230,12 +229,6 @@ def test_chat_help_works() -> None:
     result = runner.invoke(app, ["chat", "--help"])
     assert result.exit_code == 0
     assert "chat [OPTIONS]" in result.output
-
-
-def test_analyze_help_works() -> None:
-    result = runner.invoke(app, ["analyze", "--help"])
-    assert result.exit_code == 0
-    assert "analyze [OPTIONS]" in result.output
 
 
 def test_no_source_file_contains_analyzor() -> None:
@@ -248,18 +241,12 @@ def test_no_source_file_contains_analyzor() -> None:
     assert offenders == [], f"'analyzor' still present in: {offenders}"
 
 
-def test_root_command_defaults_to_chat(monkeypatch) -> None:
-    calls: list[str] = []
-
-    def _fake_chat(**_kwargs: object) -> None:
-        calls.append("chat")
-
-    monkeypatch.setattr("mana_agent.commands.chat_cli.chat", _fake_chat)
-
-    result = runner.invoke(app, [])
+def test_root_command_defaults_to_chat() -> None:
+    result = runner.invoke(app, [], input="quit\n")
 
     assert result.exit_code == 0
-    assert calls == ["chat"]
+    assert "mana-agent chat" in result.output
+    assert "Goodbye!" in result.output
 
 
 class FakeStructureService:
@@ -368,13 +355,6 @@ class FakeDescribeService:
 
 
 def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
-    describe_build_calls: list[bool] = []
-
-    def fake_build_describe_service(_s, model_override=None, use_llm=True):
-        _ = model_override
-        describe_build_calls.append(use_llm)
-        return FakeDescribeService()
-
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_agent.commands.cli.build_index_service", lambda _s: FakeIndexService())
     monkeypatch.setattr("mana_agent.commands.cli.build_search_service", lambda _s: FakeSearchService())
@@ -391,33 +371,11 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None: FakeAskService())
     monkeypatch.setattr("mana_agent.commands.cli.StructureService", FakeStructureService)
     monkeypatch.setattr("mana_agent.commands.cli.build_dependency_service", lambda: FakeDependencyService())
-    monkeypatch.setattr("mana_agent.commands.cli.build_describe_service", fake_build_describe_service)
+    monkeypatch.setattr("mana_agent.commands.cli.build_describe_service", lambda *_args, **_kwargs: FakeDescribeService())
     monkeypatch.setattr("mana_agent.commands.cli.discover_subprojects", lambda root: [])
     monkeypatch.setattr("mana_agent.commands.cli.discover_index_dirs", lambda root: [Path(root) / ".mana/index"])
 
     idx = tmp_path / "idx"
-
-    result_analyze = runner.invoke(app, ["analyze", str(tmp_path), "--query", "add", "--json"])
-    assert result_analyze.exit_code == 0
-    payload = json.loads(result_analyze.stdout)
-    assert set(payload) >= {"meta", "index", "search", "dependencies", "graph", "findings", "describe", "structure", "security", "flow", "warnings"}
-    assert payload["search"]["query"] == "add"
-    assert payload["search"]["results"][0]["symbol_name"] == "add"
-
-    result_analyze_llm = runner.invoke(
-        app,
-        [
-            "analyze",
-            str(tmp_path),
-            "--model",
-            "gpt-test",
-            "--llm-max-files",
-            "5",
-            "--json",
-        ],
-    )
-    assert result_analyze_llm.exit_code == 0
-    assert "llm-bug-risk" in result_analyze_llm.stdout
 
     result_ask = runner.invoke(app, ["ask", "what", "--index-dir", str(idx), "--json"])
     assert result_ask.exit_code == 0
@@ -430,25 +388,7 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
     assert result_ask_agent.exit_code == 0
     assert "Tool answer" in result_ask_agent.stdout
 
-    result_analyze_structure_md = runner.invoke(
-        app,
-        ["analyze", str(tmp_path), "--output-format", "markdown"],
-    )
-    assert result_analyze_structure_md.exit_code == 0
-    assert "Unified Analyze Report" in result_analyze_structure_md.stdout
-    assert "Repository Description" in result_analyze_structure_md.stdout
-    assert "Architecture" in result_analyze_structure_md.stdout
-    assert "Technology" in result_analyze_structure_md.stdout
-
-    result_analyze_structure_llm = runner.invoke(
-        app,
-        ["analyze", str(tmp_path), "--output-format", "json", "--json"],
-    )
-    assert result_analyze_structure_llm.exit_code == 0
-    assert "describe" in result_analyze_structure_llm.stdout
-    assert describe_build_calls
-
-    for retired in ("index", "search", "deps", "graph", "describe", "report", "flow"):
+    for retired in ("analyze", "index", "search", "deps", "graph", "describe", "report", "flow"):
         result_retired = runner.invoke(app, [retired, str(tmp_path)])
         assert result_retired.exit_code != 0
 
@@ -465,17 +405,6 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
     )
     assert result_ask_dir_mode_tools.exit_code == 0
     assert "Dir tool answer" in result_ask_dir_mode_tools.stdout
-
-
-def test_analyze_fail_on_warning(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_analyze_service",
-        lambda: FakeAnalyzeService([Finding("missing-docstring", "warning", "msg", "/tmp/a.py", 1, 0)]),
-    )
-
-    result = runner.invoke(app, ["analyze", str(tmp_path), "--fail-on", "warning"])
-    assert result.exit_code == 1
 
 
 def test_ask_root_dir_applies_project_root_in_classic_mode(monkeypatch, tmp_path: Path) -> None:
@@ -523,58 +452,6 @@ def test_ask_root_dir_changes_default_index_dir_in_classic_mode(monkeypatch, tmp
     )
     assert result.exit_code == 0
     assert captured["index_dir"] == str((tmp_path / ".mana/index").resolve())
-
-
-def test_analyze_fail_on_merged_findings(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_analyze_service",
-        lambda: FakeAnalyzeService([]),
-    )
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_llm_analyze_service",
-        lambda _s, model_override=None: FakeLlmAnalyzeService(
-            [Finding("llm-generic", "warning", "llm warning", "/tmp/a.py", 1, 0)]
-        ),
-    )
-
-    result = runner.invoke(app, ["analyze", str(tmp_path), "--fail-on", "warning"])
-    assert result.exit_code == 1
-
-
-def test_analyze_full_structure_writes_markdown_artifact(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_analyze_service",
-        lambda: FakeAnalyzeService([Finding("missing-docstring", "warning", "msg", "/tmp/a.py", 1, 0)]),
-    )
-    monkeypatch.setattr("mana_agent.commands.cli.StructureService", FakeStructureService)
-    monkeypatch.setattr("mana_agent.commands.cli.build_describe_service", lambda *_args, **_kwargs: FakeDescribeService())
-
-    result = runner.invoke(app, ["analyze", str(tmp_path), "--output-format", "all"])
-    assert result.exit_code == 0
-
-    out_dir = tmp_path / ".mana"
-    md_file = out_dir / "analyze.md"
-    json_file = out_dir / "analyze.json"
-    html_file = out_dir / "analyze.html"
-    dot_file = out_dir / "analyze.dot"
-    graphml_file = out_dir / "analyze.graphml"
-
-    assert md_file.exists(), "expected analyze markdown artifact"
-    assert json_file.exists(), "expected analyze json artifact"
-    assert html_file.exists(), "expected analyze html artifact"
-    assert dot_file.exists(), "expected analyze dot artifact"
-    assert graphml_file.exists(), "expected analyze graphml artifact"
-
-    markdown = md_file.read_text(encoding="utf-8")
-    payload = json.loads(json_file.read_text(encoding="utf-8"))
-
-    assert "Findings" in markdown
-    assert "missing-docstring" in markdown
-    assert "Repository Description" in markdown
-    assert payload["findings"]["merged"][0]["rule_id"] == "missing-docstring"
-    assert payload["describe"]["architecture_summary"] == "arch"
 
 
 def test_ask_dir_mode_no_auto_index_missing(monkeypatch, tmp_path: Path) -> None:

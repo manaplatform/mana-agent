@@ -179,22 +179,44 @@ def make_worker_executor(
     tool_policy: dict[str, Any] | None = None,
     index_dir: str | None = None,
     flow_id: str | None = None,
+    run_id: str | None = None,
 ) -> Callable[[WorkItem], WorkResult]:
     """Build the ``execute`` callable that runs a :class:`WorkItem` on the worker."""
     repo_root = Path(repo_root).resolve()
 
+    def _normalized_path(path: str) -> str:
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        try:
+            candidate = Path(text)
+            resolved = candidate if candidate.is_absolute() else (repo_root / candidate)
+            return resolved.resolve().relative_to(repo_root).as_posix()
+        except Exception:
+            return text.replace("\\", "/").lstrip("./")
+
     def _execute(item: WorkItem) -> WorkResult:
         question = item.question or (f"run tool {item.tool_name}" if item.tool_name else item.title)
+        item_policy = dict(tool_policy or {})
+        if item.kind == "edit":
+            item_policy["allowed_tools"] = ["apply_patch", "write_file", "create_file", "git_diff", "git_status"]
+            item_policy["require_read_files"] = 0
+            item_policy["mutation_required"] = True
+            item_policy["verify_requires_mutation"] = True
+        tool_args = dict(item.tool_args or {})
+        if (item.tool_name or "").strip().lower() == "read_file" and tool_args.get("path"):
+            tool_args["path"] = _normalized_path(str(tool_args.get("path")))
         request = ToolRunRequest(
             question=question,
             index_dir=index_dir,
             flow_id=flow_id,
+            run_id=run_id,
             k=int(default_k),
             max_steps=int(default_max_steps),
             timeout_seconds=int(default_timeout),
-            tool_policy=tool_policy,
+            tool_policy=item_policy,
             tool_name=item.tool_name or "",
-            tool_args=dict(item.tool_args or {}),
+            tool_args=tool_args,
         )
         t0 = time.perf_counter()
         try:
@@ -247,12 +269,28 @@ class CodingAgentSniffer:
         # in the request. The caller passes that decision down as ``emit_edit``;
         # when it is unknown (no planner signal) we do not force a mutation.
         self._emit_edit = bool(emit_edit)
-        self._target_files = [str(item).strip().replace("\\", "/").lstrip("./") for item in (target_files or []) if str(item).strip()]
+        self._target_files = []
         self._max_reads = int(max_reads)
         self._max_follow_per_read = int(max_follow_per_read)
         self._relevant = relevant or (lambda _path: True)
         self._reads_emitted = 0
         self._finalization_emitted = False
+        self._target_files = [
+            self._normalize_repo_path(str(item))
+            for item in (target_files or [])
+            if str(item).strip()
+        ]
+
+    def _normalize_repo_path(self, path: str) -> str:
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        try:
+            candidate = Path(text)
+            resolved = candidate if candidate.is_absolute() else (self._repo_root / candidate)
+            return resolved.resolve().relative_to(self._repo_root).as_posix()
+        except Exception:
+            return text.replace("\\", "/").lstrip("./")
 
     def on_result(self, item: WorkItem, result: WorkResult, *, board: TaskBoard) -> list[WorkItem]:
         if not result.ok:
@@ -332,7 +370,7 @@ class CodingAgentSniffer:
         still spends its budget on the files most likely to matter rather than
         an arbitrary slice of every search hit.
         """
-        relevant = list(dict.fromkeys(p for p in paths if self._relevant(p)))
+        relevant = list(dict.fromkeys(p for p in (self._normalize_repo_path(path) for path in paths) if p and self._relevant(p)))
         keywords = self._request_keywords()
         # Drop keywords that match every candidate (e.g. the repo name): they add
         # only noise to the score and let an arbitrary file float to the top.

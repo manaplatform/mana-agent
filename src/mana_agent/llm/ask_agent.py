@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from langchain_core.callbacks.base import BaseCallbackHandler
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.llm.prompts import ASK_AGENT_SYSTEM_PROMPT
+from mana_agent.llm.evidence_memory import EvidenceMemory
 from mana_agent.analysis.chunker import CodeChunker
 from mana_agent.services.structure_service import StructureService
 from mana_agent.llm.run_logger import LlmRunLogger
@@ -671,15 +672,18 @@ class AskAgent:
         if requested_mode == "full":
             return {
                 "file_path": file_path,
+                "normalized_path": file_path,
                 "mode": "full",
                 "start_line": 1,
                 "end_line": file_line_count,
                 "line_count": file_line_count,
                 "content": str(row.get("content_text", "")),
                 "cache_hit": True,
+                "source": "memory",
                 "cache_source": cache_source,
                 "cache_invalidated": False,
                 "full_file_cached": row_mode == "full",
+                "covered_range": [1, file_line_count],
             }
 
         actual_end = min(max(int(end_line), int(start_line)), file_line_count)
@@ -695,15 +699,18 @@ class AskAgent:
             segment = row_lines[slice_start:max(slice_start, slice_end)]
         return {
             "file_path": file_path,
+            "normalized_path": file_path,
             "mode": "line",
             "start_line": int(start_line),
             "end_line": actual_end,
             "line_count": file_line_count,
             "content": "\n".join(segment),
             "cache_hit": True,
+            "source": "memory",
             "cache_source": cache_source,
             "cache_invalidated": False,
             "full_file_cached": row_mode == "full",
+            "covered_range": [int(start_line), actual_end],
         }
 
     def _lookup_read_cache(
@@ -785,6 +792,7 @@ class AskAgent:
         flow_id: str | None,
         ephemeral_read_cache: dict[str, list[dict[str, Any]]] | None,
         line_window: int,
+        run_id: str | None = None,
     ) -> bool:
         try:
             resolved = self._resolve_read_path(path)
@@ -801,7 +809,15 @@ class AskAgent:
             ephemeral_read_cache=ephemeral_read_cache,
             invalidate_stale=False,
         )
-        return payload is not None
+        if payload is not None:
+            return True
+        run_payload, _ = EvidenceMemory(repo_root=self.project_root, run_id=run_id).lookup(
+            resolved=resolved,
+            mode=requested_mode,
+            start_line=normalized_start,
+            end_line=normalized_end,
+        )
+        return run_payload is not None
 
     def _build_tools(
         self,
@@ -809,6 +825,7 @@ class AskAgent:
         timeout_seconds: int,
         read_line_window: int = 400,
         flow_id: str | None = None,
+        run_id: str | None = None,
         ephemeral_read_cache: dict[str, list[dict[str, Any]]] | None = None,
         read_telemetry: dict[str, int] | None = None,
     ) -> tuple[list[BaseTool], list[ToolInvocationTrace], list[SearchHit], list[str]]:
@@ -816,6 +833,7 @@ class AskAgent:
         sources: list[SearchHit] = []
         warnings: list[str] = []
         safe_read_line_window = max(200, min(int(read_line_window or 400), 2000))
+        evidence_memory = EvidenceMemory(repo_root=self.project_root, run_id=run_id)
         resolved_indexes = list(getattr(self, "_resolved_indexes", []) or [])
         if not resolved_indexes:
             fallback_index = Path(getattr(self, "_resolved_index", default_index_dir(self.project_root))).resolve()
@@ -866,6 +884,8 @@ class AskAgent:
             args_summary = f"path={path!r} mode={mode!r} start={start_line} end={end_line}"
             try:
                 resolved = self._resolve_read_path(path)
+                if resolved.is_dir():
+                    raise ValueError(f"{path} is a directory; use list_files instead of read_file")
                 if self._is_binary_path(resolved):
                     raise ValueError("binary files cannot be read by read_file")
                 requested_mode = self._normalize_read_mode(mode)
@@ -879,8 +899,25 @@ class AskAgent:
                     ephemeral_read_cache=ephemeral_read_cache,
                     invalidate_stale=True,
                 )
+                run_cached_payload, run_invalidated = evidence_memory.lookup(
+                    resolved=resolved,
+                    mode=requested_mode,
+                    start_line=start,
+                    end_line=end,
+                )
+                if run_invalidated:
+                    invalidated = True
                 if invalidated and read_telemetry is not None:
                     read_telemetry["read_cache_invalidations"] = int(read_telemetry.get("read_cache_invalidations", 0)) + 1
+                if run_cached_payload is not None:
+                    if read_telemetry is not None:
+                        read_telemetry["read_cache_hits"] = int(read_telemetry.get("read_cache_hits", 0)) + 1
+                        if requested_mode == "full":
+                            read_telemetry["read_full_mode_used"] = int(read_telemetry.get("read_full_mode_used", 0)) + 1
+                    run_cached_payload["cache_invalidated"] = bool(invalidated)
+                    encoded = json.dumps(run_cached_payload)
+                    output_preview = encoded
+                    return encoded
                 if cached_payload is not None:
                     if read_telemetry is not None:
                         read_telemetry["read_cache_hits"] = int(read_telemetry.get("read_cache_hits", 0)) + 1
@@ -930,19 +967,32 @@ class AskAgent:
                         row=cache_row,
                         ephemeral_read_cache=ephemeral_read_cache,
                     )
+                    evidence_memory.store(
+                        original_path=path,
+                        resolved=resolved,
+                        mode="full",
+                        start_line=1,
+                        end_line=line_count,
+                        line_count=line_count,
+                        content=content_text,
+                        summary=f"full file read, {line_count} lines",
+                    )
                     if read_telemetry is not None:
                         read_telemetry["read_full_mode_used"] = int(read_telemetry.get("read_full_mode_used", 0)) + 1
                     result = {
                         "file_path": str(resolved),
+                        "normalized_path": str(resolved),
                         "mode": "full",
                         "start_line": 1,
                         "end_line": line_count,
                         "line_count": line_count,
                         "content": content_text,
                         "cache_hit": False,
+                        "source": "tool",
                         "cache_source": "disk",
                         "cache_invalidated": bool(invalidated),
                         "full_file_cached": True,
+                        "covered_range": [1, line_count],
                     }
                     encoded = json.dumps(result)
                     output_preview = encoded
@@ -965,17 +1015,31 @@ class AskAgent:
                     row=cache_row,
                     ephemeral_read_cache=ephemeral_read_cache,
                 )
+                segment_text = "\n".join(segment)
+                evidence_memory.store(
+                    original_path=path,
+                    resolved=resolved,
+                    mode="line",
+                    start_line=start,
+                    end_line=actual_end,
+                    line_count=line_count,
+                    content=segment_text,
+                    summary=f"line range read, lines {start}-{actual_end}",
+                )
                 result = {
                     "file_path": str(resolved),
+                    "normalized_path": str(resolved),
                     "mode": "line",
                     "start_line": start,
                     "end_line": actual_end,
                     "line_count": line_count,
-                    "content": "\n".join(segment),
+                    "content": segment_text,
                     "cache_hit": False,
+                    "source": "tool",
                     "cache_source": "disk",
                     "cache_invalidated": bool(invalidated),
                     "full_file_cached": False,
+                    "covered_range": [start, actual_end],
                 }
                 encoded = json.dumps(result)
                 output_preview = encoded
@@ -1209,6 +1273,7 @@ class AskAgent:
         tool_policy: dict[str, Any] | None = None,
         tool_use: bool = True,
         flow_id: str | None = None,
+        run_id: str | None = None,
     ) -> AskResponseWithTrace:
         # tool_use kept for compatibility; this AskAgent is tool-based by design.
         return self.run(
@@ -1222,6 +1287,7 @@ class AskAgent:
             system_prompt=system_prompt,
             tool_policy=tool_policy,
             flow_id=flow_id,
+            run_id=run_id,
         )
 
     def run(
@@ -1236,6 +1302,7 @@ class AskAgent:
         system_prompt: str | None = None,  # ✅ NEW
         tool_policy: dict[str, Any] | None = None,
         flow_id: str | None = None,
+        run_id: str | None = None,
     ) -> AskResponseWithTrace:
         started = perf_counter()
 
@@ -1267,12 +1334,14 @@ class AskAgent:
             "read_cache_invalidations": 0,
         }
         ephemeral_read_cache: dict[str, list[dict[str, Any]]] = {}
+        evidence_memory = EvidenceMemory(repo_root=self.project_root, run_id=run_id)
 
         tools, traces, sources, warnings = self._build_tools(
             k_default=k,
             timeout_seconds=timeout_seconds,
             read_line_window=read_line_window,
             flow_id=flow_id,
+            run_id=run_id,
             ephemeral_read_cache=ephemeral_read_cache,
             read_telemetry=read_telemetry,
         )
@@ -1291,6 +1360,7 @@ class AskAgent:
         seen_tool_args: dict[tuple[str, str], int] = defaultdict(int)
         tool_counts: dict[str, int] = defaultdict(int)
         unique_read_files: set[str] = set()
+        unique_read_files.update(evidence_memory.read_files())
         disk_read_count = 0
 
         # Loop-progress guards.
@@ -1505,6 +1575,7 @@ class AskAgent:
                                 start_line=int(read_args.get("start_line", 1) or 1),
                                 end_line=int(read_args.get("end_line", 200) or 200),
                                 flow_id=flow_id,
+                                run_id=run_id,
                                 ephemeral_read_cache=ephemeral_read_cache,
                                 line_window=read_line_window,
                             )
@@ -1633,6 +1704,21 @@ class AskAgent:
                                 unique_read_files.add(file_path)
                         if not bool(payload.get("cache_hit", False)) and not read_failed:
                             disk_read_count += 1
+                if name in {"apply_patch", "create_file", "write_file"}:
+                    payload = self._coerce_tool_payload(content)
+                    changed_paths: list[str] = []
+                    if isinstance(payload, dict):
+                        for key in ("files_changed", "changed_files", "modified_files", "touched_files"):
+                            value = payload.get(key)
+                            if isinstance(value, list):
+                                changed_paths.extend(str(item) for item in value if str(item).strip())
+                        proof = payload.get("proof")
+                        if isinstance(proof, dict) and isinstance(proof.get("modified_files"), list):
+                            changed_paths.extend(str(item) for item in proof["modified_files"] if str(item).strip())
+                    if not changed_paths and isinstance(args, dict) and str(args.get("path", "")).strip():
+                        changed_paths.append(str(args.get("path", "")))
+                    if changed_paths:
+                        evidence_memory.invalidate_many(set(changed_paths))
                 if name == "search_internet":
                     detail = self._search_error_detail(content)
                     if detail:
@@ -1738,6 +1824,7 @@ class AskAgent:
         timeout_seconds: int = 30,
         callbacks: Sequence[Any] | None = None,
         flow_id: str | None = None,
+        run_id: str | None = None,
         **kwargs: Any,
     ):
         """
@@ -1768,6 +1855,7 @@ class AskAgent:
                 callbacks=callbacks,
                 tool_policy=tool_policy,
                 flow_id=flow_id,
+                run_id=run_id,
                 **kwargs,
             )
 
@@ -1824,6 +1912,7 @@ class AskAgent:
             callbacks=callbacks,
             tool_policy=tool_policy,
             flow_id=flow_id,
+            run_id=run_id,
             **kwargs,
         )
 
