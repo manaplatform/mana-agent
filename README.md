@@ -41,30 +41,6 @@ Large codebases are hard to inspect, summarize, and safely modify. `mana-agent` 
 
 ## Core Capabilities
 
-### Repository analysis
-
-`mana-agent analyze` runs a unified analysis pipeline that can include:
-
-- Incremental semantic indexing of source files.
-- Static checks and repository structure summaries.
-- Dependency detection and dependency graph support.
-- Security/vulnerability-oriented analysis with an offline mode for avoiding online lookups.
-- Optional query-driven semantic search results.
-- Report generation in multiple output formats.
-
-### Evidence-backed Q&A
-
-`mana-agent ask` answers repository questions using project context. It can work with an existing index, discover indexes in directory mode, or create a temporary index when enabled.
-
-Example questions:
-
-```text
-How is configuration loaded?
-Where is the CLI entry point implemented?
-What code writes analysis artifacts?
-Summarize the parser architecture.
-```
-
 ### Interactive coding workflows
 
 `mana-agent chat` opens an interactive session for repository Q&A and coding-agent tasks. The chat workflow supports planning mode, auto-execution, persisted coding memory, optional tool-worker execution paths, and diagram rendering.
