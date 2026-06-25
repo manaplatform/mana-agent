@@ -26,8 +26,108 @@ from mana_agent.tools.search_internet import build_search_internet_tool, safe_se
 from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.utils.redaction import redact_json_line, redact_secrets
 from mana_agent.utils.tool_policy import expand_tool_aliases
+from mana_agent.config.settings import default_tools_logs_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_tools_log_root(req: "ToolRunRequest", repo_root: str | None) -> Path | None:
+    """Best-effort resolution of the repo root used to locate ``.mana/tools_logs``.
+
+    Prefers the worker's configured ``repo_root``; falls back to deriving it from
+    the request's index directory (``<root>/.mana/index`` -> ``<root>``).
+    """
+    if repo_root:
+        try:
+            return Path(repo_root).resolve()
+        except Exception:
+            pass
+    index_dir = req.index_dir or (req.index_dirs[0] if req.index_dirs else None)
+    if index_dir:
+        try:
+            # <root>/.mana/index -> parents[1] is <root>
+            return Path(index_dir).resolve().parents[1]
+        except Exception:
+            return None
+    return None
+
+
+def _write_tools_execution_log(
+    *,
+    repo_root: str | None,
+    req: "ToolRunRequest",
+    trace_rows: list[dict[str, Any]],
+    ok: bool,
+    ok_tools: int,
+    ok_mutation_tools: int,
+    error_code: str = "",
+    error_message: str = "",
+) -> None:
+    """Persist the full per-tool execution trace for a single run_tools request.
+
+    Writes one self-contained JSON file per run under ``.mana/tools_logs/`` and
+    appends a compact line to a per-day JSONL index. Logging failures never
+    propagate — tool execution must not be affected by log I/O.
+    """
+    try:
+        log_root = _resolve_tools_log_root(req, repo_root)
+        if log_root is None:
+            return
+        logs_dir = default_tools_logs_dir(log_root)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        now = time.time()
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)) + f"{int((now % 1) * 1e6):06d}Z"
+        run_id = str(req.run_id or "norun")
+        safe_run = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)[:64]
+
+        record = {
+            "logged_at": now,
+            "logged_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "run_id": req.run_id,
+            "flow_id": req.flow_id,
+            "question": req.question,
+            "tool_name": req.tool_name or None,
+            "tool_args": req.tool_args or {},
+            "retry_attempt": int(req.retry_attempt or 0),
+            "ok": bool(ok),
+            "error_code": error_code or "",
+            "error_message": error_message or "",
+            "tools_total": len(trace_rows),
+            "tools_ok": int(ok_tools),
+            "mutation_tools_ok": int(ok_mutation_tools),
+            "trace": trace_rows,
+        }
+
+        payload = json.dumps(record, default=str, ensure_ascii=False, indent=2)
+        payload = redact_secrets(payload)
+        (logs_dir / f"tools_{stamp}_{safe_run}.json").write_text(payload, encoding="utf-8")
+
+        # Compact per-day index for quick scanning.
+        index_line = json.dumps(
+            {
+                "logged_at_iso": record["logged_at_iso"],
+                "run_id": req.run_id,
+                "flow_id": req.flow_id,
+                "tool_name": req.tool_name or None,
+                "ok": bool(ok),
+                "error_code": error_code or "",
+                "tools_total": len(trace_rows),
+                "tools_ok": int(ok_tools),
+                "tools": [
+                    str(r.get("tool_name") or r.get("tool") or r.get("name") or r.get("type") or "tool")
+                    for r in trace_rows
+                ],
+                "file": f"tools_{stamp}_{safe_run}.json",
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+        index_name = "tools_" + time.strftime("%Y-%m-%d", time.gmtime(now)) + ".jsonl"
+        with (logs_dir / index_name).open("a", encoding="utf-8") as fh:
+            fh.write(redact_secrets(index_line) + "\n")
+    except Exception as exc:  # pragma: no cover - logging must never break a run
+        logger.debug("[tools_logs] failed to write execution log: %s", exc)
 
 def _configure_worker_logging() -> None:
     """Install fallback logging when this module is run as a worker process."""
@@ -1195,6 +1295,7 @@ def _run_tool_request(
     req: ToolRunRequest,
     tools_only_strict_default: bool,
     callbacks: list[BaseCallbackHandler] | None = None,
+    repo_root: str | None = None,
 ) -> ToolRunResponse:
     logger.debug("=== EXECUTOR START ===")
     logger.debug("Question: %s", req.question)
@@ -1300,6 +1401,17 @@ def _run_tool_request(
             else "tools-only mode requires at least one successful tool call"
         )
 
+        _write_tools_execution_log(
+            repo_root=repo_root,
+            req=req,
+            trace_rows=trace_rows_raw,
+            ok=False,
+            ok_tools=ok_tools,
+            ok_mutation_tools=ok_mutation_tools,
+            error_code="tools_only_violation",
+            error_message=message,
+        )
+
         raise ToolWorkerProcessError(
             code="tools_only_violation",
             message=message,
@@ -1310,6 +1422,15 @@ def _run_tool_request(
     trace_rows_safe = _strip_banned_keys(trace_rows_raw)
     logger.debug("Sanitized trace rows: %d", len(trace_rows_safe))
     logger.debug("=== EXECUTOR END ===")
+
+    _write_tools_execution_log(
+        repo_root=repo_root,
+        req=req,
+        trace_rows=trace_rows_raw,
+        ok=True,
+        ok_tools=ok_tools,
+        ok_mutation_tools=ok_mutation_tools,
+    )
 
     return ToolRunResponse(
         answer=str(getattr(result, "answer", "")),
@@ -1331,6 +1452,7 @@ def run_tool_request_once(
         req=request,
         tools_only_strict_default=bool(init_payload.tools_only_strict),
         callbacks=None,
+        repo_root=str(init_payload.repo_root or init_payload.project_root or "") or None,
     )
 
 
@@ -1438,6 +1560,7 @@ class _ToolWorkerServer:
         self._tools_only_strict = True
         self._turn_tool_state = TurnToolExecutionState()
         self._current_turn_id: str | None = None
+        self._repo_root: str | None = None
 
     def run(self) -> int:
         logger.info("[_ToolWorkerServer] Starting worker server...")
@@ -1492,6 +1615,7 @@ class _ToolWorkerServer:
             payload = WorkerInitPayload.model_validate(env.payload)
             self._ask_agent = _build_worker_ask_agent(payload)
             self._tools_only_strict = bool(payload.tools_only_strict)
+            self._repo_root = str(payload.repo_root or payload.project_root or "") or None
             self._emit(
                 WorkerReply(
                     type="event",
@@ -1609,6 +1733,7 @@ class _ToolWorkerServer:
                 req=req,
                 tools_only_strict_default=self._tools_only_strict,
                 callbacks=[tool_event_cb],
+                repo_root=self._repo_root,
             )
 
             safe_payload = _strip_banned_keys(response.model_dump())

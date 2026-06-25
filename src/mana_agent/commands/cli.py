@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from .cli_internal import *  # noqa: F401,F403
 from .main_cli import main
-from .ask_cli import ask
 from .chat_cli import chat
 from .ui_helpers import *  # noqa: F401,F403
 from .ui_helpers import (
@@ -16,7 +15,6 @@ from .ui_helpers import (
 __all__ = [
     "app",
     "main",
-    "ask",
     "chat",
     "_render_coding_sections",
     "_render_turn_summary",

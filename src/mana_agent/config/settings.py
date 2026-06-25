@@ -67,6 +67,10 @@ def default_logs_dir(target_path: str | Path) -> Path:
     return mana_root_dir(target_path) / "logs"
 
 
+def default_tools_logs_dir(target_path: str | Path) -> Path:
+    return mana_root_dir(target_path) / "tools_logs"
+
+
 def default_llm_logs_dir(target_path: str | Path) -> Path:
     return mana_root_dir(target_path) / "llm_logs"
 

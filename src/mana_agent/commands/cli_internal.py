@@ -187,6 +187,15 @@ def continue_command(
         project_root=root,
         repo_root=root,
     )
+    # Resume must reconnect flow memory: without it the continuation loses the
+    # flow read-cache and stops recording turns/todos, so resumed passes re-read
+    # files the original run already cached. Keyed on project root + flow_id, the
+    # disk-backed store transparently reattaches to the same flow.
+    coding_memory_service = CodingMemoryService(
+        project_root=root,
+        max_turns=settings.coding_flow_max_turns,
+        max_tasks=settings.coding_flow_max_tasks,
+    )
     orchestrator = tools_manager_orchestrator_cls(
         api_key=settings.openai_api_key,
         model=settings.openai_chat_model,
@@ -194,6 +203,7 @@ def continue_command(
         worker_client=worker,
         repo_root=root,
         executor=LocalToolsExecutor(worker_client=worker),
+        coding_memory_service=coding_memory_service,
     )
     try:
         result = None
@@ -411,8 +421,10 @@ def setup_logging(verbose: bool = False, log_dir: Path | None = None) -> Path | 
 
     effective_log_dir = log_dir or default_logs_dir(Path.cwd())
     effective_log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = effective_log_dir / f"mana_agent_{timestamp}.log"
+    # Use a per-day tag (not per-second) so every run appends to the same
+    # daily log file instead of creating a new file each invocation.
+    date_tag = datetime.now().strftime("%Y%m%d")
+    log_file = effective_log_dir / f"mana_agent_{date_tag}.log"
 
     logging.basicConfig(
         level=log_level,

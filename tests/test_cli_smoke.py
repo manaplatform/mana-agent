@@ -217,8 +217,9 @@ def test_root_help_exposes_commands_and_no_legacy_branding() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("chat", "ask"):
-        assert command in result.output
+    assert "chat" in result.output
+    # ask and analyze CLI commands were retired; only chat/continue remain.
+    assert "ask" not in result.output
     assert "analyze" not in result.output
     assert "mana-agent" in result.output
     assert "mana-analyzer" not in result.output
@@ -375,107 +376,11 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("mana_agent.commands.cli.discover_subprojects", lambda root: [])
     monkeypatch.setattr("mana_agent.commands.cli.discover_index_dirs", lambda root: [Path(root) / ".mana/index"])
 
-    idx = tmp_path / "idx"
-
-    result_ask = runner.invoke(app, ["ask", "what", "--index-dir", str(idx), "--json"])
-    assert result_ask.exit_code == 0
-    assert "answer" in result_ask.stdout
-
-    result_ask_agent = runner.invoke(
-        app,
-        ["ask", "what", "--index-dir", str(idx), "--agent-tools", "--agent-max-steps", "3", "--json"],
-    )
-    assert result_ask_agent.exit_code == 0
-    assert "Tool answer" in result_ask_agent.stdout
-
-    for retired in ("analyze", "index", "search", "deps", "graph", "describe", "report", "flow"):
+    # ask and analyze were retired as CLI commands (their main services remain).
+    # Only chat/continue are exposed now; every legacy subcommand must error out.
+    for retired in ("ask", "analyze", "index", "search", "deps", "graph", "describe", "report", "flow"):
         result_retired = runner.invoke(app, [retired, str(tmp_path)])
         assert result_retired.exit_code != 0
-
-    result_ask_dir_mode = runner.invoke(
-        app,
-        ["ask", "what", "--dir-mode", "--root-dir", str(tmp_path), "--json"],
-    )
-    assert result_ask_dir_mode.exit_code == 0
-    assert "Dir tool answer" in result_ask_dir_mode.stdout
-
-    result_ask_dir_mode_tools = runner.invoke(
-        app,
-        ["ask", "what", "--dir-mode", "--root-dir", str(tmp_path), "--agent-tools", "--json"],
-    )
-    assert result_ask_dir_mode_tools.exit_code == 0
-    assert "Dir tool answer" in result_ask_dir_mode_tools.stdout
-
-
-def test_ask_root_dir_applies_project_root_in_classic_mode(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, Path | None] = {"project_root": None}
-
-    def _build_ask_service(_settings, model_override=None, project_root=None):
-        _ = model_override
-        captured["project_root"] = project_root
-        return FakeAskService()
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", _build_ask_service)
-
-    result = runner.invoke(
-        app,
-        ["ask", "what", "--root-dir", str(tmp_path), "--json"],
-    )
-    assert result.exit_code == 0
-    assert captured["project_root"] == tmp_path.resolve()
-
-
-def test_ask_root_dir_changes_default_index_dir_in_classic_mode(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, str] = {"index_dir": ""}
-
-    class _AskService(FakeAskService):
-        def ask_with_tools(
-            self,
-            index_dir: str,
-            question: str,
-            k: int,
-            max_steps: int = 6,
-            timeout_seconds: int = 30,
-        ) -> AskResponse:
-            _ = (question, k, max_steps, timeout_seconds)
-            captured["index_dir"] = str(index_dir)
-            hit = SearchHit(0.9, "/tmp/good.py", 1, 3, "add", "snippet")
-            return AskResponse(answer="Tool answer. /tmp/good.py:1-3", sources=[hit])
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None, project_root=None: _AskService())
-
-    result = runner.invoke(
-        app,
-        ["ask", "what", "--root-dir", str(tmp_path), "--json"],
-    )
-    assert result.exit_code == 0
-    assert captured["index_dir"] == str((tmp_path / ".mana/index").resolve())
-
-
-def test_ask_dir_mode_no_auto_index_missing(monkeypatch, tmp_path: Path) -> None:
-    class _AskServiceNoIndexes(FakeAskService):
-        def ask_dir_mode(self, index_dirs, question: str, k: int, root_dir: str) -> AskResponse:
-            assert index_dirs == []
-            return AskResponse(answer=f"No usable indexes found under {root_dir}", sources=[], warnings=[])
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None: _AskServiceNoIndexes())
-    monkeypatch.setattr("mana_agent.commands.cli.discover_index_dirs", lambda root: [])
-
-    class _Sub:
-        def __init__(self, root_path: Path) -> None:
-            self.root_path = root_path
-
-    monkeypatch.setattr("mana_agent.commands.cli.discover_subprojects", lambda root: [_Sub(Path(root) / "pkg-a")])
-
-    result = runner.invoke(
-        app,
-        ["ask", "what", "--dir-mode", "--root-dir", str(tmp_path), "--no-auto-index-missing", "--json"],
-    )
-    assert result.exit_code == 0
-    assert "No usable indexes found under" in result.stdout
 
 
 def test_build_ask_service_registers_search_internet_tool_without_duplicates(monkeypatch, tmp_path: Path) -> None:

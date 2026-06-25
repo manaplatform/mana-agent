@@ -1643,7 +1643,25 @@ def _read_chat_input(
     multiline_enabled: bool,
     multiline_terminator: str,
 ) -> str:
-    """Read one chat question with optional multiline collection."""
+    """Read one chat question.
+
+    Prefers the prompt_toolkit input box (Enter sends, Shift+Enter / Alt+Enter /
+    Ctrl+J insert a newline) when running in an interactive terminal. Falls back
+    to plain ``input()`` collection (tests, pipes, CI, or when prompt_toolkit is
+    unavailable), preserving the legacy ``/paste`` + terminator behavior.
+    """
+    if multiline_enabled:
+        try:
+            from mana_agent.commands.chat_input import (
+                prompt_toolkit_available,
+                read_chat_input,
+            )
+
+            if prompt_toolkit_available():
+                return read_chat_input()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.debug("prompt_toolkit input unavailable; using plain input", extra={"error": str(exc)})
+
     first_line = input(prompt)
     normalized_first_line = first_line.strip()
     force_multiline = bool(multiline_enabled and normalized_first_line == "/paste")
