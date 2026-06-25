@@ -8,7 +8,6 @@ context, and runs a tool-aware coding agent that can inspect, patch, and verify
 code.
 
 ## Docs
-
 - [Overview](./docs/01-overview.md)
 - [Installation](./docs/02-installation.md)
 - [Quick Start](./docs/03-quick-start.md)
@@ -16,6 +15,7 @@ code.
 - [Configuration](./docs/05-configuration.md)
 - [Workflows](./docs/06-workflows.md)
 - [Project Diagram](./docs/07-diagram.md)
+- [Architecture](./docs/08-architecture.md)\n- [Project Diagram](./docs/07-diagram.md)
 
 ## Project Diagram
 

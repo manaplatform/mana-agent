@@ -568,9 +568,14 @@ def chat(
             repo_root=root,
             execution_config=tools_execution_config,
             executor=tools_executor_instance,
+            coding_memory_service=coding_memory_service,
         )
         if hasattr(coding_agent_instance, "set_tools_manager_orchestrator"):
             coding_agent_instance.set_tools_manager_orchestrator(tools_manager_orchestrator)
+        # Give preview_plan access to the coding agent's LLM planner + memory so
+        # the pre-execution checklist is accurate, not deterministic-only.
+        if hasattr(tools_manager_orchestrator, "attach_decision_provider"):
+            tools_manager_orchestrator.attach_decision_provider(coding_agent_instance)
 
     tmp_root: tempfile.TemporaryDirectory | None = None
     tmp_base: Path | None = None
@@ -931,6 +936,10 @@ def chat(
             )
             if coding_agent_instance is not None and hasattr(coding_agent_instance, "set_tools_manager_orchestrator"):
                 coding_agent_instance.set_tools_manager_orchestrator(tools_manager_orchestrator)
+            # Accurate, memory-backed preview planning: route preview_plan through
+            # the coding agent's LLM planner when one is available.
+            if coding_agent_instance is not None and hasattr(tools_manager_orchestrator, "attach_decision_provider"):
+                tools_manager_orchestrator.attach_decision_provider(coding_agent_instance)
             return tools_manager_orchestrator
 
         def _run_auto_execute_pipeline(
@@ -939,6 +948,9 @@ def chat(
             render_progress: bool = True,
             run_id: str | None = None,
         ) -> tuple[dict[str, Any], str]:
+            # We may adopt the flow id the preview attached to, so this name is
+            # rebound here rather than only read from the enclosing scope.
+            nonlocal active_flow_id
             if not agent_tools or not auto_execute_plan:
                 return {}, ""
             orchestrator = _ensure_tools_manager_orchestrator()
@@ -1020,6 +1032,7 @@ def chat(
                     preview_payload = orchestrator.preview_plan(
                         request=user_question,
                         flow_context=flow_context_text,
+                        flow_id=active_flow_id,
                         pass_cap=auto_execute_max_passes,
                     )
                 except Exception as exc:
@@ -1037,6 +1050,12 @@ def chat(
                     "prechecklist_warning": "",
                     "warnings": [],
                 }
+            # Adopt the flow the preview attached to so the run, its memory turn,
+            # and the todo ledger all share one flow id (preview may have created
+            # the flow when none was active yet).
+            preview_flow_id = preview_payload.get("flow_id")
+            if isinstance(preview_flow_id, str) and preview_flow_id.strip():
+                active_flow_id = preview_flow_id.strip()
             preview_checklist = (
                 preview_payload.get("prechecklist")
                 if isinstance(preview_payload.get("prechecklist"), dict)
@@ -1057,6 +1076,10 @@ def chat(
 
             def _call(callbacks: list[BaseCallbackHandler]):
                 _ = callbacks
+                # Carry the accurate preview decision into execution so the run
+                # and the previewed plan agree on edit intent and target files.
+                preview_requires_edit = preview_payload.get("requires_edit")
+                preview_targets = preview_payload.get("target_files")
                 return orchestrator.run(
                     request=user_question,
                     flow_context=flow_context_text,
@@ -1070,6 +1093,8 @@ def chat(
                     on_event=CodingAgent._log_worker_event,
                     flow_id=active_flow_id,
                     run_id=run_id,
+                    requires_edit=preview_requires_edit if isinstance(preview_requires_edit, bool) else None,
+                    target_files=tuple(preview_targets) if isinstance(preview_targets, list) else (),
                 )
 
             result_obj, debug_tail = _run_with_live_buffer(

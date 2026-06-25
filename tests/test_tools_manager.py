@@ -965,3 +965,67 @@ def test_substantial_wrong_path_content_is_relocated_not_discarded(tmp_path: Pat
     assert result.changed_files == ["docs/01-overview.md"]
 
 
+
+
+def test_preview_plan_deterministic_materializes_todos(tmp_path: Path) -> None:
+    # With no decision provider attached, preview_plan must still produce a
+    # memory-backed checklist and connect it to the todo ledger.
+    (tmp_path / "docs").mkdir()
+    memory = CodingMemoryService(project_root=tmp_path)
+    manager = QueueManager(
+        worker_client=_NoopWorker(),
+        repo_root=tmp_path,
+        coding_memory_service=memory,
+    )
+
+    payload = manager.preview_plan(request="create overview.md in docs")
+
+    assert payload["prechecklist_source"] == "deterministic"
+    assert payload["requires_edit"] is True
+    assert payload["flow_id"]
+    # The plan was synced into the durable todo ledger for the flow.
+    todos = payload["todos"]
+    assert any(t["kind"] == "edit" for t in todos)
+    assert memory.list_plan_steps(payload["flow_id"]) == todos
+
+
+def test_preview_plan_delegates_to_decision_provider(tmp_path: Path) -> None:
+    memory = CodingMemoryService(project_root=tmp_path)
+    manager = QueueManager(
+        worker_client=_NoopWorker(),
+        repo_root=tmp_path,
+        coding_memory_service=memory,
+    )
+
+    class _Provider:
+        def __init__(self) -> None:
+            self.called_with: dict | None = None
+
+        def preview_execution_checklist(self, request, *, flow_id=None, flow_context=None):
+            self.called_with = {"request": request, "flow_id": flow_id}
+            return {
+                "flow_id": "flow-xyz",
+                "prechecklist": {
+                    "objective": request,
+                    "requires_edit": True,
+                    "target_files": ["a.py"],
+                    "steps": [{"id": "edit", "title": "Edit a.py", "requires_tools": ["apply_patch"]}],
+                    "source": "planner",
+                },
+                "prechecklist_source": "planner",
+                "prechecklist_warning": "",
+                "requires_edit": True,
+                "target_files": ["a.py"],
+                "warnings": [],
+            }
+
+    provider = _Provider()
+    manager.attach_decision_provider(provider)
+
+    payload = manager.preview_plan(request="fix the bug", flow_id="flow-xyz")
+
+    assert provider.called_with == {"request": "fix the bug", "flow_id": "flow-xyz"}
+    assert payload["prechecklist_source"] == "planner"
+    # Provider output is still synced into the todo ledger.
+    assert payload["todos"][0]["kind"] == "edit"
+    assert memory.list_plan_steps("flow-xyz")[0]["id"] == "edit"

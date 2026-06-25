@@ -172,6 +172,20 @@ class CodingMemoryService:
                     status TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS coding_flow_plan_steps (
+                    flow_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requires_tools_json TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (flow_id, step_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_coding_flows_status_updated
                   ON coding_flows(status, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_coding_turns_flow_created
@@ -186,6 +200,8 @@ class CodingMemoryService:
                   ON coding_flow_tool_calls(flow_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_coding_flow_verification_flow_created
                   ON coding_flow_verification_results(flow_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_coding_flow_plan_steps_flow_pos
+                  ON coding_flow_plan_steps(flow_id, position ASC);
                 """
             )
             cols = {
@@ -936,6 +952,135 @@ class CodingMemoryService:
                 }
             )
         return list(reversed(result))
+
+    # Monotonic status order: a step may only advance, never regress. This keeps
+    # a step marked ``done`` on a prior turn from being reset to ``pending`` when
+    # the same plan is previewed again in a continuing flow.
+    _PLAN_STEP_RANK = {
+        "pending": 0,
+        "in_progress": 1,
+        "blocked": 2,
+        "done": 3,
+    }
+
+    @classmethod
+    def _max_plan_step_status(cls, current: str, incoming: str) -> str:
+        cur = current if current in cls._PLAN_STEP_RANK else "pending"
+        inc = incoming if incoming in cls._PLAN_STEP_RANK else "pending"
+        # ``blocked`` and ``done`` are both terminal-ish; prefer the higher rank,
+        # but an explicit ``done`` always wins over a stale ``blocked``.
+        return cur if cls._PLAN_STEP_RANK[cur] >= cls._PLAN_STEP_RANK[inc] else inc
+
+    def sync_plan_steps(
+        self,
+        *,
+        flow_id: str,
+        steps: list[dict[str, Any]],
+        source: str = "",
+    ) -> None:
+        """Persist plan steps for a flow as durable todos (idempotent upsert).
+
+        Steps that already exist (matched on ``step_id``) keep the higher of
+        their stored and incoming status so completed work survives re-previews.
+        Steps no longer present in ``steps`` are pruned so the ledger always
+        mirrors the latest plan.
+        """
+        now = _utc_now()
+        incoming_ids = [str(s.get("id") or "").strip() or f"step-{i + 1}" for i, s in enumerate(steps)]
+        with self._connect() as conn:
+            existing = {
+                str(row["step_id"]): str(row["status"])
+                for row in conn.execute(
+                    "SELECT step_id, status FROM coding_flow_plan_steps WHERE flow_id = ?",
+                    (flow_id,),
+                ).fetchall()
+            }
+            for position, (step, step_id) in enumerate(zip(steps, incoming_ids)):
+                title = str(step.get("title") or "").strip() or step_id
+                kind = str(step.get("kind") or "").strip()
+                requires_tools = [
+                    str(t).strip()
+                    for t in (step.get("requires_tools") or step.get("allowed_tools") or [])
+                    if str(t).strip()
+                ]
+                incoming_status = str(step.get("status") or "pending").strip() or "pending"
+                status = self._max_plan_step_status(existing.get(step_id, "pending"), incoming_status)
+                created = now if step_id not in existing else None
+                conn.execute(
+                    """
+                    INSERT INTO coding_flow_plan_steps (
+                        flow_id, step_id, position, title, kind, status,
+                        requires_tools_json, source, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(flow_id, step_id) DO UPDATE SET
+                        position = excluded.position,
+                        title = excluded.title,
+                        kind = excluded.kind,
+                        status = excluded.status,
+                        requires_tools_json = excluded.requires_tools_json,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        flow_id,
+                        step_id,
+                        position,
+                        title,
+                        kind,
+                        status,
+                        json.dumps(requires_tools),
+                        source,
+                        created or now,
+                        now,
+                    ),
+                )
+            if incoming_ids:
+                placeholders = ",".join("?" for _ in incoming_ids)
+                conn.execute(
+                    f"DELETE FROM coding_flow_plan_steps WHERE flow_id = ? AND step_id NOT IN ({placeholders})",
+                    (flow_id, *incoming_ids),
+                )
+            else:
+                conn.execute("DELETE FROM coding_flow_plan_steps WHERE flow_id = ?", (flow_id,))
+
+    def list_plan_steps(self, flow_id: str) -> list[dict[str, Any]]:
+        """Return persisted plan-step todos for a flow, ordered by position."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT step_id, position, title, kind, status, requires_tools_json
+                FROM coding_flow_plan_steps
+                WHERE flow_id = ?
+                ORDER BY position ASC
+                """,
+                (flow_id,),
+            ).fetchall()
+        return [
+            {
+                "id": str(row["step_id"]),
+                "position": int(row["position"]),
+                "title": str(row["title"]),
+                "kind": str(row["kind"]),
+                "status": str(row["status"]),
+                "requires_tools": self._loads_list(str(row["requires_tools_json"])),
+            }
+            for row in rows
+        ]
+
+    def update_plan_step_status(self, *, flow_id: str, step_id: str, status: str) -> None:
+        """Advance a single plan step's status (monotonic; never regresses)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM coding_flow_plan_steps WHERE flow_id = ? AND step_id = ?",
+                (flow_id, step_id),
+            ).fetchone()
+            if row is None:
+                return
+            new_status = self._max_plan_step_status(str(row["status"]), status)
+            conn.execute(
+                "UPDATE coding_flow_plan_steps SET status = ?, updated_at = ? WHERE flow_id = ? AND step_id = ?",
+                (new_status, _utc_now(), flow_id, step_id),
+            )
 
     def is_conflicting_request(self, flow_id: str, request: str) -> bool:
         """Detect likely request divergence from the active objective."""

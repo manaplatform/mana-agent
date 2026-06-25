@@ -37,6 +37,7 @@ from mana_agent.llm.tools_executor import (
     ToolsExecutor,
 )
 from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.services.coding_todo_service import TodoService
 from mana_agent.tools.write_file import safe_create_file, safe_write_file
 
 logger = logging.getLogger(__name__)
@@ -2445,6 +2446,7 @@ class QueueManager:
         execution_config: ToolsExecutionConfig | None = None,
         executor: ToolsExecutor | None = None,
         coding_memory_service: CodingMemoryService | None = None,
+        todo_service: TodoService | None = None,
         decision_provider: Any = None,
     ) -> None:
         _ = (api_key, model, base_url, decision_provider)
@@ -2453,15 +2455,240 @@ class QueueManager:
         self.execution_config = execution_config or ToolsExecutionConfig()
         self.executor = executor
         self.coding_memory_service = coding_memory_service
+        # The todo ledger is backed by the same flow-memory store. When a memory
+        # service is present we always have a ledger, so the prechecklist can be
+        # materialized into durable, status-tracked todos.
+        self.todo_service = todo_service or (
+            TodoService(memory=coding_memory_service) if coding_memory_service is not None else None
+        )
         self._decision_provider = decision_provider
 
     def attach_decision_provider(self, provider: Any) -> None:
-        # The queue manager is deterministic and does not use an LLM planner;
-        # the provider is retained only for API compatibility.
+        # The provider (typically the CodingAgent) supplies the LLM planner used
+        # by ``preview_plan`` for accurate checklists. The execution loop itself
+        # stays deterministic; only pre-execution planning consults the provider.
         self._decision_provider = provider
 
     def update_model(self, new_model: str) -> None:
         logger.info("Ignoring model update; QueueManager is deterministic-only.")
+
+    def preview_plan(
+        self,
+        *,
+        request: str,
+        flow_context: str | None = None,
+        flow_id: str | None = None,
+        target_files: Sequence[str] = (),
+        requires_edit: bool | None = None,
+        pass_cap: int = 4,
+        **_ignored: Any,
+    ) -> dict[str, Any]:
+        """Build a pre-execution checklist and materialize it as durable todos.
+
+        Planning strategy (accuracy first, cost-bounded):
+
+        1. **Delegate to the attached decision provider** (the CodingAgent) when
+           it exposes ``preview_execution_checklist``. That path runs the LLM
+           planner *and* persists flow memory (ensure_flow / build_flow_context /
+           persist_preview_checklist) in one place, giving the most accurate
+           plan. Memory keeps it cheap: prior turns are reused as context and the
+           preview is cached on the flow.
+        2. **Deterministic fallback** when no provider is attached — still
+           memory-backed (the flow is ensured and the checklist persisted), so
+           continuity holds even without an LLM.
+
+        Either way the resulting prechecklist is synced into the todo ledger via
+        :class:`TodoService`, so the plan becomes status-tracked todos tied to
+        the flow rather than throwaway UI text.
+        """
+        _ = pass_cap
+        provider = self._decision_provider
+        if provider is not None and hasattr(provider, "preview_execution_checklist"):
+            try:
+                payload = provider.preview_execution_checklist(
+                    request,
+                    flow_id=flow_id,
+                    flow_context=flow_context,
+                )
+            except Exception as exc:  # pragma: no cover - provider failure -> deterministic
+                logger.warning("decision provider preview failed; using deterministic preview: %s", exc)
+                payload = self._deterministic_preview(
+                    request,
+                    flow_id=flow_id,
+                    flow_context=flow_context,
+                    target_files=target_files,
+                    requires_edit=requires_edit,
+                    warnings=[f"decision provider preview failed: {exc}"],
+                )
+        else:
+            payload = self._deterministic_preview(
+                request,
+                flow_id=flow_id,
+                flow_context=flow_context,
+                target_files=target_files,
+                requires_edit=requires_edit,
+            )
+
+        self._sync_preview_todos(payload)
+        return payload
+
+    def _sync_preview_todos(self, payload: dict[str, Any]) -> None:
+        """Connect the preview's prechecklist to the durable todo ledger."""
+        if self.todo_service is None:
+            return
+        flow_id = str(payload.get("flow_id") or "").strip()
+        prechecklist = payload.get("prechecklist")
+        if not flow_id or not isinstance(prechecklist, dict):
+            return
+        try:
+            payload["todos"] = self.todo_service.sync_from_preview(
+                flow_id=flow_id,
+                prechecklist=prechecklist,
+                source=str(payload.get("prechecklist_source", "") or ""),
+            )
+        except Exception as exc:  # pragma: no cover - ledger is best-effort
+            logger.warning("todo sync from preview failed: %s", exc)
+            payload.setdefault("warnings", [])
+            if isinstance(payload["warnings"], list):
+                payload["warnings"].append(f"todo sync failed: {exc}")
+
+    def _deterministic_preview(
+        self,
+        request: str,
+        *,
+        flow_id: str | None,
+        flow_context: str | None,
+        target_files: Sequence[str] = (),
+        requires_edit: bool | None = None,
+        warnings: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build a memory-backed prechecklist without an LLM.
+
+        Reuses the same deterministic deliverable/mutation analysis the run loop
+        relies on, so the preview and the execution agree on intent. The flow is
+        ensured and the checklist persisted through the memory service so the UI
+        and flow views stay consistent with the LLM-backed path.
+        """
+        warnings = list(warnings or [])
+        active_flow_id = flow_id
+        effective_flow_context = flow_context
+        memory = self.coding_memory_service
+
+        if memory is not None:
+            try:
+                active_flow_id = memory.ensure_flow(flow_id=flow_id, request=request)
+                if effective_flow_context is None:
+                    effective_flow_context = memory.build_flow_context(active_flow_id, [])
+            except Exception as exc:
+                warnings.append(f"coding memory setup failed: {exc}")
+
+        deliverables = _resolve_required_deliverables(request, self.repo_root, tuple(target_files))
+        mutation_required = (
+            bool(requires_edit)
+            if requires_edit is not None
+            else _mutation_required_from_text(request) or bool(deliverables)
+        )
+
+        steps: list[dict[str, str]] = [
+            {"id": "discover", "title": f"Locate files relevant to: {request[:120]}", "status": "pending"},
+            {"id": "read", "title": "Read the candidate files to ground the change", "status": "pending"},
+        ]
+        if mutation_required:
+            targets_label = ", ".join(deliverables) if deliverables else "the target file(s)"
+            steps.append(
+                {
+                    "id": "edit",
+                    "title": f"Apply changes to {targets_label}",
+                    "status": "pending",
+                    "requires_tools": ["apply_patch", "write_file", "create_file"],
+                }
+            )
+            steps.append(
+                {
+                    "id": "verify",
+                    "title": "Verify the change (build/tests/static checks)",
+                    "status": "pending",
+                    "requires_tools": ["verify_project"],
+                }
+            )
+        else:
+            steps.append({"id": "answer", "title": "Compose the grounded answer", "status": "pending"})
+
+        prechecklist = {
+            "objective": request.strip()[:200],
+            "requires_edit": mutation_required,
+            "target_files": list(deliverables),
+            "steps": steps,
+            "source": "deterministic",
+        }
+
+        if memory is not None and active_flow_id:
+            try:
+                memory.persist_preview_checklist(
+                    flow_id=active_flow_id,
+                    user_request=request,
+                    checklist=prechecklist,
+                    source="deterministic",
+                )
+            except Exception as exc:
+                warnings.append(f"coding memory preview persistence failed: {exc}")
+
+        return {
+            "flow_id": active_flow_id,
+            "flow_context": effective_flow_context,
+            "prechecklist": prechecklist,
+            "prechecklist_source": "deterministic",
+            "prechecklist_warning": "",
+            "requires_edit": mutation_required,
+            "target_files": list(deliverables),
+            "warnings": warnings,
+        }
+
+    def _persist_turn_and_todos(
+        self,
+        *,
+        request: str,
+        flow_id: str | None,
+        flow_context: str | None,
+        answer: str,
+        changed_files: list[str],
+        warnings: list[str],
+        mutation_succeeded: bool,
+        verification_passed: bool,
+        run_blocked: bool,
+    ) -> None:
+        """Record the completed turn to flow memory and reconcile todos."""
+        memory = self.coding_memory_service
+        if memory is None:
+            return
+        try:
+            active_flow_id = memory.ensure_flow(flow_id=flow_id, request=request)
+        except Exception as exc:  # pragma: no cover - memory is best-effort
+            logger.warning("ensure_flow after run failed: %s", exc)
+            return
+        try:
+            memory.record_turn(
+                flow_id=active_flow_id,
+                user_request=request,
+                effective_prompt=(flow_context or "")[:4000],
+                agent_answer=answer or "",
+                changed_files=list(changed_files),
+                warnings=list(warnings),
+                static_findings=[],
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("record_turn after run failed: %s", exc)
+        if self.todo_service is not None:
+            try:
+                self.todo_service.reconcile_after_run(
+                    flow_id=active_flow_id,
+                    changed_files=list(changed_files),
+                    mutation_succeeded=mutation_succeeded,
+                    verification_passed=verification_passed,
+                    run_blocked=run_blocked,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("todo reconcile after run failed: %s", exc)
 
     def run(
         self,
@@ -2772,6 +2999,20 @@ class QueueManager:
         verification_passed = bool(
             (not mutation_required or not missing_required_files)
             and (not verification.get("ran") or verification.get("passed"))
+        )
+        # Write-side flow continuity: persist this turn and reconcile the todo
+        # ledger from authoritative results so the next turn (and the UI) reflect
+        # what actually happened. Best-effort: memory failures never fail a run.
+        self._persist_turn_and_todos(
+            request=request,
+            flow_id=flow_id,
+            flow_context=flow_context,
+            answer=final_answer,
+            changed_files=changed_files,
+            warnings=warnings,
+            mutation_succeeded=bool(mutation_state.get("mutation_succeeded")),
+            verification_passed=verification_passed,
+            run_blocked=(run_status == "blocked"),
         )
         return AutoExecuteResult(
             answer=final_answer,
