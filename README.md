@@ -52,10 +52,6 @@ Large codebases are hard to inspect, summarize, and safely modify. `mana-agent` 
 ```mermaid
 flowchart TD
     A[Local repository] --> B[Index source files]
-    B --> C[Analyze structure, checks, dependencies, security]
-    C --> D[Generate .mana/ artifacts]
-    B --> E[Ask]
-    E --> F[Evidence-backed answer]
     B --> G[Chat]
     G --> H[Plan]
     H --> I[Inspect repository]
@@ -63,6 +59,7 @@ flowchart TD
     J --> K[Run verification]
     K --> L[Summarize changes]
 ```
+
 
 For a standalone diagram, see [docs/07-diagram.md](./docs/07-diagram.md).
 
