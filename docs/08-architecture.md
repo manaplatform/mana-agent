@@ -4,7 +4,7 @@
 layers for repository analysis, dependency inspection, code description, and
 LLM-driven agent workflows.
 
-## Overview\n
+## Overview
 ## Major Components
 
 - `src/mana_agent/commands/`: CLI entry points and output rendering.

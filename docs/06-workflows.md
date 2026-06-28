@@ -2,31 +2,7 @@
 
 `mana-agent` supports a few common repository-assistant workflows: initial analysis, targeted questions, interactive chat, and resuming a saved automation run. The command docs describe the available entry points and the outputs they produce. [docs/04-commands.md:1-171](docs/04-commands.md:1-171) [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
 
-## 1. Start with repository analysis
-
-Use `analyze` when you want a structured pass over a codebase:
-
-```bash
-mana-agent analyze /path/to/project
-```
-
-This command resolves the target repository, indexes it, runs dependency and structure analysis, performs static findings, can include semantic search when `--query` is supplied, and writes report artifacts under the project’s `.mana/` directory. [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119) [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
-
-A good first pass is to run `analyze` before asking follow-up questions, because the output provides a broad map of the repository.
-
-## 2. Ask focused questions
-
-After analysis, use `ask` for targeted repository-grounded questions:
-
-```bash
-mana-agent ask "How is configuration loaded?" --root-dir /path/to/project
-```
-
-`ask` supports a direct index, directory-aware mode, ephemeral indexes, agent tool use, and JSON output. When enabled, it can return sources and trace information. [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119) [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
-
-Use this workflow when you need evidence for a specific behavior, file, or data flow.
-
-## 3. Open an interactive chat session
+## 1. Open an interactive chat session
 
 Use `chat` when you want a conversational workspace for repository exploration or coding tasks:
 
@@ -56,7 +32,7 @@ While inside a chat session you can generate analysis artifacts without leaving 
 
 This writes the selected reports under the project `.mana/` directory (for example `.mana/analyze.json`, `.mana/analyze.md`, `.mana/diagram.mmd`) and runs before the message reaches the model, so it is fast and read-only apart from those artifacts. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
 
-## 4. Resume an automated run
+## 2. Resume an automated run
 
 Use `continue` to pick up a persisted auto-execute session:
 
