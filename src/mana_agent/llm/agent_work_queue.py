@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -48,6 +49,7 @@ from mana_agent.llm.goal_profiles import active_goal_profile
 from mana_agent.llm.tool_worker_process import ToolWorkerClient
 from mana_agent.llm.tools_executor import ToolsExecutionConfig, ToolsExecutor
 from mana_agent.llm.tools_manager import (
+    AgentFlowError,
     AutoExecuteResult,
     RunStateStore,
     _cleanup_stray_deliverables,
@@ -71,6 +73,8 @@ from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.coding_todo_service import TodoService
 
 logger = logging.getLogger(__name__)
+
+_MUTATION_TOOLS = {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
 
 WorkKind = Literal["discover", "search", "read", "edit", "verify", "summarize"]
 WorkStatus = Literal[
@@ -619,6 +623,48 @@ class QueueManager:
         )
         self._decision_provider = decision_provider
 
+    def _git_diff_names(self) -> set[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=self.repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return set()
+        if proc.returncode != 0:
+            return set()
+        return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+    def _git_status_names(self) -> set[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=self.repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return set()
+        if proc.returncode != 0:
+            return set()
+        paths: set[str] = set()
+        for line in proc.stdout.splitlines():
+            if not line:
+                continue
+            payload = line[3:] if len(line) > 3 else line
+            if " -> " in payload:
+                payload = payload.split(" -> ", 1)[1]
+            payload = payload.strip()
+            if payload:
+                paths.add(payload)
+        return paths
+
     def attach_decision_provider(self, provider: Any) -> None:
         # The provider (typically the CodingAgent) supplies the LLM planner used
         # by ``preview_plan`` for accurate checklists. The execution loop itself
@@ -883,6 +929,9 @@ class QueueManager:
 
         _ = (index_dirs, max_no_progress_passes, flow_context)
         store = RunStateStore(repo_root=self.repo_root, run_id=run_id)
+        baseline_diff = self._git_diff_names()
+        baseline_status = self._git_status_names()
+        pre_existing_changed_files = sorted(baseline_diff)
         resolved_tool_policy = dict(tool_policy or {})
         default_skill_registry_request = _looks_like_default_skill_registry_request(request)
         if default_skill_registry_request:
@@ -1113,7 +1162,8 @@ class QueueManager:
                 forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
                 forced_retry_changed_files = bool(mutation_state.get("changed_files"))
                 if not forced_retry_mutation_attempted:
-                    warnings.append("forced_mutation_retry_no_mutation_tool_attempted")
+                    logger.warning("Forced mutation retry ran but did not attempt a mutation tool")
+                    raise AgentFlowError("Forced mutation retry ran but did not attempt a mutation tool")
                 elif not forced_retry_changed_files:
                     warnings.append("forced_mutation_retry_no_changed_files")
 
@@ -1173,7 +1223,13 @@ class QueueManager:
         # Relocated/cleaned-up strays no longer exist on disk, so drop them from
         # the reported changed files regardless of what the trace remembers.
         _removed = set(removed_strays)
-        changed_files = [p for p in (mutation_state.get("changed_files") or changed_files) if p not in _removed]
+        current_diff = self._git_diff_names()
+        current_status = self._git_status_names()
+        run_changed_files = sorted((current_diff | current_status).difference(baseline_diff | baseline_status))
+        trace_changed_files = [
+            p for p in (mutation_state.get("changed_files") or changed_files) if p not in _removed
+        ]
+        changed_files = sorted(dict.fromkeys([*trace_changed_files, *run_changed_files]))
         # Final answer is rebuilt from authoritative execution state (trace,
         # changed_files, mutation_state, verification), never from the last
         # natural-language worker answer, so an intermediate "I could not edit"
@@ -1259,6 +1315,7 @@ class QueueManager:
             run_dir=str(store.run_dir),
             run_status=run_status,
             next_action="",
+            pre_existing_changed_files=pre_existing_changed_files,
         )
 
     def resume_run(

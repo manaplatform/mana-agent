@@ -116,6 +116,11 @@ class AutoExecuteResult(BaseModel):
     run_status: str = ""
     resume_command: str = ""
     next_action: str = ""
+    pre_existing_changed_files: list[str] = Field(default_factory=list)
+
+
+class AgentFlowError(RuntimeError):
+    """Raised when an edit-required control-flow invariant is violated."""
 
 
 class TodoLedgerItem(BaseModel):
@@ -1787,6 +1792,13 @@ _CREATE_ARTIFACT_INTENT_RE = re.compile(r"\b(create|write|generate|add(?:\s+file
 _ANALYSIS_ARTIFACT_INTENT_RE = re.compile(r"\b(analy[sz]e|analysis|report|document|summarize)\b", re.IGNORECASE)
 _DETERMINISTIC_ARTIFACT_SUFFIXES = (".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg")
 _README_ATTACH_RE = re.compile(r"\b(?:attach|add|link|include|update)\b.*\breadme(?:\.md)?\b", re.IGNORECASE)
+_IGNORED_TARGET_PATH_PARTS = {
+    ".git",
+    ".mana/index",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
 
 
 def _mutation_required_from_policy(tool_policy: dict[str, Any] | None, requires_edit: bool | None) -> bool:
@@ -1821,7 +1833,109 @@ def _safe_relative_path(repo_root: Path, raw: str) -> str:
         return ""
 
 
+def _is_ignored_target_path(path: str) -> bool:
+    rel = str(path or "").strip().replace("\\", "/").lstrip("./")
+    if not rel:
+        return True
+    if rel.endswith(".egg-info") or ".egg-info/" in rel:
+        return True
+    parts = rel.split("/")
+    if "__pycache__" in parts or "node_modules" in parts or ".git" in parts or ".venv" in parts:
+        return True
+    return rel.startswith(".mana/index/")
+
+
+def _repo_files_for_target_resolution(repo_root: Path) -> list[str]:
+    files: list[str] = []
+    for path in repo_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            continue
+        if _is_ignored_target_path(rel):
+            continue
+        files.append(rel)
+    return sorted(files)
+
+
+def resolve_target_paths(
+    user_request: str,
+    discovered_files: Sequence[str] = (),
+    repo_files: Sequence[str] = (),
+) -> list[str]:
+    """Resolve explicit target filenames without inventing parent directories.
+
+    Bare filenames prefer exact discovered/repo basename matches. A planner
+    target such as ``src/08-architecture.md`` must not override an existing
+    ``docs/08-architecture.md`` when the user only named ``08-architecture.md``.
+    Ambiguous equally-valid basename matches return an empty list so callers can
+    block/ask rather than guessing.
+    """
+    requested: list[str] = []
+    for match in _EXPLICIT_FILE_RE.finditer(str(user_request or "")):
+        raw = match.group("path").strip().replace("\\", "/").lstrip("./")
+        if raw and raw not in requested:
+            requested.append(raw)
+    if not requested:
+        return []
+
+    def _clean_many(values: Sequence[str]) -> list[str]:
+        cleaned: list[str] = []
+        for value in values:
+            rel = str(value or "").strip().replace("\\", "/").lstrip("./")
+            rel = re.sub(r"[,.):;\]]+$", "", rel)
+            if not rel or _is_ignored_target_path(rel):
+                continue
+            if rel not in cleaned:
+                cleaned.append(rel)
+        return cleaned
+
+    discovered = _clean_many(discovered_files)
+    repo = _clean_many(repo_files)
+    resolved: list[str] = []
+    for raw in requested:
+        name = Path(raw).name
+        has_dir = "/" in raw
+
+        if has_dir:
+            discovered_exact = [path for path in discovered if path == raw]
+            repo_exact = [path for path in repo if path == raw]
+            if discovered_exact:
+                chosen = discovered_exact[0]
+            elif repo_exact:
+                chosen = repo_exact[0]
+            else:
+                chosen = raw
+            if chosen not in resolved:
+                resolved.append(chosen)
+            continue
+
+        discovered_matches = [path for path in discovered if Path(path).name == name]
+        if len(discovered_matches) == 1:
+            chosen = discovered_matches[0]
+        elif len(discovered_matches) > 1:
+            return []
+        else:
+            repo_matches = [path for path in repo if Path(path).name == name]
+            if len(repo_matches) == 1:
+                chosen = repo_matches[0]
+            elif len(repo_matches) > 1:
+                return []
+            else:
+                chosen = raw
+        if chosen not in resolved:
+            resolved.append(chosen)
+    return resolved
+
+
 def _resolve_mutation_target_path(task: str, repo_root: Path, target_files: Sequence[str] = ()) -> str:
+    repo_files = _repo_files_for_target_resolution(repo_root)
+    resolved_targets = resolve_target_paths(task, target_files, repo_files)
+    if resolved_targets:
+        return resolved_targets[0]
+
     for item in target_files:
         rel = _safe_relative_path(repo_root, item)
         if rel:
@@ -1888,6 +2002,11 @@ def _resolve_required_deliverables(
     target), this returns the full ordered list of deliverables the request
     demands. The run is held to *all* of them by the verification gate.
     """
+    repo_files = _repo_files_for_target_resolution(repo_root)
+    resolved_targets = resolve_target_paths(request, target_files, repo_files)
+    if resolved_targets:
+        return resolved_targets
+
     explicit: list[str] = []
     for item in target_files:
         rel = _safe_relative_path(repo_root, item)
@@ -2427,4 +2546,6 @@ __all__ = [
     "ToolsManagerRequest",
     "ToolsManagerBatch",
     "AutoExecuteResult",
+    "AgentFlowError",
+    "resolve_target_paths",
 ]

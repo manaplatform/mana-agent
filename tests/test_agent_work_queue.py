@@ -409,6 +409,7 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
 
 def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Path):
     from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.llm.tools_manager import AgentFlowError
 
     class _FakeWorker:
         def __init__(self) -> None:
@@ -425,17 +426,71 @@ def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Pat
             )
 
     worker = _FakeWorker()
-    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
-        request="update docs/overview.md",
-        index_dir=str(tmp_path),
+    with pytest.raises(AgentFlowError, match="Forced mutation retry ran but did not attempt a mutation tool"):
+        QueueManager(worker_client=worker, repo_root=tmp_path).run(
+            request="update docs/overview.md",
+            index_dir=str(tmp_path),
+            requires_edit=True,
+            target_files=["docs/overview.md"],
+        )
+    assert worker.policies[-1]["allowed_tools"] == _AGENTIC_EDIT_TOOLS
+
+
+def test_bare_docs_filename_resolves_existing_docs_file(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs" / "08-architecture.md").write_text("# Architecture\n", encoding="utf-8")
+
+    payload = QueueManager(worker_client=object(), repo_root=tmp_path).preview_plan(
+        request="analyze src architecture and update 08-architecture.md",
         requires_edit=True,
-        target_files=["docs/overview.md"],
+        target_files=["src/08-architecture.md"],
     )
 
-    assert result.run_status == "blocked"
-    assert result.terminal_reason == "mutation_required_but_no_mutation_tool_attempted"
-    assert "forced_mutation_retry_no_mutation_tool_attempted" in result.warnings
-    assert worker.policies[-1]["allowed_tools"] == _AGENTIC_EDIT_TOOLS
+    assert "docs/08-architecture.md" in payload["target_files"]
+    assert "src/08-architecture.md" not in payload["target_files"]
+
+
+def test_edit_intent_forces_mutation_tool_attempt(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "08-architecture.md").write_text("# Old\n", encoding="utf-8")
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.mutation_tools_called: list[str] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            tool = request.tool_name or ""
+            if tool in {"write_file", "edit_file", "multi_edit_file", "apply_patch", "create_file", "delete_file"}:
+                self.mutation_tools_called.append(tool)
+                (tmp_path / "docs" / "08-architecture.md").write_text("# New\n\nUpdated architecture.\n", encoding="utf-8")
+                return ToolRunResponse(
+                    answer="updated",
+                    mode="agent-tools",
+                    trace=[{"tool_name": tool, "status": "ok", "changed_files": ["docs/08-architecture.md"]}],
+                )
+            return ToolRunResponse(
+                answer="found docs/08-architecture.md",
+                mode="agent-tools",
+                trace=[{"tool_name": tool or "repo_search", "status": "ok"}],
+            )
+
+    worker = _FakeWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update docs/08-architecture.md",
+        index_dir=str(tmp_path),
+        requires_edit=None,
+    )
+
+    decision = result.planner_decisions[0]
+    assert decision["mutation_required"] is True
+    assert decision["mutation_tool_attempted"] is True
+    assert decision["mutation_tools_called"]
+    assert worker.mutation_tools_called
 
 
 def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path):
