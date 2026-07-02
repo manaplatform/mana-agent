@@ -49,11 +49,13 @@ def test_coding_prompts_enforce_noop_retry_flow() -> None:
     assert "do not finalize on no-op" in system_text
     assert "if you want me to proceed" in system_text
     assert "no-op" in recog_text
+    assert "edit_file" in recog_text and "multi_edit_file" in recog_text
     assert "apply_patch" in recog_text and "create_file" in recog_text and "write_file" in recog_text and "delete_file" in recog_text
     assert "execute the edit in the same turn" in recog_text
-    assert "json patch" in system_text
-    assert "json patch" in recog_text
-    assert "do not use git/unified diff" in system_text
+    assert "codex patch" in system_text
+    assert "codex patch" in recog_text
+    assert "old_start" not in system_text
+    assert "old_start" not in recog_text
 
 
 def test_coding_language_tooling_prompt_covers_python_node_and_ignores() -> None:

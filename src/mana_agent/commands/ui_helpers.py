@@ -1049,8 +1049,8 @@ def _extract_decisions(
 
     for warning in warnings:
         lowered = warning.lower()
-        if "write_file fallback" in lowered:
-            rows.append({"decision": "Use write_file fallback", "rationale": warning[:220]})
+        if "write_file fallback" in lowered or "mutation_failed_no_changes" in lowered:
+            rows.append({"decision": "Stop after failed mutation", "rationale": warning[:220]})
         elif "patch-only loop" in lowered or "patch-style retry" in lowered:
             rows.append({"decision": "Stop patch-only retries", "rationale": warning[:220]})
 

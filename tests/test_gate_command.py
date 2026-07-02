@@ -65,7 +65,7 @@ def test_B_apply_changes_blocks_read_file(tmp_path: Path) -> None:
     store = _store(tmp_path, "preflight-B")
     command = store.build_gate_command("apply_changes", goal="update docs/models.md")
 
-    assert set(command.allowed_tools) == {"apply_patch", "write_file", "create_file", "delete_file"}
+    assert set(command.allowed_tools) == {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
 
     decision = store.preflight_tool(command, tool_name="read_file")
 

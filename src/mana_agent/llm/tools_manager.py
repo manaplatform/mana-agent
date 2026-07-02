@@ -74,7 +74,6 @@ class ToolsManagerRequest(BaseModel):
     tool_name: str = ""
     tool_args: dict[str, Any] = Field(default_factory=dict)
     mutating: bool = False
-    strategy_hint: str = ""
 
 
 class ToolsManagerBatch(BaseModel):
@@ -167,7 +166,7 @@ class RunStateStore:
         "verify_changes",
         "final_report",
     ]
-    mutation_tools = {"apply_patch", "write_file", "create_file", "delete_file"}
+    mutation_tools = {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
     verification_tools = {"run_command", "verify_project"}
     # Internal placeholder recorded when a worker request does not resolve to a
     # concrete enumerated tool (the agentic ask path). It is never a real tool.
@@ -825,7 +824,7 @@ class RunStateStore:
             if row.get("status") != "ok":
                 continue
             tool = str(row.get("tool_name", "") or "").strip().lower()
-            if tool in {"apply_patch", "write_file", "create_file", "delete_file"} and any(
+            if tool in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"} and any(
                 str(path).strip()
                 for path in (row.get("files_changed") if isinstance(row.get("files_changed"), list) else [])
             ):
@@ -1175,7 +1174,7 @@ class RunStateStore:
         successful_patches = 0
         for row in self.read_jsonl("tool_calls.jsonl"):
             tool = str(row.get("tool_name", "") or "").strip().lower()
-            if row.get("status") == "ok" and tool in {"apply_patch", "write_file", "create_file", "delete_file"}:
+            if row.get("status") == "ok" and tool in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}:
                 successful_patches += 1
             if row.get("status") == "ok" and tool in {"run_command", "verify_project"}:
                 verification_commands += 1
@@ -1251,7 +1250,7 @@ class RunStateStore:
             "applied_patches": [
                 row
                 for row in self.read_jsonl("tool_calls.jsonl")
-                if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"apply_patch", "write_file", "create_file", "delete_file"}
+                if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
                 and any(str(path).strip() for path in (row.get("files_changed") if isinstance(row.get("files_changed"), list) else []))
             ],
             "verification_commands": [
@@ -1351,8 +1350,8 @@ class RunStateStore:
                     "title": "Update docs/models.md",
                     "kind": "edit",
                     "target_files": ["docs/models.md"],
-                    "allowed_tools": ["apply_patch", "write_file", "create_file", "delete_file"],
-                    "required_tool": "apply_patch|write_file|create_file|delete_file",
+                    "allowed_tools": ["edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"],
+                    "required_tool": "edit_file|multi_edit_file|apply_patch|write_file|create_file|delete_file",
                     "dependencies": ["plan_docs_models_update"],
                     "done_condition": "docs/models.md is modified by a mutation tool",
                 },
@@ -1390,8 +1389,8 @@ class RunStateStore:
             },
             "apply_changes": {
                 "kind": "edit",
-                "allowed_tools": ["apply_patch", "write_file", "create_file", "delete_file"],
-                "required_tool": "apply_patch|write_file|create_file|delete_file",
+                "allowed_tools": ["edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"],
+                "required_tool": "edit_file|multi_edit_file|apply_patch|write_file|create_file|delete_file",
                 "done_condition": "target file is modified by a mutation tool",
             },
             "verify_changes": {
@@ -1710,7 +1709,7 @@ class RunStateStore:
         self.write_json("work_ledger.json", ledger)
 
 
-_MUTATION_TOOLS = {"apply_patch", "write_file", "create_file", "delete_file"}
+_MUTATION_TOOLS = {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
 _NON_PROGRESS_STATUSES = {
     "blocked",
     "skipped",
@@ -1769,7 +1768,7 @@ _CREATE_FILE_IN_DIR_RE = re.compile(
     re.IGNORECASE,
 )
 _MUTATION_FALLBACK_ALLOWED_TOOLS = frozenset(
-    {"apply_patch", "write_file", "create_file", "delete_file", "git_status", "git_diff", "verify_project"}
+    {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file", "git_status", "git_diff", "verify_project"}
 )
 _MUTATION_FALLBACK_BLOCKED_TOOLS = frozenset(
     {
@@ -2008,7 +2007,7 @@ def _forced_mutation_prompt(request: str, target_file: str) -> str:
         "(e.g. an overview summarizes the project; an installation guide gives the "
         "real setup and install commands; usage/commands document the actual CLI).",
         "3. Finish by writing real, project-specific content with exactly one "
-        "mutation tool (create_file, write_file, apply_patch, or delete_file).",
+        "mutation tool (edit_file, multi_edit_file, apply_patch, create_file, write_file, or delete_file).",
         "",
         "Hard requirements:",
         "- Ground every claim in what you actually found in the repository.",
@@ -2093,7 +2092,13 @@ def _salvage_misplaced_deliverables(
             if _looks_like_stub(content):
                 continue  # not worth keeping; deterministic generation will replace it
             if target_abs.exists():
-                result = safe_write_file(repo_root=repo_root, path=deliverable, content=content, allowed_prefixes=None)
+                result = safe_write_file(
+                    repo_root=repo_root,
+                    path=deliverable,
+                    content=content,
+                    allowed_prefixes=None,
+                    force=True,
+                )
             else:
                 result = safe_create_file(repo_root=repo_root, path=deliverable, content=content, allowed_prefixes=None)
             if not bool(result.get("ok")):
@@ -2373,7 +2378,7 @@ def _compose_final_answer(
         lines = ["The edit could not be completed."]
         if reason == "mutation_required_but_no_mutation_tool_attempted":
             lines.append(
-                "No edit tool (apply_patch/write_file/create_file/delete_file) was executed, so no changes were made."
+                "No edit tool (edit_file/multi_edit_file/apply_patch/write_file/create_file/delete_file) was executed, so no changes were made."
             )
         elif reason == "mutation_required_but_no_changed_files":
             lines.append(

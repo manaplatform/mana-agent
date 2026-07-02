@@ -762,7 +762,7 @@ def test_is_apply_patch_failure_treats_ok_true_payload_with_error_details_as_suc
     assert AskAgent._is_apply_patch_failure(payload) is False
 
 
-def test_ask_agent_keeps_looping_after_apply_patch_failures_for_write_file_fallback(tmp_path: Path) -> None:
+def test_ask_agent_stops_progress_after_apply_patch_failures_without_write_retry(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.tools = [
         StructuredTool.from_function(
@@ -789,5 +789,5 @@ def test_ask_agent_keeps_looping_after_apply_patch_failures_for_write_file_fallb
     )
 
     result = agent.run("Implement change", tmp_path / ".mana/index", 2, max_steps=6, timeout_seconds=2)
-    assert result.answer == "Done"
-    assert any("apply_patch disabled after repeated failures" in str(w) for w in result.warnings)
+    assert "Tool loop stopped after no-progress detection" in "\n".join(result.warnings)
+    assert not any(trace.tool_name == "write_file" for trace in result.trace)

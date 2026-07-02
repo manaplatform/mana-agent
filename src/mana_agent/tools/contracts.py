@@ -99,24 +99,81 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="apply_patch",
-            description="Apply a JSON or unified diff patch inside the repository.",
+            description="Apply a Codex-style text patch inside the repository.",
             input_schema=_schema(
                 {
                     "patch": {"type": "string"},
                     "check_only": {"type": "boolean"},
-                    "strategy_hint": {"enum": ["auto", "py", "perl"]},
-                    "strict_strategy": {"type": "boolean"},
                 },
                 ["patch"],
             ),
-            output_schema=_schema({"ok": {"type": "boolean"}, "touched_files": {"type": "array"}}),
+            output_schema=_schema({"ok": {"type": "boolean"}, "touched_files": {"type": "array"}, "changed_ranges": {"type": "array"}}),
             error_format=common_error,
             safety_rules=[
                 "Reject unread existing target files when read tracking is supplied.",
-                "Reject traversal, absolute paths, paths outside root, binary files, and file deletes.",
+                "Reject traversal, absolute paths, paths outside root, and stale contexts.",
+                "Match update hunks by surrounding text, never by generated line numbers.",
                 "Store patch preview and result under .mana/logs/ before returning.",
             ],
-            examples=[{"input": {"patch": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"}}],
+            examples=[{"input": {"patch": "*** Begin Patch\n*** Update File: a.py\n@@\n-old\n+new\n*** End Patch"}}],
+        ),
+        ToolContract(
+            name="edit_file",
+            description="Replace one exact old_string in a repository file.",
+            input_schema=_schema(
+                {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
+                },
+                ["path", "old_string", "new_string"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "path": {"type": "string"},
+                    "files_changed": {"type": "array"},
+                    "before_sha256": {"type": "string"},
+                    "after_sha256": {"type": "string"},
+                    "changed_ranges": {"type": "array"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Re-read the file immediately before editing.",
+                "Search old_string exactly; fail on missing or ambiguous matches.",
+                "Never use line numbers as the source of truth.",
+            ],
+            examples=[{"input": {"path": "a.py", "old_string": "old", "new_string": "new", "replace_all": False}}],
+        ),
+        ToolContract(
+            name="multi_edit_file",
+            description="Apply several exact-string replacements to one file atomically.",
+            input_schema=_schema(
+                {
+                    "path": {"type": "string"},
+                    "edits": {"type": "array"},
+                },
+                ["path", "edits"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "path": {"type": "string"},
+                    "files_changed": {"type": "array"},
+                    "before_sha256": {"type": "string"},
+                    "after_sha256": {"type": "string"},
+                    "changed_ranges": {"type": "array"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Re-read the file once before editing.",
+                "Apply edits sequentially in memory and abort without writing on the first failed edit.",
+                "Write once at the end.",
+            ],
+            examples=[{"input": {"path": "a.py", "edits": [{"old_string": "old", "new_string": "new"}]}}],
         ),
         ToolContract(
             name="create_file",
@@ -146,6 +203,39 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "Create parent directories as needed and write atomically.",
             ],
             examples=[{"input": {"path": "docs/new-note.md", "content": "# New note\n"}}],
+        ),
+        ToolContract(
+            name="write_file",
+            description="Write full file content, guarded against accidental overwrites of existing files.",
+            input_schema=_schema(
+                {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "text": {"type": "string"},
+                    "body": {"type": "string"},
+                    "expected_sha256": {"type": "string"},
+                    "force": {"type": "boolean"},
+                },
+                ["path", "content"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "path": {"type": "string"},
+                    "bytes_written": {"type": "integer"},
+                    "sha256": {"type": "string"},
+                    "files_changed": {"type": "array"},
+                    "error": {"type": "string"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Reject traversal, absolute paths, paths outside root, and disallowed prefixes.",
+                "Reject overwriting existing files unless expected_sha256 matches the current content or force=true is supplied.",
+                "Use edit_file, multi_edit_file, or apply_patch before whole-file rewrites.",
+                "Write atomically.",
+            ],
+            examples=[{"input": {"path": "docs/note.md", "content": "# Note\n", "expected_sha256": "<sha256-from-read>"}}],
         ),
         ToolContract(
             name="delete_file",

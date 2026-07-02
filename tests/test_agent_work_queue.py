@@ -28,6 +28,8 @@ _AGENTIC_EDIT_TOOLS = [
     "list_files",
     "ls",
     "find_symbols",
+    "edit_file",
+    "multi_edit_file",
     "apply_patch",
     "write_file",
     "create_file",
@@ -451,7 +453,7 @@ def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path)
     assert "imports, exports" in edit["title"]
     assert "registries" in edit["title"]
     assert "call sites" in edit["title"]
-    assert edit["requires_tools"] == ["apply_patch", "write_file", "create_file", "delete_file"]
+    assert edit["requires_tools"] == ["edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"]
     assert edit["checks"] == [
         "target file changed/created/deleted",
         "related imports/usages updated",

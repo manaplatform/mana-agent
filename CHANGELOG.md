@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-02 (mutation tool reliability)
+
+- Added exact-string `edit_file` and atomic sequential `multi_edit_file` mutation tools, registered them across coding-agent, worker, policies, prompts, contracts, and tests, and made them the preferred edit path before patching or whole-file writes.
+- Replaced the fragile line-number JSON patch contract with Codex-style text patches using `*** Begin Patch` file blocks, contextual hunks, and strict path/context validation; removed automatic duplicate mutation retry after patch failures.
+- Guarded `write_file` overwrites with `expected_sha256` or `force=true`, registered the Laravel default skill, and added regression coverage for line-number-free registry updates.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_edit_file_tools.py tests/test_apply_patch_json_only.py tests/test_tool_input_aliases.py tests/test_write_file_chunking.py tests/test_coding_tool_system.py tests/test_prompts_contract.py tests/test_tool_policy.py tests/test_auto_chat.py tests/test_gate_command.py tests/test_cli_modes_skills.py tests/test_coding_memory_service.py -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_work_queue.py tests/test_tools_manager.py -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_ask_agent.py tests/test_coding_agent.py tests/test_tool_worker_process.py -q` passed; `PYTHONPATH=src .venv/bin/python -m compileall src`, `PYTHONPATH=src .venv/bin/mana-agent skills list --repo .`, and `git diff --check` passed.
+
 ## 2026-07-02 (chat edit orchestration and default skills)
 
 - Added built-in `fastapi`, `nestjs`, `nextjs`, and `reactjs` skills, registered their keyword detection, and added a deterministic default-skill registry text builder for simple marker-based registry edits.

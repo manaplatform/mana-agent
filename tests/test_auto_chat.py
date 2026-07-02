@@ -40,9 +40,13 @@ def test_auto_chat_mutation_guard_blocks_non_edit_modes() -> None:
         AutoChatMode.ANALYZE,
     ):
         assert mode_allows_mutation(mode) is False
+        assert tool_allowed_for_mode("edit_file", mode) is False
+        assert tool_allowed_for_mode("multi_edit_file", mode) is False
         assert tool_allowed_for_mode("apply_patch", mode) is False
 
     assert mode_allows_mutation(AutoChatMode.EDIT) is True
+    assert tool_allowed_for_mode("edit_file", AutoChatMode.EDIT) is True
+    assert tool_allowed_for_mode("multi_edit_file", AutoChatMode.EDIT) is True
     assert tool_allowed_for_mode("apply_patch", AutoChatMode.EDIT) is True
 
 
@@ -79,7 +83,7 @@ def test_auto_chat_edit_policy_keeps_mutation_tools_but_still_bounded() -> None:
     )
 
     assert "apply_patch" in policy["allowed_tools"]
-    assert {"apply_patch", "create_file", "write_file", "delete_file"} <= set(policy["allowed_tools"])
+    assert {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"} <= set(policy["allowed_tools"])
     assert policy["mutation_allowed"] is True
     assert policy["search_budget"] == AUTO_MAX_SEARCH_QUERIES
     assert policy["read_budget"] == AUTO_MAX_FILES_TO_READ

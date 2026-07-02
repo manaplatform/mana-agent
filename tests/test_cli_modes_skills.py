@@ -63,7 +63,7 @@ def test_new_framework_built_in_skills_are_registered(tmp_path: Path) -> None:
     manager = SkillManager(project_root=tmp_path)
 
     listed = manager.list_by_source()["Built-in Skills"]
-    for name in ("nestjs", "nextjs", "reactjs", "fastapi"):
+    for name in ("nestjs", "nextjs", "reactjs", "fastapi", "laravel"):
         assert name in listed
         skill = manager.get(name)
         assert skill is not None

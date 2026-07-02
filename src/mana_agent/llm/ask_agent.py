@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 _FORCED_WRITE_INSTRUCTION = (
     "You have gathered enough evidence from the repository. Do NOT read, search, "
     "or list anything else. Right now, in this step, call exactly one mutation "
-    "tool (create_file, write_file, apply_patch, or delete_file) to apply the required "
+    "tool (edit_file, multi_edit_file, apply_patch, write_file, create_file, or delete_file) to apply the required "
     "project-level change with its full, final, project-specific content. Update "
     "all required imports, exports, registries, routers, commands, call sites, tests, "
     "and docs, and remove stale references. Do not answer in prose and do not emit "
@@ -569,7 +569,7 @@ class AskAgent:
         unique_read_files: set[str],
     ) -> list[str]:
         targets: list[str] = []
-        if name in {"write_file", "create_file", "delete_file"}:
+        if name in {"edit_file", "multi_edit_file", "write_file", "create_file", "delete_file"}:
             raw_path = str(args.get("path", "")).strip()
             if raw_path:
                 try:
@@ -605,7 +605,7 @@ class AskAgent:
         when the payload omits a list. Returns ``[]`` for non-mutation tools or
         when the call did not succeed.
         """
-        if name not in {"apply_patch", "create_file", "write_file", "delete_file"}:
+        if name not in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"}:
             return []
         if name == "apply_patch":
             if self._is_apply_patch_failure(content):
@@ -1426,7 +1426,7 @@ class AskAgent:
         mutation_required = bool(policy.get("mutation_required") or policy.get("mutation_strict"))
         mutation_tool_names = [
             name
-            for name in ("apply_patch", "write_file", "create_file", "delete_file")
+            for name in ("edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file")
             if name in tool_map and (not allowed_tools or name in allowed_tools)
         ]
         bound_mutation = None
@@ -1449,8 +1449,6 @@ class AskAgent:
         ]
 
         cfg: dict[str, Any] = {"callbacks": list(callbacks) if callbacks else []}
-        apply_patch_failures = 0
-        forced_patch_fallback = False
         seen_tool_args: dict[tuple[str, str], int] = defaultdict(int)
         tool_counts: dict[str, int] = defaultdict(int)
         unique_read_files: set[str] = set()
@@ -1615,19 +1613,8 @@ class AskAgent:
                         {
                             "error": (
                                 f"duplicate tool call blocked: {name}. "
-                                "Use a different step (read_file/apply_patch/create_file/write_file) instead of repeating."
+                                "Use a different step (read_file/edit_file/multi_edit_file/apply_patch/write_file/create_file) instead of repeating."
                             )
-                        }
-                    )
-                    persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                elif forced_patch_fallback and name == "apply_patch":
-                    content = json.dumps(
-                        {
-                            "ok": False,
-                            "error": (
-                                "apply_patch disabled after repeated failures/no-op in this run; "
-                                "switch to write_file fallback."
-                            ),
                         }
                     )
                     persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
@@ -1699,7 +1686,7 @@ class AskAgent:
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
                             messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
                             continue
-                    if name in {"apply_patch", "create_file", "write_file", "delete_file"} and require_read_files > 0:
+                    if name in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"} and require_read_files > 0:
                         if len(unique_read_files) < require_read_files:
                             content = json.dumps(
                                 {
@@ -1711,7 +1698,7 @@ class AskAgent:
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
                             messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
                             continue
-                    if name in {"apply_patch", "create_file", "write_file", "delete_file"}:
+                    if name in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"}:
                         unread_targets = self._mutation_unread_targets(
                             name=name,
                             args=args if isinstance(args, dict) else {},
@@ -1773,11 +1760,10 @@ class AskAgent:
                     # evidence resets the stagnation counter; an executed result
                     # that repeats earlier evidence increments it. Errors also
                     # count as no-progress (even when the error *text* changes),
-                    # except for tools that already have dedicated failure guards
-                    # (apply_patch -> write_file fallback, read_file -> repeated-
-                    # failure limit), which would otherwise be cut off early.
+                    # except for read_file, which has a dedicated repeated-failure
+                    # limit and would otherwise be cut off early.
                     if self._tool_error_detail(content):
-                        if name not in {"apply_patch", "read_file"}:
+                        if name != "read_file":
                             stagnant_steps += 1
                     else:
                         fingerprint = self._evidence_fingerprint(content)
@@ -1794,17 +1780,6 @@ class AskAgent:
                 if is_duplicate_call:
                     stagnant_steps += 1
 
-                if name == "apply_patch":
-                    if self._is_apply_patch_failure(content):
-                        apply_patch_failures += 1
-                        if apply_patch_failures >= 2:
-                            forced_patch_fallback = True
-                            warning = (
-                                "apply_patch disabled after repeated failures in this run; "
-                                "switching to write_file fallback."
-                            )
-                            if warning not in warnings:
-                                warnings.append(warning)
                 tool_counts[name] += 1
                 if name == "read_file":
                     payload = self._coerce_tool_payload(content)
@@ -1824,7 +1799,7 @@ class AskAgent:
                                 unique_read_files.add(file_path)
                         if not bool(payload.get("cache_hit", False)) and not read_failed:
                             disk_read_count += 1
-                if name in {"apply_patch", "create_file", "write_file", "delete_file"}:
+                if name in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"}:
                     changed_paths = self._mutation_changed_files(
                         name=name,
                         args=args if isinstance(args, dict) else {},
@@ -1846,9 +1821,7 @@ class AskAgent:
         # Final-answer fallback: never surface the raw step-limit string. Always
         # synthesize a best-effort answer from the collected evidence/trace.
         if not final_answer:
-            reason = force_synthesis_reason or (
-                "apply_patch_fallback_incomplete" if forced_patch_fallback else "max_steps_reached"
-            )
+            reason = force_synthesis_reason or "max_steps_reached"
             final_answer = self._synthesize_final_answer(
                 user_query=question,
                 observations=observations,
@@ -1862,10 +1835,6 @@ class AskAgent:
                 "no_progress": "Tool loop stopped after no-progress detection; returned best-effort final answer.",
                 "remaining_tool_budget_low": (
                     "Tool loop stopped due to low remaining tool budget; returned best-effort final answer."
-                ),
-                "apply_patch_fallback_incomplete": (
-                    "apply_patch was disabled after repeated failures; "
-                    "returned best-effort final answer before the write_file fallback completed."
                 ),
             }
             warnings.append(reason_messages.get(reason, f"Tool loop stopped ({reason}); returned best-effort final answer."))

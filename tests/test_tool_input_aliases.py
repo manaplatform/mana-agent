@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from mana_agent.tools.apply_patch import build_apply_patch_tool
@@ -36,10 +35,7 @@ def test_apply_patch_tool_accepts_patch_alias(monkeypatch, tmp_path: Path) -> No
 
 def test_apply_patch_tool_accepts_nested_patch_payload(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
-    patch_text = (
-        '[{"path":"sample.py","hunks":[{"old_start":1,'
-        '"old_lines":["old"],"new_lines":["new"]}]}]'
-    )
+    patch_text = "*** Begin Patch\n*** Update File: sample.py\n@@\n-old\n+new\n*** End Patch\n"
 
     def _fake_safe_apply_patch(
         *,
@@ -61,41 +57,17 @@ def test_apply_patch_tool_accepts_nested_patch_payload(monkeypatch, tmp_path: Pa
     assert captured["patch"] == patch_text
 
 
-def test_apply_patch_tool_accepts_structured_patch_list(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-    patch_payload = [
-        {
-            "path": "sample.py",
-            "hunks": [{"old_start": 1, "old_lines": ["old"], "new_lines": ["new"]}],
-        }
-    ]
-
-    def _fake_safe_apply_patch(
-        *,
-        repo_root: Path,
-        patch: str,
-        allowed_prefixes,
-        check_only: bool,
-        **_kwargs: object,
-    ) -> dict:
-        captured["patch"] = patch
-        return {"ok": True, "touched_files": ["sample.py"], "check_only": check_only}
-
-    monkeypatch.setattr("mana_agent.tools.apply_patch.safe_apply_patch", _fake_safe_apply_patch)
-
+def test_apply_patch_tool_rejects_structured_patch_list(tmp_path: Path) -> None:
     tool = build_apply_patch_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"patch": patch_payload})
+    result = tool.invoke({"patch": [{"path": "sample.py", "hunks": []}]})
 
-    assert result["ok"] is True
-    assert json.loads(str(captured["patch"])) == patch_payload
+    assert result["ok"] is False
+    assert result["error_code"] == "invalid_patch_format"
 
 
 def test_apply_patch_tool_accepts_input_alias(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
-    patch_text = (
-        '[{"path":"sample.py","hunks":[{"old_start":1,'
-        '"old_lines":["old"],"new_lines":["new"]}]}]'
-    )
+    patch_text = "*** Begin Patch\n*** Update File: sample.py\n@@\n-old\n+new\n*** End Patch\n"
 
     def _fake_safe_apply_patch(
         *,
@@ -126,7 +98,10 @@ def test_write_file_tool_accepts_text_alias(monkeypatch, tmp_path: Path) -> None
         path: str,
         content: str,
         allowed_prefixes,
+        expected_sha256=None,
+        force: bool = False,
     ) -> dict:
+        _ = (expected_sha256, force)
         captured["repo_root"] = repo_root
         captured["path"] = path
         captured["content"] = content

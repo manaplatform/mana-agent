@@ -16,6 +16,7 @@ DEFAULT_SKILL_NAMES = (
     "nestjs",
     "nextjs",
     "reactjs",
+    "laravel",
     "telegram-bot",
     "celery",
     "testing",
@@ -33,6 +34,7 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
     "nestjs": ("nestjs", "@nestjs", "controller", "provider", "module", "dependency injection"),
     "nextjs": ("next", "nextjs", "next.js", "ssr", "app router", "routing", "server components"),
     "reactjs": ("react", "reactjs", "jsx", "tsx", "component", "hooks"),
+    "laravel": ("laravel", "php", "artisan", "eloquent", "blade", "middleware", "controller"),
     "telegram-bot": ("telegram", "bot", "handler", "inline button", "message"),
     "celery": ("celery", "background job", "queue", "task", "scheduled"),
     "testing": ("test", "pytest", "verify", "verification"),
@@ -45,6 +47,7 @@ DEFAULT_SKILL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "nestjs": ("nestjs", "@nestjs", "controller", "provider", "module", "dependency injection"),
     "nextjs": ("next", "nextjs", "next.js", "ssr", "app router", "routing", "server components"),
     "reactjs": ("react", "reactjs", "jsx", "tsx", "component", "hooks"),
+    "laravel": ("laravel", "php", "artisan", "eloquent", "blade", "middleware", "controller"),
 }
 
 

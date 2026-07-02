@@ -39,14 +39,14 @@ def test_extract_helpers_cover_constraints_acceptance_tasks_and_decisions() -> N
     decisions = CodingMemoryService._extract_decisions(
         answer,
         warnings=[
-            "write_file fallback engaged after patch mismatch",
+            "mutation_failed_no_changes after patch mismatch",
             "patch-only loop detected; stopping retries",
-            "write_file fallback engaged after patch mismatch",
+            "mutation_failed_no_changes after patch mismatch",
         ],
     )
     decision_titles = [item["decision"] for item in decisions]
     assert "Keep SQLite schema unchanged" in decision_titles
-    assert decision_titles.count("Use write_file fallback") == 1
+    assert decision_titles.count("Stop after failed mutation") == 1
     assert "Stop patch-only retries" in decision_titles
 
 
@@ -70,7 +70,7 @@ def test_record_turn_and_build_flow_context_capture_expected_summary(memory_serv
             "- [ ] Add memory service regression tests\n"
         ),
         changed_files=["src/mana_agent/services/coding_memory_service.py"],
-        warnings=["write_file fallback used after patch mismatch"],
+        warnings=["mutation_failed_no_changes after patch mismatch"],
         static_findings=[{"rule": "missing-docstring", "path": "src/mana_agent/services/index_service.py"}],
         checklist={
             "objective": "Flow persistence hardening",
@@ -99,7 +99,7 @@ def test_record_turn_and_build_flow_context_capture_expected_summary(memory_serv
 
     decision_titles = [item["decision"] for item in summary.recent_decisions]
     assert "Use warning-based patch fallback tracking" in decision_titles
-    assert "Use write_file fallback" in decision_titles
+    assert "Stop after failed mutation" in decision_titles
 
     context = memory_service.build_flow_context(flow_id, repo_delta_paths=["README.md"])
     assert f"Flow ID: {flow_id}" in context

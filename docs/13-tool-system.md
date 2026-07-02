@@ -22,7 +22,8 @@ patching, file writing, and verification steps.
 - Search tools: semantic search and text search.
 - Inspection tools: file listing, file reads, chunked reads, symbol lookup, and
   call graph inspection.
-- Change tools: JSON patch application and atomic file writes.
+- Change tools: exact string edits, multi-edit batches, Codex-style patch
+  application, guarded whole-file writes, file creation, and file deletion.
 - Validation tools: project verification, command execution, and git status or
   diff review.
 - Reporting tools: the in-chat `/analyze` slash command runs the existing

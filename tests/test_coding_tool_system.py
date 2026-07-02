@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,8 @@ def test_tool_contracts_are_machine_readable() -> None:
     names = {item.name for item in contracts}
     assert {
         "read_file",
+        "edit_file",
+        "multi_edit_file",
         "apply_patch",
         "create_file",
         "delete_file",
@@ -52,14 +53,10 @@ def test_safe_file_read_rejects_outside_root_and_binary(tmp_path: Path) -> None:
 def test_patch_rejects_outside_root_path(tmp_path: Path) -> None:
     result = safe_apply_patch(
         repo_root=tmp_path,
-        patch=json.dumps(
-            [
-                {
-                    "path": "../outside.py",
-                    "hunks": [{"old_start": 1, "old_lines": ["old"], "new_lines": ["new"]}],
-                }
-            ]
-        ),
+        patch="""*** Begin Patch
+*** Add File: ../outside.py
++outside
+*** End Patch""",
     )
 
     assert result["ok"] is False
@@ -73,14 +70,12 @@ def test_patch_rejects_unread_existing_target(tmp_path: Path) -> None:
 
     result = safe_apply_patch(
         repo_root=tmp_path,
-        patch=json.dumps(
-            [
-                {
-                    "path": "src/example.py",
-                    "hunks": [{"old_start": 1, "old_lines": ["old"], "new_lines": ["new"]}],
-                }
-            ]
-        ),
+        patch="""*** Begin Patch
+*** Update File: src/example.py
+@@
+-old
++new
+*** End Patch""",
         require_read=True,
         read_files=[],
     )
@@ -97,12 +92,12 @@ def test_successful_patch_flow_records_history(tmp_path: Path) -> None:
 
     result = safe_apply_patch(
         repo_root=tmp_path,
-        patch="""--- a/src/example.py
-+++ b/src/example.py
-@@ -1 +1 @@
+        patch="""*** Begin Patch
+*** Update File: src/example.py
+@@
 -old
 +new
-""".replace("++++", "+++"),
+*** End Patch""",
         require_read=True,
         read_files=["src/example.py"],
     )

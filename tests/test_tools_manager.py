@@ -133,13 +133,13 @@ def test_edit_pass_can_read_and_search_to_ground_content(tmp_path: Path) -> None
     assert worker.edit_policies, "expected at least one mutation-required edit pass"
     allowed = set(worker.edit_policies[0].get("allowed_tools") or [])
     assert {"read_file", "repo_search"}.issubset(allowed)
-    assert {"create_file", "write_file", "apply_patch", "delete_file"}.issubset(allowed)
+    assert {"edit_file", "multi_edit_file", "create_file", "write_file", "apply_patch", "delete_file"}.issubset(allowed)
 
 
 def test_mutation_fallback_allowlist_blocks_discovery_tools() -> None:
     for tool in ("repo_search", "read_file", "ls", "list_files"):
         assert _mutation_fallback_tool_allowed(tool, target_exists=False, prior_target_evidence=True) is False
-    for tool in ("create_file", "write_file", "apply_patch", "delete_file"):
+    for tool in ("edit_file", "multi_edit_file", "create_file", "write_file", "apply_patch", "delete_file"):
         assert _mutation_fallback_tool_allowed(tool, target_exists=False, prior_target_evidence=True) is True
     assert _mutation_fallback_tool_allowed("read_file", target_exists=True, prior_target_evidence=False) is True
 
@@ -860,6 +860,7 @@ def test_forced_mutation_prompt_drives_agentic_authoring() -> None:
     assert "ANALYZING THIS PROJECT" in prompt
     # It must point the worker at read/search tools, not just mutation tools.
     assert "read_file" in prompt and "repo_search" in prompt
+    assert "edit_file" in prompt and "multi_edit_file" in prompt
     assert "create_file" in prompt and "write_file" in prompt and "apply_patch" in prompt and "delete_file" in prompt
     # No placeholders/boilerplate — there is no template fallback behind it.
     assert "Do NOT write placeholders" in prompt

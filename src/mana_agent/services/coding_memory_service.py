@@ -290,10 +290,10 @@ class CodingMemoryService:
                 )
         for warning in warnings:
             lowered = warning.lower()
-            if "write_file fallback" in lowered:
+            if "write_file fallback" in lowered or "mutation_failed_no_changes" in lowered:
                 rows.append(
                     {
-                        "decision": "Use write_file fallback",
+                        "decision": "Stop after failed mutation",
                         "rationale": warning[:220],
                     }
                 )

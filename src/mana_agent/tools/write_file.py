@@ -30,8 +30,8 @@ DEFAULT_ALLOWED_PREFIXES: Optional[tuple[str, ...]] = None
 # Guidance text injected into tool descriptions to reduce wrong-format failures.
 PATCH_FORMAT_GUIDANCE = (
     "NOTE: This tool writes FULL FILE CONTENT, not patches. "
-    "If you want partial edits, use apply_patch with JSON patch format: "
-    "[{\"path\":\"src/foo.py\",\"create\":false,\"hunks\":[{\"old_start\":1,\"old_lines\":[\"old\"],\"new_lines\":[\"new\"]}]}]."
+    "For partial edits, use edit_file/multi_edit_file with exact old_string text, "
+    "or apply_patch with Codex patch text."
 )
 
 
@@ -281,11 +281,27 @@ def safe_finalize_file_parts(
     path: str,
     allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES,
     cleanup_parts: bool = True,
+    expected_sha256: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     try:
         target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
         if err or target is None or rel_posix is None:
             return WriteFileResult(ok=False, path=path, error=err or "Error: invalid path").to_dict()
+        if target.exists() and not force:
+            if not expected_sha256:
+                return WriteFileResult(
+                    ok=False,
+                    path=rel_posix,
+                    error="Blocked: existing file overwrite requires expected_sha256 or force=true",
+                ).to_dict()
+            current_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+            if current_hash != expected_sha256:
+                return WriteFileResult(
+                    ok=False,
+                    path=rel_posix,
+                    error="Blocked: existing file hash does not match expected_sha256; re-read before writing",
+                ).to_dict()
 
         parts_dir = _parts_dir_for_target(target)
         if not parts_dir.exists() or not parts_dir.is_dir():
@@ -336,11 +352,27 @@ def safe_write_file(
     path: str,
     content: str,
     allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES,
+    expected_sha256: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     try:
         target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
         if err or target is None or rel_posix is None:
             return WriteFileResult(ok=False, path=path, error=err or "Error: invalid path").to_dict()
+        if target.exists() and not force:
+            if not expected_sha256:
+                return WriteFileResult(
+                    ok=False,
+                    path=rel_posix,
+                    error="Blocked: existing file overwrite requires expected_sha256 or force=true",
+                ).to_dict()
+            current_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+            if current_hash != expected_sha256:
+                return WriteFileResult(
+                    ok=False,
+                    path=rel_posix,
+                    error="Blocked: existing file hash does not match expected_sha256; re-read before writing",
+                ).to_dict()
 
         # Friendly footgun detection: users sometimes pass patch payloads to write_file.
         # Don't block (might be intentional), but provide a clear hint if it looks like a patch.
@@ -348,7 +380,7 @@ def safe_write_file(
         if stripped.startswith("diff --git ") or (
             "\n@@ " in stripped and "\n--- " in stripped and "\n+++ " in stripped
         ):
-            logger.warning("write_file received content that looks like a unified diff for %s", rel_posix)
+            logger.warning("write_file received content that looks like a diff for %s", rel_posix)
 
         data = content.encode("utf-8")
         _atomic_write_bytes(target, data)
@@ -443,6 +475,8 @@ def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequenc
         part_index: int | None = None,
         finalize: bool = False,
         cleanup_parts: bool = True,
+        expected_sha256: str | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         # Compatibility: some tool-calling models send `text`/`body` instead of `content`.
         effective_content = content if content is not None else (text if text is not None else body)
@@ -460,6 +494,8 @@ def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequenc
                 path=path,
                 allowed_prefixes=allowed_prefixes,
                 cleanup_parts=cleanup_parts,
+                expected_sha256=expected_sha256,
+                force=force,
             )
 
         if part_index is not None:
@@ -486,7 +522,14 @@ def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequenc
                 + PATCH_FORMAT_GUIDANCE,
             ).to_dict()
 
-        return safe_write_file(repo_root=repo_root, path=path, content=effective_content, allowed_prefixes=allowed_prefixes)
+        return safe_write_file(
+            repo_root=repo_root,
+            path=path,
+            content=effective_content,
+            allowed_prefixes=allowed_prefixes,
+            expected_sha256=expected_sha256,
+            force=force,
+        )
 
     return StructuredTool.from_function(
         func=_tool,
@@ -494,6 +537,7 @@ def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequenc
         description=(
             "Safely write text content to a file under the repository root. "
             "Refuses absolute paths, path traversal, and paths escaping the repository root. "
+            "Refuses to overwrite an existing file unless expected_sha256 matches current content or force=true. "
             "Performs atomic write (temp + replace). "
             "For large files: send chunks with `part_index` (writes to .<filename>.parts/NNNNNN.part), "
             "then call again with `finalize=true` to atomically assemble the final file. "

@@ -2,7 +2,7 @@
 mana_agent.llm.coding_agent
 
 Coding agent wrapper with:
-- mutation tools (create_file/write_file/apply_patch/delete_file)
+- mutation tools (edit_file/multi_edit_file/apply_patch/create_file/write_file/delete_file)
 - structured flow/checklist planning
 - anti-loop tool policy (search/read budgets, duplicate search guards)
 - flow-memory continuity integration
@@ -53,7 +53,14 @@ from mana_agent.llm.tool_worker_process import (
 )
 
 from mana_agent.services.coding_memory_service import CodingMemoryService
-from mana_agent.tools import build_create_file_tool, build_delete_file_tool, build_write_file_tool, build_apply_patch_tool
+from mana_agent.tools import (
+    build_apply_patch_tool,
+    build_create_file_tool,
+    build_delete_file_tool,
+    build_edit_file_tool,
+    build_multi_edit_file_tool,
+    build_write_file_tool,
+)
 
 logger = logging.getLogger(__name__)
 _as_jsonable = as_jsonable
@@ -93,8 +100,6 @@ class CodingAgent:
         r"(?:the\s+|last\s+|that\s+|current\s+)?plan\s*[/!.]?\s*$"
     )
 
-    # Fallback policy: if apply_patch is attempted >= this many times and no changes appear, force write_file fallback.
-    _PATCH_FAILURE_FALLBACK_THRESHOLD = 2
     _DEFAULT_READ_LINE_WINDOW = 400
     _MIN_READ_LINE_WINDOW = 200
     _MAX_READ_LINE_WINDOW = 2000
@@ -406,10 +411,12 @@ class CodingAgent:
         if hasattr(self.ask_agent, "tools"):
             self.ask_agent.tools.extend(
                 [
+                    build_edit_file_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
+                    build_multi_edit_file_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
+                    build_apply_patch_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
                     build_write_file_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
                     build_create_file_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
                     build_delete_file_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
-                    build_apply_patch_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
                 ]
             )
 
@@ -470,6 +477,18 @@ class CodingAgent:
         if hasattr(self.ask_agent, "tools"):
             self.ask_agent.tools.extend(
                 [
+                    build_edit_file_tool(
+                        repo_root=self.repo_root,
+                        allowed_prefixes=self.allowed_prefixes
+                    ),
+                    build_multi_edit_file_tool(
+                        repo_root=self.repo_root,
+                        allowed_prefixes=self.allowed_prefixes
+                    ),
+                    build_apply_patch_tool(
+                        repo_root=self.repo_root,
+                        allowed_prefixes=self.allowed_prefixes
+                    ),
                     build_write_file_tool(
                         repo_root=self.repo_root,
                         allowed_prefixes=self.allowed_prefixes
@@ -479,10 +498,6 @@ class CodingAgent:
                         allowed_prefixes=self.allowed_prefixes
                     ),
                     build_delete_file_tool(
-                        repo_root=self.repo_root,
-                        allowed_prefixes=self.allowed_prefixes
-                    ),
-                    build_apply_patch_tool(
                         repo_root=self.repo_root,
                         allowed_prefixes=self.allowed_prefixes
                     ),
@@ -1176,7 +1191,7 @@ class CodingAgent:
 
     # Mutation tools whose presence in a planned step means the run must end in
     # an actual edit (and verify), not just discovery/reads.
-    _MUTATION_TOOLS = frozenset({"apply_patch", "create_file", "write_file", "delete_file"})
+    _MUTATION_TOOLS = frozenset({"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"})
 
     @classmethod
     def _checklist_requires_edit(cls, checklist: "FlowChecklist | None") -> bool:
@@ -1276,38 +1291,6 @@ class CodingAgent:
 
         return None
 
-    def _patch_failure_summary(self, trace: list[dict[str, Any]]) -> tuple[int, int]:
-        """
-        Returns (apply_patch_calls, apply_patch_failures_detected)
-        """
-        calls = 0
-        failures = 0
-        for row in trace:
-            if str(row.get("tool_name", "")) != "apply_patch":
-                continue
-            calls += 1
-            ok = self._tool_ok_from_trace_row(row)
-            if ok is False:
-                failures += 1
-        return calls, failures
-
-    def _should_force_write_fallback(self, *, trace: list[dict[str, Any]], changed_files: list[str]) -> tuple[bool, str]:
-        """
-        Decide whether to force a write_file fallback based on observed apply_patch behavior.
-        Trigger when:
-        - apply_patch called >= threshold and no repo changes, OR
-        - apply_patch failures detected >= threshold and no repo changes.
-        """
-        if changed_files:
-            return False, ""
-        patch_calls, patch_failures = self._patch_failure_summary(trace)
-        threshold = int(self._PATCH_FAILURE_FALLBACK_THRESHOLD)
-        if patch_calls >= threshold:
-            return True, f"apply_patch attempted {patch_calls} times with no repo changes; forcing write_file fallback."
-        if patch_failures >= threshold:
-            return True, f"apply_patch failed {patch_failures} times with no repo changes; forcing write_file fallback."
-        return False, ""
-
     def _compute_progress(
         self,
         *,
@@ -1354,27 +1337,14 @@ class CodingAgent:
                 read_count,
             )
 
-        # If patches are looping, do NOT push back to "inspect"; force edit (write_file fallback).
-        force_fallback, reason = self._should_force_write_fallback(trace=trace, changed_files=changed_files)
-        if force_fallback:
-            return (
-                ExecutionDecision(
-                    phase="edit",
-                    tool_call_allowed=True,
-                    why=reason,
-                ),
-                counts,
-                read_count,
-            )
-
         if not changed_files:
             joined = "\n".join(warnings).lower()
             if "apply_patch failed" in joined or "patch did not apply cleanly" in joined or "patch-only loop" in joined:
                 return (
                     ExecutionDecision(
-                        phase="edit",
-                        tool_call_allowed=True,
-                        why="Patch failures detected via warnings with no repo changes; forcing write_file fallback.",
+                        phase="blocked",
+                        tool_call_allowed=False,
+                        why="Patch failures detected via warnings with no repo changes; stopping without duplicate mutation retry.",
                     ),
                     counts,
                     read_count,
@@ -1547,6 +1517,8 @@ class CodingAgent:
                 "git_diff",
                 "verify_project",
                 "tool_contracts",
+                "edit_file",
+                "multi_edit_file",
                 "apply_patch",
                 "create_file",
                 "write_file",
@@ -1631,8 +1603,6 @@ class CodingAgent:
             warnings.append("followup_request_rewritten_from_flow_context")
 
         edit_intent = self._looks_like_edit_request(request_for_run)
-        forced_write_retry = False
-
         # First pass
         answer = call_agent_fn(
             request_text=request_for_run,
@@ -1652,37 +1622,6 @@ class CodingAgent:
         trace_rows = [item for item in trace if isinstance(item, dict)]
         combined_trace_rows = list(trace_rows)
 
-        # If patch loop detected and no changes, force a single retry without apply_patch.
-        force_fallback, force_reason = self._should_force_write_fallback(
-            trace=trace_rows,
-            changed_files=changed,
-        )
-        if force_fallback:
-            logger.warning(force_reason)
-            warnings.append("forced_write_file_retry_after_patch_noop")
-            retry_request = (
-                "NOTE: apply_patch is unavailable or failed/no-op repeatedly. "
-                "Use write_file fallback (chunked part_index + finalize) with full file content.\n\n"
-                f"Original request:\n{request}"
-            )
-            with self._without_tool("apply_patch"):
-                answer = call_agent_fn(
-                    request_text=retry_request,
-                    tool_policy=tool_policy,
-                    flow_context=effective_flow_context,
-                )
-            forced_write_retry = True
-            changed = sorted(self._git_status_paths().difference(before))
-            payload = self._extract_payload(answer) or {}
-            trace = payload.get("trace", [])
-            if not isinstance(trace, list):
-                trace = []
-            payload_warnings = payload.get("warnings", [])
-            if isinstance(payload_warnings, list):
-                warnings.extend(str(item) for item in payload_warnings if str(item).strip())
-            trace_rows = [item for item in trace if isinstance(item, dict)]
-            combined_trace_rows.extend(trace_rows)
-
         decision, counters, read_count = self._compute_progress(
             checklist=checklist,
             trace=combined_trace_rows,
@@ -1690,49 +1629,11 @@ class CodingAgent:
             changed_files=changed,
             required_read_files=required_read_files,
         )
-        force_write = (
-            decision.phase == "edit"
-            and "forcing write_file fallback" in decision.why.lower()
-            and not changed
-        )
-
-        if force_write:
-            logger.warning("Forcing write_file fallback: re-running agent with apply_patch disabled.")
-            warnings.append("forced_write_file_retry_after_patch_noop")
-            retry_request = (
-                "NOTE: apply_patch is unavailable or failed/no-op repeatedly. "
-                "Use write_file fallback (chunked part_index + finalize) with full file content.\n\n"
-                f"Original request:\n{request}"
-            )
-            with self._without_tool("apply_patch"):
-                answer = call_agent_fn(
-                    request_text=retry_request,
-                    tool_policy=tool_policy,
-                    flow_context=effective_flow_context,
-                )
-            forced_write_retry = True
-            changed = sorted(self._git_status_paths().difference(before))
-            payload = self._extract_payload(answer) or {}
-            trace = payload.get("trace", [])
-            if not isinstance(trace, list):
-                trace = []
-            payload_warnings = payload.get("warnings", [])
-            if isinstance(payload_warnings, list):
-                warnings.extend(str(item) for item in payload_warnings if str(item).strip())
-            trace_rows = [item for item in trace if isinstance(item, dict)]
-            combined_trace_rows.extend(trace_rows)
-            decision, counters, read_count = self._compute_progress(
-                checklist=checklist,
-                trace=combined_trace_rows,
-                warnings=warnings,
-                changed_files=changed,
-                required_read_files=required_read_files,
-            )
-
         answer_text = self._extract_answer_text(answer)
         mutation_tools_seen = {str(row.get("tool_name", "")) for row in combined_trace_rows}
         attempted_apply_patch = "apply_patch" in mutation_tools_seen
         attempted_write_file = "write_file" in mutation_tools_seen
+        attempted_mutation = bool(mutation_tools_seen.intersection({"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}))
 
         if edit_intent and not changed and attempted_apply_patch:
             warnings.append("mutation_noop_after_apply_patch")
@@ -1743,7 +1644,7 @@ class CodingAgent:
             edit_intent
             and not changed
             and self._looks_like_conversational_terminal(answer_text)
-            and not forced_write_retry
+            and not attempted_mutation
         ):
             warnings.append("edit_intent_conversational_noop_detected")
             retry_request = (
@@ -1779,14 +1680,14 @@ class CodingAgent:
                 required_read_files=required_read_files,
             )
 
-        if edit_intent and not changed and attempted_apply_patch and attempted_write_file:
-            warnings.append("mutation_exhausted_true_blocker")
+        if edit_intent and not changed and attempted_mutation:
+            warnings.append("mutation_failed_no_changes")
             decision = ExecutionDecision(
                 phase="blocked",
                 tool_call_allowed=False,
                 why=(
-                    "mutation_exhausted_true_blocker: apply_patch and write_file produced no file changes "
-                    "after bounded retries."
+                    "mutation_failed_no_changes: mutation tool returned without file changes; "
+                    "stopping without duplicate mutation retry."
                 ),
             )
 

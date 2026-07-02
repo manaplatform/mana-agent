@@ -122,7 +122,7 @@ def classify_result(item: WorkItem, response: ToolRunResponse, *, repo_root: Pat
             trace=list(response.trace),
         )
 
-    if tool in {"apply_patch", "write_file", "create_file", "delete_file", "move_file"}:
+    if tool in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file", "move_file"}:
         changed = sorted(paths)
         for row in response.trace:
             if isinstance(row, dict):
@@ -211,6 +211,8 @@ def make_worker_executor(
                 "list_files",
                 "ls",
                 "find_symbols",
+                "edit_file",
+                "multi_edit_file",
                 "apply_patch",
                 "write_file",
                 "create_file",
@@ -353,7 +355,7 @@ class CodingAgentSniffer:
             question=(
                 "Using the file evidence already gathered in this run, carry out "
                 f"the user's request: {self._request}. Apply concrete changes with "
-                "create_file/write_file/apply_patch/delete_file and report the changed files. "
+                "edit_file/multi_edit_file/apply_patch/create_file/write_file/delete_file and report the changed files. "
                 "Before mutating, use bounded exact path/name/symbol evidence to account for "
                 "related importers, exports, registries, routers, commands, call sites, tests, "
                 "and stale docs/config references; update or remove each one required for the "

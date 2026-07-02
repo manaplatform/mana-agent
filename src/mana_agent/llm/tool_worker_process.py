@@ -21,7 +21,14 @@ from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.search_service import SearchService
 from mana_agent.llm.ask_agent import AskAgent
 from mana_agent.vector_store.embeddings import build_embeddings
-from mana_agent.tools import build_apply_patch_tool, build_create_file_tool, build_delete_file_tool, build_write_file_tool
+from mana_agent.tools import (
+    build_apply_patch_tool,
+    build_create_file_tool,
+    build_delete_file_tool,
+    build_edit_file_tool,
+    build_multi_edit_file_tool,
+    build_write_file_tool,
+)
 from mana_agent.tools.apply_patch import extract_patch_touched_files
 from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.utils.redaction import redact_json_line, redact_secrets
@@ -249,6 +256,24 @@ def _tool_arg_error(tool_name: str, args: dict[str, Any]) -> str:
     if name == "delete_file":
         if not _text("path"):
             return "delete_file requires `path`"
+        return ""
+    if name == "edit_file":
+        if not _text("path"):
+            return "edit_file requires `path`"
+        if args.get("old_string") is None:
+            return "edit_file requires `old_string`"
+        if args.get("new_string") is None:
+            return "edit_file requires `new_string`"
+        return ""
+    if name == "multi_edit_file":
+        if not _text("path"):
+            return "multi_edit_file requires `path`"
+        edits = args.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return "multi_edit_file requires non-empty `edits`"
+        for index, edit in enumerate(edits):
+            if not isinstance(edit, dict) or edit.get("old_string") is None or edit.get("new_string") is None:
+                return f"multi_edit_file edit {index} requires `old_string` and `new_string`"
         return ""
     if name == "apply_patch":
         patch_payload = args.get("patch", args.get("diff", args.get("input")))
@@ -632,7 +657,7 @@ def _infer_trace_row_success(row: dict[str, Any]) -> bool:
             return False
         if normalized_status in ("ok", "success"):
             tool_name = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-            if tool_name in {"apply_patch", "write_file", "create_file", "delete_file"}:
+            if tool_name in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}:
                 changed = []
                 for key in ("files_changed", "changed_files", "modified_files"):
                     value = row.get(key)
@@ -720,7 +745,7 @@ def _infer_trace_row_success(row: dict[str, Any]) -> bool:
 
 def _infer_trace_row_mutation_success(row: dict[str, Any]) -> bool:
     tool_name = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-    if tool_name not in {"apply_patch", "write_file", "create_file", "delete_file"}:
+    if tool_name not in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}:
         return False
     if not _infer_trace_row_success(row):
         return False
@@ -743,7 +768,7 @@ def _mutation_failure_error(trace_rows: list[dict[str, Any]]) -> tuple[str, str]
     mutation_rows = [
         row for row in trace_rows
         if str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-        in {"apply_patch", "write_file", "create_file", "delete_file"}
+        in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
     ]
     if not mutation_rows:
         return "mutation_not_attempted", "mutation phase ended without attempting a mutation tool"
@@ -1287,6 +1312,18 @@ def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
         coding_memory_service=CodingMemoryService(project_root=Path(payload.project_root)),
     )
     tools = [
+        build_edit_file_tool(
+            repo_root=Path(payload.repo_root),
+            allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
+        ),
+        build_multi_edit_file_tool(
+            repo_root=Path(payload.repo_root),
+            allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
+        ),
+        build_apply_patch_tool(
+            repo_root=Path(payload.repo_root),
+            allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
+        ),
         build_write_file_tool(
             repo_root=Path(payload.repo_root),
             allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
@@ -1296,10 +1333,6 @@ def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
             allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
         ),
         build_delete_file_tool(
-            repo_root=Path(payload.repo_root),
-            allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
-        ),
-        build_apply_patch_tool(
             repo_root=Path(payload.repo_root),
             allowed_prefixes=tuple(payload.allowed_prefixes) if payload.allowed_prefixes else None,
         ),

@@ -30,7 +30,7 @@ AUTO_MAX_LINES_PER_FILE = 220
 AUTO_MAX_DISCOVERY_ROUNDS = 2
 AUTO_MAX_TOOL_CALLS_BEFORE_DECISION = 8
 
-MUTATION_TOOLS = frozenset({"apply_patch", "write_file", "create_file", "delete_file", "move_file"})
+MUTATION_TOOLS = frozenset({"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file", "move_file"})
 READ_TOOLS = [
     "semantic_search",
     "read_file",
@@ -50,6 +50,8 @@ EDIT_TOOLS = [
     *READ_TOOLS,
     "run_command",
     "verify_project",
+    "edit_file",
+    "multi_edit_file",
     "apply_patch",
     "create_file",
     "write_file",
@@ -177,7 +179,7 @@ def apply_auto_chat_tool_policy(
 
     if resolved_mode == AutoChatMode.EDIT:
         allowed_tools = list(constrained.get("allowed_tools") or EDIT_TOOLS)
-        for tool in ("apply_patch", "create_file", "write_file", "delete_file"):
+        for tool in ("edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"):
             if tool not in allowed_tools:
                 allowed_tools.append(tool)
     elif resolved_mode == AutoChatMode.VERIFY:

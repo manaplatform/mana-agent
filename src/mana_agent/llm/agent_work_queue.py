@@ -121,7 +121,7 @@ def compute_fingerprint(*, kind: str, tool_name: str, tool_args: dict[str, Any],
     elif tool in {"repo_search", "semantic_search", "list_files"}:
         query = _normalize_text(args.get("query") or args.get("q") or args.get("pattern") or question)
         payload = f"{tool}:{query}"
-    elif tool in {"apply_patch", "write_file", "create_file", "delete_file"}:
+    elif tool in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}:
         path = _norm_path(args.get("path") or args.get("file") or args.get("target_file"))
         payload = f"{tool}:{path or _normalize_text(question)[:160]}"
     else:
@@ -760,7 +760,7 @@ class QueueManager:
                         f"for {targets_label} to remain working"
                     ),
                     "status": "pending",
-                    "requires_tools": ["apply_patch", "write_file", "create_file", "delete_file"],
+                    "requires_tools": ["edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"],
                     "checks": [
                         "target file changed/created/deleted",
                         "related imports/usages updated",
@@ -1069,6 +1069,8 @@ class QueueManager:
                         "list_files",
                         "ls",
                         "find_symbols",
+                        "edit_file",
+                        "multi_edit_file",
                         "apply_patch",
                         "write_file",
                         "create_file",
