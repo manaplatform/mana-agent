@@ -124,8 +124,7 @@ class AskAgent:
     )
 
     _BLOCKED_PATTERNS = [
-        "rm ",
-        "mv ",
+        "git rm ",
         "git reset --hard",
         "git checkout --",
         "sudo ",
