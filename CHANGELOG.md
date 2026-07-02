@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-02 (chat edit orchestration and default skills)
+
+- Added built-in `fastapi`, `nestjs`, `nextjs`, and `reactjs` skills, registered their keyword detection, and added a deterministic default-skill registry text builder for simple marker-based registry edits.
+- Targeted built-in skill edit orchestration so default-skill requests seed `DEFAULT_SKILL_NAMES` and `src/mana_agent/default_skills/*.md` discovery instead of broad per-framework searches that can drift into dependency detection files.
+- Made `list_files` handle flat markdown globs and recursive `dir/**` / `dir/**/*` patterns consistently, removed the unsafe perl patch fallback from `apply_patch`, validated direct mutation tool args before worker dispatch, and replaced blind tools-only retry with controlled `mutation_not_attempted` / `mutation_failed` / worker-error reporting.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_modes_skills.py tests/test_repository_tools.py tests/test_tool_worker_process.py tests/test_coding_agent.py::test_coding_agent_does_not_retry_tools_only_violation_through_orchestrator tests/test_coding_agent.py::test_coding_agent_provider_error_does_not_fallback_to_direct_ask_agent tests/test_agent_work_queue.py::test_queue_manager_targets_default_skill_registry_without_framework_search_loops tests/test_apply_patch_json_only.py -q` passed; `PYTHONPATH=src .venv/bin/python -m compileall src` passed; `PYTHONPATH=src .venv/bin/mana-agent skills list --repo .` passed and listed the new built-in skills; `printf '/exit\n' | PYTHONPATH=src .venv/bin/mana-agent --chat --repo . --no-banner` passed. `PYTHONPATH=src .venv/bin/python -m pytest tests -q` was run and ended with 458 passed, 8 failed in `tests/test_cli_smoke.py` chat-routing/fake-agent smoke cases.
+
 ## 2026-07-02 (coding workflow mutation guard)
 
 - Strengthened edit-task workflow instructions so create/modify/delete runs require project-level related-file cleanup across imports, exports, registries, routers, commands, call sites, tests, docs, and stale references.

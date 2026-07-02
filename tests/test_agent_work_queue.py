@@ -312,6 +312,99 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
     assert result.changed_files == ["docs/overview.md"]
 
 
+def test_queue_manager_targets_default_skill_registry_without_framework_search_loops(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    manager = tmp_path / "src" / "mana_agent" / "skills" / "manager.py"
+    skills_dir = tmp_path / "src" / "mana_agent" / "default_skills"
+    manager.parent.mkdir(parents=True)
+    skills_dir.mkdir(parents=True)
+    manager.write_text("DEFAULT_SKILL_NAMES = ()\n_KEYWORDS = {}\n", encoding="utf-8")
+    (tmp_path / "src" / "mana_agent" / "dependencies").mkdir(parents=True)
+    (tmp_path / "src" / "mana_agent" / "dependencies" / "dependency_service.py").write_text(
+        "react fastapi nextjs nestjs\n",
+        encoding="utf-8",
+    )
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            name = request.tool_name or ""
+            if name == "repo_search":
+                assert request.tool_args == {"query": "DEFAULT_SKILL_NAMES"}
+                return ToolRunResponse(
+                    answer="src/mana_agent/skills/manager.py",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "repo_search", "status": "ok", "result": "src/mana_agent/skills/manager.py"}],
+                )
+            if name == "list_files":
+                assert request.tool_args == {"glob": "src/mana_agent/default_skills/*.md"}
+                return ToolRunResponse(
+                    answer="src/mana_agent/default_skills/vue.md",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "list_files", "status": "ok"}],
+                )
+            if name == "write_file":
+                for rel in [
+                    "src/mana_agent/skills/manager.py",
+                    "src/mana_agent/default_skills/nestjs.md",
+                    "src/mana_agent/default_skills/nextjs.md",
+                    "src/mana_agent/default_skills/reactjs.md",
+                    "src/mana_agent/default_skills/fastapi.md",
+                ]:
+                    target = tmp_path / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(_substantive(rel), encoding="utf-8")
+                return ToolRunResponse(
+                    answer="updated default skills",
+                    mode="agent-tools",
+                    trace=[
+                        {
+                            "tool_name": "write_file",
+                            "status": "ok",
+                            "changed_files": [
+                                "src/mana_agent/skills/manager.py",
+                                "src/mana_agent/default_skills/nestjs.md",
+                                "src/mana_agent/default_skills/nextjs.md",
+                                "src/mana_agent/default_skills/reactjs.md",
+                                "src/mana_agent/default_skills/fastapi.md",
+                            ],
+                        }
+                    ],
+                )
+            return ToolRunResponse(
+                answer="ok",
+                mode="agent-tools",
+                trace=[{"tool_name": name or "read_file", "status": "ok"}],
+            )
+
+    request_text = "add in default skills:\n\n* nestjs\n* nextjs\n* reactjs\n* fastapi"
+    worker = _FakeWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request=request_text,
+        index_dir=str(tmp_path),
+    )
+
+    tool_names = [str(item.tool_name or "") for item in worker.requests]
+    questions = "\n".join(str(item.question) for item in worker.requests)
+    read_paths = [
+        str((item.tool_args or {}).get("path"))
+        for item in worker.requests
+        if str(item.tool_name or "") == "read_file"
+    ]
+
+    assert tool_names.count("repo_search") == 1
+    assert tool_names.count("list_files") == 1
+    assert tool_names.count("write_file") == 1
+    assert all("dependency_service.py" not in path for path in read_paths)
+    assert "DEFAULT_SKILL_NAMES" in questions
+    assert "src/mana_agent/default_skills/*.md" in questions
+    assert result.run_status == "completed"
+
+
 def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Path):
     from mana_agent.llm.agent_work_queue import QueueManager
 

@@ -7,8 +7,7 @@ Key properties:
 - Parses JSON patch to identify touched paths.
 - Refuses patches that touch files outside repo_root.
 - Optionally restricts touched paths to allowed prefixes.
-- Applies patch using a deterministic strategy chain:
-  py (Python compute + write_file) -> perl (Perl one-liner).
+- Applies patch using deterministic Python hunk application + write_file.
 - NO-DELETE: explicitly blocks patches that delete files.
 - Does NOT use, accept, or depend on git in any way.
 """
@@ -17,7 +16,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -769,128 +767,6 @@ def _compute_python(
 
 
 # ---------------------------------------------------------------------------
-# Strategy: perl  (Perl one-liner in-place editing)
-# ---------------------------------------------------------------------------
-
-def _apply_via_perl(
-    repo_root: Path,
-    parsed_files: list[_PatchFile],
-    check_only: bool,
-) -> tuple[bool, str, str]:
-    """Apply using ``perl -i`` in-place editing, one hunk at a time."""
-    try:
-        perl_check = subprocess.run(
-            ["perl", "-v"], capture_output=True, text=True,
-        )
-        if perl_check.returncode != 0:
-            return False, "", "perl strategy: perl not available"
-    except FileNotFoundError:
-        return False, "", "perl strategy: perl not found on system"
-
-    if check_only:
-        return (
-            True,
-            "perl strategy: check passed (perl available, patch parseable)",
-            "",
-        )
-
-    all_stdout: list[str] = []
-    all_stderr: list[str] = []
-
-    for pf in parsed_files:
-        rel_target = _target_rel_path(pf)
-        abs_target = (repo_root / Path(rel_target)).resolve()
-
-        # New-file creation — collect added lines and write directly.
-        if _is_dev_null(pf.old_path):
-            new_content_lines: list[str] = []
-            for hunk in pf.hunks:
-                for pl in hunk.lines:
-                    if pl.op == "+":
-                        new_content_lines.append(pl.text)
-            content = _lines_to_text(
-                new_content_lines,
-                trailing_newline=pf.new_has_trailing_newline,
-            )
-            abs_target.parent.mkdir(parents=True, exist_ok=True)
-            abs_target.write_text(content, encoding="utf-8")
-            all_stdout.append(f"perl strategy: created {rel_target}")
-            continue
-
-        if not abs_target.exists():
-            return False, "", f"perl strategy: missing target file {rel_target}"
-
-        # Process hunks in reverse order to keep line numbers stable.
-        sorted_hunks = sorted(
-            pf.hunks, key=lambda h: h.old_start, reverse=True,
-        )
-
-        for h_idx, hunk in enumerate(sorted_hunks):
-            new_lines_text = [
-                pl.text for pl in hunk.lines if pl.op in {" ", "+"}
-            ]
-
-            start_line = hunk.old_start
-            end_line = hunk.old_start + hunk.old_count - 1
-
-            if hunk.old_count == 0:
-                # Pure insertion
-                insert_text = "\n".join(new_lines_text)
-                insert_escaped = (
-                    insert_text.replace("\\", "\\\\").replace("'", "\\'")
-                )
-                if start_line <= 1:
-                    perl_script = (
-                        f"BEGIN {{ print '{insert_escaped}\\n' }}"
-                    )
-                else:
-                    target_line = start_line - 1
-                    perl_script = (
-                        f"if ($. == {target_line}) {{ print; "
-                        f"print '{insert_escaped}\\n'; next }}"
-                    )
-                cmd = ["perl", "-i", "-pe", perl_script, str(abs_target)]
-            else:
-                new_text = "\n".join(new_lines_text)
-                new_escaped = (
-                    new_text.replace("\\", "\\\\").replace("'", "\\'")
-                )
-
-                if new_lines_text:
-                    # Replacement
-                    perl_script = (
-                        f"if ($. == {start_line}) "
-                        f"{{ print '{new_escaped}\\n'; }} "
-                        f"elsif ($. > {start_line} && $. <= {end_line}) "
-                        f"{{ }} "
-                        f"else {{ print; }}"
-                    )
-                else:
-                    # Pure removal (line-level, not file-level)
-                    perl_script = (
-                        f"unless ($. >= {start_line} && $. <= {end_line}) "
-                        f"{{ print; }}"
-                    )
-
-                cmd = ["perl", "-i", "-ne", perl_script, str(abs_target)]
-
-            res = subprocess.run(
-                cmd, cwd=repo_root, capture_output=True, text=True,
-            )
-            if res.returncode != 0:
-                return False, "", (
-                    f"perl strategy: failed on {rel_target} hunk {h_idx + 1}: "
-                    f"{res.stderr.strip() or res.stdout.strip()}"
-                )
-
-            all_stdout.append(f"perl strategy: applied hunk to {rel_target}")
-            if res.stderr:
-                all_stderr.append(res.stderr)
-
-    return True, "\n".join(all_stdout), "\n".join(all_stderr)
-
-
-# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -911,8 +787,7 @@ def safe_apply_patch(
     Supported strategies
     --------------------
     - ``"py"``      — Python deterministic hunk application + write_file
-    - ``"perl"``    — Perl one-liner in-place editing
-    - ``"auto"``    — Try py → perl (best-effort chain)
+    - ``"auto"``    — Use the deterministic Python strategy
 
     Patch format
     ------------
@@ -938,7 +813,7 @@ def safe_apply_patch(
         str(strategy_hint or "auto").strip().lower() or "auto"
     )
     strict_strategy = bool(strict_strategy)
-    supported_strategies = ("auto", "py", "perl")
+    supported_strategies = ("auto", "py")
 
     if requested_strategy not in supported_strategies:
         return ApplyPatchResult(
@@ -1054,7 +929,7 @@ def safe_apply_patch(
             all_target_paths.append(rel)
 
     # ---- Build strategy run-order ------------------------------------------
-    strategy_order = ["py", "perl"]
+    strategy_order = ["py"]
     attempts: list[dict[str, Any]] = []
 
     if requested_strategy == "auto":
@@ -1141,10 +1016,8 @@ def safe_apply_patch(
                 return result
 
             # A context mismatch means the patch's old_lines do not match the
-            # file at the stated location: the patch is stale/wrong. Do NOT let
-            # the fuzzier perl strategy salvage it — perl can pattern-match the
-            # hunk in at the wrong place and corrupt the file. Fail and tell the
-            # caller to re-read the target before patching again.
+            # file at the stated location: the patch is stale/wrong. Fail and
+            # tell the caller to re-read the target before patching again.
             if "context mismatch" in py_detail.lower():
                 result = ApplyPatchResult(
                     ok=False,
@@ -1156,66 +1029,11 @@ def safe_apply_patch(
                     error=(
                         f"Error: patch does not match the current file: {py_detail}. "
                         "Re-read the target file and rebuild the patch against its "
-                        "current contents (the perl fallback is intentionally not "
-                        "used here to avoid applying a stale hunk at the wrong location)."
+                        "current contents."
                     ),
                 ).to_dict()
                 _write_patch_history(repo_root=repo_root, patch=patch, result=result, touched_files=touched_files, check_only=check_only)
                 return result
-
-    # -----------------------------------------------------------------------
-    # Strategy: perl
-    # -----------------------------------------------------------------------
-    if "perl" in run_order:
-        perl_phase = "check" if check_only else "apply"
-
-        snapshots: dict[str, _FileSnapshot] = {}
-        if not check_only:
-            snapshots = _snapshot_files(repo_root, all_target_paths)
-
-        perl_ok, perl_stdout, perl_stderr = _apply_via_perl(
-            repo_root, parsed_files, check_only,
-        )
-        attempts.append(
-            _attempt(
-                "perl", perl_phase, perl_ok,
-                perl_stderr if not perl_ok else perl_stdout,
-            )
-        )
-
-        if perl_ok:
-            result = ApplyPatchResult(
-                ok=True,
-                touched_files=touched_files,
-                check_only=check_only,
-                strategy_requested=requested_strategy,
-                strategy="perl",
-                attempts=attempts,
-                stdout=perl_stdout,
-                stderr=perl_stderr,
-            ).to_dict()
-            _write_patch_history(repo_root=repo_root, patch=patch, result=result, touched_files=touched_files, check_only=check_only)
-            return result
-
-        if not check_only and snapshots:
-            rollback_err = _rollback_files(repo_root, snapshots)
-            if rollback_err:
-                attempts.append(
-                    _attempt("perl", "rollback", False, rollback_err),
-                )
-
-        if strict_strategy and requested_strategy == "perl":
-            result = ApplyPatchResult(
-                ok=False,
-                touched_files=touched_files,
-                check_only=check_only,
-                strategy_requested=requested_strategy,
-                strategy="perl",
-                attempts=attempts,
-                error=f"Error: perl strategy failed: {perl_stderr}",
-            ).to_dict()
-            _write_patch_history(repo_root=repo_root, patch=patch, result=result, touched_files=touched_files, check_only=check_only)
-            return result
 
     # All strategies exhausted
     result = ApplyPatchResult(
@@ -1284,8 +1102,8 @@ def build_apply_patch_tool(
             "NO-DELETE: blocks patches that delete files. "
             "Accepts JSON file-edit operations only. "
             "Does NOT use git in any way. "
-            "Strategy chain: py -> perl. "
-            "Controls: strategy_hint=auto|py|perl, "
+            "Strategy: deterministic Python hunk application. "
+            "Controls: strategy_hint=auto|py, "
             "strict_strategy=true|false. "
             "With check_only=true, validation runs without writing files."
         ),

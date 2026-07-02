@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _SKIP_DIRS = {
@@ -74,6 +74,27 @@ def _is_binary(path: Path) -> bool:
         return True
 
 
+def _matches_file_glob(rel_path: str, pattern: str) -> bool:
+    """Match repository file globs with predictable directory recursion.
+
+    ``fnmatch`` treats ``**`` as ordinary ``*`` characters, so patterns like
+    ``src/pkg/**/*`` can miss files directly under ``src/pkg``. For tool callers
+    the useful contract is simpler: ``dir/**`` and ``dir/**/*`` both mean every
+    file under ``dir``.
+    """
+    rel_path = rel_path.replace("\\", "/").lstrip("./")
+    pattern = str(pattern or "**/*").replace("\\", "/").lstrip("./")
+    if pattern in {"**", "**/*"}:
+        return True
+    for suffix in ("/**/*", "/**"):
+        if pattern.endswith(suffix):
+            prefix = pattern[: -len(suffix)].rstrip("/")
+            return rel_path.startswith(f"{prefix}/") if prefix else True
+    if "/" not in pattern and fnmatch.fnmatch(Path(rel_path).name, pattern):
+        return True
+    return PurePosixPath(rel_path).match(pattern)
+
+
 def list_files(repo_root: Path, *, glob: str = "**/*", limit: int = 200) -> dict[str, Any]:
     """List repository files with deterministic ordering."""
 
@@ -83,7 +104,7 @@ def list_files(repo_root: Path, *, glob: str = "**/*", limit: int = 200) -> dict
     files: list[str] = []
     for path in sorted(_iter_files(root), key=lambda item: item.relative_to(root).as_posix()):
         rel = path.relative_to(root).as_posix()
-        if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern):
+        if _matches_file_glob(rel, pattern):
             files.append(rel)
             if len(files) >= max_items:
                 break

@@ -935,8 +935,74 @@ def test_run_tool_request_requires_mutation_tool_when_mutation_required() -> Non
             callbacks=None,
         )
 
-    assert excinfo.value.code == "tools_only_violation"
-    assert "successful mutation tool call" in str(excinfo.value)
+    assert excinfo.value.code == "mutation_not_attempted"
+    assert "without attempting a mutation tool" in str(excinfo.value)
+
+
+def test_run_tool_request_reports_failed_mutation_when_patch_changes_nothing() -> None:
+    class _FakeAskAgent:
+        def run(self, **_kwargs):
+            return SimpleNamespace(
+                answer="patch failed",
+                sources=[],
+                mode="agent-tools",
+                trace=[SimpleNamespace(to_dict=lambda: {"tool_name": "apply_patch", "status": "error", "error": "hunk mismatch"})],
+                warnings=[],
+            )
+
+    with pytest.raises(twp.ToolWorkerProcessError) as excinfo:
+        twp._run_tool_request(
+            ask_agent=_FakeAskAgent(),  # type: ignore[arg-type]
+            req=twp.ToolRunRequest(
+                question="update docs/analyze.md",
+                index_dir="/tmp/.mana/index",
+                tool_policy={"mutation_required": True},
+            ),
+            tools_only_strict_default=True,
+            callbacks=None,
+        )
+
+    assert excinfo.value.code == "mutation_failed"
+    assert "hunk mismatch" in str(excinfo.value)
+
+
+def test_direct_mutation_tool_args_are_validated_before_worker_start(monkeypatch, tmp_path: Path) -> None:
+    client = twp.ToolWorkerClient(api_key="test", model="fake", repo_root=tmp_path, project_root=tmp_path)
+    started = {"value": False}
+    monkeypatch.setattr(client, "start", lambda: started.__setitem__("value", True))
+
+    with pytest.raises(twp.ToolWorkerProcessError) as write_exc:
+        client.run_tools(
+            twp.ToolRunRequest(
+                question="write",
+                index_dir="/tmp/.mana/index",
+                tool_name="write_file",
+                tool_args={},
+            )
+        )
+    with pytest.raises(twp.ToolWorkerProcessError) as create_exc:
+        client.run_tools(
+            twp.ToolRunRequest(
+                question="create",
+                index_dir="/tmp/.mana/index",
+                tool_name="create_file",
+                tool_args={"path": "docs/new.md"},
+            )
+        )
+    with pytest.raises(twp.ToolWorkerProcessError) as patch_exc:
+        client.run_tools(
+            twp.ToolRunRequest(
+                question="patch",
+                index_dir="/tmp/.mana/index",
+                tool_name="apply_patch",
+                tool_args={"patch": "not a patch"},
+            )
+        )
+
+    assert write_exc.value.code == "invalid_tool_args"
+    assert create_exc.value.code == "invalid_tool_args"
+    assert patch_exc.value.code == "invalid_tool_args"
+    assert started["value"] is False
 
 
 def test_tool_worker_client_emits_request_events_for_tools_only_violation(

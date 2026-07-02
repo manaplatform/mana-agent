@@ -1834,6 +1834,18 @@ class CodingAgent:
             and len(trace_rows) == 0
             and not changed
         )
+        controlled_worker_fallback = ""
+        if len(trace_rows) == 0 and not changed:
+            for code in (
+                "tools_only_violation",
+                "mutation_not_attempted",
+                "mutation_failed",
+                "invalid_tool_args",
+                "run_failed",
+            ):
+                if code in warning_text:
+                    controlled_worker_fallback = code
+                    break
         result = {
             "status": status,
             "answer": answer,
@@ -1881,9 +1893,9 @@ class CodingAgent:
                 "finding_count": len(findings),
                 "findings": [_as_jsonable(f) for f in findings],
             },
-            "render_mode": "answer_only" if tools_only_fallback else "default",
-            "fallback_reason": "tools_only_violation" if tools_only_fallback else "",
-            "fallback_retry_attempted": bool("tools_only_violation_retry_attempted" in warning_text),
+            "render_mode": "answer_only" if controlled_worker_fallback or tools_only_fallback else "default",
+            "fallback_reason": controlled_worker_fallback or ("tools_only_violation" if tools_only_fallback else ""),
+            "fallback_retry_attempted": False,
         }
         return result, active_flow_id, effective_flow_context
 
@@ -2050,19 +2062,7 @@ class CodingAgent:
             )
             return self._stringify(response.model_dump())
         except ToolWorkerProcessError as exc:
-            if exc.code == "tools_only_violation":
-                return self._retry_after_tools_only_violation(
-                    tool_req,
-                    exc,
-                    tool_policy=tool_policy,
-                    index_dir=index_dir,
-                    flow_id=flow_id,
-                    timeout_seconds=timeout_seconds,
-                    max_steps=max_steps,
-                    k=k,
-                    flow_context=flow_context,
-                )
-            raise
+            return self._stringify(self._controlled_worker_error_payload(exc))
 
     def _call_agent_multi(
         self,
@@ -2106,72 +2106,21 @@ class CodingAgent:
             )
             return self._stringify(response.model_dump())
         except ToolWorkerProcessError as exc:
-            if exc.code == "tools_only_violation":
-                return self._retry_after_tools_only_violation(
-                    tool_req,
-                    exc,
-                    tool_policy=tool_policy,
-                    index_dirs=resolved,
-                    flow_id=flow_id,
-                    timeout_seconds=timeout_seconds,
-                    max_steps=max_steps,
-                    k=k,
-                    flow_context=flow_context,
-                )
-            raise
+            return self._stringify(self._controlled_worker_error_payload(exc))
 
-    def _retry_after_tools_only_violation(
-        self,
-        tool_req: "ToolRunRequest",
-        exc: ToolWorkerProcessError,
-        *,
-        tool_policy: "dict[str, Any] | None" = None,
-        index_dir: "str | Path | None" = None,
-        index_dirs: "list[str] | None" = None,
-        flow_id: "str | None" = None,
-        timeout_seconds: int = 60,
-        max_steps: int = 6,
-        k: "int | None" = None,
-        flow_context: "str | None" = None,
-    ) -> str:
-        retry_req = tool_req.model_copy(update={"tools_only_strict_override": False})
-        retry_warnings = [
-            f"tools_only_violation: {exc}",
-            "tools_only_violation_retry_attempted: strict override disabled for one retry",
-        ]
-        try:
-            retry_response = self._execute_via_manager(
-                retry_req,
-                tool_policy=tool_policy,
-                index_dir=index_dir,
-                index_dirs=index_dirs,
-                flow_id=flow_id,
-                timeout_seconds=timeout_seconds,
-                max_steps=max_steps,
-                k=k,
-                flow_context=flow_context,
-            )
-            payload = retry_response.model_dump()
-            existing = [str(item) for item in payload.get("warnings", []) if str(item).strip()]
-            payload["warnings"] = [*existing, *retry_warnings, "tools_only_violation_retry_result: success"]
-            payload["fallback_reason"] = "tools_only_violation"
-            payload["fallback_retry_attempted"] = True
-            return self._stringify(payload)
-        except ToolWorkerProcessError as retry_exc:
-            retry_warnings.append(f"tools_only_violation_retry_failed: {retry_exc}")
-        return self._stringify(
-            {
-                "answer": (
-                    "Request blocked by tools-only worker policy: no successful tool calls were made. "
-                    "Please provide a tool-executable request with specific files or operations."
-                ),
-                "trace": [],
-                "warnings": retry_warnings,
-                "render_mode": "answer_only",
-                "fallback_reason": "tools_only_violation",
-                "fallback_retry_attempted": True,
-            }
-        )
+    @staticmethod
+    def _controlled_worker_error_payload(exc: ToolWorkerProcessError) -> dict[str, Any]:
+        code = str(exc.code or "worker_error")
+        return {
+            "answer": f"Worker stopped cleanly: {code}: {exc}",
+            "sources": [],
+            "mode": "agent-tools",
+            "trace": [],
+            "warnings": [f"{code}: {exc}"],
+            "render_mode": "answer_only",
+            "fallback_reason": code,
+            "fallback_retry_attempted": False,
+        }
 
     @contextmanager
     def _without_tool(self, tool_name: str):

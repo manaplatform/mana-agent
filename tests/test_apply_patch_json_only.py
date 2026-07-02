@@ -30,7 +30,7 @@ def test_apply_patch_rejects_command_strategy_hint(tmp_path: Path) -> None:
     assert "invalid strategy_hint 'command'" in str(result.get("error", ""))
     assert "auto" in str(result.get("error", ""))
     assert "py" in str(result.get("error", ""))
-    assert "perl" in str(result.get("error", ""))
+    assert "perl" not in str(result.get("error", ""))
 
 
 def test_apply_patch_auto_applies_json_patch_with_py_strategy(tmp_path: Path) -> None:

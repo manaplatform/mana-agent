@@ -12,6 +12,10 @@ DEFAULT_SKILL_NAMES = (
     "coding-agent",
     "django",
     "vue",
+    "fastapi",
+    "nestjs",
+    "nextjs",
+    "reactjs",
     "telegram-bot",
     "celery",
     "testing",
@@ -25,12 +29,76 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
     "coding-agent": ("agent", "tool", "patch", "apply_patch", "code edit", "write_file"),
     "django": ("django", "model", "migration", "admin", "serializer", "view"),
     "vue": ("vue", "frontend", "component", "table", "filter"),
+    "fastapi": ("fastapi", "uvicorn", "pydantic", "starlette", "endpoint", "router"),
+    "nestjs": ("nestjs", "@nestjs", "controller", "provider", "module", "dependency injection"),
+    "nextjs": ("next", "nextjs", "next.js", "ssr", "app router", "routing", "server components"),
+    "reactjs": ("react", "reactjs", "jsx", "tsx", "component", "hooks"),
     "telegram-bot": ("telegram", "bot", "handler", "inline button", "message"),
     "celery": ("celery", "background job", "queue", "task", "scheduled"),
     "testing": ("test", "pytest", "verify", "verification"),
     "git": ("git", "commit", "branch", "status", "diff"),
     "security": ("security", "permission", "auth", "role", "access", "secret"),
 }
+
+DEFAULT_SKILL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "fastapi": ("fastapi", "uvicorn", "pydantic", "starlette", "endpoint", "router"),
+    "nestjs": ("nestjs", "@nestjs", "controller", "provider", "module", "dependency injection"),
+    "nextjs": ("next", "nextjs", "next.js", "ssr", "app router", "routing", "server components"),
+    "reactjs": ("react", "reactjs", "jsx", "tsx", "component", "hooks"),
+}
+
+
+def build_default_skill_registry_text(text: str, skill_names: Iterable[str]) -> str:
+    """Return manager.py text with missing built-in skill names/keywords added.
+
+    This deterministic path is for simple registry edits where stale LLM line
+    numbers are risky. It edits by stable markers and preserves surrounding file
+    content.
+    """
+    requested = [_normalize_name(name) for name in skill_names]
+    requested = [name for name in requested if name]
+    if not requested:
+        return text
+
+    updated = text
+    if "DEFAULT_SKILL_NAMES = (" not in updated:
+        raise ValueError("DEFAULT_SKILL_NAMES marker not found")
+    block_start = updated.index("DEFAULT_SKILL_NAMES = (")
+    block_end = updated.index(")", block_start)
+    block = updated[block_start:block_end]
+    missing_names = [name for name in requested if f'"{name}"' not in block]
+    if missing_names:
+        insertion = "".join(f'    "{name}",\n' for name in sorted(missing_names))
+        marker = '    "telegram-bot",\n'
+        if marker in block:
+            block = block.replace(marker, insertion + marker, 1)
+        else:
+            block = block + insertion
+        updated = updated[:block_start] + block + updated[block_end:]
+
+    if "_KEYWORDS: dict[str, tuple[str, ...]] = {" not in updated:
+        raise ValueError("_KEYWORDS marker not found")
+    keyword_start = updated.index("_KEYWORDS: dict[str, tuple[str, ...]] = {")
+    keyword_end = updated.index("\n}", keyword_start)
+    keyword_block = updated[keyword_start:keyword_end]
+    missing_keywords = [
+        name for name in requested
+        if name in DEFAULT_SKILL_KEYWORDS and f'    "{name}":' not in keyword_block
+    ]
+    if missing_keywords:
+        insertion = "".join(
+            f'    "{name}": {DEFAULT_SKILL_KEYWORDS[name]!r},\n'
+            for name in sorted(missing_keywords)
+        ).replace("'", '"')
+        marker = '    "telegram-bot":'
+        marker_index = keyword_block.find(marker)
+        if marker_index >= 0:
+            keyword_block = keyword_block[:marker_index] + insertion + keyword_block[marker_index:]
+        else:
+            keyword_block = keyword_block + "\n" + insertion.rstrip("\n")
+        updated = updated[:keyword_start] + keyword_block + updated[keyword_end:]
+
+    return updated
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,4 +215,3 @@ class SkillManager:
             target.write_text(content, encoding="utf-8")
             written.append(target)
         return written
-
