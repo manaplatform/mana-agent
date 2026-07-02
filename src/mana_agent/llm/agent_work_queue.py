@@ -382,6 +382,7 @@ class AgentWorkQueue:
             counts: dict[str, int] = {}
             for item in self._items.values():
                 counts[item.status] = counts.get(item.status, 0) + 1
+            active_remaining = counts.get("pending", 0) + counts.get("ready", 0) + counts.get("running", 0)
             return {
                 "total": len(self._items),
                 "counts": counts,
@@ -389,7 +390,9 @@ class AgentWorkQueue:
                 "failed": counts.get("failed", 0),
                 "blocked": counts.get("blocked", 0),
                 "skipped": counts.get("skipped", 0),
-                "remaining": counts.get("pending", 0) + counts.get("ready", 0) + counts.get("running", 0),
+                "active_remaining": active_remaining,
+                "remaining": active_remaining + counts.get("failed", 0) + counts.get("blocked", 0),
+                "complete": bool(active_remaining == 0 and counts.get("failed", 0) == 0 and counts.get("blocked", 0) == 0),
             }
 
     # -- internals --------------------------------------------------------- #
@@ -1108,24 +1111,13 @@ class QueueManager:
                     **resolved_tool_policy,
                     "mutation_required": True,
                     "mutation_strict": True,
-                    # Agentic authoring: the worker may inspect the repo to ground
-                    # the file, then must end with a mutation. The executor's edit
-                    # branch enforces the same toolset; this keeps them aligned.
                     "allowed_tools": [
-                        "read_file",
-                        "repo_search",
-                        "semantic_search",
-                        "list_files",
-                        "ls",
-                        "find_symbols",
                         "edit_file",
                         "multi_edit_file",
                         "apply_patch",
                         "write_file",
                         "create_file",
                         "delete_file",
-                        "git_diff",
-                        "git_status",
                     ],
                     "verify_requires_mutation": True,
                 }
@@ -1162,10 +1154,11 @@ class QueueManager:
                 forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
                 forced_retry_changed_files = bool(mutation_state.get("changed_files"))
                 if not forced_retry_mutation_attempted:
-                    logger.warning("Forced mutation retry ran but did not attempt a mutation tool")
-                    raise AgentFlowError("Forced mutation retry ran but did not attempt a mutation tool")
+                    warnings.append("forced_mutation_retry_no_mutation_tool_attempted")
                 elif not forced_retry_changed_files:
                     warnings.append("forced_mutation_retry_no_changed_files")
+        if mutation_required and not forced_retry_ran and not mutation_state.get("mutation_attempted"):
+            raise AgentFlowError("Invariant violation: mutation_required=True but no mutation tool was attempted")
 
         # --- Path reconciliation: salvage content written to the wrong path. ---
         # The worker sometimes writes "01-overview.md" at the repo root instead of
@@ -1253,7 +1246,8 @@ class QueueManager:
         )
         mutation_tool_stats = _mutation_tool_stats(trace)
         verification_passed = bool(
-            (not mutation_required or not missing_required_files)
+            (not mutation_required or bool(mutation_state.get("mutation_succeeded")))
+            and (not missing_required_files)
             and (not verification.get("ran") or verification.get("passed"))
         )
         # Write-side flow continuity: persist this turn and reconcile the todo
@@ -1292,7 +1286,7 @@ class QueueManager:
                     "mutation_succeeded": bool(mutation_state.get("mutation_succeeded")),
                     "changed_files": changed_files,
                     "no_op_reason": str(mutation_state.get("no_op_reason") or ""),
-                    "verify_requires_mutation": bool(mutation_state.get("verify_requires_mutation")),
+                    "verify_requires_mutation": bool(mutation_required),
                     "forced_mutation_retry_ran": forced_retry_ran,
                     "forced_retry_mutation_attempted": forced_retry_mutation_attempted,
                     "forced_retry_changed_files": forced_retry_changed_files,
@@ -1306,6 +1300,11 @@ class QueueManager:
                     "missing_required_files": list(missing_required_files),
                     "verification_passed": verification_passed,
                     "mutation_tools_called": mutation_tool_stats["mutation_tools_called"],
+                    "mutation_tools_attempted": mutation_tool_stats["mutation_tools_attempted"],
+                    "mutation_tools_successful": mutation_tool_stats["mutation_tools_successful"],
+                    "mutation_tools_failed": mutation_tool_stats["mutation_tools_failed"],
+                    "read_tools_called": mutation_tool_stats["read_tools_called"],
+                    "search_tools_called": mutation_tool_stats["search_tools_called"],
                     "successful_mutations": mutation_tool_stats["successful_mutations"],
                     "failed_mutations": mutation_tool_stats["failed_mutations"],
                 }

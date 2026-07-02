@@ -1756,7 +1756,7 @@ def _trace_status(row: dict[str, Any]) -> str:
 
 
 _MUTATION_INTENT_RE = re.compile(
-    r"\b(create|update|edit|modify|delete|remove|write|generate\s+file|add\s+file|patch|fix|refactor|rename)\b",
+    r"\b(create|update|edit|change|modify|delete|remove|write|generate\s+file|add(?:\s+file)?|patch|fix|refactor|rename|replace|implement)\b",
     re.IGNORECASE,
 )
 _EXPLICIT_FILE_RE = re.compile(r"(?P<path>(?:[\w.-]+/)*[\w.-]+\.(?:md|txt|py|json|toml|yaml|yml|ini|cfg))\b")
@@ -2077,24 +2077,39 @@ def _missing_required_files(
 
 def _mutation_tool_stats(trace: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Per-tool mutation accounting derived from the authoritative trace."""
-    called: list[str] = []
+    attempted: list[str] = []
+    successful_tools: list[str] = []
+    failed_tools: list[str] = []
+    read_tools: list[str] = []
+    search_tools: list[str] = []
     successful = 0
     failed = 0
     for row in trace:
         if not isinstance(row, dict):
             continue
         tool = _trace_tool_name(row)
+        if tool in {"read_file", "chunk_file"}:
+            read_tools.append(tool)
+        if tool in {"repo_search", "semantic_search", "list_files", "ls", "find_symbols", "call_graph"}:
+            search_tools.append(tool)
         if tool not in _MUTATION_TOOLS:
             continue
-        called.append(tool)
+        attempted.append(tool)
         status = _trace_status(row)
         changed = _extract_changed_files_from_value(row)
         if changed and status not in _NON_PROGRESS_STATUSES and status not in {"error", "failed", "timeout"}:
             successful += 1
+            successful_tools.append(tool)
         elif status in {"error", "failed", "timeout"}:
             failed += 1
+            failed_tools.append(tool)
     return {
-        "mutation_tools_called": called,
+        "mutation_tools_called": attempted,
+        "mutation_tools_attempted": attempted,
+        "mutation_tools_successful": successful_tools,
+        "mutation_tools_failed": failed_tools,
+        "read_tools_called": read_tools,
+        "search_tools_called": search_tools,
         "successful_mutations": successful,
         "failed_mutations": failed,
     }
@@ -2491,7 +2506,7 @@ def _compose_final_answer(
         lines = ["The edit could not be completed."]
         if reason == "mutation_required_but_no_mutation_tool_attempted":
             lines.append(
-                "No edit tool (edit_file/multi_edit_file/apply_patch/write_file/create_file/delete_file) was executed, so no changes were made."
+                "Mutation was required, but no mutation tool was attempted. Blocker: the mutation-only edit step returned without selecting a registered mutation tool."
             )
         elif reason == "mutation_required_but_no_changed_files":
             lines.append(

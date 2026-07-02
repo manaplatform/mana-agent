@@ -21,15 +21,9 @@ from mana_agent.llm.agent_work_queue_adapters import (
 from mana_agent.llm.tool_worker_process import ToolRunResponse
 
 
-# The agentic edit/forced pass exposes read+search tools (so the worker can
-# analyze the repo before authoring), then the mutation tools that end the pass.
+# Edit/forced passes run with mutation tools only; discovery/read jobs gather
+# evidence before the edit item is claimed.
 _AGENTIC_EDIT_TOOLS = [
-    "read_file",
-    "repo_search",
-    "semantic_search",
-    "list_files",
-    "ls",
-    "find_symbols",
     "edit_file",
     "multi_edit_file",
     "apply_patch",
@@ -411,7 +405,6 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
 
 def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Path):
     from mana_agent.llm.agent_work_queue import QueueManager
-    from mana_agent.llm.tools_manager import AgentFlowError
 
     class _FakeWorker:
         def __init__(self) -> None:
@@ -428,13 +421,22 @@ def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Pat
             )
 
     worker = _FakeWorker()
-    with pytest.raises(AgentFlowError, match="Forced mutation retry ran but did not attempt a mutation tool"):
-        QueueManager(worker_client=worker, repo_root=tmp_path).run(
-            request="update docs/overview.md",
-            index_dir=str(tmp_path),
-            requires_edit=True,
-            target_files=["docs/overview.md"],
-        )
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update docs/overview.md",
+        index_dir=str(tmp_path),
+        requires_edit=True,
+        target_files=["docs/overview.md"],
+    )
+
+    assert result.run_status == "blocked"
+    assert result.terminal_reason == "mutation_required_but_no_mutation_tool_attempted"
+    decision = result.planner_decisions[0]
+    assert decision["forced_mutation_retry_ran"] is True
+    assert decision["forced_retry_mutation_attempted"] is False
+    assert decision["mutation_tool_attempted"] is False
+    assert decision["verification_passed"] is False
+    assert decision["verify_requires_mutation"] is True
+    assert "Mutation was required, but no mutation tool was attempted" in result.answer
     assert worker.policies[-1]["allowed_tools"] == _AGENTIC_EDIT_TOOLS
 
 
@@ -655,6 +657,7 @@ def test_edit_with_evidence_uses_agentic_policy_without_duplicate_reads(tmp_path
     assert request.run_id == "edit-memory"
     assert request.tool_policy["allowed_tools"] == _AGENTIC_EDIT_TOOLS
     assert request.tool_policy["require_read_files"] == 0
+    assert request.tool_policy["mutation_strict"] is True
     assert request.tool_name == "write_file"
 
 
@@ -861,5 +864,10 @@ def test_edit_request_cannot_finalize_after_only_read_search(tmp_path: Path):
     }
     assert result.changed_files == []
     assert "could not be completed" in result.answer.lower()
+    assert "No edit tool was executed" not in result.answer
+    decision = result.planner_decisions[0]
+    assert decision["forced_mutation_retry_ran"] is True
+    assert decision["verify_requires_mutation"] is True
+    assert decision["verification_passed"] is False
     # Must not claim a successful edit when nothing actually changed.
     assert "applied changes" not in result.answer.lower()

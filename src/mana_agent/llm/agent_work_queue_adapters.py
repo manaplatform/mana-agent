@@ -30,6 +30,15 @@ from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
 
 logger = logging.getLogger(__name__)
 
+MUTATION_ONLY_TOOLS = [
+    "edit_file",
+    "multi_edit_file",
+    "apply_patch",
+    "write_file",
+    "create_file",
+    "delete_file",
+]
+
 _PATH_RE = re.compile(r"[\w./-]*?[\w-]+\.(?:py|md|txt|toml|yaml|yml|json|cfg|ini)\b")
 _LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([\w.]+)", re.MULTILINE)
 _KEYWORD_RE = re.compile(r"[a-z0-9_]+")
@@ -199,29 +208,13 @@ def make_worker_executor(
         question = item.question or (f"run tool {item.tool_name}" if item.tool_name else item.title)
         item_policy = dict(tool_policy or {})
         if item.kind == "edit":
-            # An edit item is an *agentic* analyze-then-write pass: the worker may
-            # read and search the repository to ground the file it is about to
-            # author, then must finish with a mutation tool. Read/search tools are
-            # allowed (so content is project-specific, never boilerplate); the
-            # mutation requirement still forces the pass to end in a real write.
-            item_policy["allowed_tools"] = [
-                "read_file",
-                "repo_search",
-                "semantic_search",
-                "list_files",
-                "ls",
-                "find_symbols",
-                "edit_file",
-                "multi_edit_file",
-                "apply_patch",
-                "write_file",
-                "create_file",
-                "delete_file",
-                "git_diff",
-                "git_status",
-            ]
+            # Edit work must go through a mutation-only pass. Discovery/read jobs
+            # are queued separately before this point; allowing read/search here
+            # lets an edit-required run finish with a prose-only worker response.
+            item_policy["allowed_tools"] = list(MUTATION_ONLY_TOOLS)
             item_policy["require_read_files"] = 0
             item_policy["mutation_required"] = True
+            item_policy["mutation_strict"] = True
             item_policy["verify_requires_mutation"] = True
         else:
             item_policy.pop("mutation_required", None)
