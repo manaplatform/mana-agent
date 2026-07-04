@@ -157,7 +157,15 @@ This runs the approved plan as an isolated, reproducible mutation/run (separatin
 
 ### MutationCommand (executable)
 
-To execute an approved mutation plan id, use the following `MutationCommand` form (this is the executable command used by the `mana-agent run` workflow):
+To execute an approved mutation plan id, use the following `MutationCommand(...)` form (this is the executable command used by the `mana-agent run` workflow).
+
+> Note: `MutationCommand(...)` is the internal executable representation for the plan. In normal usage you typically run the plan via `mana-agent run`.
+
+```text
+MutationCommand(<plan-id>)
+```
+
+Example:
 
 ```text
 MutationCommand(mp_7ec0ea2fc05d)

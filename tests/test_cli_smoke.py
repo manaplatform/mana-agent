@@ -48,7 +48,7 @@ def test_chat_help_hides_manual_plan_execute_flags() -> None:
     assert "--planning-mode" not in result.stdout
     assert "--auto-execute-plan" not in result.stdout
     assert "--no-auto-execute-plan" not in result.stdout
-    assert "--execution-prof" in result.stdout
+    assert "--execution-profile" in result.stdout
     assert "--full-auto" in result.stdout
 
 
@@ -66,8 +66,8 @@ def test_analyze_command_is_public() -> None:
     result = runner.invoke(app, ["analyze", "--help"])
 
     assert result.exit_code == 0
-    assert "--depth" in result.output
-    assert "--max-files" in result.output
+    assert "--depth" in result.stdout
+    assert "--max-files" in result.stdout
 
 
 def test_continue_command_uses_root_dir_and_loops_until_complete(monkeypatch, tmp_path: Path) -> None:
