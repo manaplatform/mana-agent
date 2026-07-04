@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 from mana_agent.llm.agent_work_queue import (
@@ -19,23 +21,15 @@ from mana_agent.llm.agent_work_queue_adapters import (
 from mana_agent.llm.tool_worker_process import ToolRunResponse
 
 
-# The agentic edit/forced pass exposes read+search tools (so the worker can
-# analyze the repo before authoring), then the mutation tools that end the pass.
+# Edit/forced passes run with mutation tools only; discovery/read jobs gather
+# evidence before the edit item is claimed.
 _AGENTIC_EDIT_TOOLS = [
-    "read_file",
-    "repo_search",
-    "semantic_search",
-    "list_files",
-    "ls",
-    "find_symbols",
     "edit_file",
     "multi_edit_file",
     "apply_patch",
     "write_file",
     "create_file",
     "delete_file",
-    "git_diff",
-    "git_status",
 ]
 
 
@@ -70,6 +64,41 @@ def test_queue_rejects_duplicate_idempotent_jobs():
     assert q.submit(WorkItem(kind="read", tool_name="read_file", tool_args={"path": "src/x.py"}))
     # Identical read should be suppressed.
     assert not q.submit(WorkItem(kind="read", tool_name="read_file", tool_args={"path": "src/x.py"}))
+    assert len(q.items()) == 1
+
+
+def test_board_not_complete_with_failed_edit_step() -> None:
+    q = AgentWorkQueue()
+    edit = WorkItem(kind="edit", tool_name="write_file", question="update docs/08-architecture.md")
+    verify = WorkItem(kind="verify", tool_name="verify", dependencies=[edit.id])
+    q.submit(edit)
+    q.submit(verify)
+    q.complete(edit.id, status="failed", result=WorkResult(ok=False, error="mutation did not run"))
+
+    snap = q.snapshot()
+    assert snap["complete"] is False
+    assert snap["remaining"] == 2
+    assert snap["failed"] == 1
+    assert snap["blocked"] == 1
+
+
+def test_duplicate_mutation_work_items_same_target_collapse() -> None:
+    q = AgentWorkQueue()
+    first = WorkItem(
+        kind="edit",
+        tool_name="write_file",
+        tool_args={"path": "docs/08-architecture.md"},
+        question="update architecture docs",
+    )
+    second = WorkItem(
+        kind="edit",
+        tool_name="write_file",
+        tool_args={"path": "docs/08-architecture.md"},
+        question="update architecture docs",
+    )
+
+    assert q.submit(first) is True
+    assert q.submit(second) is False
     assert len(q.items()) == 1
 
 
@@ -278,9 +307,19 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
                     trace=[{"tool_name": "repo_search", "status": "ok"}],
                     warnings=[],
                 )
-            is_write = (request.tool_name or "") == "write_file"
-            if is_write:
-                _write_real(tmp_path, "docs/overview.md")
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {"path": "docs/overview.md", "content": _substantive("Overview")},
+                        }
+                    ),
+                    sources=[],
+                    mode="agent-tools",
+                    trace=[],
+                    warnings=[],
+                )
             return ToolRunResponse(
                 answer="ok",
                 sources=[],
@@ -289,7 +328,7 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
                     {
                         "tool_name": request.tool_name or "tool",
                         "status": "ok",
-                        "changed_files": ["docs/overview.md"] if is_write else [],
+                        "changed_files": [],
                     }
                 ],
                 warnings=[],
@@ -306,7 +345,7 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
     )
 
     joined = "\n".join(worker.questions)
-    assert "Apply concrete changes" in joined  # the edit job ran
+    assert "MutationCommand" in joined  # command synthesis ran
     assert "Target file: docs/overview.md" in joined
     assert "Verify the changes" in joined       # the verify job ran (after edit)
     assert result.execution_backend == "work_queue"
@@ -349,33 +388,17 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
                     mode="agent-tools",
                     trace=[{"tool_name": "list_files", "status": "ok"}],
                 )
-            if name == "write_file":
-                for rel in [
-                    "src/mana_agent/skills/manager.py",
-                    "src/mana_agent/default_skills/nestjs.md",
-                    "src/mana_agent/default_skills/nextjs.md",
-                    "src/mana_agent/default_skills/reactjs.md",
-                    "src/mana_agent/default_skills/fastapi.md",
-                ]:
-                    target = tmp_path / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(_substantive(rel), encoding="utf-8")
+            if "MutationCommand" in str(request.question):
+                target_file = request.question.split("Target file:", 1)[1].split(". User goal", 1)[0].strip()
                 return ToolRunResponse(
-                    answer="updated default skills",
-                    mode="agent-tools",
-                    trace=[
+                    answer=json.dumps(
                         {
                             "tool_name": "write_file",
-                            "status": "ok",
-                            "changed_files": [
-                                "src/mana_agent/skills/manager.py",
-                                "src/mana_agent/default_skills/nestjs.md",
-                                "src/mana_agent/default_skills/nextjs.md",
-                                "src/mana_agent/default_skills/reactjs.md",
-                                "src/mana_agent/default_skills/fastapi.md",
-                            ],
+                            "tool_args": {"path": target_file, "content": _substantive(target_file)},
                         }
-                    ],
+                    ),
+                    mode="agent-tools",
+                    trace=[],
                 )
             return ToolRunResponse(
                 answer="ok",
@@ -400,7 +423,7 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
 
     assert tool_names.count("repo_search") == 1
     assert tool_names.count("list_files") == 1
-    assert tool_names.count("write_file") == 1
+    assert tool_names.count("write_file") == 0
     assert all("dependency_service.py" not in path for path in read_paths)
     assert "DEFAULT_SKILL_NAMES" in questions
     assert "src/mana_agent/default_skills/*.md" in questions
@@ -409,6 +432,9 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
 
 def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Path):
     from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "overview.md").write_text(_substantive("Overview"), encoding="utf-8")
 
     class _FakeWorker:
         def __init__(self) -> None:
@@ -433,9 +459,588 @@ def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Pat
     )
 
     assert result.run_status == "blocked"
-    assert result.terminal_reason == "mutation_required_but_no_mutation_tool_attempted"
-    assert "forced_mutation_retry_no_mutation_tool_attempted" in result.warnings
+    assert result.terminal_reason == "mutation_command_missing"
+    decision = result.planner_decisions[0]
+    assert decision["forced_mutation_retry_ran"] is True
+    assert decision["forced_retry_mutation_attempted"] is False
+    assert decision["mutation_tool_attempted"] is False
+    assert decision["verification_passed"] is False
+    assert decision["verify_requires_mutation"] is True
+    assert "no executable MutationCommand" in result.answer
     assert worker.policies[-1]["allowed_tools"] == _AGENTIC_EDIT_TOOLS
+
+
+def test_bare_docs_filename_resolves_existing_docs_file(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs" / "08-architecture.md").write_text("# Architecture\n", encoding="utf-8")
+
+    payload = QueueManager(worker_client=object(), repo_root=tmp_path).preview_plan(
+        request="analyze src architecture and update 08-architecture.md",
+        requires_edit=True,
+        target_files=["src/08-architecture.md"],
+    )
+
+    assert "docs/08-architecture.md" in payload["target_files"]
+    assert "src/08-architecture.md" not in payload["target_files"]
+
+
+def test_typo_target_resolution_clears_missing_required_files(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    body = "# Architecture\n\n" + ("Current architecture evidence. " * 8) + "\n"
+    target = tmp_path / "docs" / "08-architecture.md"
+    target.write_text(body, encoding="utf-8")
+
+    class _TypoResolutionWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(
+                    answer="docs/08-architecture.md",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "repo_search", "status": "ok", "path": "docs/08-architecture.md"}],
+                )
+            if tool == "read_file":
+                return ToolRunResponse(
+                    answer=target.read_text(encoding="utf-8"),
+                    mode="agent-tools",
+                    trace=[{"tool_name": "read_file", "status": "ok", "path": request.tool_args.get("path")}],
+                )
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {
+                                "path": "docs/08-architecture.md",
+                                "content": body + "\n" + ("Updated with new architecture details. " * 8) + "\n",
+                            },
+                        }
+                    ),
+                    mode="agent-tools",
+                    trace=[],
+                )
+            return ToolRunResponse(answer="ok", mode="agent-tools", trace=[])
+
+    worker = _TypoResolutionWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update the architectue.md with new architecture.",
+        index_dir=str(tmp_path),
+        requires_edit=True,
+    )
+
+    decision = result.planner_decisions[0]
+    assert decision["raw_target_files"] == ["architectue.md"]
+    assert decision["resolved_target_files"] == ["docs/08-architecture.md"]
+    assert decision["required_files"] == ["docs/08-architecture.md"]
+    assert decision["missing_required_files"] == []
+    assert "architectue.md" not in decision["missing_required_files"]
+    read_paths = [
+        str(req.tool_args.get("path"))
+        for req in worker.requests
+        if (req.tool_name or "") == "read_file"
+    ]
+    assert "docs/08-architecture.md" in read_paths
+    edit_questions = [str(req.question) for req in worker.requests if "MutationCommand" in str(req.question)]
+    assert any(
+        "MutationPlan" in str(req.question) and "docs/08-architecture.md" in str(req.question)
+        for req in worker.requests
+        if "MutationCommand" in str(req.question)
+    )
+    assert all("Using the file evidence already gathered in this run, update architectue.md" not in question for question in edit_questions)
+
+
+def test_edit_intent_forces_mutation_tool_attempt(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "08-architecture.md").write_text("# Old\n", encoding="utf-8")
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.mutation_tools_called: list[str] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            tool = request.tool_name or ""
+            if tool in {"write_file", "edit_file", "multi_edit_file", "apply_patch", "create_file", "delete_file"}:
+                raise AssertionError("worker must not execute mutation tools")
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {"path": "docs/08-architecture.md", "content": _substantive("Architecture")},
+                        }
+                    ),
+                    mode="agent-tools",
+                    trace=[],
+                )
+            return ToolRunResponse(
+                answer="found docs/08-architecture.md",
+                mode="agent-tools",
+                trace=[{"tool_name": tool or "repo_search", "status": "ok"}],
+            )
+
+    worker = _FakeWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update docs/08-architecture.md",
+        index_dir=str(tmp_path),
+        requires_edit=None,
+    )
+
+    decision = result.planner_decisions[0]
+    assert decision["mutation_required"] is True
+    assert decision["mutation_tool_attempted"] is True
+    assert decision["mutation_tools_called"]
+    assert worker.mutation_tools_called == []
+
+
+def test_docs_edit_without_approved_fallback_blocks_when_worker_writes_nothing(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "docs").mkdir()
+    body = "# Architecture\n\n" + ("Existing architecture details for the project. " * 8) + "\n"
+    (tmp_path / "docs" / "08-architecture.md").write_text(body, encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "docs/08-architecture.md"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    class _ReadOnlyWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(
+                    answer="docs/08-architecture.md",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "repo_search", "status": "ok"}],
+                )
+            if tool == "read_file":
+                return ToolRunResponse(
+                    answer=body,
+                    mode="agent-tools",
+                    trace=[{"tool_name": "read_file", "status": "ok", "path": "docs/08-architecture.md"}],
+                )
+            return ToolRunResponse(
+                answer="prose only",
+                mode="agent-tools",
+                trace=[],
+            )
+
+    worker = _ReadOnlyWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update 08-architecture.md in docs",
+        index_dir=str(tmp_path),
+        requires_edit=None,
+    )
+
+    decision = result.planner_decisions[0]
+    assert result.run_status == "blocked"
+    assert decision["mutation_required"] is True
+    assert decision["forced_mutation_retry_ran"] is True
+    assert decision["mutation_tool_successful"] is False
+    assert decision["mutation_plan_approved"] is True
+    assert decision["mutation_plan_executed"] is False
+    assert "docs/08-architecture.md" not in result.changed_files
+
+
+def test_explicit_fallback_decision_can_mutate_existing_update_notes_section(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    body = (
+        "# Architecture\n\n"
+        + ("Existing architecture details for the project. " * 8)
+        + "\n\n## Update Notes\n\nRequested change: update 08-architecture.md in docs.\n"
+    )
+    target = tmp_path / "docs" / "08-architecture.md"
+    target.write_text(body, encoding="utf-8")
+
+    class _ProseOnlyWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(
+                    answer="docs/08-architecture.md",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "repo_search", "status": "ok", "path": "docs/08-architecture.md"}],
+                )
+            if tool == "read_file":
+                return ToolRunResponse(
+                    answer=target.read_text(encoding="utf-8"),
+                    mode="agent-tools",
+                    trace=[{"tool_name": "read_file", "status": "ok", "path": request.tool_args.get("path")}],
+                )
+            return ToolRunResponse(answer="only prose", mode="agent-tools", trace=[])
+
+    result = QueueManager(worker_client=_ProseOnlyWorker(), repo_root=tmp_path).run(
+        request="update the architectue.md with new architecture.",
+        index_dir=str(tmp_path),
+        requires_edit=True,
+        tool_policy={"fallback_decision": True},
+    )
+
+    decision = result.planner_decisions[0]
+    assert result.run_status == "completed"
+    assert decision["raw_target_files"] == ["architectue.md"]
+    assert decision["resolved_target_files"] == ["docs/08-architecture.md"]
+    assert decision["mutation_tools_called"] == ["write_file"]
+    assert decision["missing_required_files"] == []
+    assert "docs/08-architecture.md" in result.changed_files
+    assert "Requested change: update the architectue.md with new architecture." in target.read_text(encoding="utf-8")
+
+
+def test_source_architecture_update_reads_src_evidence_before_mutation(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.llm.mutation_plan import ARCHITECTURE_SOURCE_DIRS
+
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs" / "08-architecture.md"
+    target.write_text("# Architecture\n\nExisting architecture.\n", encoding="utf-8")
+    src_files: list[str] = []
+    for dirname in ARCHITECTURE_SOURCE_DIRS:
+        root = tmp_path / dirname
+        root.mkdir(parents=True, exist_ok=True)
+        rel = f"{dirname}module.py"
+        (tmp_path / rel).write_text("class Component:\n    pass\n", encoding="utf-8")
+        src_files.append(rel)
+
+    class _ArchitectureWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(
+                    answer="tests/test_architecture.py\nCHANGELOG.md",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "repo_search", "status": "ok"}],
+                )
+            if tool == "read_file":
+                path = str(request.tool_args.get("path"))
+                return ToolRunResponse(
+                    answer=(tmp_path / path).read_text(encoding="utf-8"),
+                    mode="agent-tools",
+                    trace=[{"tool_name": "read_file", "status": "ok", "path": path}],
+                )
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {
+                                "path": "docs/08-architecture.md",
+                                "content": (
+                                    "# Architecture\n\n"
+                                    "Updated from src/mana_agent/llm/module.py evidence.\n\n"
+                                    + ("Source-backed architecture section. " * 12)
+                                    + "\n"
+                                ),
+                            },
+                        }
+                    ),
+                    mode="agent-tools",
+                    trace=[],
+                )
+            return ToolRunResponse(answer="ok", mode="agent-tools", trace=[])
+
+    worker = _ArchitectureWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="08-architecture.md update this files with new architecture exist in src",
+        index_dir=str(tmp_path),
+        requires_edit=True,
+    )
+
+    read_paths = [
+        str(req.tool_args.get("path"))
+        for req in worker.requests
+        if (req.tool_name or "") == "read_file"
+    ]
+    assert result.run_status == "completed"
+    assert "docs/08-architecture.md" in read_paths
+    assert set(src_files).issubset(set(read_paths))
+    decision = result.planner_decisions[0]
+    assert decision["mutation_plan_approved"] is True
+    assert decision["mutation_plan_executed"] is True
+
+
+def test_source_architecture_update_rejects_tests_changelog_only_evidence(tmp_path: Path):
+    from mana_agent.llm.mutation_plan import build_mutation_plan
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "08-architecture.md").write_text("# Architecture\n", encoding="utf-8")
+    (tmp_path / "src/mana_agent/llm").mkdir(parents=True)
+    (tmp_path / "src/mana_agent/llm/module.py").write_text("class Queue: pass\n", encoding="utf-8")
+
+    plan = build_mutation_plan(
+        repo_root=tmp_path,
+        user_goal="08-architecture.md update this files with new architecture exist in src",
+        target_files=["docs/08-architecture.md"],
+        evidence_files_read=["docs/08-architecture.md", "tests/test_architecture.py", "CHANGELOG.md"],
+    )
+
+    assert plan.allowed_to_mutate is False
+    assert "required evidence files not read" in str(plan.blocked_reason)
+
+
+def test_approved_mutation_plan_compiles_to_registered_tool(tmp_path: Path):
+    from mana_agent.llm.mutation_plan import build_mutation_plan, compile_mutation_command, validate_mutation_command
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "08-architecture.md").write_text("# Old\n", encoding="utf-8")
+    plan = build_mutation_plan(
+        repo_root=tmp_path,
+        user_goal="update docs/08-architecture.md",
+        target_files=["docs/08-architecture.md"],
+        evidence_files_read=["docs/08-architecture.md"],
+    )
+
+    command = compile_mutation_command(
+        repo_root=tmp_path,
+        plan=plan,
+        current_files={"docs/08-architecture.md": "# Old\n"},
+        synthesized_content="# New\n\nUpdated architecture.\n",
+    )
+
+    assert command.tool_name in {"write_file", "apply_patch"}
+    assert command.tool_args.get("path") or command.tool_args.get("patch")
+    assert not validate_mutation_command(command)
+
+
+def test_work_item_tool_name_is_not_ignored(tmp_path: Path):
+    from mana_agent.llm.mutation_plan import build_mutation_plan
+
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs" / "note.md"
+    target.write_text("old\n", encoding="utf-8")
+    plan = build_mutation_plan(
+        repo_root=tmp_path,
+        user_goal="update docs/note.md",
+        target_files=["docs/note.md"],
+        evidence_files_read=["docs/note.md"],
+    )
+
+    class _ShouldNotRunWorker:
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            raise AssertionError("worker should not select mutation tools")
+
+    executor = make_worker_executor(worker_client=_ShouldNotRunWorker(), repo_root=tmp_path)
+    result = executor(
+        WorkItem(
+            kind="edit",
+            tool_name="write_file",
+            tool_args={
+                "path": "docs/note.md",
+                "content": "new\n",
+                "mutation_plan": plan.model_dump(),
+                "mutation_plan_id": plan.plan_id,
+            },
+            question="update docs/note.md",
+        )
+    )
+
+    assert result.ok is True
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert result.trace[0]["mutation_plan_id"] == plan.plan_id
+    assert result.trace[0]["created_by"] == "mutation_command_executor"
+
+
+def test_write_file_without_content_is_incomplete(tmp_path: Path):
+    from mana_agent.llm.mutation_plan import build_mutation_plan
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "note.md").write_text("old\n", encoding="utf-8")
+    plan = build_mutation_plan(
+        repo_root=tmp_path,
+        user_goal="update docs/note.md",
+        target_files=["docs/note.md"],
+        evidence_files_read=["docs/note.md"],
+    )
+
+    class _ShouldNotRunWorker:
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            raise AssertionError("worker should not receive incomplete mutation command")
+
+    executor = make_worker_executor(worker_client=_ShouldNotRunWorker(), repo_root=tmp_path)
+    result = executor(
+        WorkItem(
+            kind="edit",
+            tool_name="write_file",
+            tool_args={
+                "path": "docs/note.md",
+                "mutation_plan": plan.model_dump(),
+                "mutation_plan_id": plan.plan_id,
+            },
+            question="update docs/note.md",
+        )
+    )
+
+    assert result.ok is False
+    assert "mutation_command_incomplete" in result.error
+    assert result.trace[0]["error"] == "mutation_command_incomplete"
+
+
+def test_architecture_update_does_not_depend_on_model_tool_selection(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs" / "08-architecture.md"
+    target.write_text("# Old\n", encoding="utf-8")
+
+    class _StructuredCommandWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(answer="docs/08-architecture.md", mode="agent-tools", trace=[{"tool_name": "repo_search", "status": "ok"}])
+            if tool == "read_file":
+                return ToolRunResponse(answer=target.read_text(encoding="utf-8"), mode="agent-tools", trace=[{"tool_name": "read_file", "status": "ok", "path": "docs/08-architecture.md"}])
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {
+                                "path": "docs/08-architecture.md",
+                                "content": "# New\n\n" + ("Updated by structured command. " * 8) + "\n",
+                            },
+                        }
+                    ),
+                    mode="agent-tools",
+                    trace=[],
+                )
+            if tool in {"write_file", "create_file", "apply_patch", "delete_file"}:
+                raise AssertionError("worker must not execute mutation tools")
+            return ToolRunResponse(answer="verified", mode="agent-tools", trace=[{"tool_name": tool or "verify", "status": "ok"}])
+
+    worker = _StructuredCommandWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update docs/08-architecture.md",
+        index_dir=str(tmp_path),
+        requires_edit=True,
+        target_files=["docs/08-architecture.md"],
+    )
+
+    assert result.run_status == "completed"
+    assert result.changed_files == ["docs/08-architecture.md"]
+    assert target.read_text(encoding="utf-8").startswith("# New")
+    assert all((req.tool_name or "") != "write_file" for req in worker.requests)
+    assert any(row.get("created_by") == "mutation_command_executor" for row in result.trace)
+
+
+def test_mutation_only_worker_prose_is_rejected(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "note.md").write_text("old\n", encoding="utf-8")
+
+    class _ProseWorker:
+        def __init__(self) -> None:
+            self.mutation_calls = 0
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(answer="docs/note.md", mode="agent-tools", trace=[{"tool_name": "repo_search", "status": "ok"}])
+            if tool == "read_file":
+                return ToolRunResponse(answer="old\n", mode="agent-tools", trace=[{"tool_name": "read_file", "status": "ok", "path": "docs/note.md"}])
+            if tool in {"write_file", "create_file", "apply_patch", "delete_file"}:
+                self.mutation_calls += 1
+            return ToolRunResponse(answer="I updated it", mode="agent-tools", trace=[])
+
+    worker = _ProseWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update docs/note.md",
+        index_dir=str(tmp_path),
+        requires_edit=True,
+        target_files=["docs/note.md"],
+    )
+
+    assert result.run_status == "blocked"
+    assert result.terminal_reason == "mutation_command_missing"
+    assert worker.mutation_calls == 0
+    assert "Mutation plan was approved" in result.answer
+    assert "no executable MutationCommand" in result.answer
+
+
+def test_simple_docs_edit_does_not_read_all_docs(tmp_path: Path):
+    from mana_agent.llm.agent_work_queue import QueueManager
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / "docs").mkdir()
+    body = "# Architecture\n\n" + ("Existing architecture details for the project. " * 8) + "\n"
+    (tmp_path / "docs" / "08-architecture.md").write_text(body, encoding="utf-8")
+    for idx in range(1, 8):
+        (tmp_path / "docs" / f"{idx:02d}-other.md").write_text("# Other\n\n" + ("Other docs. " * 20), encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "docs"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    class _ReadOnlyWorker:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def run_tools(self, request, on_event=None):  # noqa: ANN001
+            self.requests.append(request)
+            tool = request.tool_name or ""
+            if tool == "repo_search":
+                return ToolRunResponse(
+                    answer="docs/08-architecture.md",
+                    mode="agent-tools",
+                    trace=[{"tool_name": "repo_search", "status": "ok"}],
+                )
+            if tool == "read_file":
+                return ToolRunResponse(
+                    answer=body,
+                    mode="agent-tools",
+                    trace=[{"tool_name": "read_file", "status": "ok", "path": request.tool_args.get("path")}],
+                )
+            return ToolRunResponse(answer="prose only", mode="agent-tools", trace=[])
+
+    worker = _ReadOnlyWorker()
+    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
+        request="update 08-architecture.md in docs",
+        index_dir=str(tmp_path),
+        requires_edit=None,
+    )
+
+    read_files = [
+        str(req.tool_args.get("path"))
+        for req in worker.requests
+        if (req.tool_name or "") == "read_file" and str(req.tool_args.get("path", "")).startswith("docs/")
+    ]
+    assert result.run_status == "blocked"
+    assert "docs/08-architecture.md" in read_files
+    assert len(read_files) <= 3
 
 
 def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path):
@@ -453,7 +1058,7 @@ def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path)
     assert "imports, exports" in edit["title"]
     assert "registries" in edit["title"]
     assert "call sites" in edit["title"]
-    assert edit["requires_tools"] == ["edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"]
+    assert edit["requires_tools"] == ["edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file"]
     assert edit["checks"] == [
         "target file changed/created/deleted",
         "related imports/usages updated",
@@ -541,7 +1146,8 @@ def test_sniffer_uses_planner_target_file_for_edit_job(tmp_path: Path):
     edit = next(item for item in new_items if item.kind == "edit")
 
     assert edit.tool_name == "write_file"
-    assert edit.tool_args == {"path": "docs/analyze.md"}
+    assert edit.tool_args["path"] == "docs/analyze.md"
+    assert edit.tool_args["mutation_plan_id"]
     assert "Target file: docs/analyze.md" in edit.question
     assert "related importers, exports, registries" in edit.question
     assert "stale docs/config references" in edit.question
@@ -549,6 +1155,7 @@ def test_sniffer_uses_planner_target_file_for_edit_job(tmp_path: Path):
 
 def test_edit_with_evidence_uses_agentic_policy_without_duplicate_reads(tmp_path: Path):
     from mana_agent.llm.evidence_memory import EvidenceMemory
+    from mana_agent.llm.mutation_plan import build_mutation_plan
 
     (tmp_path / "src").mkdir()
     target = tmp_path / "src" / "app.py"
@@ -565,16 +1172,9 @@ def test_edit_with_evidence_uses_agentic_policy_without_duplicate_reads(tmp_path
         summary="full file read, 1 lines",
     )
 
-    seen: list[object] = []
-
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
-            seen.append(request)
-            return ToolRunResponse(
-                answer="changed",
-                mode="agent-tools",
-                trace=[{"tool_name": "write_file", "status": "ok", "changed_files": ["src/app.py"]}],
-            )
+            raise AssertionError("complete mutation command should execute directly")
 
     executor = make_worker_executor(
         worker_client=_FakeWorker(),
@@ -583,22 +1183,29 @@ def test_edit_with_evidence_uses_agentic_policy_without_duplicate_reads(tmp_path
         run_id="edit-memory",
         tool_policy={"allowed_tools": ["read_file", "write_file"], "require_read_files": 2},
     )
+    plan = build_mutation_plan(
+        repo_root=tmp_path,
+        user_goal="Update src/app.py using existing evidence.",
+        target_files=["src/app.py"],
+        evidence_files_read=["src/app.py"],
+    )
     result = executor(
         WorkItem(
             kind="edit",
             tool_name="write_file",
-            tool_args={"path": "src/app.py"},
+            tool_args={
+                "path": "src/app.py",
+                "content": "new\n",
+                "mutation_plan": plan.model_dump(),
+                "mutation_plan_id": plan.plan_id,
+            },
             question="Update src/app.py using existing evidence.",
         )
     )
 
     assert result.ok is True
-    assert len(seen) == 1
-    request = seen[0]
-    assert request.run_id == "edit-memory"
-    assert request.tool_policy["allowed_tools"] == _AGENTIC_EDIT_TOOLS
-    assert request.tool_policy["require_read_files"] == 0
-    assert request.tool_name == "write_file"
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert result.trace[0]["created_by"] == "mutation_command_executor"
 
 
 def test_sniffer_skips_edit_for_non_mutating_request(tmp_path: Path):
@@ -698,12 +1305,18 @@ def test_non_empty_changed_files_never_claims_no_changes(tmp_path: Path):
 def test_failed_verify_project_is_surfaced_in_final_answer(tmp_path: Path):
     from mana_agent.llm.agent_work_queue import QueueManager
 
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("old\n", encoding="utf-8")
+
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
             name = request.tool_name or ""
             if name == "repo_search":
-                return ToolRunResponse(answer="ok", mode="agent-tools",
+                return ToolRunResponse(answer="src/app.py", mode="agent-tools",
                                        trace=[{"tool_name": "repo_search", "status": "ok"}])
+            if name == "read_file":
+                return ToolRunResponse(answer="old\n", mode="agent-tools",
+                                       trace=[{"tool_name": "read_file", "status": "ok", "path": "src/app.py"}])
             if "Verify" in (request.question or "") or name in {"verify", "verify_project"}:
                 return ToolRunResponse(
                     answer="verification done",
@@ -720,11 +1333,21 @@ def test_failed_verify_project_is_surfaced_in_final_answer(tmp_path: Path):
                         }
                     ],
                 )
-            _write_real(tmp_path, "src/app.py")
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {"path": "src/app.py", "content": "print('new')\n" * 20},
+                        }
+                    ),
+                    mode="agent-tools",
+                    trace=[],
+                )
             return ToolRunResponse(
-                answer="edited",
+                answer="ok",
                 mode="agent-tools",
-                trace=[{"tool_name": "apply_patch", "status": "ok", "changed_files": ["src/app.py"]}],
+                trace=[],
             )
 
     result = QueueManager(worker_client=_FakeWorker(), repo_root=tmp_path).run(
@@ -744,12 +1367,18 @@ def test_failed_verify_project_is_surfaced_in_final_answer(tmp_path: Path):
 def test_passed_verify_reports_changed_files_and_checks_passed(tmp_path: Path):
     from mana_agent.llm.agent_work_queue import QueueManager
 
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("old\n", encoding="utf-8")
+
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
             name = request.tool_name or ""
             if name == "repo_search":
-                return ToolRunResponse(answer="ok", mode="agent-tools",
+                return ToolRunResponse(answer="src/app.py", mode="agent-tools",
                                        trace=[{"tool_name": "repo_search", "status": "ok"}])
+            if name == "read_file":
+                return ToolRunResponse(answer="old\n", mode="agent-tools",
+                                       trace=[{"tool_name": "read_file", "status": "ok", "path": "src/app.py"}])
             if "Verify" in (request.question or "") or name in {"verify", "verify_project"}:
                 return ToolRunResponse(
                     answer="verification done",
@@ -757,11 +1386,21 @@ def test_passed_verify_reports_changed_files_and_checks_passed(tmp_path: Path):
                     trace=[{"tool_name": "verify_project", "status": "ok",
                             "checks": [{"name": "pytest", "status": "passed"}]}],
                 )
-            _write_real(tmp_path, "src/app.py")
+            if "MutationCommand" in str(request.question):
+                return ToolRunResponse(
+                    answer=json.dumps(
+                        {
+                            "tool_name": "write_file",
+                            "tool_args": {"path": "src/app.py", "content": "print('new')\n" * 20},
+                        }
+                    ),
+                    mode="agent-tools",
+                    trace=[],
+                )
             return ToolRunResponse(
-                answer="edited",
+                answer="ok",
                 mode="agent-tools",
-                trace=[{"tool_name": "write_file", "status": "ok", "changed_files": ["src/app.py"]}],
+                trace=[],
             )
 
     result = QueueManager(worker_client=_FakeWorker(), repo_root=tmp_path).run(
@@ -801,8 +1440,14 @@ def test_edit_request_cannot_finalize_after_only_read_search(tmp_path: Path):
     assert result.terminal_reason in {
         "mutation_required_but_no_mutation_tool_attempted",
         "mutation_required_but_no_changed_files",
+        "mutation_command_missing",
     }
     assert result.changed_files == []
     assert "could not be completed" in result.answer.lower()
+    assert "No edit tool was executed" not in result.answer
+    decision = result.planner_decisions[0]
+    assert decision["forced_mutation_retry_ran"] is True
+    assert decision["verify_requires_mutation"] is True
+    assert decision["verification_passed"] is False
     # Must not claim a successful edit when nothing actually changed.
     assert "applied changes" not in result.answer.lower()

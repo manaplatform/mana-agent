@@ -13,6 +13,7 @@ from .edit_file import (  # noqa: F401
     safe_multi_edit_file,
 )
 from .repository import (  # noqa: F401
+    apply_patch_batch,
     call_graph,
     explore_src,
     find_symbols,
@@ -21,7 +22,10 @@ from .repository import (  # noqa: F401
     inspect_project_structure,
     inspect_tests,
     list_files,
+    repo_batch_read,
+    repo_batch_search,
     repo_search,
+    run_script_once,
     verify_file_created,
     verify_project,
 )
@@ -38,6 +42,7 @@ __all__ = [
     "build_apply_patch_tool",
     "build_edit_file_tool",
     "build_multi_edit_file_tool",
+    "apply_patch_batch",
     "coding_tool_contracts",
     "coding_tool_contracts_payload",
     "call_graph",
@@ -49,7 +54,10 @@ __all__ = [
     "inspect_project_structure",
     "inspect_tests",
     "list_files",
+    "repo_batch_read",
+    "repo_batch_search",
     "repo_search",
+    "run_script_once",
     "safe_apply_patch",
     "safe_edit_file",
     "safe_multi_edit_file",

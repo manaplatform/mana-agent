@@ -48,8 +48,8 @@ GATE_TO_PHASE: dict[str, str] = {
 # the active gate.
 WRAPPER_TOOLS: frozenset[str] = frozenset({"toolsmanager_request"})
 
-MUTATION_TOOLS: frozenset[str] = frozenset({"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"})
-VERIFICATION_TOOLS: frozenset[str] = frozenset({"run_command", "verify_project"})
+MUTATION_TOOLS: frozenset[str] = frozenset({"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file"})
+VERIFICATION_TOOLS: frozenset[str] = frozenset({"run_command", "run_script_once", "verify_project"})
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ GATE_POLICIES: dict[str, GatePolicy] = {
     "locate_candidates": GatePolicy(
         gate="locate_candidates",
         phase="DISCOVERY",
-        allowed_tools=frozenset({"repo_search", "semantic_search", "list_files", "run_command"}),
+        allowed_tools=frozenset({"repo_search", "repo_batch_search", "semantic_search", "list_files", "run_command", "run_script_once"}),
         forbidden_tools=frozenset(),
         required_tool_set=frozenset(),
         progress_keys=("files_found", "files_discovered", "candidate_files", "no_candidates"),

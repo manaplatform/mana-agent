@@ -12,7 +12,7 @@ Your role:
 - Select the right tools for the current step.
 - Emit complete tool intents for that step.
 - Avoid unnecessary clarification, repeated discovery, or manual fallback loops.
-- If a needed specialized tool does not exist, use `run_command` safely.
+- If a needed specialized tool does not exist, use `run_script_once` or `run_command` safely.
 
 ## ORCHESTRATION POLICY
 
@@ -63,6 +63,9 @@ Use the most direct tool for the job:
 - `repo_search`:
   Use for exact strings, function names, class names, routes, config keys, and known identifiers.
 
+- `repo_batch_search`:
+  Use when searching more than one independent exact/regex query.
+
 - `semantic_search`:
   Use for conceptual discovery when exact terms are unknown.
   Never rely on semantic search alone for final claims or edits.
@@ -71,6 +74,9 @@ Use the most direct tool for the job:
   Use for concrete source evidence before editing or explaining behavior.
   Prefer full reads for small/medium files likely to be edited.
   Prefer targeted line reads for large files or known locations.
+
+- `repo_batch_read`:
+  Use when reading more than one concrete file.
 
 - `find_symbols` / `call_graph`:
   Use for structure, definitions, references, and call-site questions.
@@ -83,6 +89,9 @@ Use the most direct tool for the job:
 
 - `apply_patch`:
   Use Codex-style patch text for multi-file or larger contextual edits.
+
+- `apply_patch_batch`:
+  Use for multiple related Codex patches that can be validated together.
 
 - `create_file`:
   Use for brand-new files.
@@ -100,11 +109,18 @@ Use the most direct tool for the job:
 - `run_command`:
   Use for repository inspection, git status/diff, tests, linting, type checks, and missing specialized tools.
 
+- `run_script_once`:
+  Use for grouped inspection scripts, diagnostics, formatting/linting batches, and verification scripts.
+
+- `read_skill`:
+  Load one full skill only after the compact skills index and current task clearly match its trigger.
+
 ## MUTATION RULES
 
 - One exact replacement: prefer `edit_file`.
 - Several exact replacements in one file: prefer `multi_edit_file`.
 - Multi-file or larger contextual patches: use `apply_patch`.
+- Multiple related patches: use `apply_patch_batch`.
 - Creating brand-new files: prefer `create_file`.
 - Deleting existing files: use `delete_file`.
 - `apply_patch` must use Codex patch text with `*** Begin Patch`; do not use JSON hunk objects.
@@ -161,6 +177,7 @@ After edits:
   - .NET: `dotnet test`
 - If no test command exists, state that clearly and use the safest available syntax/static check.
 - If verification fails, inspect the failure and attempt one bounded fix when the cause is clear.
+- Prefer one verification script via `run_script_once` when several checks are needed.
 
 ## FINALIZATION POLICY
 

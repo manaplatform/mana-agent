@@ -31,15 +31,20 @@ from mana_agent.services.search_service import SearchService
 from mana_agent.tools import coding_tool_contracts_payload, extract_patch_touched_files
 from mana_agent.utils.tool_policy import resolve_allowed_tools
 from mana_agent.tools.repository import (
+    apply_patch_batch as repo_apply_patch_batch,
     call_graph as repo_call_graph,
     dumps_tool_result,
     find_symbols as repo_find_symbols,
     git_diff as repo_git_diff,
     git_status as repo_git_status,
+    repo_batch_read as repo_batch_read_files,
+    repo_batch_search as repo_batch_text_search,
     list_files as repo_list_files,
     repo_search as repo_text_search,
+    run_script_once as repo_run_script_once,
     verify_project as repo_verify_project,
 )
+from mana_agent.skills.manager import SkillManager
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +56,7 @@ logger = logging.getLogger(__name__)
 _FORCED_WRITE_INSTRUCTION = (
     "You have gathered enough evidence from the repository. Do NOT read, search, "
     "or list anything else. Right now, in this step, call exactly one mutation "
-    "tool (edit_file, multi_edit_file, apply_patch, write_file, create_file, or delete_file) to apply the required "
+    "tool (edit_file, multi_edit_file, apply_patch, apply_patch_batch, write_file, create_file, or delete_file) to apply the required "
     "project-level change with its full, final, project-specific content. Update "
     "all required imports, exports, registries, routers, commands, call sites, tests, "
     "and docs, and remove stale references. Do not answer in prose and do not emit "
@@ -89,6 +94,22 @@ class _RepoSearchInput(BaseModel):
     regex: bool = False
     limit: int = 100
 
+class _RepoBatchReadInput(BaseModel):
+    files: list[str]
+
+class _RepoBatchSearchInput(BaseModel):
+    patterns: list[dict[str, Any]]
+
+class _RunScriptOnceInput(BaseModel):
+    script: str
+    cwd: str | None = None
+
+class _ApplyPatchBatchInput(BaseModel):
+    patches: list[dict[str, Any]]
+
+class _ReadSkillInput(BaseModel):
+    skill_name: str
+
 class _ListFilesInput(BaseModel):
     glob: str = "**/*"
     limit: int = 200
@@ -120,7 +141,7 @@ class AskAgent:
     # Tools whose calls are deduplicated semantically (similar queries collapse
     # to the same canonical intent, e.g. ``README`` / ``README.md`` / ``README*``).
     SEARCH_LIKE_TOOLS = frozenset(
-        {"semantic_search", "repo_search", "find_symbols", "call_graph", "list_files"}
+        {"semantic_search", "repo_search", "repo_batch_search", "find_symbols", "call_graph", "list_files"}
     )
 
     _BLOCKED_PATTERNS = [
@@ -604,7 +625,7 @@ class AskAgent:
         when the payload omits a list. Returns ``[]`` for non-mutation tools or
         when the call did not succeed.
         """
-        if name not in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"}:
+        if name not in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file"}:
             return []
         if name == "apply_patch":
             if self._is_apply_patch_failure(content):
@@ -1210,6 +1231,23 @@ class AskAgent:
                 repo_text_search(self.project_root, query=query, glob=glob, regex=regex, limit=limit)
             )
 
+        def repo_batch_read(files: list[str]) -> str:
+            return dumps_tool_result(repo_batch_read_files(self.project_root, files=files))
+
+        def repo_batch_search(patterns: list[dict[str, Any]]) -> str:
+            return dumps_tool_result(repo_batch_text_search(self.project_root, patterns=patterns))
+
+        def run_script_once(script: str, cwd: str | None = None) -> str:
+            return dumps_tool_result(repo_run_script_once(self.project_root, script=script, cwd=cwd, timeout=timeout_seconds))
+
+        def apply_patch_batch(patches: list[dict[str, Any]]) -> str:
+            return dumps_tool_result(repo_apply_patch_batch(self.project_root, patches=patches))
+
+        skill_manager = SkillManager(project_root=self.project_root)
+
+        def read_skill(skill_name: str) -> str:
+            return skill_manager.read_skill(skill_name)
+
         def list_files(glob: str = "**/*", limit: int = 200) -> str:
             return dumps_tool_result(repo_list_files(self.project_root, glob=glob, limit=limit))
 
@@ -1277,6 +1315,36 @@ class AskAgent:
                 name="repo_search",
                 description="Search repository text with regex or literal matching. Read-only.",
                 args_schema=_RepoSearchInput,
+            ),
+            StructuredTool.from_function(
+                func=repo_batch_read,
+                name="repo_batch_read",
+                description="Read multiple repository files in one call with per-file errors and truncation metadata.",
+                args_schema=_RepoBatchReadInput,
+            ),
+            StructuredTool.from_function(
+                func=repo_batch_search,
+                name="repo_batch_search",
+                description="Run multiple repository text searches in one call and return grouped JSON results.",
+                args_schema=_RepoBatchSearchInput,
+            ),
+            StructuredTool.from_function(
+                func=run_script_once,
+                name="run_script_once",
+                description="Run one grouped, non-destructive shell script in the repository and return exit code/output/duration.",
+                args_schema=_RunScriptOnceInput,
+            ),
+            StructuredTool.from_function(
+                func=apply_patch_batch,
+                name="apply_patch_batch",
+                description="Validate and apply multiple related Codex patch payloads in one call.",
+                args_schema=_ApplyPatchBatchInput,
+            ),
+            StructuredTool.from_function(
+                func=read_skill,
+                name="read_skill",
+                description="Load one full skills/<skill_name>/SKILL.md body on demand after matching the compact skill index.",
+                args_schema=_ReadSkillInput,
             ),
             StructuredTool.from_function(
                 func=list_files,
@@ -1425,7 +1493,7 @@ class AskAgent:
         mutation_required = bool(policy.get("mutation_required") or policy.get("mutation_strict"))
         mutation_tool_names = [
             name
-            for name in ("edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file")
+            for name in ("edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file")
             if name in tool_map and (not allowed_tools or name in allowed_tools)
         ]
         bound_mutation = None
@@ -1612,7 +1680,7 @@ class AskAgent:
                         {
                             "error": (
                                 f"duplicate tool call blocked: {name}. "
-                                "Use a different step (read_file/edit_file/multi_edit_file/apply_patch/write_file/create_file) instead of repeating."
+                                "Use a different step (repo_batch_read/read_file/edit_file/multi_edit_file/apply_patch/apply_patch_batch/write_file/create_file) instead of repeating."
                             )
                         }
                     )
@@ -1685,7 +1753,7 @@ class AskAgent:
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
                             messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
                             continue
-                    if name in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"} and require_read_files > 0:
+                    if name in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file"} and require_read_files > 0:
                         if len(unique_read_files) < require_read_files:
                             content = json.dumps(
                                 {
@@ -1697,7 +1765,7 @@ class AskAgent:
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
                             messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
                             continue
-                    if name in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"}:
+                    if name in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file"}:
                         unread_targets = self._mutation_unread_targets(
                             name=name,
                             args=args if isinstance(args, dict) else {},
@@ -1798,7 +1866,7 @@ class AskAgent:
                                 unique_read_files.add(file_path)
                         if not bool(payload.get("cache_hit", False)) and not read_failed:
                             disk_read_count += 1
-                if name in {"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"}:
+                if name in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file"}:
                     changed_paths = self._mutation_changed_files(
                         name=name,
                         args=args if isinstance(args, dict) else {},

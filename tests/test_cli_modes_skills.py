@@ -3,7 +3,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from mana_agent.commands.cli import app
-from mana_agent.skills.manager import SkillManager, build_default_skill_registry_text
+from mana_agent.skills.manager import SkillManager, build_default_skill_registry_text, read_skill
 
 runner = CliRunner()
 
@@ -29,13 +29,13 @@ def test_plan_mode_loads_matching_skills_and_saves(tmp_path: Path) -> None:
 def test_skills_init_list_show_uses_root_directory(tmp_path: Path) -> None:
     result_init = runner.invoke(app, ["skills", "init", "--repo", str(tmp_path)])
     assert result_init.exit_code == 0
-    assert (tmp_path / "skills" / "cli.md").exists()
+    assert (tmp_path / "skills" / "cli" / "SKILL.md").exists()
 
     custom = "# CLI Skill\n\ncustom root skill\n"
-    (tmp_path / "skills" / "cli.md").write_text(custom, encoding="utf-8")
+    (tmp_path / "skills" / "cli" / "SKILL.md").write_text(custom, encoding="utf-8")
     result_init_again = runner.invoke(app, ["skills", "init", "--repo", str(tmp_path)])
     assert result_init_again.exit_code == 0
-    assert (tmp_path / "skills" / "cli.md").read_text(encoding="utf-8") == custom
+    assert (tmp_path / "skills" / "cli" / "SKILL.md").read_text(encoding="utf-8") == custom
 
     result_list = runner.invoke(app, ["skills", "list", "--repo", str(tmp_path)])
     assert result_list.exit_code == 0
@@ -45,6 +45,36 @@ def test_skills_init_list_show_uses_root_directory(tmp_path: Path) -> None:
     result_show = runner.invoke(app, ["skills", "show", "cli", "--repo", str(tmp_path)])
     assert result_show.exit_code == 0
     assert "custom root skill" in result_show.output
+
+
+def test_skill_index_reads_metadata_and_read_skill_loads_body_on_demand(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "django"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: django\n"
+        "description: Django development skill.\n"
+        "trigger: Use when migrations are mentioned.\n"
+        "---\n\n"
+        "# Django\n\n"
+        "FULL BODY CONTENT\n",
+        encoding="utf-8",
+    )
+    manager = SkillManager(project_root=tmp_path)
+
+    item = next(item for item in manager.build_index(include_builtins=False) if item.name == "django")
+
+    assert item.description == "Django development skill."
+    assert item.trigger == "Use when migrations are mentioned."
+    assert "FULL BODY CONTENT" not in item.description
+    assert manager._content_cache == {}  # noqa: SLF001
+    assert manager.read_skill("django").endswith("FULL BODY CONTENT\n")
+    assert "django" in manager._content_cache  # noqa: SLF001
+
+
+def test_read_skill_returns_safe_error_for_missing_or_invalid_skill(tmp_path: Path) -> None:
+    assert read_skill("../secret", project_root=tmp_path) == "Error: invalid skill name."
+    assert read_skill("missing", project_root=tmp_path) == "Error: skill 'missing' was not found."
 
 
 def test_root_flag_dispatches_plan_mode(tmp_path: Path) -> None:

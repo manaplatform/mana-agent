@@ -9,9 +9,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from mana_agent.tools.apply_patch import safe_apply_patch
 
 _SKIP_DIRS = {
     ".git",
@@ -145,6 +148,169 @@ def repo_search(
                 if len(matches) >= max_items:
                     return {"ok": True, "matches": matches, "limit": max_items, "truncated": True}
     return {"ok": True, "matches": matches, "limit": max_items, "truncated": False}
+
+
+def repo_batch_read(
+    repo_root: Path,
+    *,
+    files: list[str],
+    max_files: int = 20,
+    max_bytes: int = 300_000,
+    max_bytes_per_file: int = 80_000,
+) -> dict[str, Any]:
+    """Read multiple repository text files with per-file errors and caps."""
+
+    root = repo_root.resolve()
+    requested = list(files or [])[: max(1, min(int(max_files or 20), 100))]
+    remaining = max(1, min(int(max_bytes or 300_000), 2_000_000))
+    per_file_cap = max(1000, min(int(max_bytes_per_file or 80_000), remaining))
+    out: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in requested:
+        target, rel = _safe_rel(root, str(raw))
+        if target is None or rel is None:
+            err = {"path": str(raw), "ok": False, "error": "path_outside_repo"}
+            errors.append(err)
+            out.append(err)
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        if not target.exists() or not target.is_file():
+            err = {"path": rel, "ok": False, "error": "file_not_found"}
+            errors.append(err)
+            out.append(err)
+            continue
+        if _is_binary(target):
+            err = {"path": rel, "ok": False, "error": "binary_file"}
+            errors.append(err)
+            out.append(err)
+            continue
+        try:
+            raw_bytes = target.read_bytes()
+            truncated = len(raw_bytes) > per_file_cap or len(raw_bytes) > remaining
+            chunk = raw_bytes[: min(per_file_cap, remaining)]
+            content = chunk.decode("utf-8")
+            out.append(
+                {
+                    "path": rel,
+                    "ok": True,
+                    "content": content,
+                    "truncated": bool(truncated),
+                    "bytes_read": len(chunk),
+                    "file_size_bytes": len(raw_bytes),
+                }
+            )
+            remaining -= len(chunk)
+            if remaining <= 0:
+                break
+        except UnicodeDecodeError:
+            err = {"path": rel, "ok": False, "error": "decode_error"}
+            errors.append(err)
+            out.append(err)
+        except Exception as exc:
+            err = {"path": rel, "ok": False, "error": str(exc)}
+            errors.append(err)
+            out.append(err)
+    return {"ok": not errors, "files": out, "errors": errors, "truncated": remaining <= 0}
+
+
+def repo_batch_search(repo_root: Path, *, patterns: list[dict[str, Any]]) -> dict[str, Any]:
+    """Run multiple literal/regex searches in one repository pass."""
+
+    queries = list(patterns or [])[:50]
+    grouped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for index, item in enumerate(queries):
+        query = str(item.get("query", "") if isinstance(item, dict) else "")
+        glob = str(item.get("glob", "**/*") if isinstance(item, dict) else "**/*")
+        regex = bool(item.get("regex", False) if isinstance(item, dict) else False)
+        limit = int(item.get("limit", 20) if isinstance(item, dict) else 20)
+        result = repo_search(repo_root, query=query, glob=glob, regex=regex, limit=limit)
+        row = {"index": index, "query": query, "glob": glob, "regex": regex, **result}
+        grouped.append(row)
+        if not result.get("ok"):
+            errors.append(row)
+    return {"ok": not errors, "results": grouped, "errors": errors}
+
+
+_DESTRUCTIVE_SCRIPT_PATTERNS = (
+    "rm -rf",
+    "git reset --hard",
+    "git checkout --",
+    "mkfs",
+    "shutdown",
+    "reboot",
+    "sudo ",
+)
+
+
+def run_script_once(repo_root: Path, *, script: str, cwd: str | None = None, timeout: int = 120) -> dict[str, Any]:
+    """Execute one non-destructive shell script and return structured output."""
+
+    text = str(script or "")
+    lowered = text.lower()
+    if any(pattern in lowered for pattern in _DESTRUCTIVE_SCRIPT_PATTERNS):
+        return {"ok": False, "returncode": None, "stdout": "", "stderr": "script blocked by safety policy", "duration_ms": 0.0}
+    root = repo_root.resolve()
+    workdir = root
+    if cwd:
+        target, _rel = _safe_rel(root, cwd)
+        if target is None or not target.exists() or not target.is_dir():
+            return {"ok": False, "returncode": None, "stdout": "", "stderr": "cwd must be an existing repository directory", "duration_ms": 0.0}
+        workdir = target
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            text,
+            cwd=workdir,
+            shell=True,
+            check=False,
+            timeout=max(1, min(int(timeout or 120), 900)),
+            capture_output=True,
+            text=True,
+        )
+        return {
+            "ok": completed.returncode == 0,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[:12000],
+            "stderr": completed.stderr[:12000],
+            "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            "cwd": str(workdir),
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": (exc.stdout or "")[:12000] if isinstance(exc.stdout, str) else "",
+            "stderr": f"script timed out after {timeout}s",
+            "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            "cwd": str(workdir),
+        }
+
+
+def apply_patch_batch(repo_root: Path, *, patches: list[dict[str, Any]]) -> dict[str, Any]:
+    """Validate and apply multiple Codex patches in one call."""
+
+    patch_rows = list(patches or [])[:20]
+    validation: list[dict[str, Any]] = []
+    for index, item in enumerate(patch_rows):
+        patch_text = str(item.get("patch", "") if isinstance(item, dict) else "")
+        result = safe_apply_patch(repo_root=repo_root, patch=patch_text, check_only=True)
+        validation.append({"index": index, **result})
+        if not result.get("ok"):
+            return {"ok": False, "stage": "validate", "results": validation, "changed_files": [], "error_index": index}
+    results: list[dict[str, Any]] = []
+    changed: list[str] = []
+    for index, item in enumerate(patch_rows):
+        patch_text = str(item.get("patch", "") if isinstance(item, dict) else "")
+        result = safe_apply_patch(repo_root=repo_root, patch=patch_text, check_only=False)
+        results.append({"index": index, **result})
+        changed.extend(str(path) for path in result.get("files_changed") or [])
+        if not result.get("ok"):
+            return {"ok": False, "stage": "apply", "results": results, "changed_files": sorted(set(changed)), "error_index": index}
+    return {"ok": True, "results": results, "changed_files": sorted(set(changed))}
 
 
 def find_symbols(repo_root: Path, *, query: str = "", limit: int = 100) -> dict[str, Any]:

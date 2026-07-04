@@ -869,7 +869,7 @@ def test_run_tool_request_expands_file_system_alias() -> None:
         callbacks=None,
     )
     allowed = seen["tool_policy"]["allowed_tools"]  # type: ignore[index]
-    assert set(allowed) == {"ls", "list_files", "read_file", "repo_search"}
+    assert set(allowed) == {"ls", "list_files", "read_file", "repo_batch_read", "repo_search", "repo_batch_search"}
 
 
 def test_run_tool_request_rejects_unknown_tool_policy() -> None:

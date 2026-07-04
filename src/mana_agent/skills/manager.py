@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -49,6 +50,32 @@ DEFAULT_SKILL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "reactjs": ("react", "reactjs", "jsx", "tsx", "component", "hooks"),
     "laravel": ("laravel", "php", "artisan", "eloquent", "blade", "middleware", "controller"),
 }
+
+_MATCH_STOPWORDS = frozenset(
+    {
+        "about",
+        "after",
+        "and",
+        "are",
+        "code",
+        "file",
+        "files",
+        "for",
+        "from",
+        "into",
+        "mentions",
+        "project",
+        "skill",
+        "task",
+        "that",
+        "the",
+        "this",
+        "use",
+        "uses",
+        "when",
+        "with",
+    }
+)
 
 
 def build_default_skill_registry_text(text: str, skill_names: Iterable[str]) -> str:
@@ -112,8 +139,109 @@ class Skill:
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class SkillIndexItem:
+    name: str
+    description: str
+    trigger: str
+    path: Path
+
+    def to_prompt_dict(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "trigger": self.trigger,
+        }
+
+
 def _normalize_name(name: str) -> str:
     return str(name or "").strip().lower().removesuffix(".md")
+
+
+def _skill_file_candidates(directory: Path, name: str) -> tuple[Path, Path]:
+    return (directory / name / "SKILL.md", directory / f"{name}.md")
+
+
+def _parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
+    text = str(content or "")
+    if not text.startswith("---"):
+        return {}, text
+    lines = text.splitlines()
+    end = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if end is None:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in lines[1:end]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        meta[key.strip().lower()] = value.strip().strip("\"'")
+    return meta, "\n".join(lines[end + 1 :])
+
+
+def _first_heading_and_paragraph(content: str) -> tuple[str, str]:
+    heading = ""
+    paragraph_lines: list[str] = []
+    in_frontmatter_removed = _parse_frontmatter(content)[1]
+    for line in in_frontmatter_removed.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if paragraph_lines:
+                break
+            continue
+        if stripped.startswith("#") and not heading:
+            heading = stripped.lstrip("#").strip()
+            continue
+        if stripped.startswith("```"):
+            continue
+        if stripped.lower() in {"## when to use", "## rules", "## verification"}:
+            continue
+        paragraph_lines.append(stripped.lstrip("- ").strip())
+        if len(" ".join(paragraph_lines)) > 240:
+            break
+    return heading, " ".join(paragraph_lines).strip()
+
+
+def parse_skill_index_item(path: Path, *, fallback_name: str | None = None) -> SkillIndexItem:
+    content = path.read_text(encoding="utf-8")
+    meta, body = _parse_frontmatter(content)
+    derived_name = path.parent.name if path.name == "SKILL.md" else path.stem
+    name = _normalize_name(meta.get("name") or fallback_name or derived_name)
+    heading, paragraph = _first_heading_and_paragraph(body)
+    description = (meta.get("description") or paragraph or heading or "No description available.").strip()
+    trigger = (meta.get("trigger") or _extract_trigger(body) or f"Use when the task matches the {name} skill.").strip()
+    return SkillIndexItem(
+        name=name,
+        description=description[:240],
+        trigger=trigger[:320],
+        path=path,
+    )
+
+
+def _extract_trigger(content: str) -> str:
+    lines = str(content or "").splitlines()
+    for idx, line in enumerate(lines):
+        stripped = line.strip().lower()
+        if stripped in {"## when to use", "### when to use", "when to use"}:
+            collected: list[str] = []
+            for following in lines[idx + 1 :]:
+                clean = following.strip()
+                if clean.startswith("#") and collected:
+                    break
+                if clean:
+                    collected.append(clean.lstrip("- ").strip())
+                if len(" ".join(collected)) > 260:
+                    break
+            if collected:
+                return " ".join(collected)
+    return ""
+
+
+def _builtin_skill_path(name: str) -> Path:
+    try:
+        return Path(str(resources.files("mana_agent.default_skills").joinpath(f"{name}.md")))
+    except (FileNotFoundError, ModuleNotFoundError):
+        return Path(f"<built-in:{name}>")
 
 
 def detect_skill_names(text: str, explicit: Iterable[str] | None = None) -> list[str]:
@@ -138,6 +266,7 @@ class SkillManager:
     def __init__(self, project_root: str | Path | None = None, home: str | Path | None = None) -> None:
         self.project_root = Path(project_root or Path.cwd()).expanduser().resolve()
         self.home = Path(home or Path.home()).expanduser().resolve()
+        self._content_cache: dict[str, str] = {}
 
     @property
     def project_skills_dir(self) -> Path:
@@ -158,10 +287,10 @@ class SkillManager:
             return None
 
     def _read_file_skill(self, directory: Path, name: str, source: str) -> Skill | None:
-        path = directory / f"{name}.md"
-        if not path.exists():
-            return None
-        return Skill(name=name, source=source, path=path, content=path.read_text(encoding="utf-8"))
+        for path in _skill_file_candidates(directory, name):
+            if path.exists() and path.is_file():
+                return Skill(name=name, source=source, path=path, content=path.read_text(encoding="utf-8"))
+        return None
 
     def get(self, name: str) -> Skill | None:
         normalized = _normalize_name(name)
@@ -172,6 +301,18 @@ class SkillManager:
             or self._read_file_skill(self.global_skills_dir, normalized, "global")
             or self._builtin_skill(normalized)
         )
+
+    def read_skill(self, name: str) -> str:
+        normalized = _normalize_name(name)
+        if not normalized or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,80}", normalized):
+            return "Error: invalid skill name."
+        if normalized in self._content_cache:
+            return self._content_cache[normalized]
+        skill = self.get(normalized)
+        if skill is None:
+            return f"Error: skill '{normalized}' was not found."
+        self._content_cache[normalized] = skill.content
+        return skill.content
 
     def _builtin_skill(self, name: str) -> Skill | None:
         content = self._builtin_content(name)
@@ -203,7 +344,77 @@ class SkillManager:
     def _list_dir(self, directory: Path) -> list[str]:
         if not directory.exists():
             return []
-        return sorted(_normalize_name(path.name) for path in directory.glob("*.md") if path.is_file())
+        names = {_normalize_name(path.name) for path in directory.glob("*.md") if path.is_file()}
+        names.update(_normalize_name(path.parent.name) for path in directory.glob("*/SKILL.md") if path.is_file())
+        return sorted(name for name in names if name)
+
+    def build_index(self, *, include_builtins: bool = True) -> list[SkillIndexItem]:
+        items: dict[str, SkillIndexItem] = {}
+        for directory in (self.project_skills_dir, self.global_skills_dir):
+            if not directory.exists():
+                continue
+            for path in sorted(directory.glob("*/SKILL.md")):
+                item = parse_skill_index_item(path)
+                items.setdefault(item.name, item)
+            for path in sorted(directory.glob("*.md")):
+                item = parse_skill_index_item(path, fallback_name=path.stem)
+                items.setdefault(item.name, item)
+        if include_builtins:
+            for name in DEFAULT_SKILL_NAMES:
+                if name in items:
+                    continue
+                content = self._builtin_content(name)
+                if content is None:
+                    continue
+                meta, body = _parse_frontmatter(content)
+                heading, paragraph = _first_heading_and_paragraph(body)
+                items[name] = SkillIndexItem(
+                    name=name,
+                    description=(meta.get("description") or paragraph or heading or "Built-in skill.")[:240],
+                    trigger=(meta.get("trigger") or _extract_trigger(body) or f"Use when the task matches the {name} skill.")[:320],
+                    path=_builtin_skill_path(name),
+                )
+        return [items[name] for name in sorted(items)]
+
+    def prompt_index(self, *, include_builtins: bool = True) -> list[dict[str, str]]:
+        return [item.to_prompt_dict() for item in self.build_index(include_builtins=include_builtins)]
+
+    def match_skill_names(
+        self,
+        text: str,
+        *,
+        files: Iterable[str] | None = None,
+        mode: str | None = None,
+        previous_results: Iterable[str] | None = None,
+        limit: int = 3,
+    ) -> list[str]:
+        haystack = " ".join(
+            [
+                str(text or ""),
+                str(mode or ""),
+                " ".join(str(item) for item in files or ()),
+                " ".join(str(item) for item in previous_results or ()),
+            ]
+        ).lower()
+        scored: list[tuple[int, str]] = []
+        for item in self.build_index():
+            searchable = f"{item.name} {item.description} {item.trigger}".lower()
+            tokens = {
+                tok
+                for tok in re.split(r"[^a-z0-9_.-]+", searchable)
+                if len(tok) >= 4 and tok not in _MATCH_STOPWORDS
+            }
+            score = 0
+            if item.name and item.name in haystack:
+                score += 10
+            for keyword in _KEYWORDS.get(item.name, ()):
+                if keyword and keyword.lower() in haystack:
+                    score += 4
+            score += sum(1 for tok in tokens if tok in haystack)
+            if score > 0:
+                scored.append((score, item.name))
+        scored.sort(key=lambda row: (-row[0], row[1]))
+        return [name for _score, name in scored[: max(1, limit)]]
 
     def init_project_skills(self, *, force: bool = False) -> list[Path]:
         self.project_skills_dir.mkdir(parents=True, exist_ok=True)
@@ -212,9 +423,19 @@ class SkillManager:
             content = self._builtin_content(name)
             if content is None:
                 continue
-            target = self.project_skills_dir / f"{name}.md"
+            target = self.project_skills_dir / name / "SKILL.md"
             if target.exists() and not force:
                 continue
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             written.append(target)
         return written
+
+
+def build_skill_index(project_root: str | Path | None = None) -> list[SkillIndexItem]:
+    return SkillManager(project_root=project_root).build_index()
+
+
+def read_skill(skill_name: str, *, project_root: str | Path | None = None, manager: SkillManager | None = None) -> str:
+    active_manager = manager or SkillManager(project_root=project_root)
+    return active_manager.read_skill(skill_name)

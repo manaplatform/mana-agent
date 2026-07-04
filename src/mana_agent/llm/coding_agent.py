@@ -2,7 +2,7 @@
 mana_agent.llm.coding_agent
 
 Coding agent wrapper with:
-- mutation tools (edit_file/multi_edit_file/apply_patch/create_file/write_file/delete_file)
+- mutation tools (edit_file/multi_edit_file/apply_patch/apply_patch_batch/create_file/write_file/delete_file)
 - structured flow/checklist planning
 - anti-loop tool policy (search/read budgets, duplicate search guards)
 - flow-memory continuity integration
@@ -18,19 +18,15 @@ import re
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
 from mana_agent.llm.prompts import (
-    CODING_AGENT_RECOGNITION_PROMPT,
-    CODING_AGENT_LANGUAGE_TOOLING_PROMPT,
     HEAD_TOOLS_PLANNER_PROMPT,
-    CODING_FLOW_MEMORY_PROMPT,
     CODING_FLOW_PLANNER_PROMPT,
-    FULL_AUTO_EXECUTION_PROMPT,
     TOOLSMANAGER_PROMPT
 )
 from mana_agent.llm.agent_work_queue import QueueManager
@@ -44,6 +40,7 @@ from mana_agent.llm.coding_agent_models import (
 )
 from mana_agent.llm.auto_chat import apply_auto_chat_tool_policy
 from mana_agent.llm.coding_agent_prompt import CODING_SYSTEM_PROMPT
+from mana_agent.prompting.builder import PromptCache, build_coding_system_prompt
 
 
 from mana_agent.llm.tool_worker_process import (
@@ -64,6 +61,9 @@ from mana_agent.tools import (
 
 logger = logging.getLogger(__name__)
 _as_jsonable = as_jsonable
+
+if TYPE_CHECKING:
+    from mana_agent.llm.tool_worker_process import ToolRunResponse
 
 
 class CodingAgent:
@@ -406,6 +406,7 @@ class CodingAgent:
         self.full_auto_mode = bool(full_auto_mode)
         self.planner_model = str(planner_model).strip() if planner_model else None
         self.tools_manager_orchestrator: QueueManager | None = None
+        self._prompt_cache = PromptCache()
         self._setup_planner()
 
         if hasattr(self.ask_agent, "tools"):
@@ -419,6 +420,22 @@ class CodingAgent:
                     build_delete_file_tool(repo_root=self.repo_root, allowed_prefixes=self.allowed_prefixes),
                 ]
             )
+
+    def _enabled_tool_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for tool in getattr(self.ask_agent, "tools", []) or []:
+            name = str(getattr(tool, "name", "") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return tuple(names)
+
+    def _prompt_model_profile(self) -> dict[str, str]:
+        return {
+            "provider": "openai-compatible",
+            "model": str(self.planner_model or getattr(self.ask_agent, "model", "") or ""),
+            "base_url": str(self.base_url or ""),
+            "planner_model": str(getattr(getattr(self, "planner_llm", None), "model_name", "") or self.planner_model or ""),
+        }
 
     def update_model(self, model_name: str):
         """قابلیت تغییر مدل در زمان اجرا"""
@@ -970,6 +987,7 @@ class CodingAgent:
             "request_retry_exhausted": orchestrated.request_retry_exhausted,
             "edit_retry_mode_activations": orchestrated.edit_retry_mode_activations,
             "persisted_fingerprint_counts": orchestrated.persisted_fingerprint_counts,
+            "pre_existing_changed_files": list(orchestrated.pre_existing_changed_files),
             "prechecklist": prechecklist,
             "prechecklist_source": prechecklist_source,
             "prechecklist_warning": prechecklist_warning,
@@ -1081,18 +1099,17 @@ class CodingAgent:
         )
 
     def _effective_system_prompt_for(self, request: str, *, flow_context: str | None = None) -> str:
-        prompt = self.system_prompt
-        prompt = f"{prompt}\n\n{CODING_AGENT_LANGUAGE_TOOLING_PROMPT}"
-        if self._looks_like_edit_request(request):
-            prompt = f"{prompt}\n\n{CODING_AGENT_RECOGNITION_PROMPT}"
-        if self.full_auto_mode:
-            prompt = f"{prompt}\n\n{FULL_AUTO_EXECUTION_PROMPT}"
-        if flow_context:
-            prompt = (
-                f"{prompt}\n\n{CODING_FLOW_MEMORY_PROMPT}\n\n"
-                f"Flow context:\n{flow_context.strip()}"
-            )
-        return prompt
+        return build_coding_system_prompt(
+            base_prompt=self.system_prompt,
+            request=request,
+            repo_root=self.repo_root,
+            flow_context=flow_context,
+            full_auto_mode=self.full_auto_mode,
+            include_edit_rules=self._looks_like_edit_request(request),
+            prompt_cache=self._prompt_cache,
+            enabled_tools=self._enabled_tool_names(),
+            model_profile=self._prompt_model_profile(),
+        )
 
     @staticmethod
     def _log_worker_event(event: Any) -> None:
@@ -1191,7 +1208,7 @@ class CodingAgent:
 
     # Mutation tools whose presence in a planned step means the run must end in
     # an actual edit (and verify), not just discovery/reads.
-    _MUTATION_TOOLS = frozenset({"edit_file", "multi_edit_file", "apply_patch", "create_file", "write_file", "delete_file"})
+    _MUTATION_TOOLS = frozenset({"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file"})
 
     @classmethod
     def _checklist_requires_edit(cls, checklist: "FlowChecklist | None") -> bool:
@@ -1633,7 +1650,7 @@ class CodingAgent:
         mutation_tools_seen = {str(row.get("tool_name", "")) for row in combined_trace_rows}
         attempted_apply_patch = "apply_patch" in mutation_tools_seen
         attempted_write_file = "write_file" in mutation_tools_seen
-        attempted_mutation = bool(mutation_tools_seen.intersection({"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}))
+        attempted_mutation = bool(mutation_tools_seen.intersection({"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file"}))
 
         if edit_intent and not changed and attempted_apply_patch:
             warnings.append("mutation_noop_after_apply_patch")

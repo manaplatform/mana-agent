@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from mana_agent.llm.coding_agent import CodingAgent, FlowChecklist, FlowStep
 from mana_agent.llm.tool_worker_process import ToolWorkerProcessError
 from mana_agent.llm.tools_manager import AutoExecuteResult
@@ -356,6 +354,9 @@ def test_coding_agent_effective_prompt_includes_language_tooling_guide(tmp_path:
     assert "node_modules" in lowered
     assert "npm install" in lowered
     assert "pytest -q" in lowered
+    assert "mode rules" in lowered
+    assert "compact skills index" in lowered
+    assert "current task context" in lowered
 
 
 def test_coding_agent_enforces_search_budget_and_transitions_phase(tmp_path: Path, monkeypatch) -> None:

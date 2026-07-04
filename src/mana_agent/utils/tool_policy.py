@@ -17,11 +17,11 @@ from typing import Iterable
 
 # High-level aliases → concrete registered tool names.
 TOOL_GROUPS: dict[str, list[str]] = {
-    "file_system": ["ls", "list_files", "read_file", "repo_search"],
-    "inspect": ["ls", "list_files", "read_file", "repo_search", "find_symbols", "call_graph"],
-    "search": ["semantic_search", "repo_search", "list_files", "find_symbols", "call_graph"],
-    "edit": ["edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file", "git_diff"],
-    "verify": ["verify_project", "run_command"],
+    "file_system": ["ls", "list_files", "read_file", "repo_batch_read", "repo_search", "repo_batch_search"],
+    "inspect": ["ls", "list_files", "read_file", "repo_batch_read", "repo_search", "repo_batch_search", "find_symbols", "call_graph"],
+    "search": ["semantic_search", "repo_search", "repo_batch_search", "list_files", "find_symbols", "call_graph"],
+    "edit": ["edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file", "git_diff"],
+    "verify": ["verify_project", "run_command", "run_script_once"],
 }
 
 # The full set of real tool names the AskAgent worker registers. Kept here so
@@ -36,16 +36,21 @@ REGISTERED_TOOLS: frozenset[str] = frozenset(
         "list_tools",
         "ls",
         "repo_search",
+        "repo_batch_read",
+        "repo_batch_search",
         "list_files",
         "find_symbols",
         "call_graph",
+        "run_script_once",
         "git_status",
         "git_diff",
         "verify_project",
         "tool_contracts",
+        "read_skill",
         "edit_file",
         "multi_edit_file",
         "apply_patch",
+        "apply_patch_batch",
         "write_file",
         "create_file",
         "delete_file",

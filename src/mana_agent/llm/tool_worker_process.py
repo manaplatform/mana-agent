@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, ValidationError
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.search_service import SearchService
 from mana_agent.llm.ask_agent import AskAgent
+from mana_agent.llm.mutation_plan import validate_mutation_plan
 from mana_agent.vector_store.embeddings import build_embeddings
 from mana_agent.tools import (
     build_apply_patch_tool,
@@ -286,7 +287,7 @@ def _tool_arg_error(tool_name: str, args: dict[str, Any]) -> str:
     return ""
 
 
-def _validate_direct_tool_request(req: "ToolRunRequest") -> None:
+def _validate_direct_tool_request(req: "ToolRunRequest", *, repo_root: str | None = None) -> None:
     error = _tool_arg_error(req.tool_name, req.tool_args)
     if error:
         raise ToolWorkerProcessError(
@@ -295,6 +296,22 @@ def _validate_direct_tool_request(req: "ToolRunRequest") -> None:
             retriable=False,
             details={"tool_name": req.tool_name, "tool_args": req.tool_args},
         )
+    name = str(req.tool_name or "").strip().lower()
+    if name in {"write_file", "apply_patch", "create_file"}:
+        policy = req.tool_policy or {}
+        if policy.get("fallback_decision") is True:
+            return
+        plan = req.tool_args.get("mutation_plan") if isinstance(req.tool_args, dict) else None
+        plan_id = str(req.tool_args.get("mutation_plan_id") or "") if isinstance(req.tool_args, dict) else ""
+        root = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
+        errors = validate_mutation_plan(plan, repo_root=root) if isinstance(plan, dict) else ["missing approved mutation plan"]
+        if errors or not plan_id or (isinstance(plan, dict) and str(plan.get("plan_id") or "") != plan_id):
+            raise ToolWorkerProcessError(
+                code="mutation_plan_required",
+                message="mutation tool requires an approved MutationPlan linked by mutation_plan_id",
+                retriable=False,
+                details={"tool_name": req.tool_name, "errors": errors or ["mutation_plan_id mismatch"]},
+            )
 
 
 def _deep_strip_banned_keys_inplace(obj: Any) -> Any:
@@ -657,7 +674,7 @@ def _infer_trace_row_success(row: dict[str, Any]) -> bool:
             return False
         if normalized_status in ("ok", "success"):
             tool_name = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-            if tool_name in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}:
+            if tool_name in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file"}:
                 changed = []
                 for key in ("files_changed", "changed_files", "modified_files"):
                     value = row.get(key)
@@ -745,7 +762,7 @@ def _infer_trace_row_success(row: dict[str, Any]) -> bool:
 
 def _infer_trace_row_mutation_success(row: dict[str, Any]) -> bool:
     tool_name = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-    if tool_name not in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}:
+    if tool_name not in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file"}:
         return False
     if not _infer_trace_row_success(row):
         return False
@@ -768,7 +785,7 @@ def _mutation_failure_error(trace_rows: list[dict[str, Any]]) -> tuple[str, str]
     mutation_rows = [
         row for row in trace_rows
         if str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-        in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file"}
+        in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file"}
     ]
     if not mutation_rows:
         return "mutation_not_attempted", "mutation phase ended without attempting a mutation tool"
@@ -1756,7 +1773,7 @@ class _ToolWorkerServer:
         try:
             sanitized_env_payload = _strip_banned_keys(env.payload)
             req = ToolRunRequest.model_validate(sanitized_env_payload)
-            _validate_direct_tool_request(req)
+            _validate_direct_tool_request(req, repo_root=self._repo_root)
 
             tool_name = str(req.tool_name or "").strip()
             if tool_name:

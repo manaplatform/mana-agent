@@ -69,6 +69,28 @@ runtime. If the coding-agent session has no queue manager attached, the request
 is blocked as unavailable instead of falling back to direct `ask_agent.run*` or
 bare worker calls.
 
+## Prompt Cache Boundary
+
+The coding agent prompt is split into stable and ephemeral layers. Stable prompt
+state contains core identity, tool rules, agent behavior rules, a compact skill
+index, repository rules from `AGENTS.md`, and safety/verification rules. This
+state is cached per `CodingAgent` session and rebuilt only when stable inputs
+change: prompt template version, mana-agent version, enabled tools, skill index,
+repository rules, identity/rules, or model/provider profile.
+
+The compact skill index contains only `name`, `description`, and `trigger` for
+each discovered skill. Full `SKILL.md` bodies are not stable prompt content.
+When the current task, detected files, mode, or prior results match a trigger,
+the agent loads the full body through `read_skill(skill_name)` and keeps it in
+ephemeral context for that turn.
+
+Per-turn context is appended separately as an ephemeral developer/context
+message. It contains the current task, detected mode, retrieved snippets,
+summarized tool results, recent local summary, and temporary constraints. Current
+user messages, retrieved files, tool output, turn numbers, patches, command
+output, and temporary plans must not enter the stable cache key. Oversized
+ephemeral context is trimmed or summarized before it is resent.
+
 ## Reporting Expectations
 
 When finishing a task, the agent should report:

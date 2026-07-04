@@ -98,6 +98,45 @@ def coding_tool_contracts() -> list[ToolContract]:
             examples=[{"input": {"path": "src/mana_agent/llm/ask_agent.py", "mode": "full"}}],
         ),
         ToolContract(
+            name="read_skill",
+            description="Load one full skills/<skill_name>/SKILL.md body on demand after matching the compact skill index.",
+            input_schema=_schema({"skill_name": {"type": "string"}}, ["skill_name"]),
+            output_schema=_schema({"content": {"type": "string"}}),
+            error_format=common_error,
+            safety_rules=[
+                "Validate skill_name.",
+                "Never load all skills eagerly.",
+                "Use only when the current task matches the skill trigger.",
+            ],
+            examples=[{"input": {"skill_name": "django"}}],
+        ),
+        ToolContract(
+            name="repo_batch_read",
+            description="Read multiple repository text files in one call with per-file errors and truncation metadata.",
+            input_schema=_schema({"files": {"type": "array"}}, ["files"]),
+            output_schema=_schema({"files": {"type": "array"}, "errors": {"type": "array"}, "truncated": {"type": "boolean"}}),
+            error_format=common_error,
+            safety_rules=[
+                "Validate every path is inside the repository.",
+                "Return per-file errors instead of failing the whole batch.",
+                "Use this instead of multiple read_file calls when reading more than one file.",
+            ],
+            examples=[{"input": {"files": ["src/a.py", "src/b.py"]}}],
+        ),
+        ToolContract(
+            name="repo_batch_search",
+            description="Run multiple repository text searches in one call and return grouped results per query.",
+            input_schema=_schema({"patterns": {"type": "array"}}, ["patterns"]),
+            output_schema=_schema({"results": {"type": "array"}, "errors": {"type": "array"}}),
+            error_format=common_error,
+            safety_rules=[
+                "Prefer ripgrep-like exact search semantics through repository-local text search.",
+                "Use this instead of multiple repo_search calls for independent queries.",
+                "Respect per-query limits.",
+            ],
+            examples=[{"input": {"patterns": [{"query": "Skill", "glob": "**/*.py", "regex": False, "limit": 20}]}}],
+        ),
+        ToolContract(
             name="apply_patch",
             description="Apply a Codex-style text patch inside the repository.",
             input_schema=_schema(
@@ -116,6 +155,19 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "Store patch preview and result under .mana/logs/ before returning.",
             ],
             examples=[{"input": {"patch": "*** Begin Patch\n*** Update File: a.py\n@@\n-old\n+new\n*** End Patch"}}],
+        ),
+        ToolContract(
+            name="apply_patch_batch",
+            description="Validate and apply multiple related Codex patch payloads in one call.",
+            input_schema=_schema({"patches": {"type": "array"}}, ["patches"]),
+            output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "changed_files": {"type": "array"}}),
+            error_format=common_error,
+            safety_rules=[
+                "Each patch must be Codex patch text.",
+                "Dry-run validate all patches before applying.",
+                "Use for related multi-file edits instead of many separate apply_patch calls.",
+            ],
+            examples=[{"input": {"patches": [{"path": "a.py", "patch": "*** Begin Patch\n*** Update File: a.py\n@@\n-old\n+new\n*** End Patch"}]}}],
         ),
         ToolContract(
             name="edit_file",
@@ -296,6 +348,26 @@ def coding_tool_contracts() -> list[ToolContract]:
             error_format=common_error,
             safety_rules=["Block destructive shell patterns.", "Use project root as cwd.", "Return stdout/stderr and exit code."],
             examples=[{"input": {"cmd": "pytest -q"}}],
+        ),
+        ToolContract(
+            name="run_script_once",
+            description="Run one grouped, non-destructive shell script in the repository and return exit code/output/duration.",
+            input_schema=_schema({"script": {"type": "string"}, "cwd": {"type": "string"}}, ["script"]),
+            output_schema=_schema(
+                {
+                    "returncode": {"type": "integer"},
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                    "duration_ms": {"type": "number"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Prefer one grouped script for multiple safe checks.",
+                "Block destructive command patterns.",
+                "Return output summary, exit code, and duration.",
+            ],
+            examples=[{"input": {"script": "python -m compileall src\npytest -q"}}],
         ),
         ToolContract(
             name="verify_project",

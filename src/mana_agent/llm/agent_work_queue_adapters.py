@@ -25,10 +25,30 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult
+from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult, execute_registered_mutation_command
+from mana_agent.llm.mutation_plan import (
+    REGISTERED_MUTATION_TOOLS,
+    MutationCommand,
+    build_mutation_plan,
+    is_architecture_docs_update,
+    mutation_trace_has_plan,
+    representative_architecture_sources,
+    validate_mutation_command,
+    validate_mutation_plan,
+)
 from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
 
 logger = logging.getLogger(__name__)
+
+MUTATION_ONLY_TOOLS = [
+    "edit_file",
+    "multi_edit_file",
+    "apply_patch",
+    "apply_patch_batch",
+    "write_file",
+    "create_file",
+    "delete_file",
+]
 
 _PATH_RE = re.compile(r"[\w./-]*?[\w-]+\.(?:py|md|txt|toml|yaml|yml|json|cfg|ini)\b")
 _LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([\w.]+)", re.MULTILINE)
@@ -122,7 +142,7 @@ def classify_result(item: WorkItem, response: ToolRunResponse, *, repo_root: Pat
             trace=list(response.trace),
         )
 
-    if tool in {"edit_file", "multi_edit_file", "apply_patch", "write_file", "create_file", "delete_file", "move_file"}:
+    if tool in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file", "create_file", "delete_file", "move_file"}:
         changed = sorted(paths)
         for row in response.trace:
             if isinstance(row, dict):
@@ -144,7 +164,7 @@ def classify_result(item: WorkItem, response: ToolRunResponse, *, repo_root: Pat
             trace=list(response.trace),
         )
 
-    if tool in {"repo_search", "semantic_search", "list_files"}:
+    if tool in {"repo_search", "repo_batch_search", "semantic_search", "list_files"}:
         ok = not error and (bool(paths) or has_content)
         return WorkResult(
             ok=ok,
@@ -199,35 +219,87 @@ def make_worker_executor(
         question = item.question or (f"run tool {item.tool_name}" if item.tool_name else item.title)
         item_policy = dict(tool_policy or {})
         if item.kind == "edit":
-            # An edit item is an *agentic* analyze-then-write pass: the worker may
-            # read and search the repository to ground the file it is about to
-            # author, then must finish with a mutation tool. Read/search tools are
-            # allowed (so content is project-specific, never boilerplate); the
-            # mutation requirement still forces the pass to end in a real write.
-            item_policy["allowed_tools"] = [
-                "read_file",
-                "repo_search",
-                "semantic_search",
-                "list_files",
-                "ls",
-                "find_symbols",
-                "edit_file",
-                "multi_edit_file",
-                "apply_patch",
-                "write_file",
-                "create_file",
-                "delete_file",
-                "git_diff",
-                "git_status",
-            ]
+            # Edit work must go through a mutation-only pass. Discovery/read jobs
+            # are queued separately before this point; allowing read/search here
+            # lets an edit-required run finish with a prose-only worker response.
+            item_policy["allowed_tools"] = list(MUTATION_ONLY_TOOLS)
             item_policy["require_read_files"] = 0
             item_policy["mutation_required"] = True
+            item_policy["mutation_strict"] = True
             item_policy["verify_requires_mutation"] = True
         else:
             item_policy.pop("mutation_required", None)
             item_policy.pop("mutation_strict", None)
             item_policy.pop("verify_requires_mutation", None)
         tool_args = dict(item.tool_args or {})
+        if item.kind == "edit":
+            plan_payload = tool_args.get("mutation_plan")
+            plan_id = str(tool_args.get("mutation_plan_id") or "").strip()
+            errors = validate_mutation_plan(plan_payload, repo_root=repo_root) if isinstance(plan_payload, dict) else ["missing approved mutation plan"]
+            if errors or not plan_id:
+                return WorkResult(
+                    ok=False,
+                    summary="mutation plan validation failed",
+                    error="mutation_plan_validation_failed: " + "; ".join(errors or ["missing mutation_plan_id"]),
+                    trace=[
+                        {
+                            "tool_name": item.tool_name or "mutation",
+                            "status": "blocked",
+                            "error": "mutation_plan_validation_failed",
+                            "details": errors,
+                            "mutation_plan_id": plan_id,
+                        }
+                    ],
+                )
+            tool = (item.tool_name or "").strip().lower()
+            if tool in REGISTERED_MUTATION_TOOLS:
+                command_args = {
+                    key: value
+                    for key, value in tool_args.items()
+                    if key not in {"mutation_plan", "mutation_plan_id"}
+                }
+                try:
+                    command = MutationCommand(
+                        plan_id=plan_id,
+                        tool_name=tool,  # type: ignore[arg-type]
+                        tool_args=command_args,
+                        target_files=list(plan_payload.get("target_files") or []),
+                        reason="compiled from registered edit WorkItem",
+                    )
+                except Exception as exc:
+                    return WorkResult(
+                        ok=False,
+                        summary="mutation command invalid",
+                        error=f"mutation_command_incomplete: {exc}",
+                        trace=[
+                            {
+                                "tool_name": tool,
+                                "status": "blocked",
+                                "error": "mutation_command_incomplete",
+                                "mutation_plan_id": plan_id,
+                            }
+                        ],
+                    )
+                command_errors = validate_mutation_command(command)
+                if command_errors:
+                    return WorkResult(
+                        ok=False,
+                        summary="mutation command incomplete",
+                        error="mutation_command_incomplete: " + "; ".join(command_errors),
+                        trace=[
+                            {
+                                "tool_name": tool,
+                                "status": "blocked",
+                                "error": "mutation_command_incomplete",
+                                "details": command_errors,
+                                "mutation_plan_id": plan_id,
+                                "target_files": list(command.target_files),
+                                "changed_files": [],
+                                "created_by": "mutation_command_executor",
+                            }
+                        ],
+                    )
+                return execute_registered_mutation_command(repo_root=repo_root, command=command)
         if (item.tool_name or "").strip().lower() == "read_file" and tool_args.get("path"):
             tool_args["path"] = _normalized_path(str(tool_args.get("path")))
         request = ToolRunRequest(
@@ -249,6 +321,21 @@ def make_worker_executor(
             response = worker_client.run_tools(request)
         except Exception as exc:
             return WorkResult(ok=False, error=f"worker_error: {exc}")
+        if item.kind == "edit":
+            plan_id = str(tool_args.get("mutation_plan_id") or "").strip()
+            for row in response.trace:
+                if not isinstance(row, dict):
+                    continue
+                tool = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
+                if tool in set(MUTATION_ONLY_TOOLS):
+                    row.setdefault("mutation_plan_id", plan_id)
+            if not mutation_trace_has_plan(response.trace, plan_id):
+                return WorkResult(
+                    ok=False,
+                    summary="mutation did not execute with approved plan",
+                    error="mutation_tool_missing_plan_id",
+                    trace=list(response.trace),
+                )
         result = classify_result(item, response, repo_root=repo_root)
         result.duration_ms = round((time.perf_counter() - t0) * 1000.0, 3)
         return result
@@ -299,11 +386,14 @@ class CodingAgentSniffer:
         self._relevant = relevant or (lambda _path: True)
         self._reads_emitted = 0
         self._finalization_emitted = False
+        self._read_files: set[str] = set()
         self._target_files = [
             self._normalize_repo_path(str(item))
             for item in (target_files or [])
             if str(item).strip()
         ]
+        if is_architecture_docs_update(self._request, self._target_files):
+            self._max_reads = max(self._max_reads, len(representative_architecture_sources(self._repo_root)) + len(self._target_files))
 
     def _normalize_repo_path(self, path: str) -> str:
         text = str(path or "").strip()
@@ -327,6 +417,7 @@ class CodingAgentSniffer:
             out.extend(self._finalization_jobs())
             return out
         if kind == "read":
+            self._read_files.update(result.files_read)
             return self._follow_local_imports(result, parent=item)
         return []
 
@@ -342,19 +433,30 @@ class CodingAgentSniffer:
             return []
         self._finalization_emitted = True
         target_file = self._target_files[0] if self._target_files else ""
-        tool_args = {"path": target_file} if target_file else {}
-        target_instruction = (
-            f" Target file: {target_file}. Create it if it does not exist."
-            if target_file
-            else ""
+        plan = build_mutation_plan(
+            repo_root=self._repo_root,
+            user_goal=self._request,
+            target_files=self._target_files,
+            evidence_files_read=sorted(self._read_files),
         )
+        if not plan.allowed_to_mutate:
+            tool_args = {"path": target_file, "mutation_plan": plan.model_dump(), "mutation_plan_id": plan.plan_id}
+        else:
+            tool_args = {"path": target_file, "mutation_plan": plan.model_dump(), "mutation_plan_id": plan.plan_id}
+        if target_file:
+            edit_lead = f"Using approved MutationPlan {plan.plan_id}, update {target_file}."
+            target_instruction = f" Target file: {target_file}. Create it if it does not exist."
+        else:
+            edit_lead = f"Using approved MutationPlan {plan.plan_id}, carry out the user's request."
+            target_instruction = ""
         edit = WorkItem(
             kind="edit",
             tool_name="write_file",
             tool_args=tool_args,
             question=(
-                "Using the file evidence already gathered in this run, carry out "
-                f"the user's request: {self._request}. Apply concrete changes with "
+                f"{edit_lead} User request context: {self._request}. Evidence summary: {plan.evidence_summary}. "
+                f"Intended changes: {'; '.join(plan.intended_changes)}. Patch strategy: {plan.patch_strategy}. "
+                "Apply concrete changes with "
                 "edit_file/multi_edit_file/apply_patch/create_file/write_file/delete_file and report the changed files. "
                 "Before mutating, use bounded exact path/name/symbol evidence to account for "
                 "related importers, exports, registries, routers, commands, call sites, tests, "
@@ -370,8 +472,8 @@ class CodingAgentSniffer:
             kind="verify",
             tool_name="verify",
             question=(
-                "Verify the changes made for the request: "
-                f"{self._request}. Confirm the new or edited files exist and are "
+                f"Verify the changes made to {target_file or 'the resolved target files'}. "
+                f"User request context: {self._request}. Confirm the new or edited files exist and are "
                 "well-formed, and run any available checks."
             ),
             gate="verify_changes",
@@ -413,7 +515,11 @@ class CodingAgentSniffer:
 
     def _reads_from_discovery(self, paths: list[str], *, parent: WorkItem) -> list[WorkItem]:
         out: list[WorkItem] = []
-        for path in self._rank_candidates(paths):
+        ranked = list(self._target_files)
+        if is_architecture_docs_update(self._request, self._target_files):
+            ranked.extend(path for path in representative_architecture_sources(self._repo_root) if path not in ranked)
+        ranked.extend(path for path in self._rank_candidates(paths) if path not in ranked)
+        for path in ranked:
             if self._reads_emitted >= self._max_reads:
                 break
             out.append(
