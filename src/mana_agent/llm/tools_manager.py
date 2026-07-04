@@ -1851,6 +1851,122 @@ def _resolve_existing_unique_bare_path(repo_root: Path, rel: str) -> str:
     return matches[0] if len(matches) == 1 else candidate
 
 
+def _repo_files_for_target_resolution(repo_root: Path) -> list[str]:
+    """Return repo-relative files eligible for target-name resolution."""
+    root = Path(repo_root).resolve()
+    files: list[str] = []
+    try:
+        iterator = root.rglob("*")
+        for path in iterator:
+            try:
+                rel_path = path.relative_to(root)
+            except ValueError:
+                continue
+            parts = set(rel_path.parts)
+            if ".git" in parts or ".mana" in parts or "__pycache__" in parts:
+                continue
+            if path.is_file():
+                files.append(rel_path.as_posix())
+    except OSError:
+        return []
+    return sorted(dict.fromkeys(files))
+
+
+def _normalized_target_candidates(paths: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in paths:
+        text = str(item or "").strip().replace("\\", "/").strip("`'\" ")
+        text = re.sub(r"[,.):;\]]+$", "", text).lstrip("./")
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _similar_target_score(raw: str, candidate: str) -> float:
+    raw_name = Path(raw).name.lower()
+    candidate_name = Path(candidate).name.lower()
+    if not raw_name or not candidate_name:
+        return 0.0
+    if raw_name == candidate_name:
+        return 1.0
+    raw_stem = Path(raw_name).stem
+    candidate_stem = Path(candidate_name).stem
+    # Prefer exact suffix/basename matches, then tolerate small typos such as
+    # "architectue.md" for "08-architecture.md".
+    if candidate_name.endswith(raw_name):
+        return 0.98
+    if raw_stem and raw_stem in candidate_stem:
+        return 0.94
+    return SequenceMatcher(None, raw_stem, candidate_stem).ratio()
+
+
+def resolve_target_paths(
+    request: str,
+    discovered_files: Sequence[str] = (),
+    repo_files: Sequence[str] = (),
+) -> list[str]:
+    """Resolve target filenames in a request to concrete repo paths when possible."""
+    raw_targets = _normalized_target_candidates(match.group("path") for match in _EXPLICIT_FILE_RE.finditer(str(request or "")))
+    if not raw_targets:
+        return []
+    candidates = _normalized_target_candidates([*discovered_files, *repo_files])
+    resolved: list[str] = []
+    for raw in raw_targets:
+        direct = [path for path in candidates if path == raw]
+        basename = [path for path in candidates if Path(path).name.lower() == Path(raw).name.lower()]
+        matches = direct or basename
+        if not matches:
+            scored = sorted(
+                (
+                    (_similar_target_score(raw, path), path)
+                    for path in candidates
+                    if Path(path).suffix.lower() == Path(raw).suffix.lower()
+                ),
+                key=lambda item: (-item[0], len(item[1]), item[1]),
+            )
+            if scored and scored[0][0] >= 0.72:
+                matches = [scored[0][1]]
+        if len(matches) == 1 and matches[0] not in resolved:
+            resolved.append(matches[0])
+    return resolved
+
+
+def resolve_target_state(
+    request: str,
+    repo_root: Path,
+    *,
+    target_files: Sequence[str] = (),
+    discovered_files: Sequence[str] = (),
+) -> dict[str, list[str]]:
+    """Resolve requested/planner target files and keep raw unresolved values visible."""
+    raw_from_request = _normalized_target_candidates(match.group("path") for match in _EXPLICIT_FILE_RE.finditer(str(request or "")))
+    raw_targets = _normalized_target_candidates([*target_files, *raw_from_request])
+    repo_files = _repo_files_for_target_resolution(repo_root)
+    candidates = _normalized_target_candidates([*discovered_files, *repo_files])
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for raw in raw_targets:
+        match = resolve_target_paths(raw, discovered_files=candidates, repo_files=())
+        if match:
+            for item in match:
+                if item not in resolved:
+                    resolved.append(item)
+            continue
+        rel = _safe_relative_path(repo_root, raw)
+        if rel:
+            rel = _resolve_existing_unique_bare_path(repo_root, rel)
+            if rel and rel not in resolved:
+                resolved.append(rel)
+                continue
+        if raw not in unresolved:
+            unresolved.append(raw)
+    return {
+        "raw_target_files": raw_targets,
+        "resolved_target_files": resolved,
+        "unresolved_target_files": unresolved,
+    }
+
+
 def _resolve_mutation_target_path(task: str, repo_root: Path, target_files: Sequence[str] = ()) -> str:
     repo_files = _repo_files_for_target_resolution(repo_root)
     resolved_targets = resolve_target_paths(task, (), repo_files)
@@ -2433,6 +2549,7 @@ def _compose_final_answer(
     fallback: str,
     missing_required_files: Sequence[str] = (),
     tool_failures: Sequence[dict[str, str]] = (),
+    mutation_tools_used: Sequence[str] = (),
 ) -> str:
     """Rebuild the final answer from authoritative execution state.
 
@@ -2538,4 +2655,5 @@ __all__ = [
     "AutoExecuteResult",
     "AgentFlowError",
     "resolve_target_paths",
+    "resolve_target_state",
 ]

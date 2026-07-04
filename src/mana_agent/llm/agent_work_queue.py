@@ -1771,6 +1771,7 @@ class QueueManager:
             fallback=board.render(),
             missing_required_files=missing_required_files,
             tool_failures=failed_calls,
+            mutation_tools_used=mutation_tool_stats["mutation_tools_called"],
         )
         if mutation_required and approved_mutation_plan is not None:
             final_answer = f"{final_answer}\nMutation plan: {approved_mutation_plan.plan_id}"

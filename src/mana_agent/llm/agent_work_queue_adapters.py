@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from mana_agent.llm.agent_session import AgentSession
 from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult
+from mana_agent.llm.mutation_plan import is_architecture_docs_update, representative_architecture_sources
 from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
 from mana_agent.llm.tools_executor import BatchToolRequest, ToolsExecutor
 
