@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import time
 from typing import Any, Callable, Literal, Sequence
 
@@ -12,6 +13,9 @@ from mana_agent.llm.tool_worker_process import (
     ToolWorkerClient,
     ToolWorkerProcessError,
 )
+
+logger = logging.getLogger(__name__)
+_FALLBACK_WARNINGS_EMITTED: set[str] = set()
 
 
 STANDARD_ERROR_CODES = {
@@ -404,6 +408,34 @@ class RedisRQToolsExecutor(ToolsExecutor):
         return ordered
 
 
+def build_tools_executor_with_fallback(
+    *,
+    worker_client: ToolWorkerClient,
+    config: ToolsExecutionConfig,
+    worker_init_payload: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+    warning_key: str = "redis_executor_unavailable",
+    local_executor_cls: type[ToolsExecutor] = LocalToolsExecutor,
+    redis_executor_cls: type[ToolsExecutor] = RedisRQToolsExecutor,
+) -> ToolsExecutor:
+    """Select the requested backend, falling back to local with one warning per key."""
+    if config.backend != "redis":
+        return local_executor_cls(worker_client=worker_client)  # type: ignore[call-arg]
+    try:
+        return redis_executor_cls(
+            worker_init_payload=worker_init_payload or {},
+            config=config,
+        )
+    except Exception as exc:
+        message = f"redis executor unavailable; falling back to local backend: {exc}"
+        if warning_key not in _FALLBACK_WARNINGS_EMITTED:
+            _FALLBACK_WARNINGS_EMITTED.add(warning_key)
+            logger.warning(message)
+            if warnings is not None:
+                warnings.append(message)
+        return local_executor_cls(worker_client=worker_client)  # type: ignore[call-arg]
+
+
 __all__ = [
     "BatchExecutionResult",
     "BatchToolRequest",
@@ -411,5 +443,6 @@ __all__ = [
     "RedisRQToolsExecutor",
     "ToolsExecutionConfig",
     "ToolsExecutor",
+    "build_tools_executor_with_fallback",
     "normalize_error_code",
 ]

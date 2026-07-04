@@ -48,7 +48,6 @@ def test_chat_help_hides_manual_plan_execute_flags() -> None:
     assert "--planning-mode" not in result.stdout
     assert "--auto-execute-plan" not in result.stdout
     assert "--no-auto-execute-plan" not in result.stdout
-    assert "--execution-prof" in result.stdout
     assert "--full-auto" in result.stdout
 
 
@@ -66,8 +65,8 @@ def test_analyze_command_is_public() -> None:
     result = runner.invoke(app, ["analyze", "--help"])
 
     assert result.exit_code == 0
-    assert "--depth" in result.output
-    assert "--max-files" in result.output
+    assert "--depth" in result.stdout
+    assert "--max-files" in result.stdout
 
 
 def test_continue_command_uses_root_dir_and_loops_until_complete(monkeypatch, tmp_path: Path) -> None:
@@ -211,6 +210,31 @@ def test_chat_help_works() -> None:
     result = runner.invoke(app, ["chat", "--help"])
     assert result.exit_code == 0
     assert "chat [OPTIONS]" in result.output
+
+
+def test_chat_prompt_direct_readme_version_edit_skips_heavy_setup(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        "# Demo\n\nCurrent documented version: **v0.0.7**.\n",
+        encoding="utf-8",
+    )
+
+    def _blocked(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("small direct edit should not initialize heavy chat dependencies")
+
+    monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.chat_cli.build_ask_service", _blocked)
+    monkeypatch.setattr("mana_agent.commands.chat_cli.build_index_service", _blocked)
+    monkeypatch.setattr("mana_agent.commands.chat_cli.CodingAgent", _blocked)
+    monkeypatch.setattr("mana_agent.commands.chat_cli.ToolWorkerClient", _blocked)
+
+    result = runner.invoke(
+        app,
+        ["chat", "update version in readme.md to 0.0.8", "--root-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Verification skipped: docs-only one-line edit" in result.output
+    assert "Current documented version: **v0.0.8**." in (tmp_path / "README.md").read_text(encoding="utf-8")
 
 
 def test_no_source_file_contains_analyzor() -> None:

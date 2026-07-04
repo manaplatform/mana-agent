@@ -6,7 +6,7 @@ from .cli_internal import *
 from .output import build_output_sink
 from mana_agent.ui.banner import render_banner, render_repository
 
-@app.callback()
+
 def main(
     ctx: typer.Context,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logs (console + file)."),

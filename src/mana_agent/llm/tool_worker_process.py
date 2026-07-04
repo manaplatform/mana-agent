@@ -11,7 +11,7 @@ import uuid
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Protocol
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, before_sleep_log
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -834,6 +834,16 @@ class ToolRunResponse(BaseModel):
     mode: str = "agent-tools"
     trace: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class ToolExecutorProtocol(Protocol):
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def run_tools(
+        self,
+        request: ToolRunRequest,
+        on_event: Callable[[Any], None] | None = None,
+    ) -> ToolRunResponse: ...
 
 
 class WorkerError(BaseModel):

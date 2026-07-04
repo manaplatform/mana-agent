@@ -143,6 +143,40 @@ Start an interactive coding-agent session:
 mana-agent chat --root-dir /path/to/project
 ```
 
+---
+
+## Running an approved mutation plan
+
+If you have an approved workflow/mutation plan id (for example: `mp_8550d39b9f86`), you can execute it deterministically against a target repository.
+
+```bash
+mana-agent run --root-dir /path/to/project --plan-id mp_8550d39b9f86
+```
+
+This runs the approved plan as an isolated, reproducible mutation/run (separating planning/approval from applying changes).
+
+### MutationCommand (executable)
+
+To execute an approved mutation plan id, use the following `MutationCommand(...)` form (this is the executable command used by the `mana-agent run` workflow).
+
+> Note: `MutationCommand(...)` is the internal executable representation for the plan. In normal usage you typically run the plan via `mana-agent run`.
+
+```text
+MutationCommand(<plan-id>)
+```
+
+Example:
+
+```text
+MutationCommand(mp_7ec0ea2fc05d)
+```
+
+Example:
+
+```bash
+mana-agent run --root-dir /path/to/project --plan-id mp_7ec0ea2fc05d
+```
+
 Useful global flags:
 
 ```bash

@@ -61,20 +61,12 @@ _REQUEST_STOPWORDS = frozenset(
 )
 
 _AGENTIC_EDIT_TOOLS = [
-    "read_file",
-    "repo_search",
-    "semantic_search",
-    "list_files",
-    "ls",
-    "find_symbols",
     "edit_file",
     "multi_edit_file",
     "apply_patch",
     "write_file",
     "create_file",
     "delete_file",
-    "git_diff",
-    "git_status",
 ]
 
 
@@ -219,6 +211,33 @@ def make_worker_executor(
     repo_root = Path(repo_root).resolve()
 
     def _execute(item: WorkItem) -> WorkResult:
+        if item.kind == "edit" and (item.tool_name or "").strip().lower() in MUTATION_ONLY_TOOLS:
+            tool_args = dict(item.tool_args or {})
+            plan_id = str(tool_args.get("mutation_plan_id") or "").strip()
+            if plan_id:
+                from mana_agent.llm.agent_work_queue import execute_registered_mutation_command
+                from mana_agent.llm.mutation_plan import MutationCommand
+
+                payload_args = {
+                    key: value
+                    for key, value in tool_args.items()
+                    if key not in {"mutation_plan", "mutation_plan_id"}
+                }
+                plan_payload = tool_args.get("mutation_plan") if isinstance(tool_args.get("mutation_plan"), dict) else {}
+                target_files = list(plan_payload.get("target_files") or [])
+                if not target_files and payload_args.get("path"):
+                    target_files = [str(payload_args.get("path"))]
+                command = MutationCommand(
+                    plan_id=plan_id,
+                    tool_name=(item.tool_name or "").strip().lower(),  # type: ignore[arg-type]
+                    tool_args=payload_args,
+                    target_files=target_files,
+                    reason="executed from queued registered mutation work item",
+                )
+                t0 = time.perf_counter()
+                result = execute_registered_mutation_command(repo_root=repo_root, command=command)
+                result.duration_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+                return result
         request = build_tool_run_request(
             item,
             repo_root=repo_root,
@@ -377,6 +396,23 @@ def make_batch_executor(
             response = ToolRunResponse.model_validate(result.response)
         except Exception as exc:
             return WorkResult(ok=False, error=f"executor_result_decode_failed: {exc}")
+        if item.kind == "edit":
+            tool_args = dict(item.tool_args or {})
+            plan_id = str(tool_args.get("mutation_plan_id") or "").strip()
+            if plan_id:
+                for row in response.trace:
+                    if not isinstance(row, dict):
+                        continue
+                    tool = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
+                    if tool in set(MUTATION_ONLY_TOOLS):
+                        row.setdefault("mutation_plan_id", plan_id)
+                if not mutation_trace_has_plan(response.trace, plan_id):
+                    return WorkResult(
+                        ok=False,
+                        summary="mutation did not execute with approved plan",
+                        error="mutation_tool_missing_plan_id",
+                        trace=list(response.trace),
+                    )
         work_result = classify_result(item, response, repo_root=repo_root)
         work_result.duration_ms = float(result.duration_ms or 0.0)
         return work_result
@@ -413,6 +449,7 @@ class CodingAgentSniffer:
         max_reads: int = 8,
         max_follow_per_read: int = 4,
         relevant: Callable[[str], bool] | None = None,
+        orchestrator: Any | None = None,
     ) -> None:
         self._repo_root = Path(repo_root).resolve()
         self._request = str(request or "").strip()
@@ -428,6 +465,7 @@ class CodingAgentSniffer:
         self._reads_emitted = 0
         self._finalization_emitted = False
         self._read_files: set[str] = set()
+        self._orchestrator = orchestrator
         self._target_files = [
             self._normalize_repo_path(str(item))
             for item in (target_files or [])
@@ -459,7 +497,12 @@ class CodingAgentSniffer:
             return out
         if kind == "read":
             self._read_files.update(result.files_read)
-            return self._follow_local_imports(result, parent=item)
+            out: list[WorkItem] = []
+            if self._orchestrator is not None and self._orchestrator.state.evidence_sufficient:
+                out.extend(self._finalization_jobs())
+                return out
+            out.extend(self._follow_local_imports(result, parent=item))
+            return out
         return []
 
     def _finalization_jobs(self) -> list[WorkItem]:
@@ -545,7 +588,11 @@ class CodingAgentSniffer:
 
     def _reads_from_discovery(self, paths: list[str], *, parent: WorkItem) -> list[WorkItem]:
         out: list[WorkItem] = []
-        ranked = list(self._target_files)
+        create_intent = bool(re.search(r"\b(create|add|generate)\b", self._request, re.IGNORECASE))
+        ranked = [
+            path for path in self._target_files
+            if (self._repo_root / path).is_file() or not create_intent
+        ]
         if is_architecture_docs_update(self._request, self._target_files):
             ranked.extend(path for path in representative_architecture_sources(self._repo_root) if path not in ranked)
         ranked.extend(path for path in self._rank_candidates(paths) if path not in ranked)

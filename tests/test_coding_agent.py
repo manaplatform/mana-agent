@@ -1151,3 +1151,54 @@ def test_preview_execution_checklist_surfaces_deterministic_fallback_warning(tmp
     preview = agent.preview_execution_checklist("implement plan.")
     assert preview["prechecklist_source"] == "deterministic_fallback"
     assert "deterministic fallback checklist" in str(preview.get("prechecklist_warning", "")).lower()
+
+
+def test_explicit_file_heading_task_skips_planner_questions(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n\n## Project Layout\n\nOld\n", encoding="utf-8")
+    payload = {"answer": "ok", "trace": [], "warnings": []}
+    agent = _build_agent(tmp_path, monkeypatch, payload=payload)
+
+    class _FailingPlanner:
+        calls = 0
+
+        def invoke(self, _messages):
+            self.calls += 1
+            raise AssertionError("planner should not be called for clear target tasks")
+
+    planner = _FailingPlanner()
+    agent.planner_llm = planner
+
+    checklist, warnings, source = agent._plan_checklist_with_source("task:update readme.md ## Project Layout")
+
+    assert source == "deterministic_clear_task"
+    assert warnings == []
+    assert checklist is not None
+    assert checklist.requires_edit is True
+    assert checklist.target_files == ["README.md"]
+    assert planner.calls == 0
+
+
+def test_planner_failure_circuit_breaker_uses_fallback_once(tmp_path: Path, monkeypatch) -> None:
+    payload = {"answer": "ok", "trace": [], "warnings": []}
+    agent = _build_agent(tmp_path, monkeypatch, payload=payload)
+
+    class _FailingPlanner:
+        calls = 0
+
+        def invoke(self, _messages):
+            self.calls += 1
+            raise RuntimeError("invalid api key")
+
+    planner = _FailingPlanner()
+    agent.planner_llm = planner
+
+    first, first_warnings, first_source = agent._plan_checklist_with_source("explain the project structure")
+    second, second_warnings, second_source = agent._plan_checklist_with_source("explain another area")
+
+    assert first is not None
+    assert second is not None
+    assert first_source == "deterministic_fallback"
+    assert second_source == "deterministic_fallback"
+    assert planner.calls == 1
+    assert any("planner unavailable" in warning for warning in first_warnings)
+    assert second_warnings == ["planner unavailable; using deterministic checklist"]

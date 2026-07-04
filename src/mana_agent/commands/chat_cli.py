@@ -14,11 +14,14 @@ from mana_agent.llm.auto_chat import (
     AutoChatSessionState,
     apply_auto_chat_tool_policy,
     classify_auto_chat_intent,
+    is_plan_execution_request,
     load_auto_chat_state,
     resolve_auto_followup,
     save_auto_chat_state,
 )
 from mana_agent.llm.agent_session import route_for_turn
+from mana_agent.llm.small_direct_edit import handle_small_direct_edit
+from mana_agent.llm.tools_executor import build_tools_executor_with_fallback
 from mana_agent.ui.banner import render_mode_header
 
 
@@ -132,14 +135,15 @@ def _should_use_coding_agent_turn(
     force_plan_only_response: bool,
     has_pending_prechecklist: bool,
     coding_agent_is_custom: bool,
+    general_coding_agent_turns: bool = True,
 ) -> bool:
     """Route turns consistently with the chat banner when CodingAgent is active."""
-    _ = (
-        edit_request,
-        plan_trigger_request,
-        force_plan_only_response,
-        has_pending_prechecklist,
-    )
+    if not coding_agent_available:
+        return False
+    if edit_request or plan_trigger_request or force_plan_only_response or has_pending_prechecklist:
+        return True
+    if not general_coding_agent_turns:
+        return False
     route = route_for_turn(
         coding_agent_available=coding_agent_available,
         agent_tools=agent_tools,
@@ -205,7 +209,7 @@ def _render_auto_execute_pass_status(
     )
 
 
-@app.command()
+
 def chat(
     prompt: str | None = typer.Argument(None, help="Optional first chat prompt."),
     model: str | None = typer.Option(None, "--model"),
@@ -489,10 +493,6 @@ def chat(
         min_steps=8,
         cap=200,
     )
-    # CodingAgent is the sole decision-maker in chat – always force on.
-
-    if auto_execute_plan:
-        pass  # already forced above
     settings = _public_symbol("Settings", Settings)()
     resolved_tool_exec_backend = str(
         (tool_exec_backend or getattr(settings, "tool_exec_backend", "local")) or "local"
@@ -540,6 +540,14 @@ def chat(
         root = root.parent
     render_mode_header("Chat", "Ask about your repository or request edits", console)
 
+    if prompt:
+        direct_edit_result = handle_small_direct_edit(root, prompt)
+        if direct_edit_result.handled:
+            console.print(f"[bold cyan]mana ❯[/bold cyan] {prompt}")
+            _render_answer_header(console)
+            console.print(Markdown(direct_edit_result.answer))
+            return
+
     logger.debug("Resolved chat root", extra={"root": str(root)})
     run_logger_cls = _public_symbol("LlmRunLogger", LlmRunLogger)
     run_logger = run_logger_cls(
@@ -584,18 +592,21 @@ def chat(
     effective_base_url = settings.openai_base_url or os.getenv("OPENAI_BASE_URL")
 
     def _build_tools_executor(worker_client: ToolWorkerClient):
-        if tools_execution_config.backend != "redis":
-            return _public_symbol("LocalToolsExecutor", LocalToolsExecutor)(worker_client=worker_client)
-        try:
-            return _public_symbol("RedisRQToolsExecutor", RedisRQToolsExecutor)(
-                worker_init_payload=worker_client.init_payload_dict(),
-                config=tools_execution_config,
-            )
-        except Exception as exc:
-            warning = f"redis executor unavailable; falling back to local backend: {exc}"
-            logger.warning(warning)
-            tools_execution_boot_warnings.append(warning)
-            return _public_symbol("LocalToolsExecutor", LocalToolsExecutor)(worker_client=worker_client)
+        helper = _public_symbol("build_tools_executor_with_fallback", build_tools_executor_with_fallback)
+        init_payload = (
+            worker_client.init_payload_dict()
+            if hasattr(worker_client, "init_payload_dict")
+            else {}
+        )
+        return helper(
+            worker_client=worker_client,
+            config=tools_execution_config,
+            worker_init_payload=init_payload,
+            warnings=tools_execution_boot_warnings,
+            warning_key=f"chat:{root}:{tools_execution_config.redis_url}:{tools_execution_config.queue_name}",
+            local_executor_cls=_public_symbol("LocalToolsExecutor", LocalToolsExecutor),
+            redis_executor_cls=_public_symbol("RedisRQToolsExecutor", RedisRQToolsExecutor),
+        )
 
     if coding_agent:
         if not agent_tools:
@@ -960,7 +971,10 @@ def chat(
             if coding_agent_instance is not None:
                 target_flow = active_flow_id or coding_agent_instance.get_active_flow_id()
                 if isinstance(target_flow, str) and target_flow.strip():
-                    reset_id = coding_agent_instance.reset_flow(target_flow.strip())
+                    if hasattr(coding_agent_instance, "reset_flow"):
+                        reset_id = coding_agent_instance.reset_flow(target_flow.strip())
+                    else:
+                        reset_id = target_flow.strip()
             active_flow_id = None
             pending_conflict_question = None
             return reset_id
@@ -1709,6 +1723,50 @@ def chat(
             question = resolve_auto_followup(question, auto_chat_state)
             auto_chat_mode = classify_auto_chat_intent(question)
 
+            small_direct_edit_result = handle_small_direct_edit(root, question)
+            if small_direct_edit_result.handled:
+                answer_text = small_direct_edit_result.answer
+                _render_answer_header(console)
+                console.print(Markdown(answer_text))
+                turn_record = ChatTurnTelemetry(
+                    turn_index=len(session_turns) + 1,
+                    timestamp=_now_iso(),
+                    question=question,
+                    answer_text=answer_text,
+                    sources=[{"path": path} for path in small_direct_edit_result.changed_files],
+                    warnings=[] if small_direct_edit_result.ok else [small_direct_edit_result.error],
+                    trace=_coerce_trace_items(small_direct_edit_result.trace),
+                    tool_steps_total=len(small_direct_edit_result.trace),
+                    decisions=[],
+                    changed_files=list(small_direct_edit_result.changed_files),
+                    has_diff=bool(small_direct_edit_result.changed_files),
+                    coding_state={
+                        "flow_id": active_flow_id,
+                        "small_direct_edit": True,
+                        "verification": "skipped_docs_only" if small_direct_edit_result.ok else "minimal_check_failed",
+                    },
+                )
+                session_turns.append(turn_record)
+                _log_chat_turn(
+                    run_logger,
+                    turn=turn_record,
+                    mode="small-direct-edit",
+                    dir_mode=dir_mode,
+                    coding_agent=False,
+                    flow_id=active_flow_id,
+                    multiline_input=multiline_input,
+                    multiline_terminator=multiline_terminator,
+                )
+                _save_auto_chat_turn_state(
+                    mode=auto_chat_mode,
+                    task=original_auto_question,
+                    answer_text=answer_text,
+                    sources=[{"path": path} for path in small_direct_edit_result.changed_files],
+                    changed_files=small_direct_edit_result.changed_files,
+                    verification="Verification skipped: docs-only one-line edit.",
+                )
+                continue
+
             # -----------------------------
             # Exact search fast-path (ripgrep / static search, no index needed).
             # -----------------------------
@@ -1823,6 +1881,7 @@ def chat(
                     if not summary:
                         console.print("[yellow]No active coding flow.[/yellow]")
                         continue
+                    console.print("[bold]Flow memory active[/bold]")
                     _render_flow_summary(
                         console,
                         summary,
@@ -1860,7 +1919,8 @@ def chat(
                 )
                 continue
 
-            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY)
+            plan_execution_request = is_plan_execution_request(question)
+            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or plan_execution_request)
             edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
             auto_planning_turn = bool(
                 planning_request is not None
@@ -2057,7 +2117,12 @@ def chat(
                 coding_agent_instance is None
                 and agent_tools
                 and auto_execute_plan
-                and (edit_request or legacy_auto_execute_plan_requested or execution_profile == "full-auto")
+                and (
+                    edit_request
+                    or plan_execution_request
+                    or legacy_auto_execute_plan_requested
+                    or execution_profile == "full-auto"
+                )
                 and (plan_trigger_request or edit_request)
             ):
                 auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
@@ -2081,6 +2146,7 @@ def chat(
                 force_plan_only_response=force_plan_only_response,
                 has_pending_prechecklist=pending_prechecklist is not None,
                 coding_agent_is_custom=coding_agent_is_custom,
+                general_coding_agent_turns=bool(coding_agent_explicit or coding_agent_is_custom),
             )
 
             if not use_coding_agent_turn:

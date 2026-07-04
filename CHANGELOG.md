@@ -2,6 +2,35 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-04 (agent decision and evidence gate)
+
+- Added a central agent orchestrator with task classification, evidence queue items, an evaluation gate state machine, post-tool critic tracing, and verification-profile selection.
+- Wired the live work queue to read explicit single-file targets directly, stop unrelated discovery once enough evidence exists, and emit edit/verify work from read evidence instead of requiring broad repo search first.
+- Added a planner-unavailable circuit breaker, explicit fake-worker lifecycle protocol, and Redis executor fallback warning deduplication.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_orchestrator.py tests/test_agent_work_queue.py tests/test_tools_executor_redis.py tests/test_tool_worker_process.py::test_tool_worker_client_init_health_shutdown tests/test_tool_worker_process.py::test_tool_worker_client_restarts_once_on_worker_failure tests/test_tool_worker_process.py::test_tool_worker_client_run_tools_forwards_events tests/test_coding_agent.py::test_preview_execution_checklist_uses_planner_and_persists_to_flow_memory tests/test_coding_agent.py::test_preview_execution_checklist_reports_repair_source tests/test_coding_agent.py::test_preview_execution_checklist_surfaces_deterministic_fallback_warning tests/test_coding_agent.py::test_explicit_file_heading_task_skips_planner_questions tests/test_coding_agent.py::test_planner_failure_circuit_breaker_uses_fallback_once tests/test_cli_smoke.py::test_chat_redis_backend_falls_back_to_local_executor_when_unavailable -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest -q tests/commands tests/integration` passed; `PYTHONPATH=src .venv/bin/python -m pytest -q` passed with 533 tests and 16 warnings; `PYTHONPATH=src .venv/bin/python -c "import mana_agent; print('ok')"` passed; `PYTHONPATH=src .venv/bin/mana-agent --help` passed; `PYTHONPATH=src .venv/bin/mana-agent chat --help` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/agent src/mana_agent/llm/tools_executor.py tests/test_agent_orchestrator.py --select F,E9` passed.
+
+## 2026-07-04 (chat routing regression repair)
+
+- Restored plain `chat` to classic routing by default while keeping `--coding-agent` opt-in and `--agent-tools` auto-execute available for plan-trigger turns.
+- Kept default CodingAgent/tool-worker initialization for planning, edit automation, root-dir propagation, and custom-agent tests while routing built-in implicit general chat turns through classic chat.
+- Recognized `implement/execute plan` messages as plan triggers in chat routing so they bypass flow-conflict prompts and run through the existing `QueueManager` path when no coding agent is active.
+- Restored `rm -rf` blocking in `AskAgent.run_command` and kept `/flow show` visibly reporting active flow memory.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_chat_planning_mode.py tests/test_cli_smoke.py::test_chat_root_dir_applies_to_worker_and_coding_agent_in_classic_mode tests/test_cli_smoke.py::test_chat_root_dir_changes_default_index_dir_in_classic_mode tests/test_cli_smoke.py::test_chat_transparency_uses_trace_steps_in_agent_tools_mode tests/test_cli_smoke.py::test_chat_planning_mode_no_auto_execute_keeps_plan_only_behavior tests/test_cli_smoke.py::test_chat_handles_effective_ui_blocks_failure_without_crash tests/test_cli_smoke.py::test_chat_balanced_profile_auto_executes_clear_edit_requests tests/test_cli_smoke.py::test_chat_full_auto_profile_forces_auto_execute_for_edit_requests tests/test_cli_smoke.py::test_chat_transparency_sections_always_render_in_normal_mode tests/test_cli_smoke.py::test_chat_writes_llm_run_log_rows tests/test_cli_smoke.py::test_chat_plan_trigger_auto_execute_without_coding_agent_hides_progress tests/test_cli_smoke.py::test_chat_redis_backend_falls_back_to_local_executor_when_unavailable tests/test_cli_smoke.py::test_chat_full_auto_tools_manager_path_auto_resumes_docs_update_pass_cap tests/test_cli_ux_helpers.py::test_coding_agent_mode_routes_general_analysis_turns_to_coding_agent -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest -q` passed with 525 tests and 16 warnings.
+
+## 2026-07-04 (approved mutation command retries)
+
+- Restored auto-detected edit requests so the work-queue sniffer emits edit/verify jobs from the resolved mutation-required decision.
+- Routed plan-linked direct mutation `WorkItem`s through the local registered mutation-command executor, including incomplete-command blocking before worker dispatch.
+- Preserved mutation-only edit policy while supporting approved legacy mutation passes, structured forced retries for per-target deliverables, and explicit docs fallback only when `fallback_decision` is set.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_work_queue.py tests/test_tools_manager.py -q` passed.
+
+## 2026-07-04 (small direct edit fast path)
+
+- Added a deterministic small-edit classifier and canonical path resolver for explicit low-risk edits such as `update version in readme.md to 0.0.8`, including case-safe `README.md` resolution without repo-wide markdown discovery.
+- Added a README version handler that reads a bounded line window, applies one patch, skips worker/search/index/verify setup for one-line docs edits, and reports docs-only verification as skipped with the confirmed changed line.
+- Added regression coverage for the direct README version update, duplicate case guard, docs-only verification wording, non-doc fallback behavior, and CLI first-prompt bypass of heavy chat setup.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_small_direct_edit.py tests/test_cli_smoke.py::test_chat_prompt_direct_readme_version_edit_skips_heavy_setup -q` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_agent/llm/small_direct_edit.py src/mana_agent/commands/chat_cli.py tests/test_small_direct_edit.py tests/test_cli_smoke.py` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/llm/small_direct_edit.py tests/test_small_direct_edit.py --select F,E9` passed; `git diff --check -- CHANGELOG.md src/mana_agent/commands/chat_cli.py tests/test_cli_smoke.py` passed.
+
 
 ## 2026-07-03 (mutation command execution wiring)
 

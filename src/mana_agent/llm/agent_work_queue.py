@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterable, Literal, Protocol, Sequence
 
 from pydantic import BaseModel, Field
 
+from mana_agent.agent.orchestrator import AgentOrchestrator
 from mana_agent.llm.agent_session import AgentSession
 from mana_agent.llm.goal_profiles import active_goal_profile
 from mana_agent.llm.tool_worker_process import ToolWorkerClient
@@ -511,6 +512,22 @@ class AgentWorkQueue:
                     return False
             return True
 
+    def skip_where(self, predicate: Callable[[WorkItem], bool], *, reason: str) -> int:
+        """Mark pending/ready jobs as skipped when the evaluation gate closes discovery."""
+        skipped = 0
+        with self._lock:
+            for item in self._items.values():
+                if item.status not in {"pending", "ready"}:
+                    continue
+                if not predicate(item):
+                    continue
+                item.status = "skipped"
+                item.error = reason
+                item.updated_at = _utc_now()
+                skipped += 1
+                self._emit("job_skipped", item, status="skipped")
+        return skipped
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             counts: dict[str, int] = {}
@@ -650,12 +667,14 @@ class WorkQueueRunner:
         execute: Callable[[WorkItem], WorkResult],
         sniffer: JobSniffer | None = None,
         board: TaskBoard | None = None,
+        orchestrator: AgentOrchestrator | None = None,
         max_steps: int = 60,
     ) -> None:
         self._queue = queue
         self._execute = execute
         self._sniffer = sniffer
         self._board = board or TaskBoard(queue=queue)
+        self._orchestrator = orchestrator
         self._max_steps = max(1, int(max_steps))
 
     @property
@@ -673,12 +692,21 @@ class WorkQueueRunner:
                 terminal_reason = "drained" if self._queue.is_drained() else "no_runnable_jobs"
                 break
             steps += 1
+            pre_gate = self._before_item(item)
+            if pre_gate == "skip":
+                self._queue.complete(
+                    item.id,
+                    status="skipped",
+                    result=WorkResult(ok=True, summary="skipped by evaluation gate", error="evaluation_gate_skipped"),
+                )
+                continue
             result = self._safe_execute(item)
             status = self._classify(item, result)
             if status == "retry":
                 self._queue.requeue(item.id)
             else:
                 self._queue.complete(item.id, status=status, result=result)
+                self._after_item(item, result)
                 if self._sniffer is not None and status == "done":
                     emitted += self._run_sniffer(item, result)
         else:
@@ -703,6 +731,33 @@ class WorkQueueRunner:
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("work item execution raised: %s", item.id)
             return WorkResult(ok=False, error=f"executor_exception: {exc}")
+
+    def _before_item(self, item: WorkItem) -> str:
+        if self._orchestrator is None:
+            return "execute"
+        target = str((item.tool_args or {}).get("path") or (item.tool_args or {}).get("file") or "")
+        gate = self._orchestrator.before_tool(tool_name=item.tool_name or item.kind, target=target)
+        if gate.decision == "skip_tool":
+            return "skip"
+        return "execute"
+
+    def _after_item(self, item: WorkItem, result: WorkResult) -> None:
+        if self._orchestrator is None:
+            return
+        gate = self._orchestrator.after_tool(
+            tool_name=item.tool_name or item.kind,
+            ok=bool(result.ok),
+            files_read=list(result.files_read),
+            changed_files=list(result.files_changed),
+            error=str(result.error or ""),
+        )
+        if gate.decision in {"start_mutation", "stop_discovery"}:
+            targets = set(self._orchestrator.decision.target_files)
+            self._queue.skip_where(
+                lambda queued: queued.kind in {"discover", "search", "read"}
+                and str((queued.tool_args or {}).get("path") or "").replace("\\", "/").lstrip("./") not in targets,
+                reason="evaluation_gate_evidence_sufficient",
+            )
 
     def _classify(self, item: WorkItem, result: WorkResult) -> WorkStatus | Literal["retry"]:
         if result.ok:
@@ -1328,6 +1383,12 @@ class QueueManager:
         )
         queue = AgentWorkQueue()
         board = TaskBoard(queue=queue)
+        orchestrator = AgentOrchestrator.start(
+            request,
+            repo_root=self.repo_root,
+            target_files=required_files or target_files,
+            requires_edit=mutation_required,
+        )
         profile = active_goal_profile(request)
         if profile is not None:
             def _relevant(path: str) -> bool:
@@ -1336,7 +1397,28 @@ class QueueManager:
             def _relevant(path: str) -> bool:
                 return True
 
-        if default_skill_registry_request:
+        direct_read_targets = list(orchestrator.decision.target_files)
+        explicit_direct_read = (
+            orchestrator.decision.needs_file_read
+            and orchestrator.decision.scope in {"single_file", "single_file_section"}
+            and bool(direct_read_targets)
+            and all((self.repo_root / path).is_file() for path in direct_read_targets)
+            and not is_architecture_docs_update(request, direct_read_targets)
+        )
+        if explicit_direct_read:
+            for target in orchestrator.decision.target_files:
+                queue.submit(
+                    WorkItem(
+                        kind="read",
+                        tool_name="read_file",
+                        tool_args={"path": target},
+                        question=f"Read explicit target file {target}",
+                        gate="read_explicit_target",
+                        priority=10,
+                        created_by="agent_orchestrator",
+                    )
+                )
+        elif default_skill_registry_request:
             queue.submit(
                 WorkItem(
                     kind="discover",
@@ -1422,6 +1504,7 @@ class QueueManager:
         # one file written. Falls back to the single primary target when the
         # request named no explicit files (e.g. generic "fix the bug").
         deliverables = list(required_files) or ([resolved_target_path] if resolved_target_path else [])
+        initially_missing_deliverables = _missing_required_files(self.repo_root, deliverables, changed=set())
 
         def execute(item: "WorkItem"):  # noqa: F821 - imported above
             nonlocal mutation_state, approved_mutation_plan
@@ -1442,6 +1525,13 @@ class QueueManager:
                     trace=blocked_trace,
                 )
             if mutation_required and item.kind == "edit":
+                item_tool_args = dict(item.tool_args or {})
+                item_targets = [
+                    str(path).strip().replace("\\", "/").lstrip("./")
+                    for path in (item_tool_args.get("target_files") or [])
+                    if str(path).strip()
+                ]
+                plan_targets = item_targets or deliverables or ([resolved_target_path] if resolved_target_path else [])
                 read_files = sorted(
                     dict.fromkeys(
                         path
@@ -1454,7 +1544,7 @@ class QueueManager:
                 plan = build_mutation_plan(
                     repo_root=self.repo_root,
                     user_goal=request,
-                    target_files=deliverables or ([resolved_target_path] if resolved_target_path else []),
+                    target_files=plan_targets,
                     evidence_files_read=read_files,
                 )
                 plan_errors = validate_mutation_plan(plan, repo_root=self.repo_root)
@@ -1476,7 +1566,7 @@ class QueueManager:
                         trace=blocked_trace,
                     )
                 approved_mutation_plan = plan
-                target = str((deliverables or [resolved_target_path])[0] or "")
+                target = str((plan_targets or [resolved_target_path])[0] or "")
                 tool_args = dict(item.tool_args or {})
                 command: MutationCommand | None = None
                 if (item.tool_name or "").strip().lower() in REGISTERED_MUTATION_TOOLS:
@@ -1499,6 +1589,62 @@ class QueueManager:
                         target_file=target,
                     )
                 if command is None:
+                    legacy_result = base_execute(
+                        WorkItem(
+                            kind="edit",
+                            tool_name="",
+                            tool_args={
+                                "mutation_plan": plan.model_dump(),
+                                "mutation_plan_id": plan.plan_id,
+                            },
+                            question=item.question,
+                            gate="apply_approved_mutation_plan",
+                            priority=item.priority,
+                            created_by="approved_plan_legacy_mutation_pass",
+                            max_attempts=1,
+                        )
+                    )
+                    legacy_changed = sorted(
+                        dict.fromkeys(
+                            [
+                                *legacy_result.files_changed,
+                                *_extract_changed_files_from_value(legacy_result.trace),
+                            ]
+                        )
+                    )
+                    if mutation_trace_has_plan(legacy_result.trace, plan.plan_id) and legacy_changed:
+                        legacy_result.files_changed = legacy_changed
+                        if legacy_result.answer:
+                            answers.append(legacy_result.answer)
+                        sources.extend(legacy_result.sources)
+                        trace.extend(legacy_result.trace)
+                        changed_files.extend(legacy_changed)
+                        changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
+                        mutation_state = _mutation_state_from_trace(trace, changed_files)
+                        return legacy_result
+                    legacy_payload = self._json_object_from_answer(legacy_result.answer)
+                    if legacy_payload:
+                        current_files = self._read_current_files(plan.target_files)
+                        legacy_command = self._command_from_payload(
+                            plan=plan,
+                            payload=legacy_payload,
+                            current_files=current_files,
+                        )
+                        if legacy_command and not validate_mutation_command(legacy_command):
+                            command_result = execute_registered_mutation_command(
+                                repo_root=self.repo_root,
+                                command=legacy_command,
+                            )
+                            if command_result.ok:
+                                if command_result.answer:
+                                    answers.append(command_result.answer)
+                                sources.extend(command_result.sources)
+                                trace.extend(command_result.trace)
+                                changed_files.extend(command_result.files_changed)
+                                changed_files.extend(_extract_changed_files_from_value(command_result.trace))
+                                changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
+                                mutation_state = _mutation_state_from_trace(trace, changed_files)
+                                return command_result
                     blocked_trace = [
                         {
                             "tool_name": "mutation_command",
@@ -1569,15 +1715,17 @@ class QueueManager:
         sniffer = CodingAgentSniffer(
             repo_root=self.repo_root,
             request=request,
-            emit_edit=requires_edit,
+            emit_edit=mutation_required,
             target_files=sniffer_target_files,
             relevant=_relevant,
+            orchestrator=orchestrator,
         )
         runner = WorkQueueRunner(
             queue=queue,
             execute=execute,
             sniffer=sniffer,
             board=board,
+            orchestrator=orchestrator,
             max_steps=max(12, int(pass_cap) * 8),
         )
         report = runner.run()
@@ -1598,11 +1746,15 @@ class QueueManager:
         # For any deliverable still missing after the main pass (or, when no files
         # were named, when nothing was mutated) re-run the worker under a strict
         # MUTATION_REQUIRED prompt that forbids natural-language-only answers.
+        forced_missing_before: list[str] = []
         if mutation_required and not mutation_state.get("no_op_reason"):
-            if deliverables:
-                forced_targets = _missing_required_files(
-                    self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
-                )
+            forced_missing_before = _missing_required_files(
+                self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
+            )
+            if deliverables and not mutation_state.get("mutation_succeeded"):
+                forced_targets = list(deliverables)
+            elif deliverables:
+                forced_targets = list(forced_missing_before)
             elif not mutation_state.get("mutation_succeeded"):
                 forced_targets = [resolved_target_path]
             else:
@@ -1617,20 +1769,12 @@ class QueueManager:
                     # the file, then must end with a mutation. The executor's edit
                     # branch enforces the same toolset; this keeps them aligned.
                     "allowed_tools": [
-                        "read_file",
-                        "repo_search",
-                        "semantic_search",
-                        "list_files",
-                        "ls",
-                        "find_symbols",
                         "edit_file",
                         "multi_edit_file",
                         "apply_patch",
                         "write_file",
                         "create_file",
                         "delete_file",
-                        "git_diff",
-                        "git_status",
                     ],
                     "verify_requires_mutation": True,
                 }
@@ -1660,20 +1804,35 @@ class QueueManager:
                 forced_item = WorkItem(
                     kind="edit",
                     tool_name="",
-                    tool_args={},
+                    tool_args={"target_files": [target_file]},
                     question=_forced_mutation_prompt(request, target_file),
                     gate="apply_changes",
                     priority=1,
                     created_by="forced_mutation_retry",
                 )
-                forced_result = forced_execute(forced_item)
-                if forced_result.answer:
-                    answers.append(forced_result.answer)
-                sources.extend(forced_result.sources)
-                trace.extend(forced_result.trace)
-                changed_files.extend(forced_result.files_changed)
-                changed_files.extend(_extract_changed_files_from_value(forced_result.trace))
-                _refresh_mutation_state()
+                if self.executor is None:
+                    trace_len = len(trace)
+                    changed_len = len(changed_files)
+                    forced_result = execute(forced_item)
+                    if forced_result.answer and forced_result.answer not in answers:
+                        answers.append(forced_result.answer)
+                    sources.extend(forced_result.sources)
+                    if len(trace) == trace_len:
+                        trace.extend(forced_result.trace)
+                    if len(changed_files) == changed_len:
+                        changed_files.extend(forced_result.files_changed)
+                        changed_files.extend(_extract_changed_files_from_value(forced_result.trace))
+                    _refresh_mutation_state()
+                target_changed = target_file in set(mutation_state.get("changed_files") or [])
+                if not target_changed or self.executor is not None:
+                    forced_result = forced_execute(forced_item)
+                    if forced_result.answer:
+                        answers.append(forced_result.answer)
+                    sources.extend(forced_result.sources)
+                    trace.extend(forced_result.trace)
+                    changed_files.extend(forced_result.files_changed)
+                    changed_files.extend(_extract_changed_files_from_value(forced_result.trace))
+                    _refresh_mutation_state()
             if forced_retry_ran:
                 forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
                 forced_retry_changed_files = bool(mutation_state.get("changed_files"))
@@ -1681,6 +1840,49 @@ class QueueManager:
                     warnings.append("forced_mutation_retry_no_mutation_tool_attempted")
                 elif not forced_retry_changed_files:
                     warnings.append("forced_mutation_retry_no_changed_files")
+
+            if (
+                forced_retry_ran
+                and not mutation_state.get("mutation_succeeded")
+                and resolved_tool_policy.get("fallback_decision") is True
+            ):
+                for target_file in deliverables:
+                    if self._try_docs_markdown_mutation_fallback(
+                        request=request,
+                        target_file=target_file,
+                        trace=trace,
+                        changed_files=changed_files,
+                        warnings=warnings,
+                    ):
+                        _refresh_mutation_state()
+                        break
+                forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
+                forced_retry_changed_files = bool(mutation_state.get("changed_files"))
+
+            reconciliation_candidates = sorted(
+                dict.fromkeys([*initially_missing_deliverables, *forced_missing_before])
+            )
+            if forced_retry_ran and reconciliation_candidates and not mutation_state.get("mutation_succeeded"):
+                still_missing = _missing_required_files(
+                    self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
+                )
+                if not still_missing:
+                    reconciled = sorted(dict.fromkeys(deliverables))
+                    trace.append(
+                        {
+                            "tool_name": "write_file",
+                            "status": "ok",
+                            "changed_files": reconciled,
+                            "files_changed": reconciled,
+                            "target_files": reconciled,
+                            "mutation_plan_id": approved_mutation_plan.plan_id if approved_mutation_plan else "",
+                            "created_by": "forced_retry_filesystem_reconciliation",
+                        }
+                    )
+                    changed_files.extend(reconciled)
+                    _refresh_mutation_state()
+                    forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
+                    forced_retry_changed_files = bool(mutation_state.get("changed_files"))
 
         # --- Path reconciliation: salvage content written to the wrong path. ---
         # The worker sometimes writes "01-overview.md" at the repo root instead of
@@ -1751,6 +1953,13 @@ class QueueManager:
         # natural-language worker answer, so an intermediate "I could not edit"
         # cannot contradict a trace that proves a mutation landed.
         verification = _verification_summary_from_trace(trace)
+        verification_decision = orchestrator.verification_decision(
+            changed_files=changed_files,
+            core_agent_change=any(
+                path.startswith("src/mana_agent/agent/") or path.startswith("src/mana_agent/llm/")
+                for path in changed_files
+            ),
+        )
         failed_calls = _failed_tool_calls_from_trace(trace)
         for failure in failed_calls:
             warning = f"tool_call_failed:{failure['tool']}"
@@ -1803,6 +2012,8 @@ class QueueManager:
                 "unresolved_target_files": list(target_state["unresolved_target_files"]),
             },
         )
+        orchestrator.finalize_trace()
+        trace.extend(orchestrator.trace)
         return AutoExecuteResult(
             answer=final_answer,
             sources=sources,
@@ -1849,6 +2060,16 @@ class QueueManager:
                     "required_files": list(deliverables),
                     "missing_required_files": list(missing_required_files),
                     "verification_passed": verification_passed,
+                    "verification_profile": verification_decision.verification_profile,
+                    "verification_commands": list(verification_decision.commands),
+                    "skip_full_pytest_reason": verification_decision.skip_full_pytest_reason,
+                    "task_decision": {
+                        "task_type": orchestrator.decision.task_type,
+                        "target_files": list(orchestrator.decision.target_files),
+                        "target_sections": list(orchestrator.decision.target_sections),
+                        "scope": orchestrator.decision.scope,
+                        "confidence": orchestrator.decision.confidence,
+                    },
                     "mutation_tools_called": mutation_tool_stats["mutation_tools_called"],
                     "mutation_tools_attempted": mutation_tool_stats["mutation_tools_attempted"],
                     "mutation_tools_successful": mutation_tool_stats["mutation_tools_successful"],

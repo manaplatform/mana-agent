@@ -148,6 +148,7 @@ class AskAgent:
         "git rm ",
         "git reset --hard",
         "git checkout --",
+        "rm -rf",
         "sudo ",
         "dd ",
         "mkfs",
@@ -185,7 +186,13 @@ class AskAgent:
 
     def _is_blocked_command(self, cmd: str) -> bool:
         lowered = f"{cmd.lower()} "
-        return any(pattern in lowered for pattern in self._BLOCKED_PATTERNS)
+        for pattern in self._BLOCKED_PATTERNS:
+            if "\\" in pattern:
+                if re.search(pattern, lowered):
+                    return True
+            elif pattern in lowered:
+                return True
+        return False
 
     def _rewrite_python_command(self, cmd: str) -> tuple[str, bool]:
         raw = str(cmd or "").strip()

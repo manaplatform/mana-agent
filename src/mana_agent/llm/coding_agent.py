@@ -24,6 +24,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
+from mana_agent.agent.task_classifier import classify_task
 from mana_agent.llm.prompts import (
     HEAD_TOOLS_PLANNER_PROMPT,
     CODING_FLOW_PLANNER_PROMPT,
@@ -407,6 +408,7 @@ class CodingAgent:
         self.planner_model = str(planner_model).strip() if planner_model else None
         self.tools_manager_orchestrator: QueueManager | None = None
         self._prompt_cache = PromptCache()
+        self._planner_unavailable = False
         self._setup_planner()
 
         if hasattr(self.ask_agent, "tools"):
@@ -1150,6 +1152,24 @@ class CodingAgent:
         flow_context: str | None = None,
     ) -> tuple[FlowChecklist | None, list[str], str]:
         warnings: list[str] = []
+        decision = classify_task(request, repo_root=self.repo_root)
+        clear_explicit_mutation = (
+            decision.task_type == "mutation_required"
+            and decision.scope in {"single_file", "single_file_section"}
+            and bool(decision.target_files)
+            and decision.confidence >= 0.8
+        )
+        if clear_explicit_mutation:
+            fallback = self._fallback_checklist(request)
+            fallback.requires_edit = True
+            fallback.target_files = list(decision.target_files)
+            return fallback, warnings, "deterministic_clear_task"
+        if self._planner_unavailable:
+            warnings.append("planner unavailable; using deterministic checklist")
+            fallback = self._fallback_checklist(request)
+            if len(fallback.steps) > self.plan_max_steps:
+                fallback.steps = fallback.steps[: self.plan_max_steps]
+            return fallback, warnings, "deterministic_fallback"
         user_prompt = (
             f"User request:\n{request}\n\n"
             f"Max steps: {self.plan_max_steps}\n\n"
@@ -1195,7 +1215,8 @@ class CodingAgent:
                     fallback.steps = fallback.steps[: self.plan_max_steps]
                 return fallback, warnings, "deterministic_fallback"
         except Exception as exc:  # pragma: no cover
-            warnings.append(f"planner invocation failed: {exc}")
+            self._planner_unavailable = True
+            warnings.append(f"planner invocation failed once; planner unavailable: {exc}")
             warnings.append("planner fallback: using deterministic checklist")
             fallback = self._fallback_checklist(request)
             if len(fallback.steps) > self.plan_max_steps:

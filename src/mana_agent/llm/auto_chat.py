@@ -129,6 +129,10 @@ def classify_auto_chat_intent(message: str) -> AutoChatMode:
     return AutoChatMode.ANSWER_ONLY
 
 
+def is_plan_execution_request(message: str) -> bool:
+    return bool(_EXECUTE_PLAN_RE.search(str(message or "")))
+
+
 def is_followup_auto_message(message: str) -> bool:
     return bool(_FOLLOWUP_RE.match(str(message or "").strip()))
 
