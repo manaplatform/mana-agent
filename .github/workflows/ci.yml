@@ -10,8 +10,9 @@ jobs:
 
     env:
       PYTHONPATH: src
-      COLUMNS: "160"
-      TERM: xterm-256color
+      NO_COLOR: "1"
+      CLICOLOR: "0"
+      TERM: dumb
 
     steps:
       - uses: actions/checkout@v4
@@ -24,40 +25,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
-
-      - name: Debug CLI import
-        run: |
-          python - <<'PY'
-          import inspect
-          import click
-          import typer
-          import rich
-          import mana_agent.commands.cli as cli
-
-          print("cli file:", cli.__file__)
-          print("app:", cli.app)
-          print("commands:", [c.name for c in cli.app.registered_commands])
-          print("callback:", cli.app.registered_callback)
-          print("typer:", typer.__version__)
-          print("click:", click.__version__)
-          print("rich:", getattr(rich, "__version__", "unknown"))
-
-          from typer.testing import CliRunner
-          runner = CliRunner()
-
-          for args in [
-              ["chat", "--help"],
-              ["analyze", "--help"],
-              ["continue", "--root-dir", ".", "--run-id", "abc123", "--help"],
-          ]:
-              result = runner.invoke(cli.app, args)
-              print("\nARGS:", args)
-              print("EXIT:", result.exit_code)
-              print("HAS --full-auto:", "--full-auto" in result.stdout)
-              print("HAS --depth:", "--depth" in result.stdout)
-              print("HAS --root-dir:", "--root-dir" in result.stdout)
-              print(result.stdout[:2500])
-          PY
 
       - name: Test
         run: python -m pytest -q
