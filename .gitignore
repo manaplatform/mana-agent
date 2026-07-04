@@ -20,3 +20,4 @@ dist/
 logs/
 .mana/
 .ruff_cache/
+*.py[cod]
