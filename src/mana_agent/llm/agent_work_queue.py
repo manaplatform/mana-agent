@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterable, Literal, Protocol, Sequence
 
 from pydantic import BaseModel, Field
 
+from mana_agent.llm.agent_session import AgentSession
 from mana_agent.llm.goal_profiles import active_goal_profile
 from mana_agent.llm.tool_worker_process import ToolWorkerClient
 from mana_agent.llm.tools_executor import ToolsExecutionConfig, ToolsExecutor
@@ -1292,10 +1293,11 @@ class QueueManager:
     ) -> AutoExecuteResult:
         from mana_agent.llm.agent_work_queue_adapters import (
             CodingAgentSniffer,
+            make_batch_executor,
             make_worker_executor,
         )
 
-        _ = (index_dirs, max_no_progress_passes, flow_context)
+        _ = (max_no_progress_passes, flow_context)
         store = RunStateStore(repo_root=self.repo_root, run_id=run_id)
         baseline_diff = self._git_diff_names()
         baseline_status = self._git_status_names()
@@ -1382,18 +1384,38 @@ class QueueManager:
             "no_op_reason": "",
             "verify_requires_mutation": False,
         }
-        base_execute = make_worker_executor(
-            worker_client=self.worker_client,
+        execution_backend = str(getattr(self.execution_config, "backend", "") or "local")
+        session = AgentSession.from_queue_run(
             repo_root=self.repo_root,
-            on_event=on_event,
-            default_timeout=int(timeout_seconds),
-            default_k=int(k),
-            default_max_steps=int(max_steps),
-            tool_policy=resolved_tool_policy,
-            index_dir=str(index_dir) if index_dir else None,
-            flow_id=flow_id,
             run_id=store.run_id,
+            flow_id=flow_id,
+            index_dir=index_dir,
+            index_dirs=index_dirs,
+            tool_policy=resolved_tool_policy,
+            execution_backend=execution_backend,
         )
+        if self.executor is not None:
+            base_execute = make_batch_executor(
+                executor=self.executor,
+                session=session,
+                on_event=on_event,
+                default_timeout=int(timeout_seconds),
+                default_k=int(k),
+                default_max_steps=int(max_steps),
+            )
+        else:
+            base_execute = make_worker_executor(
+                worker_client=self.worker_client,
+                repo_root=self.repo_root,
+                on_event=on_event,
+                default_timeout=int(timeout_seconds),
+                default_k=int(k),
+                default_max_steps=int(max_steps),
+                tool_policy=resolved_tool_policy,
+                index_dir=session.index_dir,
+                flow_id=session.flow_id,
+                run_id=session.run_id,
+            )
 
         # The deliverables the request demands. The run is held to ALL of them,
         # not just the first, so "create A and B in docs" cannot finish with only
@@ -1572,6 +1594,7 @@ class QueueManager:
         # were named, when nothing was mutated) re-run the worker under a strict
         # MUTATION_REQUIRED prompt that forbids natural-language-only answers.
         if mutation_required and not mutation_state.get("no_op_reason"):
+<<<<<<< HEAD
             with _mutation_lock(flow_id, store.run_id):
                 if deliverables:
                     missing_targets = _missing_required_files(
@@ -1600,6 +1623,54 @@ class QueueManager:
                         ],
                         "verify_requires_mutation": True,
                     }
+=======
+            if deliverables:
+                forced_targets = _missing_required_files(
+                    self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
+                )
+            elif not mutation_state.get("mutation_succeeded"):
+                forced_targets = [resolved_target_path]
+            else:
+                forced_targets = []
+            for target_file in forced_targets:
+                forced_retry_ran = True
+                forced_policy = {
+                    **resolved_tool_policy,
+                    "mutation_required": True,
+                    "mutation_strict": True,
+                    # Agentic authoring: the worker may inspect the repo to ground
+                    # the file, then must end with a mutation. The executor's edit
+                    # branch enforces the same toolset; this keeps them aligned.
+                    "allowed_tools": [
+                        "read_file",
+                        "repo_search",
+                        "semantic_search",
+                        "list_files",
+                        "ls",
+                        "find_symbols",
+                        "edit_file",
+                        "multi_edit_file",
+                        "apply_patch",
+                        "write_file",
+                        "create_file",
+                        "delete_file",
+                        "git_diff",
+                        "git_status",
+                    ],
+                    "verify_requires_mutation": True,
+                }
+                forced_session = session.with_tool_policy(forced_policy)
+                if self.executor is not None:
+                    forced_execute = make_batch_executor(
+                        executor=self.executor,
+                        session=forced_session,
+                        on_event=on_event,
+                        default_timeout=int(timeout_seconds),
+                        default_k=int(k),
+                        default_max_steps=max(1, int(max_steps)),
+                    )
+                else:
+>>>>>>> 9919886 (Add batch-tools prompt)
                     forced_execute = make_worker_executor(
                         worker_client=self.worker_client,
                         repo_root=self.repo_root,
@@ -1608,6 +1679,7 @@ class QueueManager:
                         default_k=int(k),
                         default_max_steps=max(1, int(max_steps)),
                         tool_policy=forced_policy,
+<<<<<<< HEAD
                         index_dir=str(index_dir) if index_dir else None,
                         flow_id=flow_id,
                         run_id=store.run_id,
@@ -1733,6 +1805,36 @@ class QueueManager:
                         warnings.append("forced_mutation_retry_no_changed_files")
         if mutation_required and not forced_retry_ran and not mutation_state.get("mutation_attempted"):
             raise AgentFlowError("Invariant violation: mutation_required=True but no mutation tool was attempted")
+=======
+                        index_dir=forced_session.index_dir,
+                        flow_id=forced_session.flow_id,
+                        run_id=forced_session.run_id,
+                    )
+                forced_item = WorkItem(
+                    kind="edit",
+                    tool_name="write_file" if target_file and (self.repo_root / target_file).exists() else ("create_file" if target_file else ""),
+                    tool_args={"path": target_file} if target_file else {},
+                    question=_forced_mutation_prompt(request, target_file),
+                    gate="apply_changes",
+                    priority=1,
+                    created_by="forced_mutation_retry",
+                )
+                forced_result = forced_execute(forced_item)
+                if forced_result.answer:
+                    answers.append(forced_result.answer)
+                sources.extend(forced_result.sources)
+                trace.extend(forced_result.trace)
+                changed_files.extend(forced_result.files_changed)
+                changed_files.extend(_extract_changed_files_from_value(forced_result.trace))
+                _refresh_mutation_state()
+            if forced_retry_ran:
+                forced_retry_mutation_attempted = bool(mutation_state.get("mutation_attempted"))
+                forced_retry_changed_files = bool(mutation_state.get("changed_files"))
+                if not forced_retry_mutation_attempted:
+                    warnings.append("forced_mutation_retry_no_mutation_tool_attempted")
+                elif not forced_retry_changed_files:
+                    warnings.append("forced_mutation_retry_no_changed_files")
+>>>>>>> 9919886 (Add batch-tools prompt)
 
         # --- Path reconciliation: salvage content written to the wrong path. ---
         # The worker sometimes writes "01-overview.md" at the repo root instead of
@@ -1863,7 +1965,11 @@ class QueueManager:
             passes=report.steps,
             terminal_reason=terminal_reason,
             toolsmanager_requests_count=report.steps,
-            execution_backend="work_queue",
+            execution_backend=(
+                f"work_queue:{session.execution_backend}"
+                if self.executor is not None
+                else "work_queue"
+            ),
             execution_run_id=store.run_id,
             execution_duration_ms=report.duration_ms,
             execution_requests_ok=report.done,

@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+<<<<<<< HEAD
 from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult, execute_registered_mutation_command
 from mana_agent.llm.mutation_plan import (
     REGISTERED_MUTATION_TOOLS,
@@ -36,7 +37,12 @@ from mana_agent.llm.mutation_plan import (
     validate_mutation_command,
     validate_mutation_plan,
 )
+=======
+from mana_agent.llm.agent_session import AgentSession
+from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult
+>>>>>>> 9919886 (Add batch-tools prompt)
 from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
+from mana_agent.llm.tools_executor import BatchToolRequest, ToolsExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +68,23 @@ _REQUEST_STOPWORDS = frozenset(
         "change", "fix", "separately", "seperately", "please", "want",
     }
 )
+
+_AGENTIC_EDIT_TOOLS = [
+    "read_file",
+    "repo_search",
+    "semantic_search",
+    "list_files",
+    "ls",
+    "find_symbols",
+    "edit_file",
+    "multi_edit_file",
+    "apply_patch",
+    "write_file",
+    "create_file",
+    "delete_file",
+    "git_diff",
+    "git_status",
+]
 
 
 def _extract_paths(response: ToolRunResponse, *, repo_root: Path) -> set[str]:
@@ -204,18 +227,8 @@ def make_worker_executor(
     """Build the ``execute`` callable that runs a :class:`WorkItem` on the worker."""
     repo_root = Path(repo_root).resolve()
 
-    def _normalized_path(path: str) -> str:
-        text = str(path or "").strip()
-        if not text:
-            return ""
-        try:
-            candidate = Path(text)
-            resolved = candidate if candidate.is_absolute() else (repo_root / candidate)
-            return resolved.resolve().relative_to(repo_root).as_posix()
-        except Exception:
-            return text.replace("\\", "/").lstrip("./")
-
     def _execute(item: WorkItem) -> WorkResult:
+<<<<<<< HEAD
         question = item.question or (f"run tool {item.tool_name}" if item.tool_name else item.title)
         item_policy = dict(tool_policy or {})
         if item.kind == "edit":
@@ -304,15 +317,18 @@ def make_worker_executor(
             tool_args["path"] = _normalized_path(str(tool_args.get("path")))
         request = ToolRunRequest(
             question=question,
+=======
+        request = build_tool_run_request(
+            item,
+            repo_root=repo_root,
+>>>>>>> 9919886 (Add batch-tools prompt)
             index_dir=index_dir,
             flow_id=flow_id,
             run_id=run_id,
-            k=int(default_k),
-            max_steps=int(default_max_steps),
-            timeout_seconds=int(default_timeout),
-            tool_policy=item_policy,
-            tool_name=item.tool_name or "",
-            tool_args=tool_args,
+            k=default_k,
+            max_steps=default_max_steps,
+            timeout_seconds=default_timeout,
+            tool_policy=tool_policy,
         )
         t0 = time.perf_counter()
         try:
@@ -339,6 +355,129 @@ def make_worker_executor(
         result = classify_result(item, response, repo_root=repo_root)
         result.duration_ms = round((time.perf_counter() - t0) * 1000.0, 3)
         return result
+
+    return _execute
+
+
+def _normalized_repo_path(path: str, *, repo_root: Path) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        candidate = Path(text)
+        resolved = candidate if candidate.is_absolute() else (repo_root / candidate)
+        return resolved.resolve().relative_to(repo_root).as_posix()
+    except Exception:
+        return text.replace("\\", "/").lstrip("./")
+
+
+def _policy_for_item(item: WorkItem, tool_policy: dict[str, Any] | None) -> dict[str, Any]:
+    item_policy = dict(tool_policy or {})
+    if item.kind == "edit":
+        # An edit item is an agentic analyze-then-write pass: the worker may
+        # inspect the repo before authoring, but must finish with a mutation.
+        item_policy["allowed_tools"] = list(_AGENTIC_EDIT_TOOLS)
+        item_policy["require_read_files"] = 0
+        item_policy["mutation_required"] = True
+        item_policy["verify_requires_mutation"] = True
+    else:
+        item_policy.pop("mutation_required", None)
+        item_policy.pop("mutation_strict", None)
+        item_policy.pop("verify_requires_mutation", None)
+    return item_policy
+
+
+def build_tool_run_request(
+    item: WorkItem,
+    *,
+    repo_root: Path,
+    index_dir: str | None = None,
+    index_dirs: list[str] | None = None,
+    flow_id: str | None = None,
+    run_id: str | None = None,
+    k: int = 8,
+    max_steps: int = 6,
+    timeout_seconds: int = 60,
+    tool_policy: dict[str, Any] | None = None,
+) -> ToolRunRequest:
+    question = item.question or (f"run tool {item.tool_name}" if item.tool_name else item.title)
+    tool_args = dict(item.tool_args or {})
+    if (item.tool_name or "").strip().lower() == "read_file" and tool_args.get("path"):
+        tool_args["path"] = _normalized_repo_path(str(tool_args.get("path")), repo_root=repo_root)
+    return ToolRunRequest(
+        question=question,
+        index_dir=index_dir,
+        index_dirs=list(index_dirs or []) or None,
+        flow_id=flow_id,
+        run_id=run_id,
+        k=int(k),
+        max_steps=int(max_steps),
+        timeout_seconds=int(timeout_seconds),
+        tool_policy=_policy_for_item(item, tool_policy),
+        tool_name=item.tool_name or "",
+        tool_args=tool_args,
+    )
+
+
+def make_batch_executor(
+    *,
+    executor: ToolsExecutor,
+    session: AgentSession,
+    on_event: Callable[[Any], None] | None = None,
+    default_timeout: int = 60,
+    default_k: int = 8,
+    default_max_steps: int = 6,
+) -> Callable[[WorkItem], WorkResult]:
+    """Build an execute callable that routes WorkItems through ToolsExecutor.run_batch."""
+    repo_root = Path(session.repo_root).resolve()
+
+    def _execute(item: WorkItem) -> WorkResult:
+        request = build_tool_run_request(
+            item,
+            repo_root=repo_root,
+            index_dir=session.index_dir,
+            index_dirs=session.index_dirs,
+            flow_id=session.flow_id,
+            run_id=session.run_id,
+            k=default_k,
+            max_steps=default_max_steps,
+            timeout_seconds=default_timeout,
+            tool_policy=session.tool_policy,
+        )
+        results = executor.run_batch(
+            run_id=session.run_id,
+            requests=[BatchToolRequest(request_index=0, request=request)],
+            on_event=on_event,
+        )
+        if not results:
+            return WorkResult(ok=False, error="executor_returned_no_results")
+        result = results[0]
+        if not result.ok:
+            trace = [
+                {
+                    "tool_name": item.tool_name or "",
+                    "status": "failed",
+                    "error_code": result.error_code,
+                    "error": result.error_message,
+                    "backend": result.backend,
+                }
+            ]
+            return WorkResult(
+                ok=False,
+                summary=result.error_message or result.error_code or "tool execution failed",
+                error=result.error_message or result.error_code or "tool execution failed",
+                trace=trace,
+                duration_ms=float(result.duration_ms or 0.0),
+            )
+        if not isinstance(result.response, dict):
+            return WorkResult(ok=False, error="executor_result_missing_response")
+        try:
+            response = ToolRunResponse.model_validate(result.response)
+        except Exception as exc:
+            return WorkResult(ok=False, error=f"executor_result_decode_failed: {exc}")
+        work_result = classify_result(item, response, repo_root=repo_root)
+        work_result.duration_ms = float(result.duration_ms or 0.0)
+        return work_result
 
     return _execute
 
@@ -575,6 +714,8 @@ class CodingAgentSniffer:
 
 __all__ = [
     "CodingAgentSniffer",
+    "build_tool_run_request",
     "classify_result",
+    "make_batch_executor",
     "make_worker_executor",
 ]

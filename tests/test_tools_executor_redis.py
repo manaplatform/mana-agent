@@ -7,6 +7,7 @@ from mana_agent.llm.tools_executor import (
     BatchToolRequest,
     RedisRQToolsExecutor,
     ToolsExecutionConfig,
+    ToolsExecutor,
 )
 
 
@@ -89,6 +90,22 @@ def _install_fake_redis_stack(monkeypatch, jobs: list[_FakeJob]):
 
     monkeypatch.setattr("mana_agent.llm.tools_executor.importlib.import_module", _fake_import)
     return fake_redis
+
+
+def test_base_tools_executor_returns_structured_failures() -> None:
+    results = ToolsExecutor().run_batch(
+        run_id="base-run",
+        requests=[
+            BatchToolRequest(request_index=2, request=ToolRunRequest(question="q2")),
+            BatchToolRequest(request_index=4, request=ToolRunRequest(question="q4")),
+        ],
+    )
+
+    assert [item.request_index for item in results] == [2, 4]
+    assert all(item.ok is False for item in results)
+    assert {item.error_code for item in results} == {"worker_unavailable"}
+    assert {item.backend for item in results} == {"base"}
+    assert all("no execution backend" in item.error_message for item in results)
 
 
 def test_redis_executor_keeps_deterministic_input_order(monkeypatch) -> None:
@@ -189,4 +206,3 @@ def test_redis_executor_maps_timeout_failures_to_job_timeout(monkeypatch) -> Non
     assert len(results) == 1
     assert results[0].ok is False
     assert results[0].error_code == "job_timeout"
-

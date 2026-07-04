@@ -18,6 +18,7 @@ from mana_agent.llm.auto_chat import (
     resolve_auto_followup,
     save_auto_chat_state,
 )
+from mana_agent.llm.agent_session import route_for_turn
 from mana_agent.ui.banner import render_mode_header
 
 
@@ -139,9 +140,13 @@ def _should_use_coding_agent_turn(
         force_plan_only_response,
         has_pending_prechecklist,
     )
-    if not coding_agent_available:
-        return False
-    return bool(agent_tools or coding_agent_is_custom)
+    route = route_for_turn(
+        coding_agent_available=coding_agent_available,
+        agent_tools=agent_tools,
+        coding_agent_is_custom=coding_agent_is_custom,
+        reason="chat turn routing",
+    )
+    return route.uses_coding_agent
 
 
 def _build_planning_instruction(

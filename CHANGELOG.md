@@ -2,6 +2,7 @@
 
 All notable repository changes should be recorded here.
 
+<<<<<<< HEAD
 ## 2026-07-03 (mutation command execution wiring)
 
 - Added `MutationCommand` compilation and validation so approved `MutationPlan` work produces an executable registered mutation-tool payload before edit execution.
@@ -72,6 +73,15 @@ All notable repository changes should be recorded here.
 - Connected `CodingAgent._effective_system_prompt_for()` to the layered prompt builder so the existing coding prompt now composes core identity, tool rules, mode rules, skills, memory, current task context, and output contract through the new architecture.
 - Enforced the stable prompt assembly order and moved edit/full-auto/verification/flow-memory guidance inside the stable layers instead of adding extra top-level prompt sections.
 - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompting_builder.py tests/test_coding_agent.py::test_coding_agent_effective_prompt_includes_language_tooling_guide -q` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_agent/agent/flow.py src/mana_agent/agent/task_context.py src/mana_agent/agent/selection.py src/mana_agent/agent/verification.py src/mana_agent/prompting/layers.py src/mana_agent/prompting/builder.py src/mana_agent/prompting/skills_index.py src/mana_agent/prompting/memory_snapshot.py src/mana_agent/prompting/mode_rules.py src/mana_agent/prompting/output_contract.py src/mana_agent/llm/coding_agent.py tests/test_prompting_builder.py tests/test_coding_agent.py` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_coding_agent.py tests/test_prompting_builder.py -q` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/agent/flow.py src/mana_agent/agent/task_context.py src/mana_agent/prompting/builder.py src/mana_agent/prompting/layers.py src/mana_agent/prompting/output_contract.py tests/test_prompting_builder.py --select F,E9` passed.
+=======
+## 2026-07-04 (executor-backed agent sessions)
+
+- Added explicit `AgentSession` / `AgentRoute` models for coding-agent routing metadata and chat turn route decisions.
+- Routed `QueueManager` work execution through injected `ToolsExecutor.run_batch` when available, including forced mutation retry, while keeping direct worker execution as the no-executor compatibility path.
+- Implemented base `ToolsExecutor.run_batch` as a structured fail-closed backend instead of raising, so accidental base-executor use returns ordered `BatchExecutionResult` failures.
+- Added batch adapter coverage for WorkItem-to-ToolRunRequest conversion, failed batch results, base executor failures, executor-preferred QueueManager runs, and forced mutation retry through the executor.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_work_queue.py -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_executor_redis.py tests/test_agent_work_queue.py tests/test_tools_manager.py -q` passed; `PYTHONPATH=src .venv/bin/python -m compileall src` passed; `rg "tool_worker_client\\.run_tools|ask_agent\\.run|run_multi" src/mana_agent/llm/coding_agent.py src/mana_agent/llm/agent_work_queue.py` returned no matches. `PYTHONPATH=src .venv/bin/python -m pytest tests/test_coding_agent.py tests/test_cli_smoke.py -q` was run and still has the existing 8 `tests/test_cli_smoke.py` chat-routing/fake-agent failures.
+>>>>>>> 9919886 (Add batch-tools prompt)
 
 ## 2026-07-02 (mutation tool reliability)
 

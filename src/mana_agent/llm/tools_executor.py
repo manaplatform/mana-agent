@@ -67,7 +67,20 @@ class ToolsExecutor:
         requests: Sequence[BatchToolRequest],
         on_event: Callable[[Any], None] | None = None,
     ) -> list[BatchExecutionResult]:
-        raise NotImplementedError
+        _ = (run_id, on_event)
+        out: list[BatchExecutionResult] = []
+        for item in requests:
+            out.append(
+                BatchExecutionResult(
+                    request_index=int(item.request_index),
+                    ok=False,
+                    response=None,
+                    error_code="worker_unavailable",
+                    error_message="ToolsExecutor has no execution backend configured.",
+                    backend="base",
+                )
+            )
+        return out
 
 
 class LocalToolsExecutor(ToolsExecutor):
@@ -400,4 +413,3 @@ __all__ = [
     "ToolsExecutor",
     "normalize_error_code",
 ]
-
