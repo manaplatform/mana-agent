@@ -27,7 +27,11 @@ from typing import Any, Callable
 
 from mana_agent.llm.agent_session import AgentSession
 from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult
-from mana_agent.llm.mutation_plan import is_architecture_docs_update, representative_architecture_sources
+from mana_agent.llm.mutation_plan import (
+    is_architecture_docs_update,
+    mutation_trace_has_plan,
+    representative_architecture_sources,
+)
 from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
 from mana_agent.llm.tools_executor import BatchToolRequest, ToolsExecutor
 
@@ -234,20 +238,22 @@ def make_worker_executor(
         except Exception as exc:
             return WorkResult(ok=False, error=f"worker_error: {exc}")
         if item.kind == "edit":
+            tool_args = dict(item.tool_args or {})
             plan_id = str(tool_args.get("mutation_plan_id") or "").strip()
-            for row in response.trace:
-                if not isinstance(row, dict):
-                    continue
-                tool = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
-                if tool in set(MUTATION_ONLY_TOOLS):
-                    row.setdefault("mutation_plan_id", plan_id)
-            if not mutation_trace_has_plan(response.trace, plan_id):
-                return WorkResult(
-                    ok=False,
-                    summary="mutation did not execute with approved plan",
-                    error="mutation_tool_missing_plan_id",
-                    trace=list(response.trace),
-                )
+            if plan_id:
+                for row in response.trace:
+                    if not isinstance(row, dict):
+                        continue
+                    tool = str(row.get("tool_name") or row.get("tool") or row.get("name") or "").strip().lower()
+                    if tool in set(MUTATION_ONLY_TOOLS):
+                        row.setdefault("mutation_plan_id", plan_id)
+                if not mutation_trace_has_plan(response.trace, plan_id):
+                    return WorkResult(
+                        ok=False,
+                        summary="mutation did not execute with approved plan",
+                        error="mutation_tool_missing_plan_id",
+                        trace=list(response.trace),
+                    )
         result = classify_result(item, response, repo_root=repo_root)
         result.duration_ms = round((time.perf_counter() - t0) * 1000.0, 3)
         return result
@@ -473,23 +479,13 @@ class CodingAgentSniffer:
             if target_file
             else ""
         )
-        if not plan.allowed_to_mutate:
-            tool_args = {"path": target_file, "mutation_plan": plan.model_dump(), "mutation_plan_id": plan.plan_id}
-        else:
-            tool_args = {"path": target_file, "mutation_plan": plan.model_dump(), "mutation_plan_id": plan.plan_id}
-        if target_file:
-            edit_lead = f"Using approved MutationPlan {plan.plan_id}, update {target_file}."
-            target_instruction = f" Target file: {target_file}. Create it if it does not exist."
-        else:
-            edit_lead = f"Using approved MutationPlan {plan.plan_id}, carry out the user's request."
-            target_instruction = ""
         edit = WorkItem(
             kind="edit",
             tool_name="",
             tool_args={},
             question=(
-                f"{edit_lead} User request context: {self._request}. Evidence summary: {plan.evidence_summary}. "
-                f"Intended changes: {'; '.join(plan.intended_changes)}. Patch strategy: {plan.patch_strategy}. "
+                "Using the file evidence already gathered in this run, carry out "
+                f"the user's request: {self._request}. "
                 "Apply concrete changes with "
                 "edit_file/multi_edit_file/apply_patch/create_file/write_file/delete_file and report the changed files. "
                 "Before mutating, use bounded exact path/name/symbol evidence to account for "
