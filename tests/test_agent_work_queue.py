@@ -423,40 +423,14 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
                     trace=[{"tool_name": "repo_search", "status": "ok"}],
                     warnings=[],
                 )
-<<<<<<< HEAD
-            if "MutationCommand" in str(request.question):
-                return ToolRunResponse(
-                    answer=json.dumps(
-                        {
-                            "tool_name": "write_file",
-                            "tool_args": {"path": "docs/overview.md", "content": _substantive("Overview")},
-                        }
-                    ),
-                    sources=[],
-                    mode="agent-tools",
-                    trace=[],
-                    warnings=[],
-                )
-=======
             is_edit = bool((request.tool_policy or {}).get("mutation_required"))
             if is_edit:
                 _write_real(tmp_path, "docs/overview.md")
->>>>>>> ac61abe (Fix no-op edit error)
             return ToolRunResponse(
                 answer="ok",
                 sources=[],
                 mode="agent-tools",
                 trace=[
-<<<<<<< HEAD
-                    {
-                        "tool_name": request.tool_name or "tool",
-                        "status": "ok",
-                        "changed_files": [],
-                    }
-                ],
-                warnings=[],
-            )
-=======
                         {
                             "tool_name": "write_file" if is_edit else (request.tool_name or "tool"),
                             "status": "ok",
@@ -465,7 +439,6 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
                     ],
                     warnings=[],
                 )
->>>>>>> ac61abe (Fix no-op edit error)
 
     worker = _FakeWorker()
     mgr = QueueManager(worker_client=worker, repo_root=tmp_path)
@@ -657,10 +630,6 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
                     mode="agent-tools",
                     trace=[{"tool_name": "list_files", "status": "ok"}],
                 )
-<<<<<<< HEAD
-            if "MutationCommand" in str(request.question):
-                target_file = request.question.split("Target file:", 1)[1].split(". User goal", 1)[0].strip()
-=======
             if (request.tool_policy or {}).get("mutation_required"):
                 for rel in [
                     "src/mana_agent/skills/manager.py",
@@ -672,7 +641,6 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
                     target = tmp_path / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(_substantive(rel), encoding="utf-8")
->>>>>>> ac61abe (Fix no-op edit error)
                 return ToolRunResponse(
                     answer=json.dumps(
                         {
@@ -706,11 +674,7 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
 
     assert tool_names.count("repo_search") == 1
     assert tool_names.count("list_files") == 1
-<<<<<<< HEAD
-    assert tool_names.count("write_file") == 0
-=======
     assert tool_names.count("") >= 1
->>>>>>> ac61abe (Fix no-op edit error)
     assert all("dependency_service.py" not in path for path in read_paths)
     assert "DEFAULT_SKILL_NAMES" in questions
     assert "src/mana_agent/default_skills/*.md" in questions
@@ -1506,14 +1470,8 @@ def test_sniffer_uses_planner_target_file_for_edit_job(tmp_path: Path):
     new_items = sniffer.on_result(search, WorkResult(ok=True, files_discovered=[]), board=board)
     edit = next(item for item in new_items if item.kind == "edit")
 
-<<<<<<< HEAD
-    assert edit.tool_name == "write_file"
-    assert edit.tool_args["path"] == "docs/analyze.md"
-    assert edit.tool_args["mutation_plan_id"]
-=======
     assert edit.tool_name == ""
     assert edit.tool_args == {}
->>>>>>> ac61abe (Fix no-op edit error)
     assert "Target file: docs/analyze.md" in edit.question
     assert "related importers, exports, registries" in edit.question
     assert "stale docs/config references" in edit.question

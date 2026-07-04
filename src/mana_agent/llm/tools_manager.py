@@ -1830,199 +1830,6 @@ def _safe_relative_path(repo_root: Path, raw: str) -> str:
         return ""
 
 
-<<<<<<< HEAD
-def _is_ignored_target_path(path: str) -> bool:
-    rel = str(path or "").strip().replace("\\", "/").lstrip("./")
-    if not rel:
-        return True
-    if rel.endswith(".egg-info") or ".egg-info/" in rel:
-        return True
-    parts = rel.split("/")
-    if "__pycache__" in parts or "node_modules" in parts or ".git" in parts or ".venv" in parts:
-        return True
-    return rel.startswith(".mana/index/")
-
-
-def _repo_files_for_target_resolution(repo_root: Path) -> list[str]:
-    files: list[str] = []
-    for path in repo_root.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            rel = path.resolve().relative_to(repo_root.resolve()).as_posix()
-        except ValueError:
-            continue
-        if _is_ignored_target_path(rel):
-            continue
-        files.append(rel)
-    return sorted(files)
-
-
-def resolve_target_paths(
-    user_request: str,
-    discovered_files: Sequence[str] = (),
-    repo_files: Sequence[str] = (),
-) -> list[str]:
-    """Resolve explicit target filenames without inventing parent directories.
-
-    Bare filenames prefer exact discovered/repo basename matches. A planner
-    target such as ``src/08-architecture.md`` must not override an existing
-    ``docs/08-architecture.md`` when the user only named ``08-architecture.md``.
-    Ambiguous equally-valid basename matches return an empty list so callers can
-    block/ask rather than guessing.
-    """
-    requested: list[str] = []
-    for match in _EXPLICIT_FILE_RE.finditer(str(user_request or "")):
-        raw = match.group("path").strip().replace("\\", "/").lstrip("./")
-        if raw and raw not in requested:
-            requested.append(raw)
-    if not requested:
-        return []
-
-    def _clean_many(values: Sequence[str]) -> list[str]:
-        cleaned: list[str] = []
-        for value in values:
-            rel = str(value or "").strip().replace("\\", "/").lstrip("./")
-            rel = re.sub(r"[,.):;\]]+$", "", rel)
-            if not rel or _is_ignored_target_path(rel):
-                continue
-            if rel not in cleaned:
-                cleaned.append(rel)
-        return cleaned
-
-    discovered = _clean_many(discovered_files)
-    repo = _clean_many(repo_files)
-    resolved: list[str] = []
-    for raw in requested:
-        name = Path(raw).name
-        has_dir = "/" in raw
-
-        if has_dir:
-            discovered_exact = [path for path in discovered if path == raw]
-            repo_exact = [path for path in repo if path == raw]
-            if discovered_exact:
-                chosen = discovered_exact[0]
-            elif repo_exact:
-                chosen = repo_exact[0]
-            else:
-                chosen = raw
-            if chosen not in resolved:
-                resolved.append(chosen)
-            continue
-
-        discovered_matches = [path for path in discovered if Path(path).name == name]
-        if len(discovered_matches) == 1:
-            chosen = discovered_matches[0]
-        elif len(discovered_matches) > 1:
-            return []
-        else:
-            repo_matches = [path for path in repo if Path(path).name == name]
-            if len(repo_matches) == 1:
-                chosen = repo_matches[0]
-            elif len(repo_matches) > 1:
-                return []
-            else:
-                continue
-        if chosen not in resolved:
-            resolved.append(chosen)
-    return resolved
-
-
-def _target_match_keys(path: str) -> set[str]:
-    rel = str(path or "").strip().replace("\\", "/").lstrip("./")
-    name = Path(rel).name.lower()
-    stem = Path(name).stem
-    stripped_stem = re.sub(r"^\d+[-_.\s]+", "", stem)
-    keys = {name, stem, stripped_stem}
-    keys.update(re.sub(r"[^a-z0-9]+", "", key) for key in list(keys))
-    return {key for key in keys if key}
-
-
-def _target_similarity(raw: str, candidate: str) -> float:
-    raw_keys = _target_match_keys(raw)
-    candidate_keys = _target_match_keys(candidate)
-    if not raw_keys or not candidate_keys:
-        return 0.0
-    if raw_keys & candidate_keys:
-        return 1.0
-    return max(
-        SequenceMatcher(None, raw_key, candidate_key).ratio()
-        for raw_key in raw_keys
-        for candidate_key in candidate_keys
-    )
-
-
-def resolve_target_state(
-    user_request: str,
-    repo_root: Path,
-    *,
-    target_files: Sequence[str] = (),
-    discovered_files: Sequence[str] = (),
-) -> dict[str, list[str]]:
-    """Return raw, resolved, and unresolved target files for planner memory."""
-    raw_targets: list[str] = []
-    for match in _EXPLICIT_FILE_RE.finditer(str(user_request or "")):
-        raw = match.group("path").strip().replace("\\", "/").lstrip("./")
-        raw = re.sub(r"[,.):;\]]+$", "", raw)
-        if raw and raw not in raw_targets:
-            raw_targets.append(raw)
-    for item in target_files:
-        raw = str(item or "").strip().replace("\\", "/").lstrip("./")
-        raw = re.sub(r"[,.):;\]]+$", "", raw)
-        if any(Path(existing).name == Path(raw).name for existing in raw_targets):
-            continue
-        if raw and raw not in raw_targets:
-            raw_targets.append(raw)
-
-    repo_files = _repo_files_for_target_resolution(repo_root)
-    discovered = [
-        str(path or "").strip().replace("\\", "/").lstrip("./")
-        for path in discovered_files
-        if str(path or "").strip()
-    ]
-    resolved: list[str] = []
-    unresolved: list[str] = []
-
-    for raw in raw_targets:
-        exact = resolve_target_paths(raw, discovered, repo_files)
-        if exact:
-            exact = [path for path in exact if path in discovered or path in repo_files]
-        if exact:
-            for path in exact:
-                if path not in resolved:
-                    resolved.append(path)
-            continue
-
-        best_score = 0.0
-        best_matches: list[str] = []
-        for candidates in (discovered, repo_files):
-            for candidate in candidates:
-                if _is_ignored_target_path(candidate):
-                    continue
-                score = _target_similarity(raw, candidate)
-                if score < 0.86:
-                    continue
-                if score > best_score:
-                    best_score = score
-                    best_matches = [candidate]
-                elif score == best_score and candidate not in best_matches:
-                    best_matches.append(candidate)
-            if len(best_matches) == 1:
-                break
-
-        if len(best_matches) == 1:
-            chosen = best_matches[0]
-            if chosen not in resolved:
-                resolved.append(chosen)
-        elif raw not in unresolved:
-            unresolved.append(raw)
-
-    return {
-        "raw_target_files": raw_targets,
-        "resolved_target_files": resolved,
-        "unresolved_target_files": unresolved,
-    }
-=======
 def _resolve_existing_unique_bare_path(repo_root: Path, rel: str) -> str:
     """Resolve a bare filename to its unique existing repo path when possible."""
     candidate = str(rel or "").strip().replace("\\", "/").lstrip("./")
@@ -2042,7 +1849,6 @@ def _resolve_existing_unique_bare_path(repo_root: Path, rel: str) -> str:
     except OSError:
         return candidate
     return matches[0] if len(matches) == 1 else candidate
->>>>>>> ac61abe (Fix no-op edit error)
 
 
 def _resolve_mutation_target_path(task: str, repo_root: Path, target_files: Sequence[str] = ()) -> str:
@@ -2626,11 +2432,7 @@ def _compose_final_answer(
     worker_answer: str,
     fallback: str,
     missing_required_files: Sequence[str] = (),
-<<<<<<< HEAD
-    mutation_tools_used: Sequence[str] = (),
-=======
     tool_failures: Sequence[dict[str, str]] = (),
->>>>>>> ac61abe (Fix no-op edit error)
 ) -> str:
     """Rebuild the final answer from authoritative execution state.
 

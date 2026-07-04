@@ -799,19 +799,12 @@ def test_two_files_authored_under_docs_complete_the_run(tmp_path: Path) -> None:
 
         def run_tools(self, request, on_event=None):  # noqa: ANN001
             _ = on_event
-<<<<<<< HEAD
-            if "MutationCommand" in str(request.question):
-                path = request.question.split("Target file:", 1)[1].split(". User goal", 1)[0].strip()
-            else:
-                path = str((request.tool_args or {}).get("path") or "")
-=======
             path = str((request.tool_args or {}).get("path") or "")
             if not path:
                 for candidate in bodies:
                     if f"Target file: {candidate}" in str(request.question or ""):
                         path = candidate
                         break
->>>>>>> ac61abe (Fix no-op edit error)
             if path in bodies and path not in self.seen:
                 self.seen.add(path)
                 return ToolRunResponse(
