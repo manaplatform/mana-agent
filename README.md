@@ -2,7 +2,7 @@
 
 # mana-agent
 
-> LLM-powered repository analysis, evidence-backed Q&A, and tool-aware coding automation for local codebases.
+> Multi-agent-powered repository analysis, evidence-backed Q&A, and tool-aware coding automation for local codebases.
 
 `mana-agent` is an installable Python CLI for understanding and changing software projects. It can index a repository, run static and dependency analysis, generate reports, answer questions with repository context, and drive a constrained coding agent that can inspect files, apply patches, and run verification commands.
 
@@ -60,13 +60,46 @@ The approved mutation workflow separates planning/approval from executing change
 
 ```mermaid
 flowchart TD
-    A[Local repository] --> B[Index source files]
-    B --> G[Chat]
-    G --> H[Plan]
-    H --> I[Inspect repository]
-    I --> J[Patch or write files]
-    J --> K[Run verification]
-    K --> L[Summarize changes]
+    A["Local repository"]
+    A --> B["Index + discover evidence"]
+
+    subgraph UI["User / CLI"]
+        U1["chat (REPL)"]
+        U2["run (approved MutationPlan)"]
+        U3["continue (resume run)"]
+    end
+
+    B --> U1
+    B --> U2
+    B --> U3
+
+    subgraph Orchestrator["Multi-agent & sub-agent orchestration"]
+        P["Plan + decision lifecycle"]
+        WQ["Work queue (work items + gates)"]
+        TM["Tool manager + tool worker(s)"]
+        RT["Mutation tools + verification gates"]
+    end
+
+    U1 --> P
+    U2 --> P
+    U3 --> P
+    P --> WQ
+    WQ --> TM
+    TM --> RT
+
+    subgraph Artifacts["Outputs"]
+        M["Mutate via MutationCommand contract"]
+        V["Run verification (when supported)"]
+        R["Render summary + changed files"]
+    end
+
+    RT --> M
+    M --> V
+    V --> R
+
+    R --> U1
+    R --> U2
+    R --> U3
 ```
 
 For a standalone diagram, see [docs/07-diagram.md](./docs/07-diagram.md).
@@ -116,7 +149,7 @@ mana-agent --help
 
 ## Configuration
 
-Configure the LLM and embedding provider with environment variables or a local `.env` file:
+Configure model providers and multi-agent behavior with environment variables or a local `.env` file:
 
 ```bash
 OPENAI_API_KEY="sk-..."
@@ -126,6 +159,10 @@ OPENAI_TOOL_WORKER_MODEL="gpt-4.1"
 OPENAI_CODING_PLANNER_MODEL="gpt-4.1"
 OPENAI_EMBED_MODEL="text-embedding-3-small"
 DEFAULT_TOP_K=8
+
+# Mutation execution (approved plans)
+MUTATION_MAX_STEPS=25
+MUTATION_VERIFY_ON_CHANGE=1
 ```
 
 | Variable | Purpose |
@@ -138,9 +175,12 @@ DEFAULT_TOP_K=8
 | `OPENAI_EMBED_MODEL` | Embedding model used for semantic indexing. |
 | `DEFAULT_TOP_K` | Default number of search results returned by retrieval workflows. |
 
----
+| Variable | Purpose |
+| --- | --- |
+| `MUTATION_MAX_STEPS` | Upper bound for tool/mutation work items per approved plan. |
+| `MUTATION_VERIFY_ON_CHANGE` | When `1`, run verification gates after applying mutation changes when supported. |
 
-## Quick Start
+-## Quick Start
 
 Start an interactive coding-agent session:
 
@@ -168,12 +208,12 @@ This runs the approved plan as an isolated, reproducible mutation/run (separatin
 
 ### MutationCommand (executable)
 
-To execute an approved mutation plan id, `mana-agent run` compiles the plan into an internal, executable mutation command.
+To execute an approved mutation plan id, `mana-agent run` compiles the plan into an internal, executable `MutationCommand` contract.
 
-> Note: You normally run the plan via `mana-agent run --plan-id ...`. The `MutationCommand(mp_a672168ef9c0)` form below is shown to make the executable contract explicit.
+> Note: You normally run the plan via `mana-agent run --plan-id ...`. The `MutationCommand(mp_9d694e17a6be)` form below is shown to make the executable contract explicit.
 
 ```text
-MutationCommand(mp_a672168ef9c0)
+MutationCommand(mp_9d694e17a6be)
 ```
 
 Example:

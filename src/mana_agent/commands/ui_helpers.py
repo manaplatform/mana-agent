@@ -1892,7 +1892,8 @@ def _read_chat_input(
         except Exception as exc:  # pragma: no cover - defensive fallback
             logger.debug("prompt_toolkit input unavailable; using plain input", extra={"error": str(exc)})
 
-    first_line = input(prompt)
+    fallback_prompt = re.sub(r"\001|\002|\x1b\[[0-9;]*m", "", str(prompt or "mana ❯ "))
+    first_line = input(fallback_prompt)
     normalized_first_line = first_line.strip()
     force_multiline = bool(multiline_enabled and normalized_first_line == "/paste")
     try:
