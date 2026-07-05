@@ -734,6 +734,23 @@ class AskAgent:
             existing = [item for item in existing if self._read_cache_row_key(item) != row_key]
             existing.insert(0, dict(row))
             ephemeral_read_cache[file_path] = existing[:20]
+        resolved_flow = str(flow_id or "").strip()
+        service = getattr(self, "coding_memory_service", None)
+        if resolved_flow and service is not None:
+            try:
+                service.upsert_read_cache_row(
+                    flow_id=resolved_flow,
+                    file_path=file_path,
+                    mode=str(row.get("mode", "")),
+                    start_line=int(row.get("start_line", 0) or 0),
+                    end_line=int(row.get("end_line", 0) or 0),
+                    line_count=int(row.get("line_count", 0) or 0),
+                    content_text=str(row.get("content_text", "")),
+                    file_size_bytes=int(row.get("file_size_bytes", 0) or 0),
+                    file_mtime_ns=int(row.get("file_mtime_ns", 0) or 0),
+                )
+            except Exception:
+                logger.debug("Failed to store persistent read cache row", exc_info=True)
 
     def _build_cached_read_payload(
         self,
