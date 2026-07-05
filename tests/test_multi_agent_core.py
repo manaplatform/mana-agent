@@ -252,6 +252,28 @@ def test_write_tool_not_reused_as_execution(tmp_path):
     assert cached is None
 
 
+def test_reusable_tool_memory_adds_cache_metadata(tmp_path):
+    memory = MultiAgentMemoryService(root=tmp_path)
+    memory.record_tool_execution(
+        tool_name="repo_search",
+        args={"query": "needle"},
+        task_id="task_1",
+        agent_id="agent_tool_0001",
+        status="ok",
+        result_summary="found",
+        result={"stdout": "needle\n"},
+    )
+
+    cached = memory.get_reusable_tool_result(
+        tool_name="repo_search",
+        args={"query": "needle"},
+    )
+
+    assert cached is not None
+    assert cached.result["cache_hit"] is True
+    assert cached.result["source"] == "memory"
+
+
 def test_verifier_uses_previous_memory(tmp_path):
     memory = MultiAgentMemoryService(root=tmp_path)
     memory.record_verification(

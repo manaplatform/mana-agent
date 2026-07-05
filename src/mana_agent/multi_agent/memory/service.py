@@ -322,6 +322,7 @@ class MultiAgentMemoryService:
         key = self.tool_cache_key(tool_name=normalized, args=args, relevant_file_hashes=relevant_file_hashes)
         record = self.tool_executions.get(key)
         if record and record.reusable and record.status == "ok":
+            record.result = self._normalized_reusable_result(record.result, cache_hit=True, source="memory")
             logger.info("[memory] tool_cache_hit tool=%s", normalized)
             return record
         return None
@@ -341,6 +342,9 @@ class MultiAgentMemoryService:
         normalized = normalize_tool_name(tool_name)
         key = self.tool_cache_key(tool_name=normalized, args=args, relevant_file_hashes=relevant_file_hashes)
         reusable = normalized not in WRITE_TOOL_NAMES
+        stored_result = result or {}
+        if reusable and status == "ok":
+            stored_result = self._normalized_reusable_result(stored_result, cache_hit=False, source="tool")
         record = ToolExecutionMemoryRecord(
             tool_name=normalized,
             normalized_args_hash=key,
@@ -351,10 +355,23 @@ class MultiAgentMemoryService:
             started_at=utc_iso(),
             completed_at=utc_iso(),
             reusable=reusable,
-            result=result or {},
+            result=stored_result,
         )
         self.tool_executions[key] = record
         return record
+
+    @staticmethod
+    def _normalized_reusable_result(
+        result: dict[str, Any] | None,
+        *,
+        cache_hit: bool,
+        source: str,
+    ) -> dict[str, Any]:
+        payload = dict(result or {})
+        payload["cache_hit"] = cache_hit
+        payload["source"] = source
+        payload["cache_source"] = source
+        return payload
 
     def record_decision(
         self,
