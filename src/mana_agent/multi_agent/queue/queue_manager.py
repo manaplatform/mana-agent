@@ -21,9 +21,14 @@ class QueueManager:
 
     def enqueue(self, job: QueueJob | None = None, **kwargs: Any) -> QueueJob:
         if job is None:
+            if not kwargs.get("approved_by_agent_id"):
+                kwargs["approved_by_agent_id"] = kwargs.get("requested_by_agent_id")
+            if not kwargs.get("purpose"):
+                kwargs["purpose"] = f"Run {kwargs.get('job_type', 'tool')} for task {kwargs.get('task_id')}"
             job = QueueJob(job_id=new_queue_job_id(), **kwargs)
         self.jobs[job.job_id] = job
         self.taskboard.add_queue_job(job.task_id, job.job_id)
+        self.taskboard.add_evidence(job.task_id, f"Queue job {job.job_id} queued for {job.job_type.value}: {job.purpose}")
         return job
 
     def claim_next(self, agent_id: str) -> QueueJob | None:
@@ -47,6 +52,7 @@ class QueueManager:
             result = self.tools_manager.execute_job(job)
             job.result = result.result
             job.error = result.error
+            job.result_summary = "ok" if result.ok else str(result.error or "failed")
             job.status = QueueJobStatus.DONE if result.ok else QueueJobStatus.FAILED
             job.updated_at = utc_now()
         if job.job_type in {QueueJobType.APPLY_PATCH} and job.result:

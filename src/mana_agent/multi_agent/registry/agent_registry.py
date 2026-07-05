@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from mana_agent.multi_agent.core.errors import AgentRegistryError
 from mana_agent.multi_agent.core.ids import new_agent_id, new_subagent_id
-from mana_agent.multi_agent.core.types import AgentNode, AgentRole
+from mana_agent.multi_agent.core.types import AgentNode, AgentRole, AgentState
 from mana_agent.multi_agent.registry.capability_registry import DEFAULT_CAPABILITIES
+from mana_agent.multi_agent.runtime.model_levels import model_level_for_role
 
 
 class AgentRegistry:
@@ -49,6 +50,7 @@ class AgentRegistry:
             role=role,
             parent_agent_id=parent_agent_id,
             capabilities=capabilities or list(DEFAULT_CAPABILITIES.get(role, [])),
+            model_level=model_level_for_role(role).model_level,
         )
         self._validate_depth(node.parent_agent_id)
         self.agents[node.agent_id] = node
@@ -65,10 +67,16 @@ class AgentRegistry:
             role=role,
             parent_agent_id=parent_agent_id,
             capabilities=capabilities,
+            model_level=model_level_for_role(role).model_level,
         )
         self._validate_depth(node.parent_agent_id)
         self.agents[node.agent_id] = node
         return node
+
+    def deactivate(self, agent_id: str) -> None:
+        if agent_id not in self.agents:
+            raise AgentRegistryError(f"unknown agent: {agent_id}")
+        self.agents[agent_id].state = AgentState.DONE
 
     def set_parent(self, agent_id: str, parent_agent_id: str | None) -> None:
         if agent_id == parent_agent_id:

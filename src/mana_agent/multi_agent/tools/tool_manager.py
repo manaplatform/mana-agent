@@ -6,6 +6,7 @@ from pathlib import Path
 from mana_agent.multi_agent.core.ids import new_message_id
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType, ToolResult
 from mana_agent.multi_agent.tools.permissions import assert_shell_allowed
+from mana_agent.tools import repo_batch_read, safe_apply_patch
 
 
 class ToolsManager:
@@ -23,6 +24,19 @@ class ToolsManager:
             if job.job_type == QueueJobType.REPO_READ:
                 path = self._resolve_path(str(job.payload.get("path", "")))
                 return ToolResult(new_message_id(), job.task_id, True, {"content": path.read_text(encoding="utf-8"), "path": str(path)})
+            if job.job_type == QueueJobType.REPO_BATCH_READ:
+                paths = job.payload.get("files") or job.payload.get("paths") or []
+                result = repo_batch_read(self.root, files=[str(item) for item in paths])
+                ok = bool(result.get("ok"))
+                return ToolResult(new_message_id(), job.task_id, ok, result, None if ok else "one or more batch reads failed")
+            if job.job_type == QueueJobType.APPLY_PATCH:
+                patch = str(job.payload.get("patch", ""))
+                result = safe_apply_patch(repo_root=self.root, patch=patch, check_only=False)
+                ok = bool(result.get("ok"))
+                error = None if ok else str(result.get("error") or result.get("message") or "patch failed")
+                if not ok and result.get("error_code") == "patch_context_not_found":
+                    error = "patch_context_not_found; reread target file before rebuilding patch"
+                return ToolResult(new_message_id(), job.task_id, ok, result, error)
             if job.job_type == QueueJobType.REPO_SEARCH:
                 query = str(job.payload.get("query", ""))
                 result = subprocess.run(["rg", "-n", query, str(self.root)], cwd=self.root, text=True, capture_output=True, timeout=30)

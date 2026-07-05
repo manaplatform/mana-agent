@@ -10,6 +10,9 @@ class HeadDecisionAgent(BaseAgent):
         task = self.taskboard.get_task(task_id)
         task.required_capabilities = list(route.required_capabilities)
         task.risk_level = route.risk_level
+        self.taskboard.add_evidence(task_id, f"Route `{route.route_name}` selected for {route.task_size} task.")
+        if route.required_subagents:
+            self.taskboard.add_evidence(task_id, f"Required subagents: {', '.join(route.required_subagents)}.")
         if route.requires_discussion:
             self.taskboard.update_status(task_id, TaskStatus.DISCUSSING, reason=route.reason_summary)
             discussion = decision_room.open_discussion(

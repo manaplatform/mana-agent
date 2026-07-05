@@ -25,8 +25,9 @@ class VerifierAgent(BaseAgent):
             task_id=task_id,
             verified_by_agent_id=self.agent_id,
             commands_run=commands,
-            passed=True,
-            summary="Verification plan recorded; existing command path performs concrete execution.",
+            passed=False,
+            summary="Verification plan recorded; commands have not been executed by this verifier.",
+            risks=["planned_verification_not_executed"],
         )
         self.taskboard.add_verification_result(task_id, result)
         return result

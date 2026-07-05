@@ -20,9 +20,25 @@ class CodingAgent(BaseAgent):
         return self.queue_manager.enqueue(
             task_id=task_id,
             requested_by_agent_id=self.agent_id,
+            approved_by_agent_id=self.parent_agent_id or self.agent_id,
             job_type=QueueJobType.REPO_READ,
             payload={"path": path},
+            purpose=f"Read current file content before planning changes to {path}.",
             priority=50,
+        )
+
+    def request_batch_read(self, task_id: str, paths: list[str]):
+        if self.queue_manager is None:
+            self.taskboard.add_blocker(task_id, "QueueManager unavailable for coding agent batch read request")
+            return None
+        return self.queue_manager.enqueue(
+            task_id=task_id,
+            requested_by_agent_id=self.agent_id,
+            approved_by_agent_id=self.parent_agent_id or self.agent_id,
+            job_type=QueueJobType.REPO_BATCH_READ,
+            payload={"files": list(paths)},
+            purpose="Batch read selected repository files before mutation planning.",
+            priority=40,
         )
 
     def request_patch(self, task_id: str, patch: str):
@@ -32,8 +48,10 @@ class CodingAgent(BaseAgent):
         return self.queue_manager.enqueue(
             task_id=task_id,
             requested_by_agent_id=self.agent_id,
+            approved_by_agent_id=self.parent_agent_id or self.agent_id,
             job_type=QueueJobType.APPLY_PATCH,
             payload={"patch": patch},
+            purpose="Apply an approved repository mutation after reading exact current content.",
             priority=10,
             lock_key="repo",
             requires_write_lock=True,

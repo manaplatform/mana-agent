@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-05 (multi-agent routing hardening)
+
+- Added explicit task-size classification and route evidence for simple, medium, and large multi-agent requests, including dynamic repo-inventory/docs subagent creation and deactivation recorded on the TaskBoard.
+- Added configurable model-tier assignment for multi-agent roles via `MANA_MODEL_*` environment variables, documented the tier placeholders in `.env.example`, added richer queue-job metadata, queued-job schema helpers, batch-read execution, and queued apply-patch execution with stale-context failure guidance.
+- Made planned verifier commands explicitly non-passing until actually executed, with ReviewerAgent weak-evidence rejection records, and added focused regression coverage for routing, subagents, queue metadata, batch reads, patch-context failures, model tiers, and verification honesty.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py -q` passed with 21 tests; `PYTHONPATH=src .venv/bin/python -m compileall src` passed; `PYTHONPATH=src .venv/bin/python - <<'PY' ... import mana_agent ... PY` passed; `PYTHONPATH=src .venv/bin/mana-agent --help` and `PYTHONPATH=src .venv/bin/mana-agent chat --help` passed; touched-file `ruff --select F,E9` and `git diff --check` passed.
+
 ## 2026-07-05 (document-update evidence and loop guards)
 
 - Added mandatory source-evidence discovery for README and project architecture/structure documentation updates, including a document evidence manifest that blocks mutation when source files from `src/` were not read.

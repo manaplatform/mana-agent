@@ -25,8 +25,10 @@ from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 class MainAgentResult:
     task_id: str
     route_name: str
+    task_size: str
     answer: str
     required_agents: list[str]
+    required_subagents: list[str]
 
 
 class MainAgent:
@@ -51,10 +53,14 @@ class MainAgent:
             owner_agent_id=main_node.agent_id,
         )
         route = self.router.route(task_id=task.task_id, user_request=f"{entrypoint} {request}")
+        self.taskboard.add_evidence(task.task_id, f"HeadDecisionAgent classified task size as {route.task_size}.")
         for role_name in route.required_agents:
             node = self._node_by_role_name(role_name)
             if node is not None:
                 self.taskboard.assign(task.task_id, node.agent_id)
+                if node.model_level:
+                    self.taskboard.add_evidence(task.task_id, f"{node.agent_id} uses {node.model_level}.")
+        subagent_ids = self._create_required_subagents(task.task_id, route.required_subagents)
         head = self._agent(AgentRole.HEAD_DECISION, HeadDecisionAgent)
         head.decide(task.task_id, route, self.decision_room)
         planner = self._agent(AgentRole.PLANNER, PlannerAgent)
@@ -68,10 +74,31 @@ class MainAgent:
             self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
         if route.requires_verification:
             self.taskboard.update_status(task.task_id, TaskStatus.VERIFYING, reason="VerifierAgent records verification plan.")
-            self._agent(AgentRole.VERIFIER, VerifierAgent).verify_no_mutation(task.task_id, plan.verification_commands)
+            verification = self._agent(AgentRole.VERIFIER, VerifierAgent).verify_no_mutation(task.task_id, plan.verification_commands)
+            if not verification.passed:
+                self._agent(AgentRole.REVIEWER, ReviewerAgent).reject_weak_evidence(task.task_id, verification.summary)
+        self._deactivate_subagents(task.task_id, subagent_ids)
         self.taskboard.update_status(task.task_id, TaskStatus.DONE, reason="Multi-agent route completed; legacy entrypoint continues concrete command behavior.")
         answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
-        return MainAgentResult(task.task_id, route.route_name, answer, route.required_agents)
+        return MainAgentResult(task.task_id, route.route_name, route.task_size, answer, route.required_agents, route.required_subagents)
+
+    def _create_required_subagents(self, task_id: str, subagent_names: list[str]) -> list[str]:
+        if not subagent_names:
+            return []
+        parent = self.registry.find_by_role(AgentRole.CODING)
+        created: list[str] = []
+        for name in subagent_names:
+            capabilities = [name, "repo_read"] if name == "repo_inventory" else [name]
+            node = self.registry.create_subagent(AgentRole.CODING, parent.agent_id, capabilities)
+            created.append(node.agent_id)
+            self.taskboard.assign_subagent(task_id, node.agent_id)
+            self.taskboard.add_evidence(task_id, f"MainAgent created {node.agent_id} for {name}.")
+        return created
+
+    def _deactivate_subagents(self, task_id: str, subagent_ids: list[str]) -> None:
+        for subagent_id in subagent_ids:
+            self.registry.deactivate(subagent_id)
+            self.taskboard.add_evidence(task_id, f"MainAgent deactivated {subagent_id}.")
 
     def _build_agents(self) -> dict[AgentRole, BaseAgent]:
         agents: dict[AgentRole, BaseAgent] = {}

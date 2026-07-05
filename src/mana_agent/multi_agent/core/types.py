@@ -37,6 +37,7 @@ class TaskStatus(_ValueEnum):
     PLANNING = "planning"
     DISCUSSING = "discussing"
     ROUTED = "routed"
+    WAITING_FOR_TOOLS = "waiting_for_tools"
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
     NEEDS_REVIEW = "needs_review"
@@ -66,6 +67,7 @@ class QueueJobType(_ValueEnum):
 
 
 class QueueJobStatus(_ValueEnum):
+    QUEUED = "queued"
     PENDING = "pending"
     CLAIMED = "claimed"
     RUNNING = "running"
@@ -165,6 +167,7 @@ class AgentNode:
     parent_agent_id: str | None = None
     capabilities: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
+    model_level: str = ""
     state: AgentState = AgentState.IDLE
 
 
@@ -209,7 +212,11 @@ class QueueJob:
     requested_by_agent_id: str
     job_type: QueueJobType
     payload: dict[str, Any]
-    status: QueueJobStatus = QueueJobStatus.PENDING
+    approved_by_agent_id: str | None = None
+    purpose: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    result_summary: str | None = None
+    status: QueueJobStatus = QueueJobStatus.QUEUED
     priority: int = 100
     lock_key: str | None = None
     requires_write_lock: bool = False
@@ -217,6 +224,18 @@ class QueueJob:
     error: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+
+    @property
+    def queue_job_id(self) -> str:
+        return self.job_id
+
+    @property
+    def tool_name(self) -> str:
+        return self.job_type.value
+
+    @property
+    def tool_args(self) -> dict[str, Any]:
+        return self.payload
 
 
 @dataclass
@@ -297,7 +316,9 @@ class TraceEvent:
 class RouteDecision:
     task_id: str
     route_name: str
+    task_size: str
     required_agents: list[str]
+    required_subagents: list[str]
     required_capabilities: list[str]
     requires_discussion: bool
     requires_verification: bool

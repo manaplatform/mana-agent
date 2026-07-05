@@ -25,11 +25,14 @@ from mana_agent.multi_agent.core.ids import (
     new_trace_id,
 )
 from mana_agent.multi_agent.core.types import (
+    AgentState,
     AgentRole,
     MessageType,
+    QueueJobStatus,
     QueueJobType,
     TaskStatus,
 )
+from mana_agent.multi_agent.runtime.model_levels import MODEL_LEVEL_2_CODING, model_level_for_role
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
 from mana_agent.multi_agent.routing.router import Router
@@ -120,6 +123,9 @@ def test_router_selects_required_routes():
     assert router.route(task_id="task_1", user_request="/analyze repo").route_name == "analyze"
     assert router.route(task_id="task_1", user_request="edit README.md").route_name == "coding"
     assert router.route(task_id="task_1", user_request="run pytest").route_name == "tool"
+    readme_route = router.route(task_id="task_1", user_request="project architecture changed, update README.md")
+    assert readme_route.task_size == "large"
+    assert readme_route.required_subagents == ["repo_inventory", "docs"]
 
 
 def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
@@ -129,16 +135,65 @@ def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
     job = queue.enqueue(
         task_id=task.task_id,
         requested_by_agent_id="agent_tool",
+        approved_by_agent_id="agent_head_decision_0001",
         job_type=QueueJobType.GIT_STATUS,
         payload={},
+        purpose="Inspect repository status.",
         priority=1,
         lock_key="repo",
         requires_write_lock=True,
     )
+    assert job.queue_job_id == job.job_id
+    assert job.tool_name == "git_status"
+    assert job.tool_args == {}
+    assert job.status == QueueJobStatus.QUEUED
+    assert job.approved_by_agent_id == "agent_head_decision_0001"
     ran = queue.run_until_idle()
     assert ran == [job]
     assert queue.get_job(job.job_id).status.value in {"done", "failed"}
     assert job.job_id in board.get_task(task.task_id).queue_job_ids
+    assert job.result_summary
+
+
+def test_queue_manager_runs_batch_read_through_tools_manager(tmp_path):
+    (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Batch read", user_request="read docs")
+    queue = QueueManager(tmp_path, taskboard=board)
+    job = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_coding_0001",
+        approved_by_agent_id="agent_head_decision_0001",
+        job_type=QueueJobType.REPO_BATCH_READ,
+        payload={"files": ["README.md"]},
+        purpose="Batch read selected repository files.",
+    )
+
+    queue.run_until_idle()
+
+    assert job.status == QueueJobStatus.DONE
+    assert job.result and job.result["ok"] is True
+    assert job.result["files"][0]["path"] == "README.md"
+
+
+def test_patch_context_failure_requires_fresh_read(tmp_path):
+    (tmp_path / "README.md").write_text("current\n", encoding="utf-8")
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Patch", user_request="edit README.md")
+    queue = QueueManager(tmp_path, taskboard=board)
+    job = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_coding_0001",
+        approved_by_agent_id="agent_head_decision_0001",
+        job_type=QueueJobType.APPLY_PATCH,
+        payload={"patch": "*** Begin Patch\n*** Update File: README.md\n@@\n-stale\n+fresh\n*** End Patch\n"},
+        purpose="Apply README update.",
+    )
+
+    queue.run_until_idle()
+
+    assert job.status == QueueJobStatus.FAILED
+    assert "reread target file" in str(job.error)
 
 
 def test_tools_manager_blocks_dangerous_shell_commands():
@@ -166,10 +221,39 @@ def test_verifier_agent_records_failed_verification(tmp_path):
     assert result in main.taskboard.get_task(task.task_id).verification_results
 
 
+def test_verifier_does_not_mark_planned_commands_as_passed(tmp_path):
+    main = MainAgent(tmp_path)
+    task = main.taskboard.create_task(title="Verify", user_request="verify")
+    verifier = main.agents[AgentRole.VERIFIER]
+    assert isinstance(verifier, VerifierAgent)
+    result = verifier.verify_no_mutation(task.task_id, ["python -m compileall src"])
+    assert result.passed is False
+    assert result.risks == ["planned_verification_not_executed"]
+
+
 def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     assert MainAgent(tmp_path).run_user_request("hello", entrypoint="chat").route_name == "simple"
     assert MainAgent(tmp_path).run_user_request("scan repo", entrypoint="analyze").route_name == "analyze"
     assert MainAgent(tmp_path).run_user_request("update docs", entrypoint="plan").route_name == "planning"
+
+
+def test_main_agent_records_large_docs_subagents_and_deactivates_them(tmp_path):
+    main = MainAgent(tmp_path)
+    result = main.run_user_request("project architecture changed, update README.md, cannot use diff", entrypoint="chat")
+    task = main.taskboard.get_task(result.task_id)
+    assert result.route_name == "coding"
+    assert result.task_size == "large"
+    assert result.required_subagents == ["repo_inventory", "docs"]
+    assert len(task.assigned_subagent_ids) == 2
+    assert all(main.registry.agents[subagent_id].state == AgentState.DONE for subagent_id in task.assigned_subagent_ids)
+    assert any("deactivated" in item for item in task.evidence)
+
+
+def test_model_levels_are_configurable_by_tier(monkeypatch):
+    monkeypatch.setenv("MANA_MODEL_CODING", "MODEL_LEVEL_2_CUSTOM")
+    assert model_level_for_role(AgentRole.CODING).model_level == "MODEL_LEVEL_2_CUSTOM"
+    monkeypatch.delenv("MANA_MODEL_CODING")
+    assert model_level_for_role(AgentRole.CODING).model_level == MODEL_LEVEL_2_CODING
 
 
 def test_cli_commands_exist_and_record_multi_agent_route(tmp_path):

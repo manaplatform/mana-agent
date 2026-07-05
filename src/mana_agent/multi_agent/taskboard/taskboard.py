@@ -100,6 +100,13 @@ class TaskBoard:
         self._record("task.assigned", {"task_id": task_id, "agent_id": agent_id})
         self.save()
 
+    def assign_subagent(self, task_id: str, subagent_id: str) -> None:
+        task = self.get_task(task_id)
+        _append_unique(task.assigned_subagent_ids, [subagent_id])
+        task.updated_at = utc_now()
+        self._record("task.subagent_assigned", {"task_id": task_id, "subagent_id": subagent_id})
+        self.save()
+
     def add_assumption(self, task_id: str, assumption: str) -> None:
         self._add_text(task_id, "assumptions", assumption)
 
