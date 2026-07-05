@@ -5,7 +5,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from mana_agent.cli.chat_ui import ChatUIState, render_startup_header
+from mana_agent.cli.chat_ui import ChatUIState, compact_path, render_startup_header, render_status
 from mana_agent.cli.events import make_event
 from mana_agent.cli.renderers import EventRenderer
 from mana_agent.telemetry.tokens import TokenUsageTracker, token_usage_from_provider
@@ -93,7 +93,7 @@ def test_event_schema_contains_required_fields() -> None:
         "type",
         "status",
         "title",
-        "message",
+        "summary",
         "started_at",
         "ended_at",
         "duration_ms",
@@ -102,7 +102,8 @@ def test_event_schema_contains_required_fields() -> None:
     ):
         assert key in data
     assert data["type"] == "tool.finished"
-    assert data["token_usage"]["estimated"] is False
+    assert data["summary"] == "Read src/app.py"
+    assert data["token_usage"] is None
 
 
 def test_event_renderer_modes_render_without_raw_json_noise() -> None:
@@ -175,3 +176,58 @@ def test_chat_ui_startup_header_and_token_command_render() -> None:
     assert "/tokens" in rendered
     assert "Token usage" in rendered
     assert "~" in rendered
+    assert "Chat Mode" not in rendered
+    assert "[INFO]" not in rendered
+
+
+def test_startup_header_is_compact_and_uses_clean_prompt() -> None:
+    console = Console(record=True, width=120)
+    state = ChatUIState(
+        repo_root=Path.cwd(),
+        provider="openai",
+        model="gpt-test",
+        tools_enabled=True,
+        memory_enabled=True,
+        skills_status="indexed",
+        ui_mode="rich",
+    )
+
+    render_startup_header(console, state)
+    rendered = console.export_text()
+
+    assert "mana ❯" not in rendered
+    assert "Mana-Agent" in rendered
+    assert "Ready. Ask for code changes" in rendered
+    assert len([line for line in rendered.splitlines() if line.strip()]) <= 9
+    assert not any("╭" in line or "┌" in line for line in rendered.splitlines())
+
+
+def test_status_full_includes_trace_and_log_paths(tmp_path: Path) -> None:
+    state = ChatUIState(
+        repo_root=Path.cwd(),
+        provider="openai",
+        model="gpt-test",
+        skills_status="indexed",
+        ui_mode="plain",
+        log_path=tmp_path / "chat.log",
+    )
+
+    compact = _render_to_text(render_status(state, full=False))
+    full = _render_to_text(render_status(state, full=True))
+
+    assert "trace path" not in compact
+    assert "trace path" in full
+    assert "log path" in full
+
+
+def test_renderer_trace_logs_and_path_truncation(tmp_path: Path) -> None:
+    log_path = tmp_path / "chat.log"
+    log_path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    state = ChatUIState(repo_root=Path.cwd(), provider="openai", model="gpt-test", log_path=log_path)
+
+    rendered = _render_to_text(state.renderer.render_log_lines(["two", "three"]))
+
+    assert "Trace logs" in rendered
+    assert "three" in rendered
+    assert compact_path("/Users/ah/Documents/mana-agent/src/mana_agent/commands/chat_ui.py", width=42).startswith("/")
+    assert len(compact_path("/Users/ah/Documents/mana-agent/src/mana_agent/commands/chat_ui.py", width=42)) <= 42

@@ -129,7 +129,7 @@ def _get_session() -> "PromptSession":
     return _SESSION
 
 
-def read_chat_input(message: str = "💬 ❯ ") -> str:
+def read_chat_input(message: str = "mana ❯ ") -> str:
     """Read one (possibly multi-line) chat message via prompt_toolkit.
 
     Raises EOFError on Ctrl+D and KeyboardInterrupt on Ctrl+C, mirroring the
