@@ -11,7 +11,7 @@ from typing import Any, Container, Literal, Sequence, TypeVar
 
 from pydantic import BaseModel, Field
 
-from mana_agent.llm.gate_command import (
+from mana_agent.multi_agent.runtime.gate_command import (
     GateCommand,
     PolicyDecision,
     ProofResult,
@@ -21,8 +21,8 @@ from mana_agent.llm.gate_command import (
     tool_fingerprint,
     validate_gate_proof,
 )
-from mana_agent.llm.goal_profiles import GoalProfile, active_goal_profile
-from mana_agent.llm.tool_worker_process import ToolRunResponse
+from mana_agent.multi_agent.runtime.goal_profiles import GoalProfile, active_goal_profile
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse
 from mana_agent.tools.write_file import safe_create_file, safe_write_file
 
 logger = logging.getLogger(__name__)

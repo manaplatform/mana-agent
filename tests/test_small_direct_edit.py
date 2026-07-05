@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mana_agent.llm.small_direct_edit import (
+from mana_agent.multi_agent.runtime.small_direct_edit import (
     classify_edit_intent,
     handle_small_direct_edit,
     resolve_explicit_path,
@@ -17,7 +17,7 @@ def test_direct_readme_version_update_uses_single_patch(monkeypatch, tmp_path: P
     )
     patch_calls: list[str] = []
 
-    from mana_agent.llm import small_direct_edit
+    from mana_agent.multi_agent.runtime import small_direct_edit
 
     real_apply = small_direct_edit.apply_patch_tool.safe_apply_patch
 

@@ -15,17 +15,17 @@ from mana_agent.prompting.layers import PROMPT_LAYER_ORDER, PromptLayer, compose
 
 def test_build_agent_flow_connects_selection_context_and_verification(tmp_path: Path) -> None:
     flow = build_agent_flow(
-        "Fix prompt builder flow in src/mana_agent/llm/coding_agent.py",
+        "Fix prompt builder flow in src/mana_agent/multi_agent/runtime/coding_agent.py",
         repo_root=tmp_path,
-        candidate_files=("src/mana_agent/llm/coding_agent.py",),
+        candidate_files=("src/mana_agent/multi_agent/runtime/coding_agent.py",),
     )
 
     assert FLOW_ORDER[0] is AgentPhase.DISCOVER
     assert flow.context.mode == "edit"
     assert flow.context.phase is AgentPhase.READ
     assert flow.context.repo_root == tmp_path.resolve()
-    assert "src/mana_agent/llm/coding_agent.py" in flow.context.candidate_files
-    assert "src/mana_agent/llm/coding_agent.py" in flow.context.candidate_search_terms
+    assert "src/mana_agent/multi_agent/runtime/coding_agent.py" in flow.context.candidate_files
+    assert "src/mana_agent/multi_agent/runtime/coding_agent.py" in flow.context.candidate_search_terms
     assert flow.context.done_criteria
     assert flow.verification.commands or flow.verification.notes
 

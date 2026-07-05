@@ -33,7 +33,7 @@ REGISTERED_MUTATION_TOOLS = {
 
 ARCHITECTURE_SOURCE_DIRS = (
     "src/mana_agent/commands/",
-    "src/mana_agent/llm/",
+    "src/mana_agent/multi_agent/runtime/",
     "src/mana_agent/agent/",
     "src/mana_agent/services/",
     "src/mana_agent/tools/",

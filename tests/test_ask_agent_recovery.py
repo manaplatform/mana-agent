@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from mana_agent.llm.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 
 
 class _FakeBoundLLM:

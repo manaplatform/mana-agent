@@ -19,8 +19,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.search_service import SearchService
-from mana_agent.llm.ask_agent import AskAgent
-from mana_agent.llm.mutation_plan import validate_mutation_plan
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.mutation_plan import validate_mutation_plan
 from mana_agent.vector_store.embeddings import build_embeddings
 from mana_agent.tools import (
     build_apply_patch_tool,
@@ -965,7 +965,7 @@ class ToolWorkerClient:
         logger.debug(f"[ToolWorkerClient] Python executable: {sys.executable}")
         
         self._proc = subprocess.Popen(
-            [sys.executable, "-m", "mana_agent.llm.tool_worker_process"],
+            [sys.executable, "-m", "mana_agent.multi_agent.runtime.tool_worker_process"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1280,7 +1280,7 @@ class ToolWorkerClient:
             
             try:
                 reply = WorkerReply.model_validate_json(line.strip())
-            except ValidationError as exc:
+            except ValidationError:
                 logger.warning(f"[ToolWorkerClient._request_with_proc] Invalid reply, skipping: {line[:100]}")
                 continue
             

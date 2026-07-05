@@ -16,7 +16,7 @@ verification flow so changes stay grounded in the codebase.
 
 When working in this project, start with the code that defines the feature:
 
-- `src/mana_agent/llm/` for agent orchestration and tool handling.
+- `src/mana_agent/multi_agent/runtime/` for agent orchestration and tool handling.
 - `src/mana_agent/tools/` for mutation and contract behavior.
 - `src/mana_agent/services/` for service-layer logic.
 - `src/mana_agent/parsers/` and `src/mana_agent/renderers/` for input/output processing.

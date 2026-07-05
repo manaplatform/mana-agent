@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 from mana_agent import __version__ as MANA_AGENT_VERSION
 from mana_agent.agent.flow import build_agent_flow
 from mana_agent.agent.task_context import render_task_context
-from mana_agent.llm.prompts import (
+from mana_agent.multi_agent.runtime.prompts import (
     CODING_AGENT_LANGUAGE_TOOLING_PROMPT,
     CODING_AGENT_RECOGNITION_PROMPT,
     CODING_FLOW_MEMORY_PROMPT,

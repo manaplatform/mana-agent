@@ -9,7 +9,7 @@ from .chat_analyze_command import (
     handle_analyze_command,
     is_analyze_command,
 )
-from mana_agent.llm.auto_chat import (
+from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
     AutoChatSessionState,
     apply_auto_chat_tool_policy,
@@ -19,9 +19,9 @@ from mana_agent.llm.auto_chat import (
     resolve_auto_followup,
     save_auto_chat_state,
 )
-from mana_agent.llm.agent_session import route_for_turn
-from mana_agent.llm.small_direct_edit import handle_small_direct_edit
-from mana_agent.llm.tools_executor import build_tools_executor_with_fallback
+from mana_agent.multi_agent.runtime.agent_session import route_for_turn
+from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
+from mana_agent.multi_agent.runtime.tools_executor import build_tools_executor_with_fallback
 from mana_agent.ui.banner import render_mode_header
 
 
@@ -539,6 +539,7 @@ def chat(
     if root.is_file():
         root = root.parent
     render_mode_header("Chat", "Ask about your repository or request edits", console)
+    _record_multi_agent_request(root, "chat command", entrypoint="chat", command_scope=True)
 
     recorded_initial_prompt = False
     if prompt:

@@ -30,8 +30,8 @@ from rich.table import Table
 from rich.text import Text
 
 from mana_agent.config.settings import default_diagrams_dir
-from mana_agent.llm.ask_agent import AskAgent
-from mana_agent.llm.run_logger import LlmRunLogger
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 from mana_agent.services.coding_memory_service import CodingMemoryService
 
 logger = logging.getLogger('mana_agent.commands.cli')

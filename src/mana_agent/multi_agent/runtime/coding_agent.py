@@ -1,5 +1,5 @@
 """
-mana_agent.llm.coding_agent
+mana_agent.multi_agent.runtime.coding_agent
 
 Coding agent wrapper with:
 - mutation tools (edit_file/multi_edit_file/apply_patch/apply_patch_batch/create_file/write_file/delete_file)
@@ -25,13 +25,13 @@ from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
 from mana_agent.agent.task_classifier import classify_task
-from mana_agent.llm.prompts import (
+from mana_agent.multi_agent.runtime.prompts import (
     HEAD_TOOLS_PLANNER_PROMPT,
     CODING_FLOW_PLANNER_PROMPT,
     TOOLSMANAGER_PROMPT
 )
-from mana_agent.llm.agent_work_queue import QueueManager
-from mana_agent.llm.coding_agent_models import (
+from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
+from mana_agent.multi_agent.runtime.coding_agent_models import (
     AskAgentLike,
     DynamicReadPolicy,
     ExecutionDecision,
@@ -39,12 +39,12 @@ from mana_agent.llm.coding_agent_models import (
     FlowStep,
     as_jsonable,
 )
-from mana_agent.llm.auto_chat import apply_auto_chat_tool_policy
-from mana_agent.llm.coding_agent_prompt import CODING_SYSTEM_PROMPT
+from mana_agent.multi_agent.runtime.auto_chat import apply_auto_chat_tool_policy
+from mana_agent.multi_agent.runtime.coding_agent_prompt import CODING_SYSTEM_PROMPT
 from mana_agent.prompting.builder import PromptCache, build_coding_system_prompt
 
 
-from mana_agent.llm.tool_worker_process import (
+from mana_agent.multi_agent.runtime.tool_worker_process import (
     ToolRunRequest,
     ToolWorkerClient,
     ToolWorkerProcessError,
@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 _as_jsonable = as_jsonable
 
 if TYPE_CHECKING:
-    from mana_agent.llm.tool_worker_process import ToolRunResponse
+    from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse
 
 
 class CodingAgent:
@@ -554,17 +554,17 @@ class CodingAgent:
         Returns a dict with the run report, the rendered board, and the final
         job list. Falls back gracefully if no tool worker is attached.
         """
-        from mana_agent.llm.agent_work_queue import (
+        from mana_agent.multi_agent.runtime.agent_work_queue import (
             AgentWorkQueue,
             TaskBoard,
             WorkItem,
             WorkQueueRunner,
         )
-        from mana_agent.llm.agent_work_queue_adapters import (
+        from mana_agent.multi_agent.runtime.agent_work_queue_adapters import (
             CodingAgentSniffer,
             make_worker_executor,
         )
-        from mana_agent.llm.goal_profiles import active_goal_profile
+        from mana_agent.multi_agent.runtime.goal_profiles import active_goal_profile
 
         if self.tool_worker_client is None:
             return {
@@ -1928,7 +1928,7 @@ class CodingAgent:
         enter through QueueManager so AgentWorkQueue owns scheduling and the
         worker process owns actual tool execution.
         """
-        from mana_agent.llm.tool_worker_process import ToolRunResponse as _TRR
+        from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse as _TRR
 
         if self.tools_manager_orchestrator is None:
             return _TRR(

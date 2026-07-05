@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from mana_agent.llm.tool_worker_process import ToolRunResponse
-from mana_agent.llm.goal_profiles import ModelDocsGoalProfile, active_goal_profile
-from mana_agent.llm.agent_work_queue import QueueManager
-from mana_agent.llm.tools_manager import (
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse
+from mana_agent.multi_agent.runtime.goal_profiles import ModelDocsGoalProfile, active_goal_profile
+from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
+from mana_agent.multi_agent.runtime.tools_manager import (
     RunStateStore,
     ToolsPlan,
     ToolsPlanStep,
@@ -19,7 +19,7 @@ from mana_agent.llm.tools_manager import (
     resolve_target_paths,
 )
 from mana_agent.services.coding_memory_service import CodingMemoryService
-from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolWorkerProcessError, _validate_direct_tool_request
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunRequest, ToolWorkerProcessError, _validate_direct_tool_request
 
 
 class _NoopWorker:

@@ -18,7 +18,7 @@ def test_quiet_filter_drops_normal_logs_keeps_warnings(monkeypatch) -> None:
     assert f.filter(_rec("mana_agent.services.index_service", logging.DEBUG)) is False
     assert f.filter(_rec("mana_agent.vector_store.faiss_store", logging.INFO)) is False
     assert f.filter(_rec("mana_agent.commands.cli_internal", logging.INFO)) is False
-    assert f.filter(_rec("mana_agent.llm.tool_worker_process", logging.INFO)) is False
+    assert f.filter(_rec("mana_agent.multi_agent.runtime.tool_worker_process", logging.INFO)) is False
 
     # Warnings/errors always pass, even from noisy loggers.
     assert f.filter(_rec("mana_agent.services.index_service", logging.WARNING)) is True
@@ -33,7 +33,7 @@ def test_quiet_filter_verbose_keeps_non_noisy_info(monkeypatch) -> None:
         return logging.LogRecord(name, level, __file__, 1, "msg", None, None)
 
     assert f.filter(_rec("mana_agent.commands.cli_internal", logging.INFO)) is True
-    assert f.filter(_rec("mana_agent.llm.tool_worker_process", logging.INFO)) is True
+    assert f.filter(_rec("mana_agent.multi_agent.runtime.tool_worker_process", logging.INFO)) is True
     assert f.filter(_rec("mana_agent.parsers.python_parser", logging.INFO)) is False
 
 

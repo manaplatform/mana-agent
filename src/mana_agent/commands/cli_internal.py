@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 import threading
 import traceback
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import typer
 import asyncio
@@ -46,13 +47,13 @@ from mana_agent.services.project_analyze_service import ProjectAnalyzeOptions, P
 from mana_agent.services.project_llm_analyze_service import ModelConfig, build_llm_analyzer
 from mana_agent.utils.index_discovery import discover_index_dirs  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.utils.project_discovery import discover_subprojects  # noqa: F401 - consumed by chat_cli through wildcard command wiring
-from mana_agent.llm.ask_agent import AskAgent
-from mana_agent.llm.qna_chain import QnAChain
-from mana_agent.llm.coding_agent import CodingAgent
-from mana_agent.llm.tool_worker_process import ToolWorkerClient, ToolWorkerProcessError  # noqa: F401 - error class consumed by chat_cli through wildcard command wiring
-from mana_agent.llm.tools_executor import LocalToolsExecutor, RedisRQToolsExecutor, ToolsExecutionConfig  # noqa: F401 - executor types consumed by chat_cli through wildcard command wiring
-from mana_agent.llm.agent_work_queue import QueueManager
-from mana_agent.llm.run_logger import LlmRunLogger  # noqa: F401 - consumed by chat_cli through wildcard command wiring
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.qna_chain import QnAChain
+from mana_agent.multi_agent.runtime.coding_agent import CodingAgent
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient, ToolWorkerProcessError  # noqa: F401 - error class consumed by chat_cli through wildcard command wiring
+from mana_agent.multi_agent.runtime.tools_executor import LocalToolsExecutor, RedisRQToolsExecutor, ToolsExecutionConfig  # noqa: F401 - executor types consumed by chat_cli through wildcard command wiring
+from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
+from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.utils.project_search import project_search  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.skills import SkillManager
 from mana_agent.ui.banner import render_mode_header
@@ -68,6 +69,10 @@ app.add_typer(skills_app, name="skills")
 OUTPUT_DIR: Path | None = None
 CLI_VERBOSE_MODE = False
 LLM_DEBUG_MODE = False
+_SKIP_NEXT_COMMAND_ROUTE: ContextVar[bool] = ContextVar(
+    "_SKIP_NEXT_COMMAND_ROUTE",
+    default=False,
+)
 
 for _name in dir(_ui_helpers):
     if _name.startswith("_") and not _name.startswith("__"):
@@ -152,10 +157,30 @@ def _resolve_repo(repo: str | None, fallback: str | Path = ".") -> Path:
     return root.parent if root.is_file() else root
 
 
-def _record_multi_agent_request(root: str | Path, request: str, *, entrypoint: str) -> str:
+def _record_multi_agent_request(
+    root: str | Path,
+    request: str,
+    *,
+    entrypoint: str,
+    command_scope: bool = False,
+) -> str:
     """Record a mandatory MainAgent route before a legacy entrypoint continues."""
+    if command_scope and _SKIP_NEXT_COMMAND_ROUTE.get():
+        return ""
     result = MainAgent(root).run_user_request(request, entrypoint=entrypoint)
     return result.task_id
+
+
+def _invoke_with_multi_agent_route(ctx, name: str, args: list[str] | None, *, root: str | Path, request: str, entrypoint: str) -> None:
+    """Invoke a Typer subcommand after recording the root-level command route once."""
+    _record_multi_agent_request(root, request, entrypoint=entrypoint, command_scope=True)
+    token = _SKIP_NEXT_COMMAND_ROUTE.set(True)
+    try:
+        command = ctx.command.commands[name]
+        with command.make_context(name, args or [], parent=ctx) as sub_ctx:
+            command.invoke(sub_ctx)
+    finally:
+        _SKIP_NEXT_COMMAND_ROUTE.reset(token)
 
 
 def _analyze_report_markdown(result, *, root: Path, focus: str | None = None) -> str:
@@ -382,7 +407,12 @@ def analyze_command(
         root = Path.cwd().resolve()
         inferred_focus = path_or_task
     effective_focus = focus or inferred_focus
-    _record_multi_agent_request(root, effective_focus or path_or_task or "analyze", entrypoint="analyze")
+    _record_multi_agent_request(
+        root,
+        effective_focus or path_or_task or "analyze",
+        entrypoint="analyze",
+        command_scope=True,
+    )
     out_dir = Path(artifact_dir).expanduser().resolve() if artifact_dir else (root / ".mana" / "analyze")
     render_mode_header("Analyze", "Scanning repository and generating report", console)
     result = ProjectAnalyzeService().run(
@@ -440,7 +470,7 @@ def plan_command(
             task = ""
         if not task.strip():
             raise typer.BadParameter("Plan mode requires a task.")
-    _record_multi_agent_request(root, task, entrypoint="plan")
+    _record_multi_agent_request(root, task, entrypoint="plan", command_scope=True)
     manager = SkillManager(root)
     console.print("[cyan]Inspecting repository...[/cyan]")
     console.print("[cyan]Loading relevant skills...[/cyan]")
@@ -490,6 +520,7 @@ def skills_init(
 ) -> None:
     """Create ./skills/ and copy built-in templates into it."""
     root = _resolve_repo(repo)
+    _record_multi_agent_request(root, "skills init", entrypoint="skills", command_scope=True)
     written = SkillManager(root).init_project_skills(force=force)
     console.print(f"[green]Skills directory:[/green] {root / 'skills'}")
     if written:
@@ -505,6 +536,7 @@ def skills_list(
 ) -> None:
     """List skills by priority source."""
     root = _resolve_repo(repo)
+    _record_multi_agent_request(root, "skills list", entrypoint="skills", command_scope=True)
     groups = SkillManager(root).list_by_source()
     console.print("[bold cyan]Available Skills[/bold cyan]\n")
     for title, names in groups.items():
@@ -524,6 +556,7 @@ def skills_show(
 ) -> None:
     """Print the selected skill content."""
     root = _resolve_repo(repo)
+    _record_multi_agent_request(root, f"skills show {name}", entrypoint="skills", command_scope=True)
     skill = SkillManager(root).get(name)
     if skill is None:
         raise typer.BadParameter(f"Unknown skill: {name}")
@@ -579,6 +612,7 @@ def continue_command(
 ) -> None:
     """Resume a persisted auto-execute run from .mana/runs/<run_id>."""
     root = Path(root_dir).resolve() if root_dir else Path.cwd().resolve()
+    _record_multi_agent_request(root, f"continue run {run_id}", entrypoint="continue", command_scope=True)
     store_dir = root / ".mana" / "runs" / str(run_id).strip()
     state_path = store_dir / "state.json"
     if not state_path.exists():

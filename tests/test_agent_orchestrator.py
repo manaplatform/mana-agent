@@ -6,9 +6,9 @@ from pathlib import Path
 from mana_agent.agent.orchestrator import AgentOrchestrator
 from mana_agent.agent.task_classifier import classify_task
 from mana_agent.agent.verification_planner import plan_verification
-from mana_agent.llm.agent_work_queue import AgentWorkQueue, WorkItem, WorkQueueRunner, WorkResult
-from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
-from mana_agent.llm.tools_executor import (
+from mana_agent.multi_agent.runtime.agent_work_queue import AgentWorkQueue, WorkItem, WorkQueueRunner, WorkResult
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunRequest, ToolRunResponse
+from mana_agent.multi_agent.runtime.tools_executor import (
     ToolsExecutionConfig,
     _FALLBACK_WARNINGS_EMITTED,
     build_tools_executor_with_fallback,

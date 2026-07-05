@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mana_agent.llm.gate_command import (
+from mana_agent.multi_agent.runtime.gate_command import (
     can_run_final_report,
     can_run_verify,
     reconcile_gate_pointer,
 )
-from mana_agent.llm.tools_manager import RunStateStore
+from mana_agent.multi_agent.runtime.tools_manager import RunStateStore
 
 
 def _store(tmp_path: Path, run_id: str, goal: str = "update docs/models.md") -> RunStateStore:

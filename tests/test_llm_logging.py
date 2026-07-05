@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 
 from mana_agent.analysis.models import SearchHit
-from mana_agent.llm.ask_agent import AskAgent
-from mana_agent.llm.qna_chain import QnAChain
-from mana_agent.llm.run_logger import LlmRunLogger
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.qna_chain import QnAChain
+from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 
 
 class _FakeResponse:

@@ -6,8 +6,8 @@ from time import perf_counter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from mana_agent.llm.prompts import HUMAN_TEMPLATE, SYSTEM_PROMPT
-from mana_agent.llm.run_logger import LlmRunLogger
+from mana_agent.multi_agent.runtime.prompts import HUMAN_TEMPLATE, SYSTEM_PROMPT
+from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 
 logger = logging.getLogger(__name__)
 

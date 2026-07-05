@@ -46,12 +46,11 @@ from typing import Any, Callable, Iterable, Literal, Protocol, Sequence
 from pydantic import BaseModel, Field
 
 from mana_agent.agent.orchestrator import AgentOrchestrator
-from mana_agent.llm.agent_session import AgentSession
-from mana_agent.llm.goal_profiles import active_goal_profile
-from mana_agent.llm.tool_worker_process import ToolWorkerClient
-from mana_agent.llm.tools_executor import ToolsExecutionConfig, ToolsExecutor
-from mana_agent.llm.tools_manager import (
-    AgentFlowError,
+from mana_agent.multi_agent.runtime.agent_session import AgentSession
+from mana_agent.multi_agent.runtime.goal_profiles import active_goal_profile
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient
+from mana_agent.multi_agent.runtime.tools_executor import ToolsExecutionConfig, ToolsExecutor
+from mana_agent.multi_agent.runtime.tools_manager import (
     AutoExecuteResult,
     RunStateStore,
     _cleanup_stray_deliverables,
@@ -72,7 +71,7 @@ from mana_agent.llm.tools_manager import (
     _verification_summary_from_trace,
     resolve_target_state,
 )
-from mana_agent.llm.mutation_plan import (
+from mana_agent.multi_agent.runtime.mutation_plan import (
     REGISTERED_MUTATION_TOOLS,
     MutationCommand,
     MutationPlan,
@@ -1346,7 +1345,7 @@ class QueueManager:
         requires_edit: bool | None = None,
         target_files: Sequence[str] = (),
     ) -> AutoExecuteResult:
-        from mana_agent.llm.agent_work_queue_adapters import (
+        from mana_agent.multi_agent.runtime.agent_work_queue_adapters import (
             CodingAgentSniffer,
             make_batch_executor,
             make_worker_executor,
@@ -1956,7 +1955,7 @@ class QueueManager:
         verification_decision = orchestrator.verification_decision(
             changed_files=changed_files,
             core_agent_change=any(
-                path.startswith("src/mana_agent/agent/") or path.startswith("src/mana_agent/llm/")
+                path.startswith("src/mana_agent/agent/") or path.startswith("src/mana_agent/multi_agent/runtime/")
                 for path in changed_files
             ),
         )

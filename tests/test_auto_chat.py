@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from mana_agent.llm.auto_chat import (
+from mana_agent.multi_agent.runtime.auto_chat import (
     AUTO_MAX_CANDIDATE_FILES,
     AUTO_MAX_DISCOVERY_ROUNDS,
     AUTO_MAX_FILES_TO_READ,

@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from mana_agent.llm.coding_agent import CodingAgent, FlowChecklist, FlowStep
-from mana_agent.llm.tool_worker_process import ToolWorkerProcessError
-from mana_agent.llm.tools_manager import AutoExecuteResult
+from mana_agent.multi_agent.runtime.coding_agent import CodingAgent, FlowChecklist, FlowStep
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerProcessError
+from mana_agent.multi_agent.runtime.tools_manager import AutoExecuteResult
 from mana_agent.services.coding_memory_service import CodingMemoryService
 
 
@@ -221,10 +221,10 @@ def _build_agent(
     memory: bool = True,
     full_auto_mode: bool = False,
 ) -> CodingAgent:
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_write_file_tool", lambda **_kwargs: _Tool("write_file"))
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_create_file_tool", lambda **_kwargs: _Tool("create_file"))
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_delete_file_tool", lambda **_kwargs: _Tool("delete_file"))
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_apply_patch_tool", lambda **_kwargs: _Tool("apply_patch"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_write_file_tool", lambda **_kwargs: _Tool("write_file"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_create_file_tool", lambda **_kwargs: _Tool("create_file"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_delete_file_tool", lambda **_kwargs: _Tool("delete_file"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_apply_patch_tool", lambda **_kwargs: _Tool("apply_patch"))
     ask_agent = _FakeAskAgent(payload)
     svc = CodingMemoryService(project_root=tmp_path, max_turns=5, max_tasks=20) if memory else None
     agent = CodingAgent(
@@ -249,10 +249,10 @@ def _build_agent(
 
 
 def _build_agent_with_ask(tmp_path: Path, monkeypatch, ask_agent, *, full_auto_mode: bool = False) -> CodingAgent:
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_write_file_tool", lambda **_kwargs: _Tool("write_file"))
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_create_file_tool", lambda **_kwargs: _Tool("create_file"))
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_delete_file_tool", lambda **_kwargs: _Tool("delete_file"))
-    monkeypatch.setattr("mana_agent.llm.coding_agent.build_apply_patch_tool", lambda **_kwargs: _Tool("apply_patch"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_write_file_tool", lambda **_kwargs: _Tool("write_file"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_create_file_tool", lambda **_kwargs: _Tool("create_file"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_delete_file_tool", lambda **_kwargs: _Tool("delete_file"))
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.coding_agent.build_apply_patch_tool", lambda **_kwargs: _Tool("apply_patch"))
     svc = CodingMemoryService(project_root=tmp_path, max_turns=5, max_tasks=20)
     agent = CodingAgent(
         api_key="test-key",
@@ -308,7 +308,7 @@ def test_coding_agent_blocks_answer_until_required_file_reads_met(tmp_path: Path
 def test_coding_agent_prevents_duplicate_semantic_search_loops(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
-    result = agent.generate("Implement planner", index_dir=tmp_path / ".mana/index", k=4)
+    agent.generate("Implement planner", index_dir=tmp_path / ".mana/index", k=4)
     calls = _orchestrator_calls(agent)
     assert calls
     policy = calls[0]["tool_policy"]

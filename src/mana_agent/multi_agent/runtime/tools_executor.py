@@ -8,7 +8,7 @@ from typing import Any, Callable, Literal, Sequence
 
 from pydantic import BaseModel
 
-from mana_agent.llm.tool_worker_process import (
+from mana_agent.multi_agent.runtime.tool_worker_process import (
     ToolRunRequest,
     ToolWorkerClient,
     ToolWorkerProcessError,
@@ -206,7 +206,7 @@ class RedisRQToolsExecutor(ToolsExecutor):
         if not requests:
             return []
 
-        from mana_agent.llm.redis_tool_tasks import run_tool_request_task
+        from mana_agent.multi_agent.runtime.redis_tool_tasks import run_tool_request_task
 
         started_at = time.time()
         run_status_key = self._key(run_id, "status")

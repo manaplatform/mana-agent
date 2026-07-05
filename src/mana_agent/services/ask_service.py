@@ -17,8 +17,8 @@ from mana_agent.analysis.models import (
     SearchHit,
     SourceGroup,
 )
-from mana_agent.llm.ask_agent import AskAgent
-from mana_agent.llm.qna_chain import QnAChain
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.qna_chain import QnAChain
 from mana_agent.services.search_service import SearchService
 from mana_agent.services.structure_service import StructureService
 from mana_agent.utils.project_search import project_search

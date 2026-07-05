@@ -1,7 +1,7 @@
 # Multi-Agent Routing
 
-Mana Agent routes every LLM-facing request through `mana_agent.multi_agent.MainAgent`.
-The old command names remain public, but the internal record starts with a
+Mana Agent routes every public command and LLM-facing request through
+`mana_agent.multi_agent.MainAgent`. The old command names remain public, but the internal record starts with a
 TaskBoard item, a route decision, agent assignments, and a final SummarizerAgent
 summary.
 
@@ -51,13 +51,21 @@ has been recorded.
 
 ## CLI Behavior
 
-- `mana-agent chat` records each user turn through MainAgent.
+- Root mode flags and menu selections record a MainAgent route before dispatching
+  to the selected command.
+- `mana-agent chat` records command start and each substantive user turn through MainAgent.
 - `/analyze` inside chat records an analyze route before running the analyzer.
 - `/plan` inside chat records a planning route before generating a plan answer.
 - `mana-agent analyze` records an analyze route before generating artifacts.
 - `mana-agent plan` records a planning route before rendering/saving the plan.
+- `mana-agent continue` records a continuation route before resuming a run.
+- `mana-agent skills init/list/show` record skill-command routes before reading
+  or writing skill files.
 - Coding/edit turns record a coding route with PlannerAgent, CodingAgent,
   QueueManager, ToolAgent, VerifierAgent, ReviewerAgent, and SummarizerAgent.
+
+The live runtime now lives under `mana_agent.multi_agent.runtime`; the previous
+top-level LLM runtime package path is retired.
 
 There is no `--no-multi-agent` flag, `MANA_MULTI_AGENT=0` bypass, or config key
 that disables multi-agent routing.

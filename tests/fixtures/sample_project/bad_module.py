@@ -1,4 +1,4 @@
-from math import *
+from math import *  # noqa: F403 - intentionally bad fixture import
 import os  # noqa: F401 - intentionally unused fixture import
 import json  # noqa: F401 - intentionally unused fixture import
 

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mana_agent.llm import tool_worker_process as twp
+from mana_agent.multi_agent.runtime import tool_worker_process as twp
 
 
 def test_tool_worker_import_does_not_configure_root_logging() -> None:
@@ -20,7 +20,7 @@ def test_tool_worker_import_does_not_configure_root_logging() -> None:
     env["PYTHONPATH"] = str(src_root)
     code = (
         "import json, logging; "
-        "import mana_agent.llm.tool_worker_process; "
+        "import mana_agent.multi_agent.runtime.tool_worker_process; "
         "root = logging.getLogger(); "
         "print(json.dumps({'level': root.level, 'handlers': len(root.handlers)}))"
     )

@@ -20,11 +20,11 @@ from pydantic import BaseModel, Field
 
 from langchain_core.callbacks.base import BaseCallbackHandler
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
-from mana_agent.llm.prompts import ASK_AGENT_SYSTEM_PROMPT
-from mana_agent.llm.evidence_memory import EvidenceMemory
+from mana_agent.multi_agent.runtime.prompts import ASK_AGENT_SYSTEM_PROMPT
+from mana_agent.multi_agent.runtime.evidence_memory import EvidenceMemory
 from mana_agent.analysis.chunker import CodeChunker
 from mana_agent.services.structure_service import StructureService
-from mana_agent.llm.run_logger import LlmRunLogger
+from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 from mana_agent.config.settings import default_index_dir
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.search_service import SearchService

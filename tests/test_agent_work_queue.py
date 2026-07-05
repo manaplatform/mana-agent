@@ -5,8 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from mana_agent.llm.agent_session import AgentSession
-from mana_agent.llm.agent_work_queue import (
+from mana_agent.multi_agent.runtime.agent_session import AgentSession
+from mana_agent.multi_agent.runtime.agent_work_queue import (
     AgentWorkQueue,
     EventBus,
     TaskBoard,
@@ -15,15 +15,15 @@ from mana_agent.llm.agent_work_queue import (
     WorkResult,
     compute_fingerprint,
 )
-from mana_agent.llm.agent_work_queue_adapters import (
+from mana_agent.multi_agent.runtime.agent_work_queue_adapters import (
     CodingAgentSniffer,
     build_tool_run_request,
     classify_result,
     make_batch_executor,
     make_worker_executor,
 )
-from mana_agent.llm.tool_worker_process import ToolRunResponse
-from mana_agent.llm.tools_executor import BatchExecutionResult, ToolsExecutionConfig
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse
+from mana_agent.multi_agent.runtime.tools_executor import BatchExecutionResult, ToolsExecutionConfig
 
 
 # Edit/forced passes run with mutation tools only; discovery/read jobs gather
@@ -403,8 +403,8 @@ def test_sniffer_without_edit_signal_does_not_finalize(tmp_path: Path):
 
 def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path):
     """End-to-end through the LIVE path (QueueManager.run), with a fake worker."""
-    from mana_agent.llm.tool_worker_process import ToolRunResponse
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "found.py").write_text("x = 1\n")
 
@@ -460,7 +460,7 @@ def test_queue_manager_runs_edit_and_verify_for_mutating_request(tmp_path: Path)
 
 
 def test_queue_manager_prefers_injected_tools_executor(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "found.py").write_text("x = 1\n", encoding="utf-8")
 
@@ -535,7 +535,7 @@ def test_queue_manager_prefers_injected_tools_executor(tmp_path: Path):
 
 
 def test_queue_manager_forced_mutation_retry_uses_tools_executor(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _NoDirectWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
@@ -596,7 +596,7 @@ def test_queue_manager_forced_mutation_retry_uses_tools_executor(tmp_path: Path)
 
 
 def test_queue_manager_targets_default_skill_registry_without_framework_search_loops(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     manager = tmp_path / "src" / "mana_agent" / "skills" / "manager.py"
     skills_dir = tmp_path / "src" / "mana_agent" / "default_skills"
@@ -645,7 +645,10 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
                     answer=json.dumps(
                         {
                             "tool_name": "write_file",
-                            "tool_args": {"path": target_file, "content": _substantive(target_file)},
+                            "tool_args": {
+                                "path": "src/mana_agent/skills/manager.py",
+                                "content": _substantive("src/mana_agent/skills/manager.py"),
+                            },
                         }
                     ),
                     mode="agent-tools",
@@ -682,7 +685,7 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
 
 
 def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "overview.md").write_text(_substantive("Overview"), encoding="utf-8")
@@ -722,7 +725,7 @@ def test_queue_manager_blocks_edit_when_no_mutation_tool_attempted(tmp_path: Pat
 
 
 def test_bare_docs_filename_resolves_existing_docs_file(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "src").mkdir()
@@ -739,7 +742,7 @@ def test_bare_docs_filename_resolves_existing_docs_file(tmp_path: Path):
 
 
 def test_typo_target_resolution_clears_missing_required_files(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     body = "# Architecture\n\n" + ("Current architecture evidence. " * 8) + "\n"
@@ -810,7 +813,7 @@ def test_typo_target_resolution_clears_missing_required_files(tmp_path: Path):
 
 
 def test_edit_intent_forces_mutation_tool_attempt(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "08-architecture.md").write_text("# Old\n", encoding="utf-8")
@@ -855,7 +858,7 @@ def test_edit_intent_forces_mutation_tool_attempt(tmp_path: Path):
 
 
 def test_docs_edit_without_approved_fallback_blocks_when_worker_writes_nothing(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     (tmp_path / "docs").mkdir()
@@ -912,7 +915,7 @@ def test_docs_edit_without_approved_fallback_blocks_when_worker_writes_nothing(t
 
 
 def test_explicit_fallback_decision_can_mutate_existing_update_notes_section(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     body = (
@@ -962,8 +965,8 @@ def test_explicit_fallback_decision_can_mutate_existing_update_notes_section(tmp
 
 
 def test_source_architecture_update_reads_src_evidence_before_mutation(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
-    from mana_agent.llm.mutation_plan import ARCHITECTURE_SOURCE_DIRS
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.mutation_plan import ARCHITECTURE_SOURCE_DIRS
 
     (tmp_path / "docs").mkdir()
     target = tmp_path / "docs" / "08-architecture.md"
@@ -1005,7 +1008,7 @@ def test_source_architecture_update_reads_src_evidence_before_mutation(tmp_path:
                                 "path": "docs/08-architecture.md",
                                 "content": (
                                     "# Architecture\n\n"
-                                    "Updated from src/mana_agent/llm/module.py evidence.\n\n"
+                                    "Updated from src/mana_agent/multi_agent/runtime/module.py evidence.\n\n"
                                     + ("Source-backed architecture section. " * 12)
                                     + "\n"
                                 ),
@@ -1038,12 +1041,12 @@ def test_source_architecture_update_reads_src_evidence_before_mutation(tmp_path:
 
 
 def test_source_architecture_update_rejects_tests_changelog_only_evidence(tmp_path: Path):
-    from mana_agent.llm.mutation_plan import build_mutation_plan
+    from mana_agent.multi_agent.runtime.mutation_plan import build_mutation_plan
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "08-architecture.md").write_text("# Architecture\n", encoding="utf-8")
-    (tmp_path / "src/mana_agent/llm").mkdir(parents=True)
-    (tmp_path / "src/mana_agent/llm/module.py").write_text("class Queue: pass\n", encoding="utf-8")
+    (tmp_path / "src/mana_agent/multi_agent/runtime").mkdir(parents=True)
+    (tmp_path / "src/mana_agent/multi_agent/runtime/module.py").write_text("class Queue: pass\n", encoding="utf-8")
 
     plan = build_mutation_plan(
         repo_root=tmp_path,
@@ -1057,7 +1060,7 @@ def test_source_architecture_update_rejects_tests_changelog_only_evidence(tmp_pa
 
 
 def test_approved_mutation_plan_compiles_to_registered_tool(tmp_path: Path):
-    from mana_agent.llm.mutation_plan import build_mutation_plan, compile_mutation_command, validate_mutation_command
+    from mana_agent.multi_agent.runtime.mutation_plan import build_mutation_plan, compile_mutation_command, validate_mutation_command
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "08-architecture.md").write_text("# Old\n", encoding="utf-8")
@@ -1081,7 +1084,7 @@ def test_approved_mutation_plan_compiles_to_registered_tool(tmp_path: Path):
 
 
 def test_work_item_tool_name_is_not_ignored(tmp_path: Path):
-    from mana_agent.llm.mutation_plan import build_mutation_plan
+    from mana_agent.multi_agent.runtime.mutation_plan import build_mutation_plan
 
     (tmp_path / "docs").mkdir()
     target = tmp_path / "docs" / "note.md"
@@ -1119,7 +1122,7 @@ def test_work_item_tool_name_is_not_ignored(tmp_path: Path):
 
 
 def test_write_file_without_content_is_incomplete(tmp_path: Path):
-    from mana_agent.llm.mutation_plan import build_mutation_plan
+    from mana_agent.multi_agent.runtime.mutation_plan import build_mutation_plan
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "note.md").write_text("old\n", encoding="utf-8")
@@ -1154,7 +1157,7 @@ def test_write_file_without_content_is_incomplete(tmp_path: Path):
 
 
 def test_architecture_update_does_not_depend_on_model_tool_selection(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     target = tmp_path / "docs" / "08-architecture.md"
@@ -1205,7 +1208,7 @@ def test_architecture_update_does_not_depend_on_model_tool_selection(tmp_path: P
 
 
 def test_mutation_only_worker_prose_is_rejected(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "note.md").write_text("old\n", encoding="utf-8")
@@ -1240,7 +1243,7 @@ def test_mutation_only_worker_prose_is_rejected(tmp_path: Path):
 
 
 def test_simple_docs_edit_does_not_read_all_docs(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     (tmp_path / "docs").mkdir()
@@ -1295,7 +1298,7 @@ def test_simple_docs_edit_does_not_read_all_docs(tmp_path: Path):
 
 
 def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     mgr = QueueManager(worker_client=object(), repo_root=tmp_path)
     payload = mgr.preview_plan(
@@ -1320,7 +1323,7 @@ def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path)
 
 
 def test_queue_manager_blocks_edit_when_mutation_has_no_changed_files(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
@@ -1345,7 +1348,7 @@ def test_queue_manager_blocks_edit_when_mutation_has_no_changed_files(tmp_path: 
 
 
 def test_queue_manager_reports_failed_mutation_details(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
@@ -1377,7 +1380,7 @@ def test_queue_manager_reports_failed_mutation_details(tmp_path: Path):
 
 
 def test_queue_manager_resolves_bare_existing_filename_before_forced_retry(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "07-diagram.md").write_text(
@@ -1419,7 +1422,7 @@ def test_queue_manager_resolves_bare_existing_filename_before_forced_retry(tmp_p
 
 
 def test_queue_manager_uses_latest_useful_answer_only_for_edit_success(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
@@ -1478,8 +1481,8 @@ def test_sniffer_uses_planner_target_file_for_edit_job(tmp_path: Path):
 
 
 def test_edit_with_evidence_uses_agentic_policy_without_duplicate_reads(tmp_path: Path):
-    from mana_agent.llm.evidence_memory import EvidenceMemory
-    from mana_agent.llm.mutation_plan import build_mutation_plan
+    from mana_agent.multi_agent.runtime.evidence_memory import EvidenceMemory
+    from mana_agent.multi_agent.runtime.mutation_plan import build_mutation_plan
 
     (tmp_path / "src").mkdir()
     target = tmp_path / "src" / "app.py"
@@ -1564,7 +1567,7 @@ def test_eventbus_broadcasts_transitions():
 def test_apply_patch_run_never_claims_no_edit_tool(tmp_path: Path):
     """A worker that wrongly says 'no edit tool was available' must not win when
     the trace proves apply_patch executed and changed a file."""
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
@@ -1601,7 +1604,7 @@ def test_apply_patch_run_never_claims_no_edit_tool(tmp_path: Path):
 
 
 def test_non_empty_changed_files_never_claims_no_changes(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001
@@ -1627,7 +1630,7 @@ def test_non_empty_changed_files_never_claims_no_changes(tmp_path: Path):
 
 
 def test_failed_verify_project_is_surfaced_in_final_answer(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("old\n", encoding="utf-8")
@@ -1689,7 +1692,7 @@ def test_failed_verify_project_is_surfaced_in_final_answer(tmp_path: Path):
 
 
 def test_passed_verify_reports_changed_files_and_checks_passed(tmp_path: Path):
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("old\n", encoding="utf-8")
@@ -1742,7 +1745,7 @@ def test_passed_verify_reports_changed_files_and_checks_passed(tmp_path: Path):
 def test_edit_request_cannot_finalize_after_only_read_search(tmp_path: Path):
     """An edit request where the worker only ever reads/searches must end blocked,
     and the final answer must not claim success."""
-    from mana_agent.llm.agent_work_queue import QueueManager
+    from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 
     class _FakeWorker:
         def run_tools(self, request, on_event=None):  # noqa: ANN001

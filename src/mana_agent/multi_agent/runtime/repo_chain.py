@@ -16,8 +16,8 @@ from tenacity import (
     before_sleep_log,
 )
 
-from mana_agent.llm.run_logger import LlmRunLogger
-from mana_agent.llm.prompts import (
+from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
+from mana_agent.multi_agent.runtime.prompts import (
     DEEP_FLOW_SYSTEM_PROMPT,
     DEEP_FLOW_HUMAN_TEMPLATE,
 )

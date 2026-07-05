@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from typer.testing import CliRunner
 
 from mana_agent.commands.cli import app
 from mana_agent.commands.cli_internal import _record_multi_agent_request
+from mana_agent.commands import cli_internal
 from mana_agent.multi_agent import MainAgent
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
@@ -178,6 +181,94 @@ def test_cli_commands_exist_and_record_multi_agent_route(tmp_path):
     assert "plan" in help_result.output
     task_id = _record_multi_agent_request(tmp_path, "plan a change", entrypoint="plan")
     assert task_id.startswith("task_")
+
+
+def test_public_command_routes_once_when_root_dispatches_plan(monkeypatch, tmp_path):
+    calls: list[tuple[str, str]] = []
+
+    class _FakeMainAgent:
+        def __init__(self, root):
+            self.root = root
+
+        def run_user_request(self, request: str, *, entrypoint: str = "chat"):
+            calls.append((entrypoint, request))
+            return SimpleNamespace(task_id=f"task_{len(calls):06d}", route_name="planning", answer="", required_agents=[])
+
+    monkeypatch.setattr(cli_internal, "MainAgent", _FakeMainAgent)
+    result = CliRunner().invoke(app, ["--plan", "--repo", str(tmp_path)], input="Add CLI banner\n")
+
+    assert result.exit_code == 0
+    assert calls == [("root", "root --plan")]
+
+
+def test_public_command_callbacks_route_through_main_agent(monkeypatch, tmp_path):
+    calls: list[tuple[str, str]] = []
+
+    class _FakeMainAgent:
+        def __init__(self, root):
+            self.root = root
+
+        def run_user_request(self, request: str, *, entrypoint: str = "chat"):
+            calls.append((entrypoint, request))
+            return SimpleNamespace(task_id=f"task_{len(calls):06d}", route_name="simple", answer="", required_agents=[])
+
+    class _FakeAnalyzeResult:
+        artifacts: dict[str, str] = {}
+        errors: list[str] = []
+        report: dict = {
+            "inventory": {},
+            "architecture": {},
+            "risks": {},
+            "recommendations": {},
+            "dependencies": {},
+            "symbols": {},
+        }
+
+    class _FakeProjectAnalyzeService:
+        def run(self, *args, **kwargs):
+            return _FakeAnalyzeResult()
+
+    monkeypatch.setattr(cli_internal, "MainAgent", _FakeMainAgent)
+    monkeypatch.setattr(cli_internal, "ProjectAnalyzeService", _FakeProjectAnalyzeService)
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["plan", "--repo", str(tmp_path), "--no-code", "Add CLI smoke"]).exit_code == 0
+    assert runner.invoke(app, ["skills", "list", "--repo", str(tmp_path)]).exit_code == 0
+    assert runner.invoke(app, ["skills", "show", "cli", "--repo", str(tmp_path)]).exit_code == 0
+    assert runner.invoke(app, ["analyze", "--repo", str(tmp_path), "--max-files", "1"]).exit_code == 0
+    continue_result = runner.invoke(app, ["continue", "--root-dir", str(tmp_path), "--run-id", "missing"])
+    assert continue_result.exit_code != 0
+
+    assert ("plan", "Add CLI smoke") in calls
+    assert ("skills", "skills list") in calls
+    assert ("skills", "skills show cli") in calls
+    assert ("analyze", ".") in calls
+    assert ("continue", "continue run missing") in calls
+
+
+def test_no_stale_mana_agent_llm_imports_remain():
+    roots = [
+        "src/mana_agent",
+        "tests",
+        "docs",
+        "README.md",
+        "pyproject.toml",
+    ]
+    offenders: list[str] = []
+    for root in roots:
+        path = __import__("pathlib").Path(root)
+        files = [path] if path.is_file() else [item for item in path.rglob("*") if item.is_file()]
+        for item in files:
+            item_path = item.as_posix()
+            if "docs/analyze" in item_path or "__pycache__" in item_path or item.suffix == ".pyc":
+                continue
+            text = item.read_text(encoding="utf-8", errors="ignore")
+            legacy_module = "mana_agent" + ".llm"
+            legacy_module_exec = "python -m " + legacy_module
+            legacy_path = "src/mana_agent" + "/llm"
+            if legacy_module in text or legacy_module_exec in text or legacy_path in text:
+                offenders.append(item_path)
+    assert offenders == []
 
 
 def test_no_multi_agent_disable_flag_or_env_bypass():

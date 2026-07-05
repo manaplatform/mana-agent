@@ -9,7 +9,7 @@ from pathlib import Path
 from mana_agent.analysis.models import SearchHit
 from mana_agent.utils.io import read_jsonl
 from mana_agent.vector_store.faiss_store import FaissStore
-from mana_agent.llm.prompts import TOOL_FIRST
+from mana_agent.multi_agent.runtime.prompts import TOOL_FIRST
 
 logger = logging.getLogger(__name__)
 

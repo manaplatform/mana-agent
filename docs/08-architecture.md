@@ -35,7 +35,7 @@ them while a sniffer steers follow-up reads/edits/verification.
 
 ### Coding orchestration (work queue + decision lifecycle)
 
-- **`src/mana_agent/llm/agent_work_queue.py`** is the orchestration spine.
+- **`src/mana_agent/multi_agent/runtime/agent_work_queue.py`** is the orchestration spine.
   It defines:
   - `WorkItem`: a unit of work (tool call + gate + priority + dependencies +
     fingerprint)
@@ -43,7 +43,7 @@ them while a sniffer steers follow-up reads/edits/verification.
   - `EventBus` + `TaskBoard`: status transitions and a live renderable progress view
   - `WorkQueueRunner`: `claim -> execute -> classify -> broadcast -> sniff`
   - `JobSniffer`: a hook for the coding-agent to emit follow-up jobs
-  See: `src/mana_agent/llm/agent_work_queue.py:1-1969`.
+  See: `src/mana_agent/multi_agent/runtime/agent_work_queue.py:1-1969`.
 
 Key lifecycle details from the implementation:
 
@@ -67,7 +67,7 @@ The queue runner itself stays deterministic by injecting the worker executor:
 
 - `QueueManager` owns a `worker_client` and builds a worker executor using
   `make_worker_executor()` (imported in `QueueManager.run`).
-  See: `src/mana_agent/llm/agent_work_queue.py` around `QueueManager.run`.
+  See: `src/mana_agent/multi_agent/runtime/agent_work_queue.py` around `QueueManager.run`.
 
 ### Mutation commands (the contract for edits)
 
@@ -76,7 +76,7 @@ Mutation tool execution uses a typed command contract:
 - The queue executor calls `execute_registered_mutation_command(repo_root, command)`.
   This validates the `MutationCommand` and routes to safe repository mutation tools
   (`write_file`, `create_file`, `delete_file`, `apply_patch`, `apply_patch_batch`).
-  See: `src/mana_agent/llm/agent_work_queue.py` `execute_registered_mutation_command`.
+  See: `src/mana_agent/multi_agent/runtime/agent_work_queue.py` `execute_registered_mutation_command`.
 
 ### Repository access and mutation tools
 
@@ -155,12 +155,12 @@ See: `src/mana_agent/services/ask_service.py:1-448`.
 3. **Work queue planning/execution**:
    - queue runner executes gated tool jobs
    - sniffer emits additional read/edit/verify jobs on successful job completion
-   See: `src/mana_agent/llm/agent_work_queue.py:1-1969`.
+   See: `src/mana_agent/multi_agent/runtime/agent_work_queue.py:1-1969`.
 4. **Mutation execution**:
    - mutation commands compile and execute against safe repository mutation tools
    - verification is derived from the tool execution trace
    - missing deliverables or failed checks block the final result
-   See: `src/mana_agent/llm/agent_work_queue.py` and `src/mana_agent/tools/apply_patch.py`.
+   See: `src/mana_agent/multi_agent/runtime/agent_work_queue.py` and `src/mana_agent/tools/apply_patch.py`.
 
 ## Repository Layout
 
@@ -172,7 +172,7 @@ src/mana_agent/
   config/                # settings, runtime config
   dependencies/          # dependency graph support
   describe/              # repository description flow
-  llm/                   # prompt chains, agents, tool managers/workers, queue
+  multi_agent/runtime/                   # prompt chains, agents, tool managers/workers, queue
   parsers/               # source parsing entry points
   prompting/             # stable/ephemeral prompt assembly and memory snapshots
   renderers/            # HTML rendering and export helpers

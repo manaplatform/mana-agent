@@ -95,7 +95,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "Check run-scoped evidence memory before disk reads.",
                 "Treat cache_hit=true/source=memory as valid evidence equal to a fresh tool read.",
             ],
-            examples=[{"input": {"path": "src/mana_agent/llm/ask_agent.py", "mode": "full"}}],
+            examples=[{"input": {"path": "src/mana_agent/multi_agent/runtime/ask_agent.py", "mode": "full"}}],
         ),
         ToolContract(
             name="read_skill",

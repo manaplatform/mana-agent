@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from mana_agent.llm.auto_chat import AutoChatMode, classify_auto_chat_intent
+from mana_agent.multi_agent.runtime.auto_chat import AutoChatMode, classify_auto_chat_intent
 
 
 class AgentPhase(str, Enum):

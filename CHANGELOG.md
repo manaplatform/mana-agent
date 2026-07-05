@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-05 (all-command multi-agent routing and runtime migration)
+
+- Routed every public CLI command surface through the mandatory `MainAgent` boundary, including root mode/menu dispatch, `chat`, `analyze`, `plan`, `continue`, and `skills init/list/show`, with a route-once guard for root-dispatched commands.
+- Moved the live LLM runtime package from `mana_agent.llm` to `mana_agent.multi_agent.runtime`, retargeted runtime imports, tests, docs, and the worker subprocess module path, and removed the old `src/mana_agent/llm` package.
+- Added regression coverage for command-level routing, stale legacy import guards, and command compatibility.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_cli_modes_skills.py tests/test_cli_smoke.py::test_continue_command_uses_root_dir_and_loops_until_complete tests/test_chat_console_logging.py tests/test_agent_work_queue.py tests/test_coding_agent.py tests/test_tool_worker_process.py tests/test_tools_executor_redis.py tests/test_prompts_contract.py -q` passed with 163 tests; `PYTHONPATH=src .venv/bin/python -m compileall src` passed; stale `mana_agent.llm` import search returned no matches; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/multi_agent tests --select F,E9` passed; `PYTHONPATH=src .venv/bin/python -m pytest -q` passed with 549 tests and 16 warnings.
+
 ## 2026-07-05 (hierarchical multi-agent core)
 
 - Added the mandatory `mana_agent.multi_agent` hierarchy with readable IDs, TaskBoard persistence, MessageBus, DecisionRoom, AgentRegistry, Router, QueueManager, ToolsManager permissions, specialized agents, prompt files, and trace/memory helpers.

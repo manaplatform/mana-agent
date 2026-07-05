@@ -6,7 +6,7 @@ evidence into :class:`AnalyzeEvidence`, sends it to the model, and parses the
 model's JSON answer into :class:`LLMAnalyzeResult`.
 
 This is the unified analyze-LLM layer. It supersedes the per-file LLM analyzer
-(``mana_agent.llm.analyze_chain.AnalyzeChain`` + ``LlmAnalyzeService``): instead
+(``mana_agent.multi_agent.runtime.analyze_chain.AnalyzeChain`` + ``LlmAnalyzeService``): instead
 of prompting the model file-by-file, it sends one compact, whole-project evidence
 payload. The deterministic core of the old engine (``PythonStaticAnalyzer``) is
 merged into :mod:`mana_agent.services.project_analyze_service` and its findings
@@ -338,7 +338,7 @@ class LLMAnalyzer:
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_openai import ChatOpenAI
 
-        from mana_agent.llm.prompts import (
+        from mana_agent.multi_agent.runtime.prompts import (
             PROJECT_ANALYZE_HUMAN_TEMPLATE,
             PROJECT_ANALYZE_SYSTEM_PROMPT,
         )

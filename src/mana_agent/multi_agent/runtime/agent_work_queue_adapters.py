@@ -25,15 +25,15 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from mana_agent.llm.agent_session import AgentSession
-from mana_agent.llm.agent_work_queue import TaskBoard, WorkItem, WorkResult
-from mana_agent.llm.mutation_plan import (
+from mana_agent.multi_agent.runtime.agent_session import AgentSession
+from mana_agent.multi_agent.runtime.agent_work_queue import TaskBoard, WorkItem, WorkResult
+from mana_agent.multi_agent.runtime.mutation_plan import (
     is_architecture_docs_update,
     mutation_trace_has_plan,
     representative_architecture_sources,
 )
-from mana_agent.llm.tool_worker_process import ToolRunRequest, ToolRunResponse
-from mana_agent.llm.tools_executor import BatchToolRequest, ToolsExecutor
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunRequest, ToolRunResponse
+from mana_agent.multi_agent.runtime.tools_executor import BatchToolRequest, ToolsExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -215,8 +215,8 @@ def make_worker_executor(
             tool_args = dict(item.tool_args or {})
             plan_id = str(tool_args.get("mutation_plan_id") or "").strip()
             if plan_id:
-                from mana_agent.llm.agent_work_queue import execute_registered_mutation_command
-                from mana_agent.llm.mutation_plan import MutationCommand
+                from mana_agent.multi_agent.runtime.agent_work_queue import execute_registered_mutation_command
+                from mana_agent.multi_agent.runtime.mutation_plan import MutationCommand
 
                 payload_args = {
                     key: value

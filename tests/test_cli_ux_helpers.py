@@ -18,7 +18,7 @@ from mana_agent.commands.ui_helpers import (
     emit_tool_event,
     set_active_tool_activity,
 )
-from mana_agent.llm.coding_agent import CodingAgent
+from mana_agent.multi_agent.runtime.coding_agent import CodingAgent
 
 runner = CliRunner()
 

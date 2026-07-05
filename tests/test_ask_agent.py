@@ -7,7 +7,7 @@ from pathlib import Path
 from langchain_core.tools import StructuredTool
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
-from mana_agent.llm.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.services.coding_memory_service import CodingMemoryService
 
 
@@ -312,7 +312,7 @@ def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
     def _raise_timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="rg x", timeout=1)
 
-    monkeypatch.setattr("mana_agent.llm.ask_agent.subprocess.run", _raise_timeout)
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.ask_agent.subprocess.run", _raise_timeout)
     output = run_command.invoke({"cmd": "rg demo"})
     assert "timed out" in output.lower()
     assert traces[-1].status == "timeout"
@@ -335,7 +335,7 @@ def test_ask_agent_run_command_rewrites_python_to_local_venv_python3(tmp_path: P
         _ = kwargs
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    monkeypatch.setattr("mana_agent.llm.ask_agent.subprocess.run", _fake_run)
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.ask_agent.subprocess.run", _fake_run)
     payload = json.loads(run_command.invoke({"cmd": "python -V"}))
 
     assert payload["interpreter_rewritten"] is True
@@ -356,7 +356,7 @@ def test_ask_agent_run_command_rewrites_python_to_python3_without_local_venv(tmp
         _ = kwargs
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    monkeypatch.setattr("mana_agent.llm.ask_agent.subprocess.run", _fake_run)
+    monkeypatch.setattr("mana_agent.multi_agent.runtime.ask_agent.subprocess.run", _fake_run)
     payload = json.loads(run_command.invoke({"cmd": "python -m pytest -q"}))
 
     assert payload["interpreter_rewritten"] is True

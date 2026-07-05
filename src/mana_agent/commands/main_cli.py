@@ -68,19 +68,19 @@ def main(
             args = ["--root-dir", str(root)]
             if model:
                 args += ["--model", model]
-            _invoke("chat", args)
+            _invoke_with_multi_agent_route(ctx, "chat", args, root=root, request="root --chat", entrypoint="root")
             return
         if analyze_mode:
             args = ["--repo", str(root)]
             if model:
                 args += ["--model", model]
-            _invoke("analyze", args)
+            _invoke_with_multi_agent_route(ctx, "analyze", args, root=root, request="root --analyze", entrypoint="root")
             return
         if plan_mode:
             args = ["--repo", str(root)]
             if model:
                 args += ["--model", model]
-            _invoke("plan", args)
+            _invoke_with_multi_agent_route(ctx, "plan", args, root=root, request="root --plan", entrypoint="root")
             return
 
         if not no_banner:
@@ -97,10 +97,10 @@ def main(
             console.print("\nGoodbye!")
             return
         if choice in {"1", "chat", "c"}:
-            _invoke("chat", ["--root-dir", str(root)])
+            _invoke_with_multi_agent_route(ctx, "chat", ["--root-dir", str(root)], root=root, request="root menu chat", entrypoint="root")
         elif choice in {"2", "analyze", "a"}:
-            _invoke("analyze", ["--repo", str(root)])
+            _invoke_with_multi_agent_route(ctx, "analyze", ["--repo", str(root)], root=root, request="root menu analyze", entrypoint="root")
         elif choice in {"3", "plan", "p"}:
-            _invoke("plan", ["--repo", str(root)])
+            _invoke_with_multi_agent_route(ctx, "plan", ["--repo", str(root)], root=root, request="root menu plan", entrypoint="root")
         else:
             console.print("Goodbye!")

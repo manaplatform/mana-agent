@@ -147,10 +147,10 @@ mana-agent chat --root-dir /path/to/project
 
 ## Running an approved mutation plan
 
-If you have an approved workflow/mutation plan id (for example: `mp_8550d39b9f86`), you can execute it deterministically against a target repository.
+If you have an approved workflow/mutation plan id (for example: `mp_887861bdc617`), you can execute it deterministically against a target repository.
 
 ```bash
-mana-agent run --root-dir /path/to/project --plan-id mp_8550d39b9f86
+mana-agent run --root-dir /path/to/project --plan-id mp_887861bdc617
 ```
 
 This runs the approved plan as an isolated, reproducible mutation/run (separating planning/approval from applying changes).
@@ -162,19 +162,13 @@ To execute an approved mutation plan id, use the following `MutationCommand(...)
 > Note: `MutationCommand(...)` is the internal executable representation for the plan. In normal usage you typically run the plan via `mana-agent run`.
 
 ```text
-MutationCommand(<plan-id>)
-```
-
-Example:
-
-```text
-MutationCommand(mp_7ec0ea2fc05d)
+MutationCommand(mp_887861bdc617)
 ```
 
 Example:
 
 ```bash
-mana-agent run --root-dir /path/to/project --plan-id mp_7ec0ea2fc05d
+mana-agent run --root-dir /path/to/project --plan-id mp_887861bdc617
 ```
 
 Useful global flags:
@@ -306,7 +300,7 @@ src/mana_agent/
   config/         Settings and environment handling
   dependencies/   Dependency graph support
   describe/       Repository description service
-  llm/            Chains, agents, prompts, tool managers, and workers
+  multi_agent/runtime/            Chains, agents, prompts, tool managers, and workers
   parsers/        Python and multi-language parser entry points
   renderers/      HTML report rendering
   services/       Index, ask, analyze, report, structure, and security services

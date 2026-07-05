@@ -1,6 +1,6 @@
 from importlib import import_module
 
-from mana_agent.llm import prompts
+from mana_agent.multi_agent.runtime import prompts
 
 
 _REQUIRED_PROMPTS = [
@@ -24,9 +24,9 @@ def test_prompt_constants_exist_and_non_empty() -> None:
 
 def test_prompt_import_smoke_for_dependent_modules() -> None:
     for module_name in [
-        "mana_agent.llm.ask_agent",
-        "mana_agent.llm.qna_chain",
-        "mana_agent.llm.repo_chain",
+        "mana_agent.multi_agent.runtime.ask_agent",
+        "mana_agent.multi_agent.runtime.qna_chain",
+        "mana_agent.multi_agent.runtime.repo_chain",
         "mana_agent.services.search_service",
     ]:
         import_module(module_name)

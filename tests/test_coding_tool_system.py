@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from mana_agent.llm.ask_agent import AskAgent
-from mana_agent.llm.coding_agent_models import CodingAgentStateMachine
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.coding_agent_models import CodingAgentStateMachine
 from mana_agent.tools.contracts import coding_tool_contracts
 from mana_agent.config.settings import default_logs_dir
 from mana_agent.tools.apply_patch import safe_apply_patch
