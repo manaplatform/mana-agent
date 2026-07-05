@@ -13,6 +13,7 @@ from mana_agent.multi_agent.core.types import (
     VerificationResult,
     utc_now,
 )
+from mana_agent.multi_agent.memory.service import MultiAgentMemoryService, task_fingerprint
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
 from mana_agent.multi_agent.taskboard.validators import validate_transition
 
@@ -27,8 +28,9 @@ def _append_unique(target: list[str], values: list[str]) -> None:
 
 
 class TaskBoard:
-    def __init__(self, root: str | Path = ".") -> None:
+    def __init__(self, root: str | Path = ".", *, memory_service: MultiAgentMemoryService | None = None) -> None:
         self.store = JsonStateStore(root)
+        self.memory_service = memory_service
         self.tasks: dict[str, TaskBoardItem] = {}
         self.load()
 
@@ -41,19 +43,64 @@ class TaskBoard:
         priority: int = 100,
         risk_level: RiskLevel = RiskLevel.LOW,
         owner_agent_id: str | None = None,
+        related_files: list[str] | None = None,
+        action_type: str = "task",
+        expected_output: str = "",
     ) -> TaskBoardItem:
         task_id = new_task_id()
+        goal = normalized_goal or user_request.strip()
+        duplicate_of = None
+        memory_bundle_id = None
+        fingerprint = task_fingerprint(
+            normalized_goal=goal,
+            action_type=action_type,
+            target_files=related_files or [],
+            expected_output=expected_output,
+            root=self.store.root,
+        )
+        if self.memory_service is not None:
+            memory_goal, fingerprint = self.memory_service.normalize_task(
+                goal=goal,
+                action_type=action_type,
+                target_files=related_files or [],
+                expected_output=expected_output,
+            )
+            record = self.memory_service.register_task(
+                task_id=task_id,
+                normalized_goal=memory_goal,
+                fingerprint=fingerprint,
+                assigned_agent_id=owner_agent_id or "",
+                related_files=related_files or [],
+            )
+            duplicate_of = record.duplicate_of
+            bundle = self.memory_service.build_bundle(
+                agent_id=owner_agent_id or "agent_taskboard",
+                agent_role="taskboard",
+                task_id=task_id,
+                target_files=related_files or [],
+            )
+            memory_bundle_id = bundle.bundle_id
         task = TaskBoardItem(
             task_id=task_id,
             parent_task_id=None,
             root_task_id=task_id,
             title=title,
             user_request=user_request,
-            normalized_goal=normalized_goal or user_request.strip(),
-            status=TaskStatus.NEW,
+            normalized_goal=goal,
+            status=TaskStatus.SKIPPED if duplicate_of else TaskStatus.NEW,
             priority=priority,
             risk_level=risk_level,
             owner_agent_id=owner_agent_id,
+            blockers=[f"duplicate_of:{duplicate_of}"] if duplicate_of else [],
+            memory_status={
+                "duplicate_checked": True,
+                "duplicate_of": duplicate_of,
+                "cache_hits": 0,
+                "file_reads_reused": 0,
+                "memory_bundle_id": memory_bundle_id,
+                "last_memory_check_at": utc_now(),
+                "fingerprint": fingerprint,
+            },
         )
         self.tasks[task_id] = task
         self._record("task.created", task)
@@ -74,6 +121,14 @@ class TaskBoard:
             priority=parent.priority,
             risk_level=parent.risk_level,
             owner_agent_id=owner_agent_id,
+            memory_status={
+                "duplicate_checked": False,
+                "duplicate_of": None,
+                "cache_hits": 0,
+                "file_reads_reused": 0,
+                "memory_bundle_id": None,
+                "last_memory_check_at": utc_now(),
+            },
         )
         self.tasks[task_id] = task
         self._record("task.created", task)

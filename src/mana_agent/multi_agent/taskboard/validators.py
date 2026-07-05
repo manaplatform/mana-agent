@@ -3,17 +3,17 @@ from __future__ import annotations
 from mana_agent.multi_agent.core.errors import InvalidTaskTransition
 from mana_agent.multi_agent.core.types import TaskBoardItem, TaskStatus
 
-_TERMINAL = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}
+_TERMINAL = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED}
 _ALLOWED: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.DISCUSSING: {TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.ROUTED: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.WAITING_FOR_TOOLS: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.QUEUED: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.IN_PROGRESS: {TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.NEEDS_REVIEW: {TaskStatus.VERIFYING, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.VERIFYING: {TaskStatus.DONE, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED},
+    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.DISCUSSING: {TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.ROUTED: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.WAITING_FOR_TOOLS: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.QUEUED: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.IN_PROGRESS: {TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.NEEDS_REVIEW: {TaskStatus.VERIFYING, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.VERIFYING: {TaskStatus.DONE, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
 }
 
 

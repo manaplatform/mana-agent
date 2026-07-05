@@ -32,6 +32,7 @@ from mana_agent.multi_agent.core.types import (
     QueueJobType,
     TaskStatus,
 )
+from mana_agent.multi_agent.memory.service import MultiAgentMemoryService
 from mana_agent.multi_agent.runtime.model_levels import MODEL_LEVEL_2_CODING, model_level_for_role
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
@@ -70,6 +71,206 @@ def test_taskboard_create_update_save_load_and_invalid_transition(tmp_path):
     assert loaded.evidence == ["Evidence row."]
     with pytest.raises(InvalidTaskTransition):
         reloaded.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_duplicate_task_not_created_twice(tmp_path):
+    memory = MultiAgentMemoryService(root=tmp_path)
+    board = TaskBoard(tmp_path, memory_service=memory)
+
+    first = board.create_task(title="Docs", user_request="Update README.md", related_files=["README.md"])
+    second = board.create_task(title="Docs again", user_request="Update README.md", related_files=["./README.md"])
+
+    assert first.memory_status["duplicate_checked"] is True
+    assert second.memory_status["duplicate_of"] == first.task_id
+    assert second.status == TaskStatus.SKIPPED
+    assert memory.task_records[second.task_id].duplicate_of == first.task_id
+
+
+def test_duplicate_task_merged_into_existing_task(tmp_path):
+    memory = MultiAgentMemoryService(root=tmp_path)
+    board = TaskBoard(tmp_path, memory_service=memory)
+    first = board.create_task(title="Docs", user_request="Update README.md", related_files=["README.md"])
+    duplicate = board.create_task(title="Docs duplicate", user_request="Update README.md", related_files=["README.md"])
+
+    assert duplicate.status == TaskStatus.SKIPPED
+    assert board.get_task(duplicate.task_id).blockers == [f"duplicate_of:{first.task_id}"]
+
+
+def test_queue_rejects_duplicate_fingerprint(tmp_path):
+    memory = MultiAgentMemoryService(root=tmp_path)
+    board = TaskBoard(tmp_path, memory_service=memory)
+    task = board.create_task(title="Queue", user_request="run status")
+    queue = QueueManager(tmp_path, taskboard=board, memory_service=memory)
+
+    first = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_tool_0001",
+        job_type=QueueJobType.GIT_STATUS,
+        payload={},
+        purpose="Inspect status",
+    )
+    second = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_tool_0001",
+        job_type=QueueJobType.GIT_STATUS,
+        payload={},
+        purpose="Inspect status again",
+    )
+
+    assert first.status == QueueJobStatus.QUEUED
+    assert second.status == QueueJobStatus.CANCELLED
+    assert second.duplicate_of == first.job_id
+
+
+def test_file_read_cache_hit_when_unchanged(tmp_path):
+    (tmp_path / "README.md").write_text("# One\n", encoding="utf-8")
+    memory = MultiAgentMemoryService(root=tmp_path)
+
+    first_content, first_record, first_hit = memory.read_file_with_memory(
+        file_path="README.md",
+        task_id="task_1",
+        agent_id="agent_coding_0001",
+    )
+    second_content, second_record, second_hit = memory.read_file_with_memory(
+        file_path="./README.md",
+        task_id="task_1",
+        agent_id="agent_coding_0001",
+    )
+
+    assert first_content == second_content == "# One\n"
+    assert first_hit is False
+    assert second_hit is True
+    assert first_record.content_hash == second_record.content_hash
+
+
+def test_file_read_cache_miss_when_hash_changed(tmp_path):
+    target = tmp_path / "README.md"
+    target.write_text("# One\n", encoding="utf-8")
+    memory = MultiAgentMemoryService(root=tmp_path)
+    memory.read_file_with_memory(file_path="README.md", task_id="task_1", agent_id="agent_coding_0001")
+
+    target.write_text("# Two\n", encoding="utf-8")
+    content, record, cache_hit = memory.read_file_with_memory(
+        file_path="README.md",
+        task_id="task_1",
+        agent_id="agent_coding_0001",
+    )
+
+    assert content == "# Two\n"
+    assert cache_hit is False
+    assert record.changed_since_last_read is True
+
+
+def test_agent_receives_scoped_memory_bundle(tmp_path):
+    memory = MultiAgentMemoryService(root=tmp_path)
+    normalized, fingerprint = memory.normalize_task(goal="Update docs", target_files=["README.md"])
+    memory.register_task(task_id="task_1", normalized_goal=normalized, fingerprint=fingerprint, related_files=["README.md"])
+
+    bundle = memory.build_bundle(
+        agent_id="agent_coding_0001",
+        agent_role=AgentRole.CODING,
+        task_id="task_1",
+        target_files=["README.md"],
+    )
+
+    assert bundle.agent_id == "agent_coding_0001"
+    assert bundle.privilege_level == "coding"
+    assert bundle.relevant_task_memory[0]["task_id"] == "task_1"
+
+
+def test_lower_agent_cannot_access_upper_memory(tmp_path):
+    (tmp_path / "secret.md").write_text("upper only\n", encoding="utf-8")
+    memory = MultiAgentMemoryService(root=tmp_path)
+    memory.project_memory.append({"fact": "full project architecture"})
+    memory.read_file_with_memory(file_path="secret.md", task_id="task_upper", agent_id="agent_main_0001")
+
+    lower_bundle = memory.build_bundle(
+        agent_id="agent_coding_0001",
+        agent_role=AgentRole.CODING,
+        task_id="task_lower",
+        target_files=["README.md"],
+    )
+    upper_bundle = memory.build_bundle(
+        agent_id="agent_main_0001",
+        agent_role=AgentRole.MAIN,
+        task_id="task_lower",
+    )
+
+    assert lower_bundle.relevant_project_memory == []
+    assert lower_bundle.relevant_file_cache == []
+    assert upper_bundle.relevant_project_memory == [{"fact": "full project architecture"}]
+    assert upper_bundle.relevant_file_cache[0]["file_path"] == "secret.md"
+
+
+def test_tool_result_reused_when_args_same(tmp_path):
+    (tmp_path / "README.md").write_text("needle\n", encoding="utf-8")
+    memory = MultiAgentMemoryService(root=tmp_path)
+    board = TaskBoard(tmp_path, memory_service=memory)
+    task = board.create_task(title="Search", user_request="search needle")
+    queue = QueueManager(tmp_path, taskboard=board, memory_service=memory)
+
+    first = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_tool_0001",
+        job_type=QueueJobType.REPO_SEARCH,
+        payload={"query": "needle"},
+    )
+    queue.run_next()
+    memory.queue_fingerprints.clear()
+    second = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_tool_0001",
+        job_type=QueueJobType.REPO_SEARCH,
+        payload={"query": "needle"},
+    )
+    queue.run_next()
+
+    assert first.result is not None
+    assert second.result is not None
+    assert second.result["cache_hit"] is True
+    assert second.result["source"] == "memory"
+
+
+def test_write_tool_not_reused_as_execution(tmp_path):
+    (tmp_path / "README.md").write_text("old\n", encoding="utf-8")
+    memory = MultiAgentMemoryService(root=tmp_path)
+    memory.record_tool_execution(
+        tool_name="apply_patch",
+        args={"patch": "*** Begin Patch\n*** End Patch\n"},
+        task_id="task_1",
+        agent_id="agent_coding_0001",
+        status="ok",
+        result_summary="patched",
+        result={"ok": True},
+    )
+
+    cached = memory.get_reusable_tool_result(
+        tool_name="apply_patch",
+        args={"patch": "*** Begin Patch\n*** End Patch\n"},
+    )
+
+    assert cached is None
+
+
+def test_verifier_uses_previous_memory(tmp_path):
+    memory = MultiAgentMemoryService(root=tmp_path)
+    memory.record_verification(
+        task_id="task_1",
+        verifier_agent_id="agent_verifier_0001",
+        checked_files=["README.md"],
+        tests_run=["python -m compileall src"],
+        result="failed",
+        findings=["planned_verification_not_executed"],
+    )
+
+    bundle = memory.build_bundle(
+        agent_id="agent_verifier_0001",
+        agent_role=AgentRole.VERIFIER,
+        task_id="task_1",
+        target_files=["README.md"],
+    )
+
+    assert bundle.verification_history[0]["tests_run"] == ["python -m compileall src"]
 
 
 def test_message_bus_send_broadcast_and_thread(tmp_path):

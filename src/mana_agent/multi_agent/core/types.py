@@ -46,6 +46,7 @@ class TaskStatus(_ValueEnum):
     BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 class RiskLevel(_ValueEnum):
@@ -201,6 +202,7 @@ class TaskBoardItem:
     handoff_records: list[HandoffRecord] = field(default_factory=list)
     verification_commands: list[str] = field(default_factory=list)
     verification_results: list[VerificationResult] = field(default_factory=list)
+    memory_status: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -222,6 +224,10 @@ class QueueJob:
     requires_write_lock: bool = False
     result: dict[str, Any] | None = None
     error: str | None = None
+    fingerprint: str = ""
+    memory_bundle_id: str | None = None
+    related_files: list[str] = field(default_factory=list)
+    duplicate_of: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

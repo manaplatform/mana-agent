@@ -97,6 +97,13 @@ class BaseAgent:
     def memory_snapshot(self, max_chars: int = 2000) -> str:
         if self.memory is None:
             return "Multi-Agent Memory Snapshot\n- none available"
+        scoped = self.memory.scoped_bundle(
+            agent_id=self.agent_id,
+            agent_role=self.role.value,
+            task_id="agent_snapshot",
+        )
+        if scoped is not None:
+            return scoped.to_prompt_block()[:max_chars]
         return self.memory.snapshot(self.agent_id, max_chars=max_chars)
 
     def _remember_only(self, summary: str, *, scope: str = "agent") -> None:

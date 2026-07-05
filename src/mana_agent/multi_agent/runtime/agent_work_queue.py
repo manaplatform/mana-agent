@@ -86,6 +86,7 @@ from mana_agent.multi_agent.runtime.mutation_plan import (
     validate_mutation_plan,
 )
 from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.multi_agent.memory.service import MultiAgentMemoryService
 from mana_agent.services.coding_todo_service import TodoService
 from mana_agent.tools.apply_patch import safe_apply_patch
 from mana_agent.tools.repository import apply_patch_batch
@@ -359,6 +360,8 @@ class WorkItem(BaseModel):
     created_by: str = "planner"
     result_summary: str = ""
     error: str = ""
+    memory_bundle_id: str = ""
+    duplicate_of: str = ""
     files_read: list[str] = Field(default_factory=list)
     files_changed: list[str] = Field(default_factory=list)
     files_discovered: list[str] = Field(default_factory=list)
@@ -459,8 +462,9 @@ class AgentWorkQueue:
     ``blocked`` rather than silently retried forever.
     """
 
-    def __init__(self, *, bus: EventBus | None = None) -> None:
+    def __init__(self, *, bus: EventBus | None = None, memory_service: MultiAgentMemoryService | None = None) -> None:
         self._bus = bus or EventBus()
+        self._memory_service = memory_service
         self._items: dict[str, WorkItem] = {}
         self._order: list[str] = []
         self._fingerprints: dict[str, str] = {}  # fingerprint -> item id
@@ -474,6 +478,15 @@ class AgentWorkQueue:
     def submit(self, item: WorkItem) -> bool:
         """Add a job. Returns ``False`` if a duplicate was suppressed."""
         with self._lock:
+            if self._memory_service is not None:
+                accepted, existing_id = self._memory_service.register_queue_item(
+                    queue_item_id=item.id,
+                    fingerprint=item.fingerprint,
+                )
+                if not accepted:
+                    item.duplicate_of = existing_id or ""
+                    self._emit("job_skipped_duplicate", item, status="skipped")
+                    return False
             existing_id = self._fingerprints.get(item.fingerprint)
             if existing_id is not None:
                 existing = self._items[existing_id]

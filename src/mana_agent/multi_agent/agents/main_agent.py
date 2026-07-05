@@ -21,6 +21,7 @@ from mana_agent.multi_agent.routing.router import Router
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.memory.memory_bundle import AgentMemoryBundle
 from mana_agent.multi_agent.memory.repo_context import RepoContext
+from mana_agent.multi_agent.memory.service import MultiAgentMemoryService
 from mana_agent.multi_agent.memory.task_memory import TaskMemory
 
 @dataclass
@@ -36,15 +37,17 @@ class MainAgentResult:
 class MainAgent:
     def __init__(self, root: str | Path = ".") -> None:
         self.root = Path(root).resolve()
+        self.memory_service = MultiAgentMemoryService(root=self.root)
         self.memory = AgentMemoryBundle(
             repo_context=RepoContext(root=str(self.root)),
             task_memory=TaskMemory(),
+            service=self.memory_service,
         )
-        self.taskboard = TaskBoard(self.root)
+        self.taskboard = TaskBoard(self.root, memory_service=self.memory_service)
         self.message_bus = MessageBus(self.root)
         self.registry = AgentRegistry()
         self.router = Router()
-        self.queue_manager = QueueManager(self.root, taskboard=self.taskboard)
+        self.queue_manager = QueueManager(self.root, taskboard=self.taskboard, memory_service=self.memory_service)
         self.decision_room = DecisionRoom(self.root, self.taskboard, self.message_bus)
         self.agents = self._build_agents()
 
@@ -58,11 +61,39 @@ class MainAgent:
             main_node.agent_id,
             f"Main agent received request via {entrypoint}: {request[:500]}",
         )
+        self.memory_service.record_decision(
+            agent_id=main_node.agent_id,
+            task_id="pending",
+            decision_type="main_request_received",
+            input_summary=request,
+            memory_used=[],
+            decision="create_or_reuse_task",
+            reason="main agent checks memory before task creation",
+        )
         task = self.taskboard.create_task(
             title=title,
             user_request=request,
             normalized_goal=f"{entrypoint}: {request}",
             owner_agent_id=main_node.agent_id,
+        )
+        duplicate_of = str(task.memory_status.get("duplicate_of") or "")
+        if duplicate_of:
+            self.memory_service.update_task(
+                task.task_id,
+                status=TaskStatus.SKIPPED.value,
+                result_summary=f"duplicate_of:{duplicate_of}",
+            )
+            answer = f"Skipped duplicate task; reused existing task {duplicate_of}."
+            self.memory.remember_task(answer)
+            return MainAgentResult(task.task_id, "skipped", "duplicate", answer, [], [])
+        self.memory_service.record_decision(
+            agent_id=main_node.agent_id,
+            task_id=task.task_id,
+            decision_type="route_request",
+            input_summary=request,
+            memory_used=[str(task.memory_status.get("memory_bundle_id") or "")],
+            decision="query_router",
+            reason="route after task duplicate and bundle checks",
         )
         route = self.router.route(task_id=task.task_id, user_request=f"{entrypoint} {request}")
         self.memory.remember_task(

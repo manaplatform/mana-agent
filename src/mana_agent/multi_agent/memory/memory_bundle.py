@@ -5,6 +5,7 @@ from typing import Any
 
 from mana_agent.multi_agent.memory.agent_memory import AgentMemory
 from mana_agent.multi_agent.memory.repo_context import RepoContext
+from mana_agent.multi_agent.memory.service import MultiAgentMemoryService, ScopedMemoryBundle
 from mana_agent.multi_agent.memory.task_memory import TaskMemory
 
 
@@ -22,6 +23,7 @@ class AgentMemoryBundle:
     repo_context: RepoContext
     task_memory: TaskMemory
     agent_memories: dict[str, AgentMemory] = field(default_factory=dict)
+    service: MultiAgentMemoryService | None = None
 
     def for_agent(self, agent_id: str) -> AgentMemory:
         key = str(agent_id or "").strip()
@@ -45,6 +47,27 @@ class AgentMemoryBundle:
         text = _clean(fact)
         if text and text not in self.repo_context.facts:
             self.repo_context.facts.append(text)
+            if self.service is not None:
+                self.service.project_memory.append({"fact": text})
+
+    def scoped_bundle(
+        self,
+        *,
+        agent_id: str,
+        agent_role: str,
+        task_id: str,
+        parent_task_id: str | None = None,
+        target_files: list[str] | None = None,
+    ) -> ScopedMemoryBundle | None:
+        if self.service is None:
+            return None
+        return self.service.build_bundle(
+            agent_id=agent_id,
+            agent_role=agent_role,
+            task_id=task_id,
+            parent_task_id=parent_task_id,
+            target_files=target_files,
+        )
 
     def snapshot(
         self,

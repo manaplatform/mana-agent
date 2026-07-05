@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-05 (memory-first multi-agent cache integration)
+
+- Added a shared multi-agent memory service with normalized task fingerprints, task/file/tool/decision/verification records, scoped memory bundles, and hierarchy-based privilege filtering.
+- Wired memory into MainAgent routing, TaskBoard memory status, QueueManager duplicate rejection, runtime AgentWorkQueue duplicate traces, and ToolsManager file/tool cache reuse while keeping write tools non-reusable.
+- Added regression coverage for duplicate task detection and merge markers, queue duplicate rejection, file read cache hit/miss behavior, scoped bundles, lower-agent access limits, reusable read-only tool results, write-tool history only, and verifier memory reuse.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py -q` passed with 31 tests; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_work_queue.py tests/test_multi_agent_core.py -q` passed with 88 tests; `PYTHONPATH=src .venv/bin/python -m compileall src/mana_agent/multi_agent` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/multi_agent tests/test_multi_agent_core.py --select F,E9` passed.
+
 ## 2026-07-05 (multi-agent routing hardening)
 
 - Added explicit task-size classification and route evidence for simple, medium, and large multi-agent requests, including dynamic repo-inventory/docs subagent creation and deactivation recorded on the TaskBoard.
