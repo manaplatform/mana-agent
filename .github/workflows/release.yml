@@ -1,0 +1,323 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12"
+  PYTHONPATH: src
+  NO_COLOR: "1"
+  CLICOLOR: "0"
+  TERM: dumb
+
+jobs:
+  package:
+    name: Build Python package
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if uv sync --all-extras --dev; then
+            echo "MANA_PYTHON=uv run python" >> "$GITHUB_ENV"
+            uv pip install --python .venv build pytest
+          else
+            python -m pip install --upgrade pip
+            if ! python -m pip install -e ".[dev]"; then
+              python -m pip install -e .
+              python -m pip install pytest
+            fi
+            python -m pip install build
+            echo "MANA_PYTHON=python" >> "$GITHUB_ENV"
+          fi
+
+      - name: Detect optional tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q '^\[tool\.ruff' pyproject.toml || [ -f ruff.toml ] || [ -f .ruff.toml ]; then
+            echo "HAS_RUFF=1" >> "$GITHUB_ENV"
+            if [ "${MANA_PYTHON}" = "uv run python" ]; then
+              uv pip install --python .venv ruff
+            else
+              python -m pip install ruff
+            fi
+          else
+            echo "HAS_RUFF=0" >> "$GITHUB_ENV"
+          fi
+          if [ -d tests ]; then
+            echo "HAS_TESTS=1" >> "$GITHUB_ENV"
+          else
+            echo "HAS_TESTS=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compile
+        shell: bash
+        run: $MANA_PYTHON -m compileall -q src
+
+      - name: Lint
+        if: env.HAS_RUFF == '1'
+        shell: bash
+        run: $MANA_PYTHON -m ruff check .
+
+      - name: Test
+        if: env.HAS_TESTS == '1'
+        shell: bash
+        run: $MANA_PYTHON -m pytest -q
+
+      - name: Build package
+        shell: bash
+        run: $MANA_PYTHON -m build
+
+      - name: Generate package checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          for path in sorted(Path("dist").iterdir()):
+              if path.is_file() and path.suffix != ".sha256":
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  Path(f"{path}.sha256").write_text(
+                      f"{digest}  {path.name}\n",
+                      encoding="utf-8",
+                  )
+          PY
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mana-agent-python-package
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  binaries:
+    name: Build ${{ matrix.asset_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: mana-agent-linux-x64
+            pyinstaller_name: mana-agent
+          - os: macos-13
+            asset_name: mana-agent-macos-x64
+            pyinstaller_name: mana-agent
+          - os: macos-14
+            asset_name: mana-agent-macos-arm64
+            pyinstaller_name: mana-agent
+          - os: windows-latest
+            asset_name: mana-agent-windows-x64.exe
+            pyinstaller_name: mana-agent.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if uv sync --all-extras --dev; then
+            echo "MANA_PYTHON=uv run python" >> "$GITHUB_ENV"
+            echo "MANA_PYINSTALLER=uv run pyinstaller" >> "$GITHUB_ENV"
+            uv pip install --python .venv build pyinstaller pytest
+          else
+            python -m pip install --upgrade pip
+            if ! python -m pip install -e ".[dev]"; then
+              python -m pip install -e .
+              python -m pip install pytest
+            fi
+            python -m pip install build pyinstaller
+            echo "MANA_PYTHON=python" >> "$GITHUB_ENV"
+            echo "MANA_PYINSTALLER=pyinstaller" >> "$GITHUB_ENV"
+          fi
+
+      - name: Detect optional tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q '^\[tool\.ruff' pyproject.toml || [ -f ruff.toml ] || [ -f .ruff.toml ]; then
+            echo "HAS_RUFF=1" >> "$GITHUB_ENV"
+            if [ "${MANA_PYTHON}" = "uv run python" ]; then
+              uv pip install --python .venv ruff
+            else
+              python -m pip install ruff
+            fi
+          else
+            echo "HAS_RUFF=0" >> "$GITHUB_ENV"
+          fi
+          if [ -d tests ]; then
+            echo "HAS_TESTS=1" >> "$GITHUB_ENV"
+          else
+            echo "HAS_TESTS=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compile
+        shell: bash
+        run: $MANA_PYTHON -m compileall -q src
+
+      - name: Lint
+        if: env.HAS_RUFF == '1'
+        shell: bash
+        run: $MANA_PYTHON -m ruff check .
+
+      - name: Test
+        if: env.HAS_TESTS == '1'
+        shell: bash
+        run: $MANA_PYTHON -m pytest -q
+
+      - name: Build standalone executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${MANA_PYINSTALLER} --onefile --clean --name mana-agent scripts/mana_agent_entry.py
+
+      - name: Prepare binary artifact
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+          import os
+          import shutil
+          import stat
+
+          asset_name = "${{ matrix.asset_name }}"
+          built_name = "${{ matrix.pyinstaller_name }}"
+          source = Path("dist") / built_name
+          target_dir = Path("release-assets")
+          target_dir.mkdir(exist_ok=True)
+          target = target_dir / asset_name
+          shutil.copy2(source, target)
+          if os.name != "nt":
+              target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          target.with_name(f"{target.name}.sha256").write_text(
+              f"{digest}  {target.name}\n",
+              encoding="utf-8",
+          )
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      - package
+      - binaries
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import sys
+
+          root = Path("release-assets")
+          required = {
+              "mana-agent-linux-x64",
+              "mana-agent-linux-x64.sha256",
+              "mana-agent-macos-x64",
+              "mana-agent-macos-x64.sha256",
+              "mana-agent-macos-arm64",
+              "mana-agent-macos-arm64.sha256",
+              "mana-agent-windows-x64.exe",
+              "mana-agent-windows-x64.exe.sha256",
+          }
+          existing = {path.name for path in root.iterdir() if path.is_file()}
+          missing = sorted(required - existing)
+          wheels = sorted(root.glob("*.whl"))
+          sdists = sorted(root.glob("*.tar.gz"))
+          if missing or not wheels or not sdists:
+              print(f"Missing assets: {missing}", file=sys.stderr)
+              print(f"Wheels: {[p.name for p in wheels]}", file=sys.stderr)
+              print(f"Sdists: {[p.name for p in sdists]}", file=sys.stderr)
+              raise SystemExit(1)
+
+          for asset in sorted(path for path in root.iterdir() if path.is_file() and path.suffix != ".sha256"):
+              checksum = asset.with_name(f"{asset.name}.sha256")
+              if not checksum.exists():
+                  raise SystemExit(f"Missing checksum for {asset.name}")
+              digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+              expected = checksum.read_text(encoding="utf-8").split()[0]
+              if digest != expected:
+                  raise SystemExit(f"Checksum mismatch for {asset.name}")
+          PY
+
+      - name: Move latest-dev tag
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f latest-dev "$GITHUB_SHA"
+          git push origin latest-dev --force
+
+      - name: Publish stable release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: false
+
+      - name: Publish latest dev prerelease
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-dev
+          name: latest-dev
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          prerelease: true
+          generate_release_notes: true
+          make_latest: false
+          overwrite_files: true

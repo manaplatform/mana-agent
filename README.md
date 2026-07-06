@@ -119,7 +119,13 @@ The default dependency set uses CPU FAISS for local vector search. Redis/RQ supp
 
 ## Installation
 
-Create and activate a virtual environment:
+Install the latest Python package directly from GitHub:
+
+```bash
+pipx install git+https://github.com/ah2727/mana-agent.git
+```
+
+Or create and activate a virtual environment for local editable development:
 
 ```bash
 python3 -m venv .venv
@@ -143,6 +149,44 @@ Confirm the CLI is available:
 
 ```bash
 mana-agent --help
+```
+
+### Latest dev binaries
+
+Download the latest development prerelease binary from the `latest-dev` release.
+
+Linux x64:
+
+```bash
+curl -L -o mana-agent https://github.com/ah2727/mana-agent/releases/download/latest-dev/mana-agent-linux-x64
+chmod +x mana-agent
+sudo mv mana-agent /usr/local/bin/mana-agent
+mana-agent --help
+```
+
+macOS Apple Silicon:
+
+```bash
+curl -L -o mana-agent https://github.com/ah2727/mana-agent/releases/download/latest-dev/mana-agent-macos-arm64
+chmod +x mana-agent
+sudo mv mana-agent /usr/local/bin/mana-agent
+mana-agent --help
+```
+
+macOS Intel:
+
+```bash
+curl -L -o mana-agent https://github.com/ah2727/mana-agent/releases/download/latest-dev/mana-agent-macos-x64
+chmod +x mana-agent
+sudo mv mana-agent /usr/local/bin/mana-agent
+mana-agent --help
+```
+
+Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -Uri "https://github.com/ah2727/mana-agent/releases/download/latest-dev/mana-agent-windows-x64.exe" -OutFile "mana-agent.exe"
+.\mana-agent.exe --help
 ```
 
 ---

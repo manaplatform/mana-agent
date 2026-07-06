@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-06 (GitHub release workflow)
+
+- Added a GitHub Actions release workflow for main-branch `latest-dev` prereleases, version-tag stable releases, Python package artifacts, platform standalone binaries, and SHA256 checksums.
+- Added a PyInstaller launcher that calls the existing Mana-Agent Typer CLI without duplicating command logic.
+- Updated README installation instructions with pipx and latest development binary download examples.
+- Verification: pending.
+
 ## 2026-07-06 (full-screen chat answer history)
 
 - Added explicit chat conversation history to `ChatUIState` and made the full-screen Chat pane render user/assistant turns before low-level routing events.
