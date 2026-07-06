@@ -216,6 +216,17 @@ To execute an approved mutation plan id, `mana-agent run` compiles the plan into
 MutationCommand(mp_9d694e17a6be)
 ```
 
+### Screenshot: full-screen chat panel
+
+<a href="https://ibb.co/zTxbQSR8"><img src="https://i.ibb.co/NdCptLj1/Screenshot-2026-07-06-at-6-59-46-PM.png" alt="Screenshot-2026-07-06-at-6-59-46-PM" border="0"></a>
+
+You can see everything in this panel (chat panes, steps/tool activity, and related UI elements) at a glance.
+
+#### Screenshot caption
+
+The panel shows the full chat UI and the tool/activity panes, so you can follow each step while the approved mutation plan executes.
+
+
 Example:
 
 ```bash

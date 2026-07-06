@@ -2578,16 +2578,27 @@ def chat(
                         show_all_logs=_cli_verbose_enabled(),
                     )
                     set_active_tool_activity(activity)
-                    use_live_activity = _use_live_tool_activity(console)
-                    try:
-                        live_context = (
-                            Live(activity, console=console, refresh_per_second=12, transient=True)
-                            if use_live_activity
-                            else nullcontext()
-                        )
-                        with live_context:
+                    use_live_activity = bool(
+                        not fullscreen_chat_ui_active()
+                        and _use_live_tool_activity(console)
+                    )
+                    cycle_result: dict[str, object] = {}
+
+                    def _run_generation_cycles() -> None:
+                        nonlocal active_flow_id
+                        nonlocal request_for_generation
+                        nonlocal turn_resumed_from_pass_cap
+                        nonlocal turn_full_auto_resume_cycles
+                        nonlocal turn_full_auto_pass_checkpoints_emitted
+                        nonlocal turn_full_auto_passes_total
+                        nonlocal turn_resume_run_id
+
+                        old_quiet = bool(getattr(console, "quiet", False))
+                        if fullscreen_chat_ui_active():
+                            console.quiet = True
+                        try:
                             while True:
-                                result, debug_tail = _run_with_live_buffer(
+                                cycle_payload, cycle_debug_tail = _run_with_live_buffer(
                                     console,
                                     spinner_text="Coding…",
                                     fn=_call,
@@ -2596,21 +2607,23 @@ def chat(
                                     activity=activity,
                                     manage_live=False,
                                 )
+                                cycle_result["result"] = cycle_payload
+                                cycle_result["debug_tail"] = cycle_debug_tail
                                 if not (
                                     chat_auto_continue
                                     and execute_plan_now
-                                    and isinstance(result, dict)
+                                    and isinstance(cycle_payload, dict)
                                 ):
                                     break
-                                turn_full_auto_passes_total += _ingest_full_auto_pass_payload(result)
-                                terminal_reason = str((result or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
-                                flow_from_cycle = (result or {}).get("flow_id")
+                                turn_full_auto_passes_total += _ingest_full_auto_pass_payload(cycle_payload)
+                                terminal_reason = str((cycle_payload or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
+                                flow_from_cycle = (cycle_payload or {}).get("flow_id")
                                 if isinstance(flow_from_cycle, str) and flow_from_cycle.strip():
                                     active_flow_id = flow_from_cycle.strip()
-                                run_from_cycle = (result or {}).get("run_id")
+                                run_from_cycle = (cycle_payload or {}).get("run_id")
                                 if isinstance(run_from_cycle, str) and run_from_cycle.strip():
                                     turn_resume_run_id = run_from_cycle.strip()
-                                run_status = str((result or {}).get("run_status", "") or "").strip().lower()
+                                run_status = str((cycle_payload or {}).get("run_status", "") or "").strip().lower()
                                 if terminal_reason != "pass_cap_reached" and run_status != "needs_resume":
                                     break
                                 turn_resumed_from_pass_cap = True
@@ -2624,6 +2637,28 @@ def chat(
                                     terminal_reason=terminal_reason,
                                 )
                                 continue
+                        finally:
+                            console.quiet = old_quiet
+
+                    try:
+                        if fullscreen_chat_ui_active():
+                            from mana_agent.cli.fullscreen_chat import run_fullscreen_worker
+
+                            run_fullscreen_worker(
+                                chat_ui_state,
+                                title="Coding…",
+                                worker=_run_generation_cycles,
+                            )
+                        else:
+                            live_context = (
+                                Live(activity, console=console, refresh_per_second=12, transient=True)
+                                if use_live_activity
+                                else nullcontext()
+                            )
+                            with live_context:
+                                _run_generation_cycles()
+                        result = cycle_result.get("result")
+                        debug_tail = str(cycle_result.get("debug_tail", "") or "")
                     finally:
                         set_active_tool_activity(None)
                         if not fullscreen_chat_ui_active():
