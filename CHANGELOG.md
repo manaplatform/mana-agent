@@ -7,7 +7,7 @@ All notable repository changes should be recorded here.
 - Added a GitHub Actions release workflow for main-branch `latest-dev` prereleases, version-tag stable releases, Python package artifacts, platform standalone binaries, and SHA256 checksums.
 - Added a PyInstaller launcher that calls the existing Mana-Agent Typer CLI without duplicating command logic.
 - Updated README installation instructions with pipx and latest development binary download examples.
-- Verification: pending.
+- Verification: `PYTHONPATH=src .venv/bin/python -m compileall -q src scripts/mana_agent_entry.py` passed; `PYTHONPATH=src .venv/bin/python -m pytest -q` passed with 608 tests and 18 warnings; `.venv/bin/python -m build` passed; `.venv/bin/pyinstaller --onefile --clean --collect-data mana_agent --name mana-agent scripts/mana_agent_entry.py` passed; `dist/mana-agent --help` passed; release workflow YAML parsed with PyYAML; `git diff --check` passed.
 
 ## 2026-07-06 (full-screen chat answer history)
 

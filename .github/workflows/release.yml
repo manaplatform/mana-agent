@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           if uv sync --all-extras --dev; then
             echo "MANA_PYTHON=uv run python" >> "$GITHUB_ENV"
-            uv pip install --python .venv build pytest
+            uv pip install build pytest
           else
             python -m pip install --upgrade pip
             if ! python -m pip install -e ".[dev]"; then
@@ -56,7 +56,7 @@ jobs:
           if grep -q '^\[tool\.ruff' pyproject.toml || [ -f ruff.toml ] || [ -f .ruff.toml ]; then
             echo "HAS_RUFF=1" >> "$GITHUB_ENV"
             if [ "${MANA_PYTHON}" = "uv run python" ]; then
-              uv pip install --python .venv ruff
+              uv pip install ruff
             else
               python -m pip install ruff
             fi
@@ -150,7 +150,7 @@ jobs:
           if uv sync --all-extras --dev; then
             echo "MANA_PYTHON=uv run python" >> "$GITHUB_ENV"
             echo "MANA_PYINSTALLER=uv run pyinstaller" >> "$GITHUB_ENV"
-            uv pip install --python .venv build pyinstaller pytest
+            uv pip install build pyinstaller pytest
           else
             python -m pip install --upgrade pip
             if ! python -m pip install -e ".[dev]"; then
@@ -169,7 +169,7 @@ jobs:
           if grep -q '^\[tool\.ruff' pyproject.toml || [ -f ruff.toml ] || [ -f .ruff.toml ]; then
             echo "HAS_RUFF=1" >> "$GITHUB_ENV"
             if [ "${MANA_PYTHON}" = "uv run python" ]; then
-              uv pip install --python .venv ruff
+              uv pip install ruff
             else
               python -m pip install ruff
             fi
@@ -200,7 +200,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ${MANA_PYINSTALLER} --onefile --clean --name mana-agent scripts/mana_agent_entry.py
+          ${MANA_PYINSTALLER} --onefile --clean --collect-data mana_agent --name mana-agent scripts/mana_agent_entry.py
 
       - name: Prepare binary artifact
         shell: python
