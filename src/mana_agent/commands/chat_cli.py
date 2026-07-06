@@ -1553,6 +1553,7 @@ def chat(
                 },
             )
             session_turns.append(turn_record)
+            chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
             _ = rendered_dynamic
             _render_answer_header(console)
             console.print(Markdown(answer_text) if answer_text else "[dim](no answer text)[/dim]")
@@ -1760,6 +1761,7 @@ def chat(
                     coding_state={"flow_id": active_flow_id},
                 )
                 session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
                 _log_chat_turn(
                     run_logger,
                     turn=turn_record,
@@ -1829,7 +1831,6 @@ def chat(
                         },
                     ).finish(status="success")
                 )
-                _finish_ui_turn(current_turn_id)
                 turn_record = ChatTurnTelemetry(
                     turn_index=len(session_turns) + 1,
                     timestamp=_now_iso(),
@@ -1845,6 +1846,8 @@ def chat(
                     coding_state={"flow_id": active_flow_id},
                 )
                 session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
+                _finish_ui_turn(current_turn_id)
                 _log_chat_turn(
                     run_logger,
                     turn=turn_record,
@@ -1885,6 +1888,7 @@ def chat(
                     },
                 )
                 session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
                 _log_chat_turn(
                     run_logger,
                     turn=turn_record,
@@ -1957,7 +1961,6 @@ def chat(
                         },
                     ).finish(status="success")
                 )
-                _finish_ui_turn(current_turn_id)
                 turn_record = ChatTurnTelemetry(
                     turn_index=len(session_turns) + 1,
                     timestamp=_now_iso(),
@@ -1973,6 +1976,8 @@ def chat(
                     coding_state={"flow_id": active_flow_id},
                 )
                 session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
+                _finish_ui_turn(current_turn_id)
                 _log_chat_turn(
                     run_logger,
                     turn=turn_record,
@@ -2437,6 +2442,7 @@ def chat(
                     coding_state={"flow_id": active_flow_id},
                 )
                 session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
                 _render_turn_transparency(console, turn=turn_record, history=session_turns)
                 _log_chat_turn(
                     run_logger,
@@ -2841,6 +2847,7 @@ def chat(
                     },
                 )
                 session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
                 if answer_only_fallback or answer_only_no_edit or answer_only_auto_execute:
                     _render_answer_header(console)
                     if answer_text:

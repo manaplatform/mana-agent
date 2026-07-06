@@ -78,10 +78,15 @@ class BaseAgent:
         return record
 
     def create_subagent(self, role: AgentRole, capabilities: list[str]):
-        if self.registry is None:
-            self.taskboard.add_blocker("", "Agent registry unavailable for subagent creation")
-            return None
-        return self.registry.create_subagent(role, self.agent_id, capabilities)
+        if self.role == AgentRole.MAIN and self.registry is not None:
+            return self.registry.create_subagent(role, self.agent_id, capabilities)
+        return {
+            "type": "capacity_request",
+            "requested_by_agent_id": self.agent_id,
+            "role": role.value,
+            "capabilities": list(capabilities),
+            "reason": "Only MainAgent can create agents or subagents.",
+        }
 
     def record_evidence(self, task_id: str, evidence: str) -> None:
         self.taskboard.add_evidence(task_id, evidence)

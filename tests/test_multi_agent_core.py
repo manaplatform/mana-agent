@@ -35,6 +35,7 @@ from mana_agent.multi_agent.core.types import (
 from mana_agent.multi_agent.runtime.model_levels import MODEL_LEVEL_2_CODING, model_level_for_role
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+from mana_agent.multi_agent.routing.hierarchy import HierarchyPolicy, HierarchyViolation
 from mana_agent.multi_agent.routing.router import Router
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.tools.permissions import assert_shell_allowed
@@ -340,6 +341,24 @@ def test_agent_registry_hierarchy_and_cycle_guard():
         registry.set_parent(coding.agent_id, subagent.agent_id)
 
 
+def test_only_main_agent_can_create_subagents(tmp_path):
+    main = MainAgent(tmp_path)
+    coding = main.agents[AgentRole.CODING]
+    request = coding.create_subagent(AgentRole.CODING, ["repo_read"])
+    assert request["type"] == "capacity_request"
+    assert request["requested_by_agent_id"] == coding.agent_id
+
+    task = main.taskboard.create_task(title="Capacity", user_request="need worker")
+    node = main.agent_factory.create_subagent(
+        main.registry.find_by_role(AgentRole.CODING).agent_id,
+        AgentRole.TOOL_WORKER,
+        task.task_id,
+        ["tool_execution"],
+        budget=500,
+    )
+    assert node.agent_id in main.taskboard.get_task(task.task_id).assigned_subagent_ids
+
+
 def test_router_selects_required_routes():
     router = Router()
     assert router.route(task_id="task_1", user_request="/plan update docs").route_name == "planning"
@@ -376,6 +395,41 @@ def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
     assert queue.get_job(job.job_id).status.value in {"done", "failed"}
     assert job.job_id in board.get_task(task.task_id).queue_job_ids
     assert job.result_summary
+    task_after = board.get_task(task.task_id)
+    assert task_after.actual_tool_events
+    assert all(event["agent_id"] != "main" for event in task_after.actual_tool_events)
+    assert task_after.budget_records
+    assert task_after.cost_by_queue_job_id[job.job_id] >= 1
+
+
+def test_hierarchy_policy_rejects_main_agent_tool_execution(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Policy", user_request="read")
+    policy = HierarchyPolicy(taskboard=board)
+    with pytest.raises(HierarchyViolation):
+        policy.assert_can_execute_tool(
+            "agent_main_0001",
+            "read_file",
+            task_id=task.task_id,
+            queue_job_id="queue_job_1",
+        )
+    assert board.get_task(task.task_id).hierarchy_violations
+
+
+def test_tool_event_with_main_agent_fails_hierarchy_policy(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Policy", user_request="read")
+    policy = HierarchyPolicy(taskboard=board)
+    with pytest.raises(HierarchyViolation):
+        policy.approve_tool_event(
+            {
+                "type": "tool.started",
+                "agent_id": "main",
+                "tool_name": "read_file",
+                "task_id": task.task_id,
+                "queue_job_id": "queue_job_1",
+            }
+        )
 
 
 def test_queue_manager_runs_batch_read_through_tools_manager(tmp_path):
@@ -397,6 +451,38 @@ def test_queue_manager_runs_batch_read_through_tools_manager(tmp_path):
     assert job.status == QueueJobStatus.DONE
     assert job.result and job.result["ok"] is True
     assert job.result["files"][0]["path"] == "README.md"
+    task_after = board.get_task(task.task_id)
+    assert task_after.actual_tool_events[0]["agent_role"] == "tool_worker"
+    assert task_after.actual_tool_events[0]["queue_job_id"] == job.job_id
+
+
+def test_queue_manager_requires_budget_before_every_job(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Budget", user_request="search")
+    queue = QueueManager(tmp_path, taskboard=board)
+    job = queue.enqueue(
+        task_id=task.task_id,
+        requested_by_agent_id="agent_coding_0001",
+        approved_by_agent_id="agent_main_0001",
+        job_type=QueueJobType.REPO_SEARCH,
+        payload={"query": "needle"},
+    )
+    assert job.budget_reserved > 0
+    assert any(record.get("queue_job_id") == job.job_id and record.get("action") == "queue_job_reserved" for record in board.get_task(task.task_id).budget_records)
+
+
+def test_queue_manager_rejects_main_agent_queue_job_creation(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Policy", user_request="search")
+    queue = QueueManager(tmp_path, taskboard=board)
+    with pytest.raises(HierarchyViolation):
+        queue.enqueue(
+            task_id=task.task_id,
+            requested_by_agent_id="agent_main_0001",
+            approved_by_agent_id="agent_main_0001",
+            job_type=QueueJobType.REPO_SEARCH,
+            payload={"query": "needle"},
+        )
 
 
 def test_batch_read_result_reused_when_args_same(tmp_path):
@@ -484,6 +570,37 @@ def test_verifier_does_not_mark_planned_commands_as_passed(tmp_path):
     assert result.risks == ["planned_verification_not_executed"]
 
 
+def test_verifier_executes_real_verification_queue_job(tmp_path):
+    main = MainAgent(tmp_path)
+    task = main.taskboard.create_task(title="Verify", user_request="verify")
+    worker = main.agent_factory.create_subagent(
+        main.registry.find_by_role(AgentRole.CODING).agent_id,
+        AgentRole.TOOL_WORKER,
+        task.task_id,
+        ["tool_execution"],
+        budget=500,
+    )
+    main.queue_manager.default_worker_agent_id = worker.agent_id
+    verifier = main.agents[AgentRole.VERIFIER]
+    assert isinstance(verifier, VerifierAgent)
+    result = verifier.execute_verification(task.task_id, ["python -m compileall ."])
+    task_after = main.taskboard.get_task(task.task_id)
+    assert result.passed is True
+    assert task_after.verification_queue_job_ids
+    assert task_after.actual_tool_events[-1]["queue_job_id"] in task_after.verification_queue_job_ids
+
+
+def test_reviewer_rejects_planned_verification_without_queue_job(tmp_path):
+    main = MainAgent(tmp_path)
+    task = main.taskboard.create_task(title="Review", user_request="verify")
+    verifier = main.agents[AgentRole.VERIFIER]
+    reviewer = main.agents[AgentRole.REVIEWER]
+    assert isinstance(verifier, VerifierAgent)
+    verifier.verify_no_mutation(task.task_id, ["python -m compileall src"])
+    assert reviewer.review_evidence(task.task_id, route_name="simple", requires_verification=True) is False
+    assert any("verification lacks executed queue job evidence" in item for item in main.taskboard.get_task(task.task_id).blockers)
+
+
 def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     assert MainAgent(tmp_path).run_user_request("hello", entrypoint="chat").route_name == "simple"
     assert MainAgent(tmp_path).run_user_request("scan repo", entrypoint="analyze").route_name == "analyze"
@@ -497,9 +614,24 @@ def test_main_agent_records_large_docs_subagents_and_deactivates_them(tmp_path):
     assert result.route_name == "coding"
     assert result.task_size == "large"
     assert result.required_subagents == ["repo_inventory", "docs"]
-    assert len(task.assigned_subagent_ids) == 2
+    coding_helpers = [item for item in task.assigned_subagent_ids if main.registry.agents[item].role == AgentRole.CODING]
+    assert len(coding_helpers) == 2
     assert all(main.registry.agents[subagent_id].state == AgentState.DONE for subagent_id in task.assigned_subagent_ids)
     assert any("deactivated" in item for item in task.evidence)
+
+
+def test_main_agent_coding_route_has_queue_worker_verifier_and_review_evidence(tmp_path):
+    (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
+    main = MainAgent(tmp_path)
+    result = main.run_user_request("fix README.md heading", entrypoint="chat")
+    task = main.taskboard.get_task(result.task_id)
+    assert result.route_name == "coding"
+    assert task.queue_job_ids
+    assert task.verification_queue_job_ids
+    assert task.actual_tool_events
+    assert all(not str(event.get("agent_id", "")).startswith("agent_main_") for event in task.actual_tool_events)
+    assert task.reviewed_by_agent_id == main.registry.find_by_role(AgentRole.REVIEWER).agent_id
+    assert any(main.registry.agents[item].role == AgentRole.TOOL_WORKER for item in task.assigned_subagent_ids)
 
 
 def test_model_levels_are_configurable_by_tier(monkeypatch):

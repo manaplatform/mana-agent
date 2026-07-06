@@ -91,6 +91,12 @@ class TaskBoard:
             priority=priority,
             risk_level=risk_level,
             owner_agent_id=owner_agent_id,
+            supervisor_agent_id=owner_agent_id,
+            delegated_by_agent_id=owner_agent_id,
+            approved_by_agent_id=owner_agent_id,
+            budget_reserved_tokens=20_000,
+            budget_remaining_tokens=20_000,
+            budget_reserved_ms=120_000,
             blockers=[f"duplicate_of:{duplicate_of}"] if duplicate_of else [],
             memory_status={
                 "duplicate_checked": True,
@@ -194,6 +200,51 @@ class TaskBoard:
 
     def add_queue_job(self, task_id: str, job_id: str) -> None:
         self._add_many(task_id, "queue_job_ids", [job_id])
+
+    def add_verification_queue_job(self, task_id: str, job_id: str) -> None:
+        self._add_many(task_id, "verification_queue_job_ids", [job_id])
+
+    def record_budget(self, task_id: str, record: dict[str, Any]) -> None:
+        task = self.get_task(task_id)
+        payload = dict(record)
+        task.budget_records.append(payload)
+        agent_id = str(payload.get("agent_id") or payload.get("requested_by_agent_id") or "")
+        queue_job_id = str(payload.get("queue_job_id") or "")
+        reserved = int(payload.get("budget_reserved_tokens") or payload.get("budget_reserved") or 0)
+        used = int(payload.get("budget_used_tokens") or payload.get("budget_used") or 0)
+        if reserved:
+            task.budget_reserved_tokens += reserved
+            task.budget_remaining_tokens += reserved
+        if used:
+            task.budget_used_tokens += used
+            task.budget_remaining_tokens = max(0, task.budget_reserved_tokens - task.budget_used_tokens)
+        if agent_id:
+            task.cost_by_agent_id[agent_id] = int(task.cost_by_agent_id.get(agent_id, 0)) + used
+        if queue_job_id:
+            task.cost_by_queue_job_id[queue_job_id] = int(task.cost_by_queue_job_id.get(queue_job_id, 0)) + used
+        task.updated_at = utc_now()
+        self._record("budget.recorded", {"task_id": task_id, "record": payload})
+        self.save()
+
+    def record_hierarchy_violation(self, task_id: str, violation: dict[str, Any]) -> None:
+        task = self.get_task(task_id)
+        payload = dict(violation)
+        task.hierarchy_violations.append(payload)
+        task.status = TaskStatus.BLOCKED
+        task.updated_at = utc_now()
+        self._record("hierarchy_violation", {"task_id": task_id, **payload})
+        self.save()
+
+    def record_tool_event(self, task_id: str, event: dict[str, Any]) -> None:
+        task = self.get_task(task_id)
+        payload = dict(event)
+        task.actual_tool_events.append(payload)
+        worker_id = str(payload.get("agent_id") or payload.get("executed_by_worker_agent_id") or "")
+        if worker_id:
+            task.executed_by_worker_agent_id = worker_id
+        task.updated_at = utc_now()
+        self._record(str(payload.get("type") or "tool.event"), {"task_id": task_id, **payload})
+        self.save()
 
     def add_verification_result(self, task_id: str, result: VerificationResult) -> None:
         task = self.get_task(task_id)

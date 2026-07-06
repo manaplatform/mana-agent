@@ -84,6 +84,19 @@ def token_bar(value: int, maximum: int | None = None, *, width: int = 18) -> str
 
 def _conversation_text(state: "ChatUIState") -> str:
     rows: list[str] = []
+    for item in state.conversation[-12:]:
+        role = str(item.get("role", "") or "").strip().lower()
+        content = _clip(str(item.get("content", "") or "").strip(), 160)
+        if not content:
+            continue
+        if role == "user":
+            rows.append(f"you: {content}")
+        elif role == "assistant":
+            rows.append(f"assistant: {content}")
+        else:
+            rows.append(content)
+    if rows:
+        return "\n".join(rows[-12:])
     for event in state.events[-18:]:
         if event.type == "turn.started":
             rows.append(f"> {event.message or event.title}")

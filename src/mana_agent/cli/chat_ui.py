@@ -66,6 +66,7 @@ class ChatUIState:
     events: list[ChatEvent] = field(default_factory=list)
     tool_runs: list[ChatEvent] = field(default_factory=list)
     subagent_events: list[ChatEvent] = field(default_factory=list)
+    conversation: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.repo_root = Path(self.repo_root).resolve()
@@ -142,6 +143,16 @@ class ChatUIState:
                 token_usage=self.tracker.by_turn.get(turn_id, self.tracker.session_total),
             ).finish(status="success")
         )
+
+    def add_conversation_turn(self, question: str, answer: str) -> None:
+        question_text = str(question or "").strip()
+        answer_text = str(answer or "").strip()
+        if question_text:
+            self.conversation.append({"role": "user", "content": question_text})
+        if answer_text:
+            self.conversation.append({"role": "assistant", "content": answer_text})
+        if len(self.conversation) > 40:
+            self.conversation = self.conversation[-40:]
 
 
 def detect_skills_status(root: Path) -> str:

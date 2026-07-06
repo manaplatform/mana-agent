@@ -5,6 +5,7 @@ from typing import Any
 
 from mana_agent.multi_agent.core.ids import new_queue_job_id
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobStatus, QueueJobType, utc_now
+from mana_agent.multi_agent.routing.hierarchy import HierarchyPolicy
 from mana_agent.services.memory_service import MultiAgentMemoryService, normalize_file_path, stable_hash
 from mana_agent.multi_agent.queue.locks import LockTable
 from mana_agent.multi_agent.queue.scheduler import next_job
@@ -20,20 +21,38 @@ class QueueManager:
         taskboard: TaskBoard | None = None,
         tools_manager: ToolsManager | None = None,
         memory_service: MultiAgentMemoryService | None = None,
+        hierarchy_policy: HierarchyPolicy | None = None,
+        default_worker_agent_id: str = "agent_tool_worker_0001",
     ) -> None:
         self.root = Path(root).resolve()
         self.memory_service = memory_service
         self.taskboard = taskboard or TaskBoard(root, memory_service=memory_service)
         self.tools_manager = tools_manager or ToolsManager(root, memory_service=memory_service)
+        self.hierarchy_policy = hierarchy_policy or HierarchyPolicy(taskboard=self.taskboard)
+        self.default_worker_agent_id = default_worker_agent_id
         self.jobs: dict[str, QueueJob] = {}
         self.locks = LockTable()
 
     def enqueue(self, job: QueueJob | None = None, **kwargs: Any) -> QueueJob:
         if job is None:
+            task_id = str(kwargs.get("task_id") or "")
+            requested_by = str(kwargs.get("requested_by_agent_id") or "")
+            self.hierarchy_policy.assert_can_create_queue_job(requested_by, task_id=task_id)
             if not kwargs.get("approved_by_agent_id"):
                 kwargs["approved_by_agent_id"] = kwargs.get("requested_by_agent_id")
             if not kwargs.get("purpose"):
                 kwargs["purpose"] = f"Run {kwargs.get('job_type', 'tool')} for task {kwargs.get('task_id')}"
+            kwargs.setdefault("assigned_worker_agent_id", self.default_worker_agent_id)
+            self.hierarchy_policy.assert_can_assign_worker(
+                requested_by,
+                str(kwargs.get("assigned_worker_agent_id") or ""),
+                task_id=task_id,
+            )
+            kwargs.setdefault("root_task_id", self._root_task_id(task_id))
+            kwargs.setdefault("parent_task_id", self._parent_task_id(task_id))
+            kwargs.setdefault("args_summary", self._args_summary(kwargs.get("payload") or {}))
+            kwargs.setdefault("budget_reserved", self._default_budget_for(kwargs.get("job_type")))
+            kwargs.setdefault("budget_reserved_ms", 30_000)
             kwargs.setdefault("fingerprint", self._fingerprint_from_kwargs(kwargs))
             kwargs.setdefault("related_files", self._related_files_from_kwargs(kwargs))
             if self.memory_service is not None and not kwargs.get("memory_bundle_id"):
@@ -46,7 +65,26 @@ class QueueManager:
                 kwargs["memory_bundle_id"] = bundle.bundle_id
             job = QueueJob(job_id=new_queue_job_id(), **kwargs)
         elif not job.fingerprint:
+            self.hierarchy_policy.assert_can_create_queue_job(job.requested_by_agent_id, task_id=job.task_id)
+            if not job.assigned_worker_agent_id:
+                job.assigned_worker_agent_id = self.default_worker_agent_id
+            self.hierarchy_policy.assert_can_assign_worker(
+                job.requested_by_agent_id,
+                job.assigned_worker_agent_id,
+                task_id=job.task_id,
+            )
+            if not job.root_task_id:
+                job.root_task_id = self._root_task_id(job.task_id)
+            if not job.parent_task_id:
+                job.parent_task_id = self._parent_task_id(job.task_id)
+            if not job.args_summary:
+                job.args_summary = self._args_summary(job.payload)
+            if not job.budget_reserved:
+                job.budget_reserved = self._default_budget_for(job.job_type)
+            if not job.budget_reserved_ms:
+                job.budget_reserved_ms = 30_000
             job.fingerprint = self._fingerprint_for_job(job)
+        self._reserve_budget(job)
         if self.memory_service is not None:
             accepted, existing_id = self.memory_service.register_queue_item(
                 queue_item_id=job.job_id,
@@ -63,6 +101,8 @@ class QueueManager:
                 return job
         self.jobs[job.job_id] = job
         self.taskboard.add_queue_job(job.task_id, job.job_id)
+        if job.job_type in {QueueJobType.SHELL, QueueJobType.RUN_TESTS, QueueJobType.RUN_LINT}:
+            self.taskboard.add_verification_queue_job(job.task_id, job.job_id)
         self.taskboard.add_evidence(job.task_id, f"Queue job {job.job_id} queued for {job.job_type.value}: {job.purpose}")
         return job
 
@@ -72,25 +112,55 @@ class QueueManager:
             return None
         job.status = QueueJobStatus.CLAIMED
         job.updated_at = utc_now()
+        job.assigned_worker_agent_id = job.assigned_worker_agent_id or agent_id
         job.payload = {**job.payload, "claimed_by_agent_id": agent_id}
         return job
 
-    def run_next(self) -> QueueJob | None:
-        job = self.claim_next("agent_tool")
+    def run_next(self, worker_agent_id: str | None = None) -> QueueJob | None:
+        worker_id = worker_agent_id or self.default_worker_agent_id
+        job = self.claim_next(worker_id)
         if job is None:
             return None
+        self.hierarchy_policy.assert_can_execute_tool(
+            worker_id,
+            job.job_type.value,
+            task_id=job.task_id,
+            queue_job_id=job.job_id,
+            assigned_worker_agent_id=job.assigned_worker_agent_id,
+        )
         lock_key = job.lock_key or ("repo" if job.requires_write_lock else f"job:{job.job_id}")
         lock = self.locks.lock_for(lock_key)
         with lock:
             job.status = QueueJobStatus.RUNNING
+            job.started_at = utc_now()
             job.updated_at = utc_now()
+            self._record_tool_event(job, event_type="tool.started", worker_agent_id=worker_id)
             result = self.tools_manager.execute_job(job)
             job.result = result.result
             job.error = result.error
             job.result_summary = "ok" if result.ok else str(result.error or "failed")
             job.status = QueueJobStatus.DONE if result.ok else QueueJobStatus.FAILED
+            job.ended_at = utc_now()
+            job.token_usage = max(1, len(str(result.result or result.error or "")) // 4)
+            if isinstance(job.result, dict):
+                changed = job.result.get("changed_files") or job.result.get("files_changed") or []
+                if isinstance(changed, list):
+                    job.changed_files = [str(item) for item in changed]
+                job.cache_status = "hit" if job.result.get("cache_hit") else "miss"
             job.updated_at = utc_now()
-            if result.result.get("cache_hit"):
+            self._record_tool_event(job, event_type="tool.finished", worker_agent_id=worker_id)
+            self.taskboard.record_budget(
+                job.task_id,
+                {
+                    "queue_job_id": job.job_id,
+                    "agent_id": worker_id,
+                    "requested_by_agent_id": job.requested_by_agent_id,
+                    "budget_used_tokens": job.token_usage,
+                    "budget_used_ms": self._duration_ms(job),
+                    "action": "queue_job_finished",
+                },
+            )
+            if isinstance(result.result, dict) and result.result.get("cache_hit"):
                 self._bump_memory_status(job.task_id, cache_hit=True, file_read=job.job_type in {QueueJobType.REPO_READ, QueueJobType.REPO_BATCH_READ})
         if job.job_type in {QueueJobType.APPLY_PATCH} and job.result:
             changed = job.result.get("changed_files") or job.result.get("files_changed") or []
@@ -100,10 +170,10 @@ class QueueManager:
             self.memory_service.update_task(job.task_id, status=job.status.value, result_summary=job.result_summary or "")
         return job
 
-    def run_until_idle(self, max_jobs: int | None = None) -> list[QueueJob]:
+    def run_until_idle(self, max_jobs: int | None = None, *, worker_agent_id: str | None = None) -> list[QueueJob]:
         ran: list[QueueJob] = []
         while max_jobs is None or len(ran) < max_jobs:
-            job = self.run_next()
+            job = self.run_next(worker_agent_id=worker_agent_id)
             if job is None:
                 break
             ran.append(job)
@@ -180,3 +250,66 @@ class QueueManager:
         task.memory_status = status
         task.updated_at = utc_now()
         self.taskboard.save()
+
+    def _root_task_id(self, task_id: str) -> str:
+        try:
+            return self.taskboard.get_task(task_id).root_task_id
+        except KeyError:
+            return task_id
+
+    def _parent_task_id(self, task_id: str) -> str | None:
+        try:
+            return self.taskboard.get_task(task_id).parent_task_id
+        except KeyError:
+            return None
+
+    def _args_summary(self, payload: dict[str, Any]) -> str:
+        text = str(payload or {})
+        return text if len(text) <= 240 else text[:237] + "..."
+
+    def _default_budget_for(self, job_type: Any) -> int:
+        kind = job_type.value if hasattr(job_type, "value") else str(job_type or "")
+        if kind in {QueueJobType.APPLY_PATCH.value, QueueJobType.SHELL.value, QueueJobType.RUN_TESTS.value, QueueJobType.RUN_LINT.value}:
+            return 1200
+        return 400
+
+    def _reserve_budget(self, job: QueueJob) -> None:
+        self.taskboard.record_budget(
+            job.task_id,
+            {
+                "queue_job_id": job.job_id,
+                "requested_by_agent_id": job.requested_by_agent_id,
+                "approved_by_agent_id": job.approved_by_agent_id,
+                "assigned_worker_agent_id": job.assigned_worker_agent_id,
+                "budget_reserved_tokens": job.budget_reserved,
+                "budget_reserved_ms": job.budget_reserved_ms,
+                "action": "queue_job_reserved",
+            },
+        )
+
+    def _record_tool_event(self, job: QueueJob, *, event_type: str, worker_agent_id: str) -> None:
+        event = self.hierarchy_policy.approve_tool_event(
+            {
+                "type": event_type,
+                "agent_id": worker_agent_id,
+                "agent_role": "tool_worker",
+                "parent_agent_id": job.requested_by_agent_id,
+                "subagent_id": worker_agent_id,
+                "task_id": job.task_id,
+                "root_task_id": job.root_task_id or job.task_id,
+                "queue_job_id": job.job_id,
+                "requested_by_agent_id": job.requested_by_agent_id,
+                "approved_by_agent_id": job.approved_by_agent_id,
+                "assigned_worker_agent_id": job.assigned_worker_agent_id,
+                "tool_name": job.job_type.value,
+                "delegation_path": [job.approved_by_agent_id, job.requested_by_agent_id, worker_agent_id],
+                "budget_used": job.token_usage,
+                "token_usage": job.token_usage,
+            }
+        )
+        self.taskboard.record_tool_event(job.task_id, event)
+
+    def _duration_ms(self, job: QueueJob) -> int:
+        if not job.started_at or not job.ended_at:
+            return 0
+        return max(0, int((job.ended_at - job.started_at).total_seconds() * 1000))

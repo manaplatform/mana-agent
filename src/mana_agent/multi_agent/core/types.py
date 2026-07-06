@@ -19,6 +19,7 @@ class AgentRole(_ValueEnum):
     VERIFIER = "verifier"
     REVIEWER = "reviewer"
     TOOL = "tool"
+    TOOL_WORKER = "tool_worker"
     RESEARCH = "research"
     SUMMARIZER = "summarizer"
 
@@ -184,6 +185,7 @@ class TaskBoardItem:
     priority: int
     risk_level: RiskLevel
     owner_agent_id: str | None = None
+    supervisor_agent_id: str | None = None
     assigned_agent_ids: list[str] = field(default_factory=list)
     assigned_subagent_ids: list[str] = field(default_factory=list)
     required_capabilities: list[str] = field(default_factory=list)
@@ -192,6 +194,7 @@ class TaskBoardItem:
     files_to_inspect: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)
     queue_job_ids: list[str] = field(default_factory=list)
+    verification_queue_job_ids: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     plan: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
@@ -200,6 +203,25 @@ class TaskBoardItem:
     discussion_ids: list[str] = field(default_factory=list)
     decision_ids: list[str] = field(default_factory=list)
     handoff_records: list[HandoffRecord] = field(default_factory=list)
+    budget_records: list[dict[str, Any]] = field(default_factory=list)
+    hierarchy_violations: list[dict[str, Any]] = field(default_factory=list)
+    actual_tool_events: list[dict[str, Any]] = field(default_factory=list)
+    delegated_by_agent_id: str | None = None
+    accepted_by_agent_id: str | None = None
+    executed_by_worker_agent_id: str | None = None
+    reviewed_by_agent_id: str | None = None
+    approved_by_agent_id: str | None = None
+    budget_reserved_tokens: int = 0
+    budget_used_tokens: int = 0
+    budget_remaining_tokens: int = 0
+    budget_reserved_ms: int = 0
+    budget_used_ms: int = 0
+    max_agents: int = 8
+    max_subagents: int = 4
+    max_queue_jobs: int = 32
+    max_tool_calls: int = 32
+    cost_by_agent_id: dict[str, int] = field(default_factory=dict)
+    cost_by_queue_job_id: dict[str, int] = field(default_factory=dict)
     verification_commands: list[str] = field(default_factory=list)
     verification_results: list[VerificationResult] = field(default_factory=list)
     memory_status: dict[str, Any] = field(default_factory=dict)
@@ -214,8 +236,14 @@ class QueueJob:
     requested_by_agent_id: str
     job_type: QueueJobType
     payload: dict[str, Any]
+    root_task_id: str | None = None
+    parent_task_id: str | None = None
+    assigned_worker_agent_id: str | None = None
     approved_by_agent_id: str | None = None
     purpose: str = ""
+    args_summary: str = ""
+    budget_reserved: int = 0
+    budget_reserved_ms: int = 0
     depends_on: list[str] = field(default_factory=list)
     result_summary: str | None = None
     status: QueueJobStatus = QueueJobStatus.QUEUED
@@ -224,6 +252,11 @@ class QueueJob:
     requires_write_lock: bool = False
     result: dict[str, Any] | None = None
     error: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    token_usage: int = 0
+    changed_files: list[str] = field(default_factory=list)
+    cache_status: str = "unknown"
     fingerprint: str = ""
     memory_bundle_id: str | None = None
     related_files: list[str] = field(default_factory=list)

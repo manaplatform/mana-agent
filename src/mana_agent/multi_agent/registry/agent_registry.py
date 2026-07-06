@@ -8,7 +8,7 @@ from mana_agent.multi_agent.runtime.model_levels import model_level_for_role
 
 
 class AgentRegistry:
-    def __init__(self, *, max_depth: int = 4, max_active_agents: int = 8) -> None:
+    def __init__(self, *, max_depth: int = 5, max_active_agents: int = 16) -> None:
         self.max_depth = max_depth
         self.max_active_agents = max_active_agents
         self.agents: dict[str, AgentNode] = {}

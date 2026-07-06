@@ -7,6 +7,8 @@ from typer.testing import CliRunner
 
 from mana_agent.commands import cli
 from mana_agent.cli.chat_ui import ChatUIState
+from mana_agent.cli.events import make_event
+from mana_agent.cli.fullscreen_chat import _conversation_text
 from mana_agent.commands.chat_cli import _should_use_coding_agent_turn
 from mana_agent.commands.ui_helpers import (
     ChatLog,
@@ -203,6 +205,31 @@ def test_chat_log_renderer_shows_timeline_roles_and_updates_tool_rows() -> None:
     assert "https://api.manadev.net/v1/projects/abcdef" not in rendered
     assert "[INFO]" not in rendered
     assert "clean warning" in rendered
+
+
+def test_fullscreen_conversation_text_prefers_answer_history() -> None:
+    state = ChatUIState(repo_root=Path.cwd(), provider="openai", model="fake", ui_mode="fullscreen")
+    turn_id = "turn-test"
+    state.start_turn(turn_id)
+    state.record_event(
+        make_event(
+            "agent.decision",
+            title="Agent decision",
+            message="Handled by direct chat command without repository tool routing.",
+            status="success",
+            session_id=state.session_id,
+            turn_id=turn_id,
+            step_id="05",
+        ).finish(status="success")
+    )
+    state.finish_turn(turn_id)
+    state.add_conversation_turn("help", "Available commands: /help, /clear, /exit")
+
+    rendered = _conversation_text(state)
+
+    assert "you: help" in rendered
+    assert "assistant: Available commands" in rendered
+    assert "Handled by direct chat command" not in rendered
 
 
 def test_tool_activity_can_use_live_without_fallback_duplicate(monkeypatch) -> None:

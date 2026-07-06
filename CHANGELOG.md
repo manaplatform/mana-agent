@@ -2,6 +2,12 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-06 (full-screen chat answer history)
+
+- Added explicit chat conversation history to `ChatUIState` and made the full-screen Chat pane render user/assistant turns before low-level routing events.
+- Wired completed chat turns, including direct commands and exact-search fast paths, into the full-screen conversation history so final answers remain visible in the UI.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_ux_helpers.py::test_fullscreen_conversation_text_prefers_answer_history -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_ux_helpers.py tests/test_chat_ui_events_tokens.py -q` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_agent/cli/chat_ui.py src/mana_agent/cli/fullscreen_chat.py src/mana_agent/commands/chat_cli.py tests/test_cli_ux_helpers.py` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/cli/chat_ui.py src/mana_agent/cli/fullscreen_chat.py tests/test_cli_ux_helpers.py --select F,E9` passed.
+
 ## 2026-07-06 (full-screen chat TUI)
 
 - Added a prompt_toolkit full-screen chat surface with structured chat, step, tool, subagent, token, and boxed input panes plus a startup pet animation for interactive terminals.
@@ -353,6 +359,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-06
 
+- Enforced the multi-agent hierarchy with a `HierarchyPolicy`/`AgentFactory`, MainAgent-owned worker creation, queue-job budget reservations, worker-attributed tool events, queue-backed verification, reviewer evidence checks, and expanded TaskBoard accounting/evidence fields.
+- Added regression coverage for MainAgent tool rejection, worker-only tool events, CodingAgent/Verifier queue jobs, planned-verification rejection, MainAgent-only subagent creation, budget records, duplicate task reuse, and coding-route integration evidence.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py -q` passed; `PYTHONPATH=src .venv/bin/python -m compileall src` passed; `PYTHONPATH=src .venv/bin/python -m pytest -q` passed with 607 tests and 18 warnings.
 - Added structured chat UI events, render modes, session trace recording, and central token accounting for chat startup, turn timelines, tool activity, subagents, and slash-command status panels.
 - Replaced the default chat startup panels/config dump with a compact Mana-Agent header, clean `mana ❯` prompt, `/status full`, `/trace logs`, `/welcome full`, and mode-aware rich/compact/plain/json rendering.
 - Preserved `/clear` session history while clearing the visible screen, routed normal chat logs to trace/log files, and fixed flow read-cache persistence so stale cached reads invalidate correctly under telemetry-enabled tool runs.
