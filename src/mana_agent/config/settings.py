@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     toolsmanager_parallel_requests: int = Field(default=3, alias="TOOLSMANAGER_PARALLEL_REQUESTS")
     redis_queue_name: str = Field(default="mana-tools", alias="REDIS_QUEUE_NAME")
     redis_ttl_seconds: int = Field(default=86_400, alias="REDIS_TTL_SECONDS")
+    mana_github_token: str = Field(default="", alias="MANA_GITHUB_TOKEN")
+    mana_search_enable_web: bool = Field(default=True, alias="MANA_SEARCH_ENABLE_WEB")
+    mana_search_enable_github: bool = Field(default=True, alias="MANA_SEARCH_ENABLE_GITHUB")
+    mana_search_max_results: int = Field(default=8, alias="MANA_SEARCH_MAX_RESULTS")
+    mana_search_timeout_seconds: int = Field(default=15, alias="MANA_SEARCH_TIMEOUT_SECONDS")
+    mana_search_memory_ttl_days: int = Field(default=14, alias="MANA_SEARCH_MEMORY_TTL_DAYS")
+    mana_web_search_provider: str = Field(default="", alias="MANA_WEB_SEARCH_PROVIDER")
+    mana_web_search_api_key: str = Field(default="", alias="MANA_WEB_SEARCH_API_KEY")
+    mana_web_search_max_results: int = Field(default=8, alias="MANA_WEB_SEARCH_MAX_RESULTS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -37,6 +37,20 @@ Relevant command options include:
 - `--ephemeral-index` for temporary indexing
 - `--dir-mode` for directory-aware indexing and retrieval [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
 
+External search is routed separately from repository-local retrieval. The agent first decides whether outside sources are useful, then reuses fresh search memory before calling configured providers. Useful results are compacted and stored under `.mana/search_memory.jsonl`.
+
+External search variables:
+
+- `MANA_SEARCH_ENABLE_WEB`
+- `MANA_SEARCH_ENABLE_GITHUB`
+- `MANA_SEARCH_MAX_RESULTS`
+- `MANA_SEARCH_TIMEOUT_SECONDS`
+- `MANA_SEARCH_MEMORY_TTL_DAYS`
+- `MANA_GITHUB_TOKEN`
+- `MANA_WEB_SEARCH_PROVIDER`
+- `MANA_WEB_SEARCH_API_KEY`
+- `MANA_WEB_SEARCH_MAX_RESULTS`
+
 ## Working directories and outputs
 
 Several commands write generated artifacts under `.mana/` inside the target project:

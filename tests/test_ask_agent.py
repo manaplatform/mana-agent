@@ -9,6 +9,9 @@ from langchain_core.tools import StructuredTool
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.search.config import SearchConfig
+from mana_agent.search.memory import SearchMemoryStore
+from mana_agent.search.models import SearchResult
 
 
 class _FakeSearchService:
@@ -58,6 +61,7 @@ def _build_agent(tmp_path: Path) -> AskAgent:
     agent.search_service = _FakeSearchService()
     agent.project_root = tmp_path.resolve()
     agent._resolved_index = tmp_path / ".mana/index"
+    agent.search_config = SearchConfig(enable_ask_agent=False)
     return agent
 
 
@@ -176,6 +180,36 @@ def test_ask_agent_forces_final_answer_when_budget_low(tmp_path: Path) -> None:
     assert "Tool loop reached the step limit before a final answer." not in result.answer
     assert result.answer.strip()
     assert any("low remaining tool budget" in str(w) for w in result.warnings)
+
+
+def test_ask_agent_reuses_external_search_memory_context(tmp_path: Path) -> None:
+    memory = SearchMemoryStore(root=tmp_path)
+    memory.store_results(
+        original_query="latest docs",
+        source_type="web",
+        results=[
+            SearchResult(
+                source_type="web",
+                title="Cached official docs",
+                url="https://docs.example.dev/current",
+                summary="Cached official docs describe the current supported behavior.",
+                source_domain="docs.example.dev",
+                confidence=0.9,
+            )
+        ],
+    )
+    agent = _build_agent(tmp_path)
+    agent.search_config = SearchConfig(enable_ask_agent=True, enable_web=True, enable_github=True)
+    agent.llm = _FakeLLM([_FakeAIMessage("Done", tool_calls=[])])
+
+    result = agent.run("latest docs", tmp_path / ".mana/index", 2, max_steps=2, timeout_seconds=2)
+
+    assert result.answer == "Done"
+    assert any(item.tool_name == "🔎 Search decision" for item in result.trace)
+    assert any(item.tool_name == "🧠 Reusing search memory" for item in result.trace)
+    context = [item for item in result.trace if item.tool_name == "External search context"]
+    assert context
+    assert "Cached official docs" in context[0].output_preview
 
 
 class _SynthesizingLLM:

@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-07 (external search routing)
+
+- Added a model-routed, memory-aware external search layer with provider-agnostic web search, structured GitHub search qualifiers, compact source-aware context injection, and search memory reuse.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_search_decision.py tests/test_search_memory.py tests/test_search_router.py tests/test_github_query_builder.py tests/test_github_provider.py tests/test_ask_agent.py -q` passed with 49 tests; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_ux_helpers.py::test_render_turn_summary_and_transparency_sections -q` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/search src/mana_agent/multi_agent/runtime/ask_agent.py src/mana_agent/config/settings.py tests/test_search_decision.py tests/test_search_memory.py tests/test_search_router.py tests/test_github_query_builder.py tests/test_github_provider.py tests/test_ask_agent.py --select F,E9` passed; `PYTHONPATH=src .venv/bin/mana-agent --help` passed.
+
 ## 2026-07-07 (macOS release runner)
 
 - Moved the macOS x64 release binary job from the retired `macos-13` GitHub Actions runner to the supported `macos-15-intel` runner label.
@@ -10,7 +15,7 @@ All notable repository changes should be recorded here.
 ## 2026-07-07 (chat model routing smoke fix)
 
 - Guarded chat coding-model propagation so lightweight `AskService.ask_agent` stubs without a mutable `model` attribute no longer crash chat startup while real `AskAgent` instances still use `update_model`.
-- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_smoke.py -q` passed with 64 tests.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli_smoke.py -q` passed with 64 tests; `PYTHONPATH=src .venv/bin/python -m pytest -q` passed with 619 tests and 18 warnings; `git diff --check` passed.
 
 ## 2026-07-06 (chat subagent visibility and model routing)
 

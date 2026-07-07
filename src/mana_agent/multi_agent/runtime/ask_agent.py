@@ -28,6 +28,8 @@ from mana_agent.config.settings import default_index_dir
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.memory_service import EvidenceMemory
 from mana_agent.services.search_service import SearchService
+from mana_agent.search.config import SearchConfig
+from mana_agent.search.router import SearchRouter, SearchRouterResult
 from mana_agent.tools import coding_tool_contracts_payload, extract_patch_touched_files
 from mana_agent.utils.tool_policy import resolve_allowed_tools
 from mana_agent.tools.repository import (
@@ -182,6 +184,7 @@ class AskAgent:
         self._resolved_index = default_index_dir(self.project_root)
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
+        self.search_config = SearchConfig.from_env()
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
@@ -1470,6 +1473,19 @@ class AskAgent:
             self._resolved_indexes = [self._resolved_index]
 
         policy = dict(tool_policy or {})
+        external_search_result = self._prepare_external_search_context(
+            question=question,
+            system_prompt=system_prompt,
+            run_id=run_id,
+            disabled=bool(policy.get("disable_external_search")),
+        )
+        if external_search_result is not None:
+            context_block = external_search_result.context_block(
+                max_results=self.search_config.max_injected_results,
+                max_words=self.search_config.max_summary_words,
+            )
+            if context_block:
+                question = f"{question}\n\n{context_block}"
         # Expand high-level aliases (e.g. "file_system") into concrete tool
         # names before enforcement so an unexpanded alias never blocks real
         # tools like ls/list_files/read_file/repo_search.
@@ -1501,6 +1517,10 @@ class AskAgent:
             ephemeral_read_cache=ephemeral_read_cache,
             read_telemetry=read_telemetry,
         )
+        pending_external_traces = list(getattr(self, "_pending_external_search_traces", []) or [])
+        if pending_external_traces:
+            traces.extend(pending_external_traces)
+            self._pending_external_search_traces = []
         tool_map = {tool.name: tool for tool in tools}
 
         bound = self.llm.bind_tools(tools)
@@ -1975,9 +1995,94 @@ class AskAgent:
                     "sources": [item.to_dict() for item in result.sources],
                     "duration_ms": round((perf_counter() - started) * 1000, 3),
                     "answer": result.answer,
+                    "external_search": external_search_result.decision.to_dict() if external_search_result else None,
+                    "external_search_results": (
+                        [item.to_dict() for item in external_search_result.results]
+                        if external_search_result
+                        else []
+                    ),
+                    "external_search_memory_hits": (
+                        [item.to_dict() for item in external_search_result.memory_hits]
+                        if external_search_result
+                        else []
+                    ),
                 }
             )
 
+        return result
+
+    def _prepare_external_search_context(
+        self,
+        *,
+        question: str,
+        system_prompt: str | None,
+        run_id: str | None,
+        disabled: bool = False,
+    ) -> SearchRouterResult | None:
+        config = getattr(self, "search_config", None) or SearchConfig.from_env()
+        self.search_config = config
+        if disabled or not config.enable_ask_agent:
+            return None
+        try:
+            router = SearchRouter(root=str(self.project_root), llm=getattr(self, "llm", None), config=config)
+            result = router.run(
+                user_query=question,
+                repo_context=system_prompt or "",
+                memory_context=f"run_id={run_id or ''}",
+                task_id=run_id,
+            )
+        except Exception as exc:
+            logger.debug("external search routing failed: %s", exc, exc_info=True)
+            return None
+        traces = list(getattr(self, "_pending_external_search_traces", []) or [])
+        traces.append(
+            ToolInvocationTrace(
+                tool_name="🔎 Search decision",
+                args_summary=f"{result.decision.mode}: {result.decision.reason}"[:500],
+                duration_ms=0.0,
+                status="ok",
+                output_preview=(
+                    f"mode={result.decision.mode} results={len(result.results)} "
+                    f"memory_hits={len(result.memory_hits)}"
+                ),
+            )
+        )
+        if result.memory_hits:
+            traces.append(
+                ToolInvocationTrace(
+                    tool_name="🧠 Reusing search memory",
+                    args_summary=", ".join(item.title for item in result.memory_hits[:3])[:500],
+                    duration_ms=0.0,
+                    status="ok",
+                    output_preview=result.context_block(
+                        max_results=config.max_injected_results,
+                        max_words=config.max_summary_words,
+                    )[:4000],
+                )
+            )
+        if result.results or result.memory_hits:
+            result_targets = {item.source_type for item in result.results}
+            if result_targets == {"web"}:
+                context_tool_name = "🌐 Searching web"
+            elif result_targets == {"github"}:
+                context_tool_name = "🔎 Searching GitHub"
+            elif result_targets:
+                context_tool_name = "🔎 External search context"
+            else:
+                context_tool_name = "External search context"
+            traces.append(
+                ToolInvocationTrace(
+                    tool_name=context_tool_name,
+                    args_summary=f"results={len(result.results)} memory_hits={len(result.memory_hits)}",
+                    duration_ms=0.0,
+                    status="ok",
+                    output_preview=result.context_block(
+                        max_results=config.max_injected_results,
+                        max_words=config.max_summary_words,
+                    )[:4000],
+                )
+            )
+        self._pending_external_search_traces = traces
         return result
 
     def run_multi(
