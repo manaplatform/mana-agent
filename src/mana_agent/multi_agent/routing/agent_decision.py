@@ -27,6 +27,7 @@ AgentIntent = Literal[
 KNOWN_AGENT_TOOLS = frozenset(
     {
         "web_search",
+        "github_search",
         "repo_search",
         "repo_batch_search",
         "read_file",
@@ -91,6 +92,22 @@ def agent_tool_descriptions() -> list[dict[str, Any]]:
                 "recent information, and topics not answerable from the local repository."
             ),
             "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        },
+        {
+            "name": "github_search",
+            "description": (
+                "Search public GitHub repositories, code, issues, and project metadata for external open-source "
+                "projects or examples. Use with web_search when the user asks for internet and GitHub research."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "github_kind": {"enum": ["repositories", "code", "issues"]},
+                    "repo": {"type": "string"},
+                },
+                "required": ["query"],
+            },
         }
     ]
     for contract in coding_tool_contracts():
@@ -109,6 +126,8 @@ Choose tools from the provided tool descriptions based on the user's intent.
 Do not route by keywords alone. Infer whether the user needs local repository context, public web research, code editing, verification, planning, review, or a plain answer.
 Explicit commands such as /analyze, /plan, or "search repo" are hints, but ordinary words like "search", "find", "web", "repo", "read", "edit", and "analyze" do not bypass your intent decision.
 Use web_search for public/current/unknown-topic research, official docs, and questions that the local repo is unlikely to answer.
+Use github_search for public GitHub project/repository/code research.
+Use both web_search and github_search when the user asks for internet/web plus GitHub.
 Use repo_search/read_file for local repository inspection.
 Use apply_patch or edit/write tools only when the user wants code or files changed.
 Return JSON only with this schema:
@@ -126,9 +145,16 @@ Return JSON only with this schema:
 
 
 class AgentDecisionEngine:
-    def __init__(self, *, llm: Any | None = None, tool_descriptions: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        llm: Any | None = None,
+        tool_descriptions: list[dict[str, Any]] | None = None,
+        enable_fallback: bool = True,
+    ) -> None:
         self.llm = llm
         self.tool_descriptions = tool_descriptions or agent_tool_descriptions()
+        self.enable_fallback = enable_fallback
 
     def decide(
         self,
@@ -161,6 +187,16 @@ class AgentDecisionEngine:
         )
         if model_decision is not None:
             return self._with_verification(model_decision, request)
+        if not self.enable_fallback:
+            return self._with_verification(
+                AgentDecision(
+                    intent="answer",
+                    confidence=0.0,
+                    reasoning_summary="Model routing decision was unavailable.",
+                    source="model_unavailable",
+                ),
+                request,
+            )
         return self._with_verification(self._fallback_decision(request), request)
 
     def _model_decision(
@@ -273,8 +309,8 @@ def verify_agent_decision(
     unknown = [tool for tool in decision.selected_tools if tool not in available and tool not in KNOWN_AGENT_TOOLS]
     if unknown:
         warnings.append(f"unknown tools selected: {', '.join(unknown)}")
-    if decision.web_search_needed and "web_search" not in decision.selected_tools:
-        warnings.append("web_search_needed=true but web_search was not selected")
+    if decision.web_search_needed and not any(tool in decision.selected_tools for tool in ("web_search", "github_search")):
+        warnings.append("web_search_needed=true but no external search tool was selected")
     if decision.repo_context_needed and not any(tool in decision.selected_tools for tool in ("repo_search", "repo_batch_search", "read_file", "repo_batch_read", "semantic_search", "list_files")):
         warnings.append("repo_context_needed=true but no repository read/search tool was selected")
     if decision.code_editing_needed and not any(tool in decision.selected_tools for tool in ("apply_patch", "apply_patch_batch", "edit_file", "multi_edit_file", "write_file", "create_file", "delete_file")):

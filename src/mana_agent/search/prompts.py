@@ -6,6 +6,8 @@ Prefer no search unless search materially improves correctness.
 Use GitHub search only for external repository/code/example discovery.
 Use web search for current docs, unknown terms, recent info, official references, and best practices.
 Use both when the task needs current explanation plus real repository examples.
+If the user explicitly asks to search the internet, web, or public sources, choose web unless the request is unsafe or private.
+If the user explicitly asks to search GitHub, choose github; choose both when they ask for internet/web plus GitHub.
 Never use external search as a replacement for local repository inspection.
 Never search private local code snippets, secrets, private URLs, customer data, or internal file contents.
 JSON schema:

@@ -4,7 +4,7 @@ import json
 
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.memory import SearchMemoryStore
-from mana_agent.search.models import SearchResult
+from mana_agent.search.models import SearchDecision, SearchQuery, SearchResult
 from mana_agent.search.providers import SearchProviders
 from mana_agent.search.router import SearchRouter
 
@@ -157,6 +157,33 @@ def test_router_can_run_both_web_and_github(tmp_path) -> None:  # noqa: ANN001
         providers=SearchProviders(web=web, github=github),
     )
     result = router.run(user_query="find production examples and latest docs")
+    assert web.calls == 1
+    assert github.calls == 1
+    assert {item.source_type for item in result.results} == {"web", "github"}
+
+
+def test_router_decision_override_runs_selected_external_tools(tmp_path) -> None:  # noqa: ANN001
+    web = _WebProvider()
+    github = _GitHubProvider()
+    router = SearchRouter(
+        root=str(tmp_path),
+        llm=_RouterModel({"mode": "none", "reason": "should not be used", "confidence": 0.1, "queries": []}),
+        config=_config(),
+        providers=SearchProviders(web=web, github=github),
+    )
+    decision = SearchDecision(
+        needs_search=True,
+        targets=["web", "github"],
+        reason="forced by AgentDecision",
+        confidence=0.9,
+        queries=[
+            SearchQuery(target="web", query="latest docs"),
+            SearchQuery(target="github", query="hermes-agent", github_kind="repositories"),
+        ],
+        max_results=4,
+        mode="both",
+    )
+    result = router.run(user_query="search internet & github", decision_override=decision)
     assert web.calls == 1
     assert github.calls == 1
     assert {item.source_type for item in result.results} == {"web", "github"}

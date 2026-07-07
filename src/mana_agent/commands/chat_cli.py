@@ -29,6 +29,7 @@ from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct
 from mana_agent.multi_agent.runtime.tools_executor import build_tools_executor_with_fallback
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine
 from mana_agent.search.config import SearchConfig
+from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
 from mana_agent.cli.chat_ui import (
     ChatUIState,
@@ -151,7 +152,8 @@ def _agent_decision_llm(ask_service):
 
 
 def _decide_chat_route(*, ask_service, question: str, root: Path) -> AgentDecision:
-    engine = AgentDecisionEngine(llm=_agent_decision_llm(ask_service))
+    llm = _agent_decision_llm(ask_service)
+    engine = AgentDecisionEngine(llm=llm, enable_fallback=False)
     return engine.decide(
         user_request=question,
         repo_context=f"Repository root: {root}",
@@ -176,21 +178,57 @@ def _auto_chat_mode_from_agent_decision(decision: AgentDecision, fallback: AutoC
 def _run_web_research_answer(*, ask_service, question: str, root: Path, decision: AgentDecision) -> tuple[str, list[dict[str, str]], list[dict[str, Any]]]:
     config = SearchConfig.from_env()
     router = SearchRouter(root=str(root), llm=_agent_decision_llm(ask_service), config=config)
-    query = str((decision.tool_inputs.get("web_search") or {}).get("query") or question).strip()
-    result = router.run(user_query=query, repo_context=f"Repository root: {root}", task_id=None)
+    queries: list[SearchQuery] = []
+    web_query = str((decision.tool_inputs.get("web_search") or {}).get("query") or "").strip()
+    if "web_search" in decision.selected_tools:
+        queries.append(SearchQuery(query=web_query or question, target="web"))
+    github_input = decision.tool_inputs.get("github_search") or {}
+    github_query = str(github_input.get("query") or web_query or question).strip()
+    if "github_search" in decision.selected_tools:
+        queries.append(
+            SearchQuery(
+                query=github_query,
+                target="github",
+                github_kind=str(github_input.get("github_kind") or "repositories"),  # type: ignore[arg-type]
+                repo=str(github_input.get("repo") or "").strip() or None,
+            )
+        )
+    if not queries:
+        queries.append(SearchQuery(query=question, target="web"))
+    targets = list(dict.fromkeys(query.target for query in queries))
+    forced_decision = SearchDecision(
+        needs_search=True,
+        targets=targets,  # type: ignore[arg-type]
+        reason=decision.reasoning_summary,
+        confidence=decision.confidence,
+        queries=queries,
+        reuse_memory_first=True,
+        max_results=config.max_results,
+        mode="both" if set(targets) == {"web", "github"} else targets[0],  # type: ignore[arg-type]
+    )
+    result = router.run(
+        user_query=question,
+        repo_context=f"Repository root: {root}",
+        task_id=None,
+        decision_override=forced_decision,
+    )
     context = result.context_block(
         max_results=config.max_injected_results,
         max_words=config.max_summary_words,
     )
     if not context:
+        warning_text = "; ".join(result.warnings)
         return (
-            "No external search results were available for that request.",
+            (
+                "No external search results were available for that request."
+                + (f"\n\nSearch warnings: {warning_text}" if warning_text else "")
+            ),
             [],
             [
                 {
-                    "tool_name": "web_search",
+                    "tool_name": "+".join(decision.selected_tools) or "external_search",
                     "status": "ok",
-                    "args_summary": query,
+                    "args_summary": "; ".join(query.query for query in queries),
                     "result_summary": "0 result(s)",
                 }
             ],
@@ -210,8 +248,11 @@ def _run_web_research_answer(*, ask_service, question: str, root: Path, decision
         {
             "tool_name": "web_search",
             "status": "ok",
-            "args_summary": query,
-            "result_summary": f"{len(result.results)} result(s), {len(result.memory_hits)} memory hit(s)",
+            "args_summary": "; ".join(query.query for query in queries),
+            "result_summary": (
+                f"{len(result.results)} result(s), {len(result.memory_hits)} memory hit(s)"
+                + (f", warnings={len(result.warnings)}" if result.warnings else "")
+            ),
         }
     ]
     return str(answer or "").strip(), sources, trace
@@ -1976,6 +2017,8 @@ def chat(
                 agent_decision,
                 classify_auto_chat_intent(question),
             )
+            if is_plan_execution_request(question):
+                auto_chat_mode = AutoChatMode.EDIT
 
             small_direct_edit_result = handle_small_direct_edit(root, question)
             if small_direct_edit_result.handled:
@@ -2038,7 +2081,7 @@ def chat(
             # Model-selected immediate tools for read-only research/search turns.
             # -----------------------------
             if (
-                "web_search" in agent_decision.selected_tools
+                any(tool in agent_decision.selected_tools for tool in ("web_search", "github_search"))
                 and agent_decision.web_search_needed
                 and not agent_decision.code_editing_needed
             ):
@@ -2106,6 +2149,7 @@ def chat(
                 "repo_search" in agent_decision.selected_tools
                 and agent_decision.repo_context_needed
                 and not agent_decision.code_editing_needed
+                and coding_agent_instance is None
             ):
                 tool_query = str((agent_decision.tool_inputs.get("repo_search") or {}).get("query") or question).strip()
                 search_result = project_search(tool_query, root)

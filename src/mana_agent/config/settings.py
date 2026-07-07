@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     mana_search_memory_ttl_days: int = Field(default=14, alias="MANA_SEARCH_MEMORY_TTL_DAYS")
     mana_web_search_provider: str = Field(default="", alias="MANA_WEB_SEARCH_PROVIDER")
     mana_web_search_api_key: str = Field(default="", alias="MANA_WEB_SEARCH_API_KEY")
+    mana_web_search_endpoint: str = Field(default="", alias="MANA_WEB_SEARCH_ENDPOINT")
     mana_web_search_max_results: int = Field(default=8, alias="MANA_WEB_SEARCH_MAX_RESULTS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

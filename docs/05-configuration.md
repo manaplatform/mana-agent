@@ -49,6 +49,7 @@ External search variables:
 - `MANA_GITHUB_TOKEN`
 - `MANA_WEB_SEARCH_PROVIDER`
 - `MANA_WEB_SEARCH_API_KEY`
+- `MANA_WEB_SEARCH_ENDPOINT`
 - `MANA_WEB_SEARCH_MAX_RESULTS`
 
 ## Working directories and outputs

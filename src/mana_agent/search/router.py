@@ -89,8 +89,9 @@ class SearchRouter:
         repo_context: str = "",
         memory_context: str = "",
         task_id: str | None = None,
+        decision_override: SearchDecision | None = None,
     ) -> SearchRouterResult:
-        decision = self.decision_engine.decide(
+        decision = decision_override or self.decision_engine.decide(
             user_query=user_query,
             repo_context=repo_context,
             memory_context=memory_context,

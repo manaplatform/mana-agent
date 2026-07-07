@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+from mana_agent.commands.chat_cli import _decide_chat_route
 from mana_agent.multi_agent.routing.agent_decision import AgentDecisionEngine
 from mana_agent.multi_agent.routing.router import Router
 
@@ -80,6 +82,19 @@ def _engine() -> AgentDecisionEngine:
                     "code_editing_needed": False,
                     "reasoning_summary": "Latest public documentation requires web research.",
                 },
+                "search internet & github for hermes-agent and describe to me.": {
+                    "intent": "web_research",
+                    "confidence": 0.94,
+                    "selected_tools": ["web_search", "github_search"],
+                    "tool_inputs": {
+                        "web_search": {"query": "hermes-agent"},
+                        "github_search": {"query": "hermes-agent", "github_kind": "repositories"},
+                    },
+                    "repo_context_needed": False,
+                    "web_search_needed": True,
+                    "code_editing_needed": False,
+                    "reasoning_summary": "The user explicitly asks for internet and GitHub research.",
+                },
             }
         )
     )
@@ -126,6 +141,14 @@ def test_agent_decision_routes_latest_docs_to_web_search() -> None:
     assert decision.web_search_needed is True
 
 
+def test_agent_decision_routes_internet_and_github_to_both_external_tools() -> None:
+    decision = _engine().decide(user_request="search internet & github for hermes-agent and describe to me.")
+    assert decision.intent == "web_research"
+    assert decision.selected_tools == ["web_search", "github_search"]
+    assert decision.web_search_needed is True
+    assert decision.verifier_passed is True
+
+
 def test_router_uses_agent_decision_for_research_route() -> None:
     route = Router(decision_engine=_engine()).route(
         task_id="task_1",
@@ -133,3 +156,45 @@ def test_router_uses_agent_decision_for_research_route() -> None:
     )
     assert route.route_name == "research"
     assert route.required_capabilities == ["web_search", "summarization"]
+
+
+def test_router_preserves_github_search_capability() -> None:
+    route = Router(decision_engine=_engine()).route(
+        task_id="task_1",
+        user_request="search internet & github for hermes-agent and describe to me.",
+    )
+    assert route.route_name == "research"
+    assert route.required_capabilities == ["web_search", "github_search", "summarization"]
+
+
+def test_chat_route_uses_direct_agent_decision_without_search_repair() -> None:
+    class AnswerModel:
+        def invoke(self, _messages):  # noqa: ANN001
+            return type(
+                "Msg",
+                (),
+                {
+                    "content": json.dumps(
+                        {
+                            "intent": "answer",
+                            "confidence": 0.7,
+                            "selected_tools": [],
+                            "tool_inputs": {},
+                            "repo_context_needed": False,
+                            "web_search_needed": False,
+                            "code_editing_needed": False,
+                            "reasoning_summary": "Answered through the standard chat service path.",
+                        }
+                    )
+                },
+            )()
+
+    ask_service = type("AskService", (), {"ask_agent": type("AskAgent", (), {"llm": AnswerModel()})()})()
+    decision = _decide_chat_route(
+        ask_service=ask_service,
+        question="search internet and give me description about hermes-agent",
+        root=Path("/repo"),
+    )
+    assert decision.intent == "answer"
+    assert decision.selected_tools == []
+    assert decision.source == "model"

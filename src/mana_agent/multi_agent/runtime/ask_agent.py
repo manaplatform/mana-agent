@@ -29,6 +29,7 @@ from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.services.memory_service import EvidenceMemory
 from mana_agent.services.search_service import SearchService
 from mana_agent.search.config import SearchConfig
+from mana_agent.search.decision import SearchDecisionEngine
 from mana_agent.search.router import SearchRouter, SearchRouterResult
 from mana_agent.tools import coding_tool_contracts_payload, extract_patch_touched_files
 from mana_agent.utils.tool_policy import resolve_allowed_tools
@@ -2022,6 +2023,13 @@ class AskAgent:
         config = getattr(self, "search_config", None) or SearchConfig.from_env()
         self.search_config = config
         if disabled or not config.enable_ask_agent:
+            return None
+        guardrail = SearchDecisionEngine(llm=None, config=config).decide(
+            user_query=question,
+            repo_context=system_prompt or "",
+            memory_context=f"run_id={run_id or ''}",
+        )
+        if not guardrail.needs_search:
             return None
         try:
             router = SearchRouter(root=str(self.project_root), llm=getattr(self, "llm", None), config=config)

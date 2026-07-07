@@ -23,7 +23,10 @@ class Router:
         if kind == "tool":
             return RouteDecision(task_id, "tool", "medium", ["main", "head_decision", "tool", "verifier", "summarizer"], [], ["tool_execution", "verification", "summarization"], agent_decision.repo_context_needed, True, RiskLevel.MEDIUM, agent_decision.reasoning_summary or "Tool-heavy request.")
         if agent_decision.intent == "web_research":
-            return RouteDecision(task_id, "research", "medium", ["main", "head_decision", "research", "summarizer"], [], ["web_search", "summarization"], False, False, RiskLevel.LOW, agent_decision.reasoning_summary or "External research request.")
+            external_tools = [
+                tool for tool in agent_decision.selected_tools if tool in {"web_search", "github_search"}
+            ] or ["web_search"]
+            return RouteDecision(task_id, "research", "medium", ["main", "head_decision", "research", "summarizer"], [], [*external_tools, "summarization"], False, False, RiskLevel.LOW, agent_decision.reasoning_summary or "External research request.")
         if agent_decision.intent == "repo_search":
             return RouteDecision(task_id, "repo_search", "medium", ["main", "head_decision", "research", "summarizer"], ["repo_inventory"], ["repo_search", "repo_read", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Repository search request.")
         return RouteDecision(task_id, "simple", "simple", ["main", "head_decision", "summarizer"], [], ["conversation", "summarization"], agent_decision.repo_context_needed, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Simple explanation or Q&A request.")

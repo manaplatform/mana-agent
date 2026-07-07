@@ -46,6 +46,14 @@ def test_web_search_for_latest_docs_model_decision() -> None:
     assert decision.queries[0].query == "Pydantic latest model config docs"
 
 
+def test_guardrail_does_not_special_case_search_internet_without_model() -> None:
+    engine = SearchDecisionEngine(llm=None, config=_config())
+    decision = engine.decide(user_query="search internet about hermes-agent")
+    assert decision.mode == "none"
+    assert decision.targets == []
+    assert decision.queries == []
+
+
 def test_github_search_for_like_repo_request() -> None:
     engine = SearchDecisionEngine(
         llm=_ModelRouter(
