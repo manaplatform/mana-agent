@@ -2,6 +2,12 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-07 (model-driven tool routing)
+
+- Added a typed `AgentDecision` routing layer that asks the model to choose intent, confidence, tools, tool inputs, repo/web/edit needs, and a verifier summary from tool descriptions instead of letting chat keyword shortcuts select repository search.
+- Routed chat read-only `web_search` and `repo_search` turns through the model decision, kept safety/unavailable-model fallbacks bounded, and made the external search router treat keyword hints as fallback-only rather than overriding valid model output.
+- Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_decision_routing.py -q` passed with 7 tests; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_decision_routing.py tests/test_search_decision.py tests/test_search_router.py tests/test_chat_direct_commands.py tests/test_auto_chat.py tests/test_multi_agent_core.py -q` passed with 75 tests; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_agent/multi_agent/routing/agent_decision.py src/mana_agent/multi_agent/routing/router.py src/mana_agent/commands/chat_cli.py src/mana_agent/search/decision.py tests/test_agent_decision_routing.py` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/multi_agent/routing/agent_decision.py src/mana_agent/multi_agent/routing/router.py src/mana_agent/search/decision.py tests/test_agent_decision_routing.py --select F,E9` passed. A touched-file Ruff run including `src/mana_agent/commands/chat_cli.py` still reports the pre-existing star-import F403/F405 surface in that module.
+
 ## 2026-07-07 (external search routing)
 
 - Added a model-routed, memory-aware external search layer with provider-agnostic web search, structured GitHub search qualifiers, compact source-aware context injection, and search memory reuse.
