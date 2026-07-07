@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
 import uuid
 
 from .cli_internal import *
@@ -25,6 +27,9 @@ from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
 from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
 from mana_agent.multi_agent.runtime.tools_executor import build_tools_executor_with_fallback
+from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine
+from mana_agent.search.config import SearchConfig
+from mana_agent.search.router import SearchRouter
 from mana_agent.cli.chat_ui import (
     ChatUIState,
     default_ui_mode,
@@ -34,7 +39,6 @@ from mana_agent.cli.chat_ui import (
 )
 from mana_agent.cli.events import make_event
 from mana_agent.cli.fullscreen_chat import MenuOption, select_option
-from mana_agent.ui.banner import render_mode_header
 
 
 _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
@@ -136,6 +140,81 @@ def _generate_planning_question_llm(
     if not content:
         raise RuntimeError("planning question LLM returned an empty question")
     return content
+
+
+def _agent_decision_llm(ask_service):
+    ask_agent = getattr(ask_service, "ask_agent", None)
+    if ask_agent is not None and hasattr(ask_agent, "llm"):
+        return getattr(ask_agent, "llm")
+    qna_chain = getattr(ask_service, "qna_chain", None)
+    return getattr(qna_chain, "llm", None)
+
+
+def _decide_chat_route(*, ask_service, question: str, root: Path) -> AgentDecision:
+    engine = AgentDecisionEngine(llm=_agent_decision_llm(ask_service))
+    return engine.decide(
+        user_request=question,
+        repo_context=f"Repository root: {root}",
+        command_hint="chat",
+    )
+
+
+def _auto_chat_mode_from_agent_decision(decision: AgentDecision, fallback: AutoChatMode) -> AutoChatMode:
+    if decision.intent == "edit" or decision.code_editing_needed:
+        return AutoChatMode.EDIT
+    if decision.intent == "plan":
+        return AutoChatMode.PLAN_ONLY
+    if decision.intent == "analyze":
+        return AutoChatMode.ANALYZE
+    if decision.intent == "verify":
+        return AutoChatMode.VERIFY
+    if decision.intent == "review":
+        return AutoChatMode.REVIEW
+    return fallback
+
+
+def _run_web_research_answer(*, ask_service, question: str, root: Path, decision: AgentDecision) -> tuple[str, list[dict[str, str]], list[dict[str, Any]]]:
+    config = SearchConfig.from_env()
+    router = SearchRouter(root=str(root), llm=_agent_decision_llm(ask_service), config=config)
+    query = str((decision.tool_inputs.get("web_search") or {}).get("query") or question).strip()
+    result = router.run(user_query=query, repo_context=f"Repository root: {root}", task_id=None)
+    context = result.context_block(
+        max_results=config.max_injected_results,
+        max_words=config.max_summary_words,
+    )
+    if not context:
+        return (
+            "No external search results were available for that request.",
+            [],
+            [
+                {
+                    "tool_name": "web_search",
+                    "status": "ok",
+                    "args_summary": query,
+                    "result_summary": "0 result(s)",
+                }
+            ],
+        )
+    qna_chain = getattr(ask_service, "qna_chain", None)
+    if qna_chain is not None and hasattr(qna_chain, "run"):
+        answer = qna_chain.run(question=question, context=context)
+    else:
+        answer = context
+    sources: list[dict[str, str]] = []
+    for item in [*result.results, *result.memory_hits]:
+        title = str(getattr(item, "title", "") or "").strip()
+        url = str(getattr(item, "url", "") or "").strip()
+        if url:
+            sources.append({"title": title, "url": url})
+    trace = [
+        {
+            "tool_name": "web_search",
+            "status": "ok",
+            "args_summary": query,
+            "result_summary": f"{len(result.results)} result(s), {len(result.memory_hits)} memory hit(s)",
+        }
+    ]
+    return str(answer or "").strip(), sources, trace
 
 
 def _is_planning_question_auth_failure(exc: Exception) -> bool:
@@ -1892,7 +1971,11 @@ def chat(
 
             original_auto_question = question
             question = resolve_auto_followup(question, auto_chat_state)
-            auto_chat_mode = classify_auto_chat_intent(question)
+            agent_decision = _decide_chat_route(ask_service=ask_service, question=question, root=root)
+            auto_chat_mode = _auto_chat_mode_from_agent_decision(
+                agent_decision,
+                classify_auto_chat_intent(question),
+            )
 
             small_direct_edit_result = handle_small_direct_edit(root, question)
             if small_direct_edit_result.handled:
@@ -1952,21 +2035,90 @@ def chat(
                 continue
 
             # -----------------------------
-            # Exact search fast-path (ripgrep / static search, no index needed).
+            # Model-selected immediate tools for read-only research/search turns.
             # -----------------------------
-            exact_search_query = _extract_exact_search_query(question)
-            if exact_search_query is not None:
-                search_result = project_search(exact_search_query, root)
+            if (
+                "web_search" in agent_decision.selected_tools
+                and agent_decision.web_search_needed
+                and not agent_decision.code_editing_needed
+            ):
+                answer_text, sources, trace = _run_web_research_answer(
+                    ask_service=ask_service,
+                    question=question,
+                    root=root,
+                    decision=agent_decision,
+                )
+                _render_answer_header(console, title="Web search")
+                console.print(Markdown(answer_text))
+                chat_ui_state.record_event(
+                    make_event(
+                        "agent.decision",
+                        title="Agent decision",
+                        message=agent_decision.reasoning_summary,
+                        status="success" if agent_decision.verifier_passed else "failed",
+                        session_id=chat_ui_state.session_id,
+                        turn_id=current_turn_id,
+                        step_id="05",
+                        metadata={
+                            "intent": agent_decision.intent,
+                            "selected_tools": agent_decision.selected_tools,
+                            "verifier": agent_decision.verifier_summary,
+                        },
+                    ).finish(status="success" if agent_decision.verifier_passed else "failed")
+                )
+                turn_record = ChatTurnTelemetry(
+                    turn_index=len(session_turns) + 1,
+                    timestamp=_now_iso(),
+                    question=question,
+                    answer_text=answer_text,
+                    sources=sources,
+                    warnings=[] if agent_decision.verifier_passed else [agent_decision.verifier_summary],
+                    trace=_coerce_trace_items(trace),
+                    tool_steps_total=len(trace),
+                    decisions=[agent_decision.to_dict()],
+                    changed_files=[],
+                    has_diff=False,
+                    coding_state={"flow_id": active_flow_id},
+                )
+                session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
+                _finish_ui_turn(current_turn_id)
+                _log_chat_turn(
+                    run_logger,
+                    turn=turn_record,
+                    mode="web-search",
+                    dir_mode=dir_mode,
+                    coding_agent=False,
+                    flow_id=active_flow_id,
+                    multiline_input=multiline_input,
+                    multiline_terminator=multiline_terminator,
+                )
+                _save_auto_chat_turn_state(
+                    mode=auto_chat_mode,
+                    task=original_auto_question,
+                    answer_text=answer_text,
+                    sources=sources,
+                    changed_files=[],
+                )
+                continue
+
+            if (
+                "repo_search" in agent_decision.selected_tools
+                and agent_decision.repo_context_needed
+                and not agent_decision.code_editing_needed
+            ):
+                tool_query = str((agent_decision.tool_inputs.get("repo_search") or {}).get("query") or question).strip()
+                search_result = project_search(tool_query, root)
                 if search_result.matches:
                     body = search_result.format(root)
                     if search_result.truncated:
                         body += "\n… (results truncated)"
                     answer_text = (
                         f"Found {len(search_result.matches)} match(es) "
-                        f"for '{exact_search_query}' via {search_result.backend}:\n\n{body}"
+                        f"for '{tool_query}' via {search_result.backend}:\n\n{body}"
                     )
                 else:
-                    answer_text = f"No matches for '{exact_search_query}' in {root}."
+                    answer_text = f"No matches for '{tool_query}' in {root}."
                 console.print("\n[bold]Search results[/bold]")
                 console.print(answer_text)
                 chat_ui_state.record_event(
@@ -1986,8 +2138,9 @@ def chat(
                         ),
                         metadata={
                             "tool_name": "project_search",
-                            "args_summary": exact_search_query,
+                            "args_summary": tool_query,
                             "result_summary": f"{len(search_result.matches)} match(es)",
+                            "agent_decision": agent_decision.to_dict(),
                         },
                     ).finish(status="success")
                 )
@@ -2000,7 +2153,7 @@ def chat(
                     warnings=[],
                     trace=[],
                     tool_steps_total=0,
-                    decisions=[],
+                    decisions=[agent_decision.to_dict()],
                     changed_files=[],
                     has_diff=False,
                     coding_state={"flow_id": active_flow_id},
@@ -2011,7 +2164,7 @@ def chat(
                 _log_chat_turn(
                     run_logger,
                     turn=turn_record,
-                    mode=f"exact-search:{search_result.backend}",
+                    mode=f"repo-search:{search_result.backend}",
                     dir_mode=dir_mode,
                     coding_agent=False,
                     flow_id=active_flow_id,

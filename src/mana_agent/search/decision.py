@@ -51,14 +51,13 @@ class SearchDecisionEngine:
         text = str(user_query or "").strip()
         if not text or EXPLICIT_NO_SEARCH.search(text) or PRIVATE_SNIPPET_HINTS.search(text):
             return self._none("External search is disabled by user intent or privacy guard.")
-        guardrail = self._guardrail_decision(text, max_results=max_results)
         model_decision = self._model_decision(
             text,
             repo_context=repo_context,
             memory_context=memory_context,
             max_results=max_results,
         )
-        decision = self._merge_decisions(model_decision, guardrail, text)
+        decision = model_decision or self._guardrail_decision(text, max_results=max_results)
         if not self.config.enable_web:
             decision.targets = [target for target in decision.targets if target != "web"]
             decision.queries = [query for query in decision.queries if query.target != "web"]
