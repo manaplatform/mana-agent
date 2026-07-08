@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.0.10"
+version = "0.0.11"
 description = "LLM-powered static analysis and repository understanding tool"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
