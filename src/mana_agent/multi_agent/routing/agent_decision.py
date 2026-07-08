@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from mana_agent.multi_agent.routing.policies import classify_request
 from mana_agent.tools.contracts import coding_tool_contracts
 
 
@@ -154,7 +153,7 @@ class AgentDecisionEngine:
     ) -> None:
         self.llm = llm
         self.tool_descriptions = tool_descriptions or agent_tool_descriptions()
-        self.enable_fallback = enable_fallback
+        self.enable_fallback = False
 
     def decide(
         self,
@@ -187,17 +186,15 @@ class AgentDecisionEngine:
         )
         if model_decision is not None:
             return self._with_verification(model_decision, request)
-        if not self.enable_fallback:
-            return self._with_verification(
-                AgentDecision(
-                    intent="answer",
-                    confidence=0.0,
-                    reasoning_summary="Model routing decision was unavailable.",
-                    source="model_unavailable",
-                ),
-                request,
-            )
-        return self._with_verification(self._fallback_decision(request), request)
+        return self._with_verification(
+            AgentDecision(
+                intent="answer",
+                confidence=0.0,
+                reasoning_summary="Model routing decision was unavailable. No alternate route was executed.",
+                source="model_unavailable",
+            ),
+            request,
+        )
 
     def _model_decision(
         self,
@@ -259,37 +256,6 @@ class AgentDecisionEngine:
             reasoning_summary=str(data.get("reasoning_summary") or "Model-routed agent decision.")[:500],
             source="model",
         )
-
-    def _fallback_decision(self, request: str) -> AgentDecision:
-        kind = classify_request(request)
-        if kind == "coding":
-            return AgentDecision(
-                intent="edit",
-                confidence=0.45,
-                selected_tools=["repo_search", "read_file", "apply_patch"],
-                tool_inputs={"repo_search": {"query": request[:240]}},
-                repo_context_needed=True,
-                code_editing_needed=True,
-                reasoning_summary="Fallback used because model routing was unavailable.",
-                source="fallback",
-            )
-        if kind == "analyze":
-            return AgentDecision(
-                intent="analyze",
-                confidence=0.45,
-                selected_tools=["repo_search", "read_file"],
-                tool_inputs={"repo_search": {"query": request[:240]}},
-                repo_context_needed=True,
-                reasoning_summary="Fallback used because model routing was unavailable.",
-                source="fallback",
-            )
-        if kind == "planning":
-            return AgentDecision(intent="plan", confidence=0.45, reasoning_summary="Fallback used because model routing was unavailable.", source="fallback")
-        if kind == "tool":
-            return AgentDecision(intent="tool", confidence=0.45, selected_tools=["run_command"], reasoning_summary="Fallback used because model routing was unavailable.", source="fallback")
-        if kind == "high_risk_tool":
-            return AgentDecision(intent="high_risk_tool", confidence=0.8, selected_tools=["run_command"], reasoning_summary="Safety fallback selected high-risk tool route.", source="fallback")
-        return AgentDecision(intent="answer", confidence=0.4, reasoning_summary="Fallback used because model routing was unavailable.", source="fallback")
 
     def _with_verification(self, decision: AgentDecision, request: str) -> AgentDecision:
         verification = verify_agent_decision(decision, user_request=request, tool_descriptions=self.tool_descriptions)

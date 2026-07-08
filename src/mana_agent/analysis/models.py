@@ -164,11 +164,14 @@ class ToolInvocationTrace:
 class AskResponseWithTrace(AskResponse):
     mode: str = "classic"
     trace: list[ToolInvocationTrace] = field(default_factory=list)
+    route_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = AskResponse.to_dict(self)
         payload["mode"] = self.mode
         payload["trace"] = [item.to_dict() for item in self.trace]
+        if self.route_trace:
+            payload["route_trace"] = self.route_trace
         return payload
 
 

@@ -16,6 +16,8 @@ DANGEROUS_SHELL_PATTERNS = [
     r"(^|\s)env(\s|$)",
     r"\bgit\s+reset\s+--hard\b",
     r"\bgit\s+clean\s+-fd\b",
+    r"\bgit\s+push\b.*\s--force(?:-with-lease)?\b",
+    r"\bgit\s+rebase\s+--(?:abort|skip)\b",
     r"\bcurl\b.*(secret|token|credential)",
 ]
 ALLOWED_SHELL_PREFIXES = (
@@ -24,8 +26,25 @@ ALLOWED_SHELL_PREFIXES = (
     "ruff check",
     "mypy",
     "git status --short",
+    "git status",
+    "git branch",
+    "git remote",
+    "git fetch",
+    "git switch",
+    "git checkout",
+    "git add",
     "git diff --stat",
     "git diff",
+    "git commit",
+    "git push",
+    "git pull",
+    "git log",
+    "git rev-parse",
+    "git merge",
+    "git rebase",
+    "git reset",
+    "git restore",
+    "git tag",
 )
 
 

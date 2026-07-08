@@ -2,6 +2,28 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-08 (work queue decision seeds)
+
+- Fixed work queue initial seeding so automatic `WorkItem`s are selected from the classifier/planner decision before queue submission instead of blindly starting with `repo_search`.
+- Changed Git and command-style requests to begin with Git context or tool-manager decision work, while exact file requests read their target files directly and broad code requests can still use repository discovery.
+- Preserved explicit `seeds=` handling so caller-provided queue seeds bypass automatic seed decisions unchanged.
+  - Verification: Pending.
+
+## 2026-07-08 (GitOps entry routing)
+
+- Added an explicit `gitops` ask/chat entry route so model-selected Git add, commit, push, branch, and related requests bypass repository search and execute through the Git-capable agent tool path.
+- Exposed Git tools to the entry-router decision context and expanded the shell permission policy for approved Git commands while continuing to block protected reset, clean, force-push, and rebase abort/skip patterns.
+- Added regression coverage proving Git commit/push requests can route to GitOps without repo search or fallback file creation.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_ask_entry_router.py tests/test_git_tools.py -q` passed; `PYTHONPATH=src .venv/bin/python -m py_compile src/mana_agent/multi_agent/runtime/entry_router.py src/mana_agent/multi_agent/runtime/route_executor.py src/mana_agent/multi_agent/tools/permissions.py tests/test_ask_entry_router.py` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/multi_agent/runtime/entry_router.py src/mana_agent/multi_agent/runtime/route_executor.py src/mana_agent/multi_agent/tools/permissions.py tests/test_ask_entry_router.py --select F,E9` passed; `git diff --check -- CHANGELOG.md src/mana_agent/multi_agent/runtime/entry_router.py src/mana_agent/multi_agent/runtime/route_executor.py src/mana_agent/multi_agent/tools/permissions.py tests/test_ask_entry_router.py` passed.
+
+## 2026-07-08 (model-routed ask entry)
+
+- Added an `EntryRouter`/`RouteDecision` layer and `RouteExecutor` so ask/chat entry requests are model-routed before semantic Q&A, repository search, command inventory, external search, coding, or analysis execution.
+- Removed automatic command-inventory/project-search recovery from `AskService`, replaced agent exception recovery with structured route errors, and added route trace metadata with route kind, router model, confidence, reason, validation, and executed tools.
+- Removed `AgentDecisionEngine._fallback_decision` so unavailable model routing now returns a model-unavailable decision with no selected tools instead of deriving a static route.
+- Added regression coverage for command inventory as a routed tool action, missing-index no-action behavior and one model-driven re-route, unknown command re-routing, tool/dir-mode failure handling, web-search routing, invalid router output, response modes without fallback labels, and no-model agent decisions.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_ask_service.py tests/test_ask_entry_router.py -q` passed with 12 tests; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_decision_routing.py -q` passed with 11 tests; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_ask_service.py tests/test_ask_entry_router.py tests/test_agent_decision_routing.py tests/test_multi_agent_core.py -q` passed with 78 tests; `PYTHONPATH=src .venv/bin/python -m pytest tests -q` passed with 674 tests and 18 warnings; `grep -R "classic-fallback\|classic-dir-fallback\|_project_search_fallback\|_command_inventory_fallback" -n src tests` returned no active runtime/test references; `rg -n "_fallback_decision|Fallback used because model routing|source=\"fallback\"|classify_request" src/mana_agent/multi_agent/routing/agent_decision.py tests/test_agent_decision_routing.py tests/test_multi_agent_core.py` returned no matches.
+
 ## 2026-07-08 (Git intent workflow gate)
 
 - Added an explicit GitIntent contract for high-risk Git requests so commit, push, and branch intents queue Git state inspection and Git action jobs through QueueManager instead of stopping after repository search.

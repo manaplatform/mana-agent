@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit
+from mana_agent.multi_agent.runtime.entry_router import RouteDecision
 from mana_agent.services.ask_service import AskService
 
 
@@ -50,6 +51,19 @@ class FakeSearchService:
 
 
 class FakeAskAgent:
+    def run(
+        self,
+        question: str,
+        index_dir: Path,
+        k: int,
+        max_steps: int = 6,
+        timeout_seconds: int = 30,
+    ) -> AskResponseWithTrace:
+        assert question
+        assert index_dir
+        assert k
+        return AskResponseWithTrace(answer="Tool answer", sources=[], mode="agent-tools", trace=[], warnings=[])
+
     def run_multi(
         self,
         question: str,
@@ -79,6 +93,17 @@ class FakeAskAgent:
         )
 
 
+class FakeRouter:
+    def __init__(self, decision: RouteDecision) -> None:
+        self.decision = decision
+        self.router_model = "fake-router"
+        self.calls: list[dict] = []
+
+    def route(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.decision
+
+
 def test_ask_service_with_sources() -> None:
     sources = [
         SearchHit(
@@ -90,20 +115,22 @@ def test_ask_service_with_sources() -> None:
             snippet="def add(a,b): return a+b",
         )
     ]
-    service = AskService(store=FakeStore(sources), qna_chain=FakeQnA())
+    router = FakeRouter(RouteDecision(kind="semantic_qa", confidence=0.9, reason="question needs indexed context"))
+    service = AskService(store=FakeStore(sources), qna_chain=FakeQnA(), entry_router=router)
     response = service.ask(index_dir="/tmp/index", question="How does add work?", k=4)
 
     assert "/tmp/good.py:3-6" in response.answer
     assert response.sources
+    assert response.to_dict()["route_trace"]["route_kind"] == "semantic_qa"
 
 
-def test_ask_service_without_sources_falls_back(tmp_path) -> None:
-    # With no indexed sources we no longer emit the old dead-end message; we
-    # fall back to direct project search and warn about the missing index.
-    service = AskService(store=FakeStore([]), qna_chain=FakeQnA(), project_root=tmp_path)
+def test_ask_service_without_sources_stays_on_model_selected_route(tmp_path) -> None:
+    router = FakeRouter(RouteDecision(kind="semantic_qa", confidence=0.9, reason="question needs indexed context"))
+    service = AskService(store=FakeStore([]), qna_chain=FakeQnA(), project_root=tmp_path, entry_router=router)
     response = service.ask(index_dir="/tmp/index", question="How does add work?", k=4)
     assert "could not find relevant indexed code context" not in response.answer.lower()
-    assert "Semantic index not found; using direct project search fallback." in response.warnings
+    assert "selected semantic route found no indexed context" in response.answer.lower()
+    assert "fallback" not in response.to_dict().get("mode", "")
 
 
 def test_ask_service_dir_mode_groups_sources() -> None:
@@ -123,16 +150,19 @@ def test_ask_service_dir_mode_groups_sources() -> None:
 
 
 def test_ask_service_tools_dir_mode_sets_grouped_sources() -> None:
+    router = FakeRouter(RouteDecision(kind="tool_execution", confidence=0.8, reason="tools requested"))
     service = AskService(
         store=FakeStore([]),
         qna_chain=FakeQnA(),
         ask_agent=FakeAskAgent(),
         search_service=FakeSearchService(),
+        entry_router=router,
     )
     response = service.ask_with_tools_dir_mode(
         index_dirs=[Path("/tmp/proj-a/.mana/index"), Path("/tmp/proj-b/.mana/index")],
         question="How does add work?",
         k=4,
     )
-    assert response.mode == "agent-tools"
+    assert response.mode == "route-tool_execution"
     assert response.source_groups
+    assert response.route_trace["route_kind"] == "tool_execution"

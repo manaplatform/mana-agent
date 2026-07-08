@@ -48,6 +48,7 @@ from mana_agent.services.project_llm_analyze_service import ModelConfig, build_l
 from mana_agent.utils.index_discovery import discover_index_dirs  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.utils.project_discovery import discover_subprojects  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+from mana_agent.multi_agent.runtime.entry_router import EntryRouter
 from mana_agent.multi_agent.runtime.qna_chain import QnAChain
 from mana_agent.multi_agent.runtime.coding_agent import CodingAgent
 from mana_agent.multi_agent.core.types import AgentRole
@@ -1116,6 +1117,11 @@ def build_ask_service(
     qna_chain_cls = _public_symbol("QnAChain", QnAChain)
     ask_agent_cls = _public_symbol("AskAgent", AskAgent)
     ask_service_cls = _public_symbol("AskService", AskService)
+    entry_router_cls = _public_symbol("EntryRouter", EntryRouter)
+    router_model = resolve_model_for_role(
+        AgentRole.HEAD_DECISION,
+        global_model=model,
+    ).resolved_model
 
     qna_chain = qna_chain_cls(
         api_key=settings.openai_api_key,
@@ -1129,6 +1135,10 @@ def build_ask_service(
         base_url=settings.openai_base_url,
         project_root=root,
     )
+    router_kwargs = {"api_key": settings.openai_api_key, "model": router_model}
+    if settings.openai_base_url:
+        router_kwargs["base_url"] = settings.openai_base_url
+    router_llm = _public_symbol("ChatOpenAI", ChatOpenAI)(**router_kwargs)
 
     return ask_service_cls(
         store=build_store(settings),
@@ -1136,6 +1146,7 @@ def build_ask_service(
         ask_agent=ask_agent,
         search_service=build_search_service(settings),
         project_root=root,
+        entry_router=entry_router_cls(llm=router_llm, router_model=router_model),
     )
 
 

@@ -46,6 +46,7 @@ from mana_agent.multi_agent.runtime.model_levels import (
 )
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+from mana_agent.multi_agent.routing.agent_decision import AgentDecisionEngine
 from mana_agent.multi_agent.routing.hierarchy import HierarchyPolicy, HierarchyViolation
 from mana_agent.multi_agent.routing.router import Router
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
@@ -69,6 +70,39 @@ def _init_git_repo(path: Path) -> Path:
     assert _git(path, "add", "README.md").returncode == 0
     assert _git(path, "commit", "-m", "test: initial commit").returncode == 0
     return path
+
+
+class _RouteModel:
+    def __init__(self, payloads: dict[str, dict]) -> None:
+        self.payloads = payloads
+
+    def invoke(self, messages):  # noqa: ANN001
+        body = json.loads(messages[-1].content)
+        request = body["user_request"]
+        payload = self.payloads[request]
+        return SimpleNamespace(content=json.dumps(payload))
+
+
+def _route_payload(
+    intent: str,
+    *,
+    confidence: float = 0.9,
+    selected_tools: list[str] | None = None,
+    repo_context_needed: bool = False,
+    web_search_needed: bool = False,
+    code_editing_needed: bool = False,
+    reasoning_summary: str = "Model selected route.",
+) -> dict:
+    return {
+        "intent": intent,
+        "confidence": confidence,
+        "selected_tools": selected_tools or [],
+        "tool_inputs": {},
+        "repo_context_needed": repo_context_needed,
+        "web_search_needed": web_search_needed,
+        "code_editing_needed": code_editing_needed,
+        "reasoning_summary": reasoning_summary,
+    }
 
 
 def _git_job_commands(main: MainAgent, task_id: str) -> list[list[str]]:
@@ -401,7 +435,40 @@ def test_only_main_agent_can_create_subagents(tmp_path):
 
 
 def test_router_selects_required_routes():
-    router = Router()
+    router = Router(
+        decision_engine=AgentDecisionEngine(
+            llm=_RouteModel(
+                {
+                    "/plan update docs": _route_payload("plan", reasoning_summary="Plan the requested docs update."),
+                    "/analyze repo": _route_payload(
+                        "analyze",
+                        selected_tools=["repo_search", "read_file"],
+                        repo_context_needed=True,
+                        reasoning_summary="Analyze the repository.",
+                    ),
+                    "edit README.md": _route_payload(
+                        "edit",
+                        selected_tools=["repo_search", "read_file", "apply_patch"],
+                        repo_context_needed=True,
+                        code_editing_needed=True,
+                        reasoning_summary="Edit README.md.",
+                    ),
+                    "run pytest": _route_payload(
+                        "tool",
+                        selected_tools=["run_command"],
+                        reasoning_summary="Run a verification command.",
+                    ),
+                    "project architecture changed, update README.md": _route_payload(
+                        "edit",
+                        selected_tools=["repo_search", "read_file", "apply_patch"],
+                        repo_context_needed=True,
+                        code_editing_needed=True,
+                        reasoning_summary="Update README documentation.",
+                    ),
+                }
+            )
+        )
+    )
     assert router.route(task_id="task_1", user_request="/plan update docs").route_name == "planning"
     assert router.route(task_id="task_1", user_request="/analyze repo").route_name == "analyze"
     assert router.route(task_id="task_1", user_request="edit README.md").route_name == "coding"
@@ -715,8 +782,26 @@ def test_reviewer_rejects_planned_verification_without_queue_job(tmp_path):
 
 def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     assert MainAgent(tmp_path).run_user_request("hello", entrypoint="chat").route_name == "simple"
-    assert MainAgent(tmp_path).run_user_request("scan repo", entrypoint="analyze").route_name == "analyze"
-    assert MainAgent(tmp_path).run_user_request("update docs", entrypoint="plan").route_name == "planning"
+    analyze_model = _RouteModel(
+        {
+            "analyze scan repo": _route_payload(
+                "analyze",
+                selected_tools=["repo_search", "read_file"],
+                repo_context_needed=True,
+                reasoning_summary="Analyze the repository.",
+            )
+        }
+    )
+    plan_model = _RouteModel(
+        {
+            "plan update docs": _route_payload(
+                "plan",
+                reasoning_summary="Plan the requested docs update.",
+            )
+        }
+    )
+    assert MainAgent(tmp_path, routing_llm=analyze_model).run_user_request("scan repo", entrypoint="analyze").route_name == "analyze"
+    assert MainAgent(tmp_path, routing_llm=plan_model).run_user_request("update docs", entrypoint="plan").route_name == "planning"
 
 
 def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
@@ -746,7 +831,20 @@ def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
 
 
 def test_main_agent_records_large_docs_subagents_and_deactivates_them(tmp_path):
-    main = MainAgent(tmp_path)
+    main = MainAgent(
+        tmp_path,
+        routing_llm=_RouteModel(
+            {
+                "chat project architecture changed, update README.md, cannot use diff": _route_payload(
+                    "edit",
+                    selected_tools=["repo_search", "read_file", "apply_patch"],
+                    repo_context_needed=True,
+                    code_editing_needed=True,
+                    reasoning_summary="Update README documentation.",
+                )
+            }
+        ),
+    )
     result = main.run_user_request("project architecture changed, update README.md, cannot use diff", entrypoint="chat")
     task = main.taskboard.get_task(result.task_id)
     assert result.route_name == "coding"
@@ -760,7 +858,20 @@ def test_main_agent_records_large_docs_subagents_and_deactivates_them(tmp_path):
 
 def test_main_agent_coding_route_has_queue_worker_verifier_and_review_evidence(tmp_path):
     (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
-    main = MainAgent(tmp_path)
+    main = MainAgent(
+        tmp_path,
+        routing_llm=_RouteModel(
+            {
+                "chat fix README.md heading": _route_payload(
+                    "edit",
+                    selected_tools=["repo_search", "read_file", "apply_patch"],
+                    repo_context_needed=True,
+                    code_editing_needed=True,
+                    reasoning_summary="Fix README heading.",
+                )
+            }
+        ),
+    )
     result = main.run_user_request("fix README.md heading", entrypoint="chat")
     task = main.taskboard.get_task(result.task_id)
     assert result.route_name == "coding"

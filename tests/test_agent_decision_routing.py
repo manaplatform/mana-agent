@@ -149,6 +149,16 @@ def test_agent_decision_routes_internet_and_github_to_both_external_tools() -> N
     assert decision.verifier_passed is True
 
 
+def test_agent_decision_without_model_stops_without_static_route() -> None:
+    decision = AgentDecisionEngine(llm=None).decide(user_request="fix the search router")
+
+    assert decision.intent == "answer"
+    assert decision.confidence == 0.0
+    assert decision.selected_tools == []
+    assert decision.source == "model_unavailable"
+    assert "fallback" not in decision.reasoning_summary.lower()
+
+
 def test_router_uses_agent_decision_for_research_route() -> None:
     route = Router(decision_engine=_engine()).route(
         task_id="task_1",
