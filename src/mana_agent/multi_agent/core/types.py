@@ -470,6 +470,19 @@ class RouteDecision:
 
 
 @dataclass
+class GitIntent:
+    wants_status: bool = True
+    wants_diff: bool = True
+    wants_commit: bool = False
+    wants_push: bool = False
+    wants_branch: bool = False
+    target_branch: str | None = None
+    commit_message: str | None = None
+    requires_remote: bool = False
+    risk_level: str = "high"
+
+
+@dataclass
 class PlanResult:
     task_id: str
     plan_steps: list[str]

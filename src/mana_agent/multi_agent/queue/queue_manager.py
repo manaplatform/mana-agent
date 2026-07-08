@@ -332,6 +332,7 @@ class QueueManager:
                 "approved_by_agent_id": job.approved_by_agent_id,
                 "assigned_worker_agent_id": job.assigned_worker_agent_id,
                 "tool_name": job.job_type.value,
+                "tool_args": dict(job.payload),
                 "budget_used": job.token_usage,
                 "token_usage": job.token_usage,
                 },

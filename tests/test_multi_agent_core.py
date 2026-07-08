@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -49,6 +51,36 @@ from mana_agent.multi_agent.routing.router import Router
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.tools.permissions import assert_shell_allowed
 from mana_agent.services.memory_service import MultiAgentMemoryService
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=repo, text=True, capture_output=True, check=False)
+
+
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    init = _git(path, "init", "-b", "main")
+    if init.returncode != 0:
+        assert _git(path, "init").returncode == 0
+        assert _git(path, "branch", "-M", "main").returncode == 0
+    assert _git(path, "config", "user.name", "Mana Agent Test").returncode == 0
+    assert _git(path, "config", "user.email", "test@example.com").returncode == 0
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    assert _git(path, "add", "README.md").returncode == 0
+    assert _git(path, "commit", "-m", "test: initial commit").returncode == 0
+    return path
+
+
+def _git_job_commands(main: MainAgent, task_id: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for job in main.queue_manager.jobs_for_task(task_id):
+        if job.job_type != QueueJobType.GIT:
+            continue
+        nested = job.payload.get("args") if isinstance(job.payload.get("args"), dict) else {}
+        raw = nested.get("args") if isinstance(nested, dict) else None
+        if isinstance(raw, list):
+            commands.append([str(item) for item in raw])
+    return commands
 
 
 def test_id_generation_is_readable_and_unique():
@@ -738,6 +770,89 @@ def test_main_agent_coding_route_has_queue_worker_verifier_and_review_evidence(t
     assert all(not str(event.get("agent_id", "")).startswith("agent_main_") for event in task.actual_tool_events)
     assert task.reviewed_by_agent_id == main.registry.find_by_role(AgentRole.REVIEWER).agent_id
     assert any(main.registry.agents[item].role == AgentRole.TOOL_WORKER for item in task.assigned_subagent_ids)
+
+
+def test_git_commit_push_request_queues_git_inspection_and_does_not_repo_search(tmp_path):
+    repo = _init_git_repo(tmp_path / "repo")
+    (repo / "README.md").write_text("hello\nchanged\n", encoding="utf-8")
+    main = MainAgent(repo)
+
+    result = main.run_user_request("commit changes and push to main", entrypoint="chat")
+
+    task = main.taskboard.get_task(result.task_id)
+    commands = _git_job_commands(main, result.task_id)
+    assert result.route_name == "high_risk_tool"
+    assert "git_status" in task.required_capabilities
+    assert "git_diff" in task.required_capabilities
+    assert "git_commit" in task.required_capabilities
+    assert "git_push" in task.required_capabilities
+    assert ["status", "--short", "--branch"] in commands
+    assert ["diff", "--stat"] in commands
+    assert not any(job.job_type == QueueJobType.REPO_SEARCH for job in main.queue_manager.jobs_for_task(result.task_id))
+    assert any(command and command[0] == "commit" for command in commands)
+    assert any("Git push blocked: no remote exists" in item for item in task.blockers)
+    assert task.status == TaskStatus.BLOCKED
+
+
+def test_git_push_to_main_inspects_remote_and_blocks_when_behind(tmp_path):
+    remote = tmp_path / "remote.git"
+    assert subprocess.run(["git", "init", "--bare", str(remote)], text=True, capture_output=True, check=False).returncode == 0
+    repo = _init_git_repo(tmp_path / "repo")
+    assert _git(repo, "remote", "add", "origin", str(remote)).returncode == 0
+    assert _git(repo, "push", "-u", "origin", "main").returncode == 0
+    other = tmp_path / "other"
+    assert subprocess.run(["git", "clone", "-b", "main", str(remote), str(other)], text=True, capture_output=True, check=False).returncode == 0
+    assert _git(other, "config", "user.name", "Mana Agent Test").returncode == 0
+    assert _git(other, "config", "user.email", "test@example.com").returncode == 0
+    (other / "README.md").write_text("hello\nremote change\n", encoding="utf-8")
+    assert _git(other, "commit", "-am", "test: remote change").returncode == 0
+    assert _git(other, "push", "origin", "main").returncode == 0
+    assert _git(repo, "fetch", "origin").returncode == 0
+    main = MainAgent(repo)
+
+    result = main.run_user_request("push to main", entrypoint="chat")
+
+    task = main.taskboard.get_task(result.task_id)
+    commands = _git_job_commands(main, result.task_id)
+    assert ["branch", "--show-current"] in commands
+    assert ["remote", "-v"] in commands
+    assert any(command[:1] == ["rev-list"] for command in commands)
+    assert not any(command and command[0] == "push" for command in commands)
+    assert any("branch is behind remote" in item for item in task.blockers)
+    assert task.status == TaskStatus.BLOCKED
+
+
+def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
+    repo = _init_git_repo(tmp_path / "repo")
+    (repo / "README.md").write_text("hello\ncommit only\n", encoding="utf-8")
+    main = MainAgent(repo)
+
+    result = main.run_user_request("commit", entrypoint="chat")
+
+    task = main.taskboard.get_task(result.task_id)
+    commands = _git_job_commands(main, result.task_id)
+    commit_commands = [command for command in commands if command and command[0] == "commit"]
+    assert ["diff", "--stat"] in commands
+    assert ["diff"] in commands
+    assert commit_commands
+    assert "README" in " ".join(commit_commands[0]) or "readme" in " ".join(commit_commands[0]).lower()
+    assert "hardcoded" not in " ".join(commit_commands[0]).lower()
+    assert _git(repo, "log", "-1", "--pretty=%s").stdout.strip().lower().startswith("docs: update readme")
+    assert task.status == TaskStatus.DONE
+
+
+def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
+    repo = _init_git_repo(tmp_path / "repo")
+    main = MainAgent(repo)
+
+    result = main.run_user_request("create new branch feature/git-workflow", entrypoint="chat")
+
+    task = main.taskboard.get_task(result.task_id)
+    commands = _git_job_commands(main, result.task_id)
+    assert ["status", "--short", "--branch"] in commands
+    assert ["switch", "-c", "feature/git-workflow"] in commands
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "feature/git-workflow"
+    assert task.status == TaskStatus.DONE
 
 
 def test_model_levels_are_configurable_by_tier(monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from mana_agent.multi_agent.agents.tool_agent import ToolAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
 from mana_agent.multi_agent.communication.decision_room import DecisionRoom
 from mana_agent.multi_agent.communication.message_bus import MessageBus
-from mana_agent.multi_agent.core.types import AgentRole, AgentState, QueueJobType, TaskStatus
+from mana_agent.multi_agent.core.types import AgentRole, AgentState, GitIntent, QueueJob, QueueJobStatus, QueueJobType, RiskLevel, TaskStatus
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
 from mana_agent.multi_agent.routing.hierarchy import AgentFactory, HierarchyPolicy
@@ -121,6 +122,12 @@ class MainAgent:
             reason="route after task duplicate and bundle checks",
         )
         route = self.router.route(task_id=task.task_id, user_request=f"{entrypoint} {request}")
+        git_intent = self._git_intent_from_request(request)
+        if git_intent is not None:
+            route = self._route_with_git_contract(route, git_intent)
+            task.risk_level = RiskLevel.HIGH
+            task.required_capabilities = list(route.required_capabilities)
+            self.taskboard.add_evidence(task.task_id, f"GitIntent contract established: {git_intent}")
         self.taskboard.record_budget(
             task.task_id,
             {
@@ -176,14 +183,20 @@ class MainAgent:
             self._agent(AgentRole.RESEARCH, ResearchAgent).collect_evidence(task.task_id, "Analyze flow delegated to existing analyzer after multi-agent route creation.")
         if route.route_name in {"coding", "tool", "high_risk_tool"}:
             self.taskboard.add_evidence(task.task_id, "QueueManager is the only approved tool execution path.")
-            self._delegate_initial_tool_work(task.task_id, request, route.route_name)
+            if git_intent is not None:
+                self._delegate_git_intent_work(task.task_id, git_intent)
+            else:
+                self._delegate_initial_tool_work(task.task_id, request, route.route_name)
         if route.risk_level.value in {"medium", "high"} or len(route.required_agents) > 4:
             self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
         if route.requires_verification:
             self.taskboard.update_status(task.task_id, TaskStatus.VERIFYING, reason="VerifierAgent executes verification queue jobs.")
             verifier = self._agent(AgentRole.VERIFIER, VerifierAgent)
             verification_commands = self._verification_commands(plan.verification_commands)
-            verification = verifier.execute_verification(task.task_id, verification_commands)
+            if git_intent is not None:
+                verification = verifier.execute_git_verification(task.task_id, wants_push=git_intent.wants_push, target_branch=git_intent.target_branch)
+            else:
+                verification = verifier.execute_verification(task.task_id, verification_commands)
             self.memory.remember_agent(
                 verifier.agent_id,
                 f"Recorded verification for task {task.task_id}: passed={verification.passed}; {verification.summary}",
@@ -196,6 +209,9 @@ class MainAgent:
         reviewer = self._agent(AgentRole.REVIEWER, ReviewerAgent)
         approved = reviewer.review_evidence(task.task_id, route_name=route.route_name, requires_verification=route.requires_verification)
         self._deactivate_subagents(task.task_id, subagent_ids + worker_ids)
+        task_after_review = self.taskboard.get_task(task.task_id)
+        if git_intent is not None and task_after_review.blockers:
+            approved = False
         if approved:
             self.taskboard.update_status(task.task_id, TaskStatus.DONE, reason="Multi-agent hierarchy completed and reviewer approved evidence.")
             answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
@@ -250,6 +266,162 @@ class MainAgent:
         )
         self.taskboard.add_evidence(task_id, f"CodingAgent created queue job {job.job_id} for repository context sniffing.")
         self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
+
+    def _delegate_git_intent_work(self, task_id: str, intent: GitIntent) -> None:
+        coding = self._agent(AgentRole.CODING, CodingAgent)
+        inspections = [
+            ["status", "--short", "--branch"],
+            ["branch", "--show-current"],
+            ["remote", "-v"],
+            ["diff", "--stat"],
+            ["diff"],
+            ["diff", "--cached", "--stat"],
+            ["log", "-1", "--oneline"],
+        ]
+        results = [self._run_git_job(task_id, coding.agent_id, args, purpose=f"Inspect Git state: git {' '.join(args)}") for args in inspections]
+        if any(job.status == QueueJobStatus.FAILED and _git_args(job)[:1] == ["status"] for job in results):
+            self.taskboard.add_blocker(task_id, "Git workflow blocked: repository status inspection failed or target is not a Git repository.")
+            return
+
+        status = _stdout_for(results, ["status", "--short", "--branch"])
+        current_branch = _stdout_for(results, ["branch", "--show-current"]).strip()
+        remotes = _stdout_for(results, ["remote", "-v"]).strip()
+        diff_stat = _stdout_for(results, ["diff", "--stat"])
+        diff = _stdout_for(results, ["diff"])
+        status_paths = _status_paths(status)
+        if _has_conflicts(status):
+            self.taskboard.add_blocker(task_id, "Git workflow blocked: conflicts are present in repository status.")
+            return
+        if intent.wants_branch:
+            self._handle_branch_intent(task_id, coding.agent_id, intent, status_paths)
+            return
+        if intent.wants_commit:
+            if not status_paths:
+                self.taskboard.add_blocker(task_id, "Git commit result: no changes to commit.")
+            elif _has_untracked(status):
+                self.taskboard.add_blocker(task_id, "Git commit blocked: untracked files are present and were not selected for staging.")
+            else:
+                paths = sorted(status_paths)
+                message = intent.commit_message or self._commit_message_from_diff(diff_stat=diff_stat, diff=diff, paths=paths)
+                intent.commit_message = message
+                self.taskboard.add_evidence(task_id, f"Git commit message generated from diff: {message}")
+                self._run_git_job(task_id, coding.agent_id, ["add", "--", *paths], purpose=f"Stage inspected Git paths: {', '.join(paths)}")
+                self._run_git_job(task_id, coding.agent_id, ["diff", "--cached", "--stat"], purpose="Inspect staged Git diff stat before commit.")
+                self._run_git_job(task_id, coding.agent_id, ["diff", "--cached"], purpose="Inspect staged Git diff before commit.")
+                committed = self._run_git_job(task_id, coding.agent_id, ["commit", "-m", message], purpose="Create Git commit with diff-derived message.")
+                if committed.status != QueueJobStatus.DONE:
+                    self.taskboard.add_blocker(task_id, f"Git commit blocked: {committed.error or committed.result_summary or 'commit failed'}")
+                    return
+        if intent.wants_push:
+            self._handle_push_intent(task_id, coding.agent_id, intent, current_branch=current_branch, remotes=remotes)
+
+    def _handle_branch_intent(self, task_id: str, agent_id: str, intent: GitIntent, status_paths: set[str]) -> None:
+        if status_paths:
+            self.taskboard.add_blocker(task_id, "Git branch creation blocked: working tree has local changes.")
+            return
+        branch = intent.target_branch or ""
+        if not branch:
+            self.taskboard.add_blocker(task_id, "Git branch creation blocked: target branch was not selected by the model decision.")
+            return
+        created = self._run_git_job(task_id, agent_id, ["switch", "-c", branch], purpose=f"Create and switch to Git branch {branch}.")
+        if created.status != QueueJobStatus.DONE:
+            self.taskboard.add_blocker(task_id, f"Git branch creation blocked: {created.error or created.result_summary or 'branch command failed'}")
+
+    def _handle_push_intent(self, task_id: str, agent_id: str, intent: GitIntent, *, current_branch: str, remotes: str) -> None:
+        target = intent.target_branch or current_branch
+        if not remotes:
+            self.taskboard.add_blocker(task_id, "Git push blocked: no remote exists.")
+            return
+        if target and current_branch and current_branch != target:
+            self.taskboard.add_blocker(task_id, f"Git push blocked: current branch is {current_branch}, target branch is {target}.")
+            return
+        upstream = self._run_git_job(task_id, agent_id, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], purpose="Inspect Git upstream before push.")
+        upstream_name = str((upstream.result or {}).get("stdout") or "").strip() if upstream.result else ""
+        compare_ref = upstream_name or (f"origin/{target}" if target else "")
+        if compare_ref:
+            divergence = self._run_git_job(task_id, agent_id, ["rev-list", "--left-right", "--count", f"{compare_ref}...HEAD"], purpose="Inspect Git ahead/behind state before push.")
+            counts = str((divergence.result or {}).get("stdout") or "").strip().split() if divergence.result else []
+            if len(counts) >= 2:
+                behind, ahead = int(counts[0]), int(counts[1])
+                if behind and ahead:
+                    self.taskboard.add_blocker(task_id, "Git push blocked: branch is diverged from remote.")
+                    return
+                if behind:
+                    self.taskboard.add_blocker(task_id, "Git push blocked: branch is behind remote.")
+                    return
+        pushed = self._run_git_job(task_id, agent_id, ["push", "origin", target or current_branch], purpose=f"Push Git branch {target or current_branch} to origin.")
+        if pushed.status != QueueJobStatus.DONE:
+            self.taskboard.add_blocker(task_id, f"Git push blocked: {pushed.error or pushed.result_summary or 'push failed'}")
+
+    def _run_git_job(self, task_id: str, requested_by_agent_id: str, args: list[str], *, purpose: str) -> QueueJob:
+        job = self.queue_manager.enqueue(
+            task_id=task_id,
+            requested_by_agent_id=requested_by_agent_id,
+            approved_by_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
+            job_type=QueueJobType.GIT,
+            payload={"tool": "git.generic", "args": {"args": args}},
+            purpose=purpose,
+            priority=70,
+            requires_write_lock=args[:1] in (["add"], ["commit"], ["push"], ["switch"], ["checkout"], ["branch"]),
+        )
+        self.taskboard.add_evidence(task_id, f"CodingAgent created Git queue job {job.job_id}: git {' '.join(args)}")
+        self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
+        return job
+
+    def _git_intent_from_request(self, request: str) -> GitIntent | None:
+        text = str(request or "").strip().lower()
+        action_re = r"\b(commit|push|branch|checkout|switch|merge|rebase|tag|release)\b"
+        if not re.search(action_re, text):
+            return None
+        wants_commit = bool(re.search(r"\bcommit\b", text))
+        wants_push = bool(re.search(r"\bpush\b", text))
+        wants_branch = bool(re.search(r"\b(branch|checkout|switch)\b", text))
+        target = "main" if re.search(r"\bmain\b", text) else None
+        branch_match = re.search(r"\b(?:branch|checkout|switch)\s+(?:to\s+|new\s+|create\s+|create\s+new\s+)?([A-Za-z0-9._/-]+)", text)
+        if wants_branch and branch_match:
+            target = branch_match.group(1)
+        return GitIntent(
+            wants_status=True,
+            wants_diff=True,
+            wants_commit=wants_commit,
+            wants_push=wants_push,
+            wants_branch=wants_branch,
+            target_branch=target,
+            commit_message=None,
+            requires_remote=wants_push,
+            risk_level="high",
+        )
+
+    def _route_with_git_contract(self, route, intent: GitIntent):
+        capabilities = ["repo_state", "git_status", "git_diff", "verification"]
+        if intent.wants_commit:
+            capabilities.append("git_commit")
+        if intent.wants_push:
+            capabilities.append("git_push")
+        if intent.wants_branch:
+            capabilities.append("git_branch")
+        route.route_name = "high_risk_tool"
+        route.task_size = "medium"
+        route.required_agents = ["main", "head_decision", "tool", "verifier", "reviewer", "summarizer"]
+        route.required_capabilities = capabilities
+        route.requires_discussion = True
+        route.requires_verification = True
+        route.risk_level = RiskLevel.HIGH
+        route.reason_summary = "Git intent requires repository-state inspection, queued Git execution, verification, and review."
+        return route
+
+    def _commit_message_from_diff(self, *, diff_stat: str, diff: str, paths: list[str]) -> str:
+        primary = Path(paths[0]).stem.replace("_", "-").replace(" ", "-") if paths else "repository"
+        changed_lines = [line for line in str(diff).splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
+        scope = primary[:40] or "repository"
+        verb = "update" if changed_lines else "record"
+        if any(path.lower().endswith((".md", ".rst", ".txt")) for path in paths):
+            return f"docs: {verb} {scope}"
+        if "test" in " ".join(paths).lower():
+            return f"test: {verb} {scope}"
+        if diff_stat:
+            return f"chore: {verb} {scope}"
+        return f"chore: record {scope} changes"
 
     def _deactivate_subagents(self, task_id: str, subagent_ids: list[str]) -> None:
         for subagent_id in subagent_ids:
@@ -313,3 +485,48 @@ class MainAgent:
         if (self.root / "src").exists():
             return ["python -m compileall src"]
         return ["python -m compileall ."]
+
+
+def _git_args(job: QueueJob) -> list[str]:
+    nested = job.payload.get("args") if isinstance(job.payload.get("args"), dict) else {}
+    raw = nested.get("args") if isinstance(nested, dict) else None
+    return [str(item) for item in raw] if isinstance(raw, list) else []
+
+
+def _stdout_for(jobs: list[QueueJob], args: list[str]) -> str:
+    for job in jobs:
+        if _git_args(job) == args:
+            return str((job.result or {}).get("stdout") or "")
+    return ""
+
+
+def _status_paths(status: str) -> set[str]:
+    paths: set[str] = set()
+    for line in str(status or "").splitlines():
+        if not line or line.startswith("##"):
+            continue
+        path = line[3:] if len(line) > 3 else line
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path and not path.startswith(".mana/"):
+            paths.add(path)
+    return paths
+
+
+def _has_untracked(status: str) -> bool:
+    for line in str(status or "").splitlines():
+        if not line.startswith("??"):
+            continue
+        path = line[3:].strip() if len(line) > 3 else ""
+        if not path.startswith(".mana/"):
+            return True
+    return False
+
+
+def _has_conflicts(status: str) -> bool:
+    conflict_codes = {"UU", "AA", "DD", "AU", "UA", "DU", "UD"}
+    for line in str(status or "").splitlines():
+        if line[:2] in conflict_codes:
+            return True
+    return False

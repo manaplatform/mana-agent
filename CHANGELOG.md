@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-08 (Git intent workflow gate)
+
+- Added an explicit GitIntent contract for high-risk Git requests so commit, push, and branch intents queue Git state inspection and Git action jobs through QueueManager instead of stopping after repository search.
+- Added Git completion gates in ReviewerAgent and Git outcome verification in VerifierAgent, including required status/diff evidence, commit/push evidence or blockers, branch/remote/divergence checks, and HEAD-vs-remote verification for pushes.
+- Added focused regression coverage for `commit changes and push to main`, `push to main`, `commit`, and `create new branch` workflows.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py::test_git_commit_push_request_queues_git_inspection_and_does_not_repo_search tests/test_multi_agent_core.py::test_git_push_to_main_inspects_remote_and_blocks_when_behind tests/test_multi_agent_core.py::test_git_commit_inspects_diff_and_uses_diff_derived_message tests/test_multi_agent_core.py::test_git_create_new_branch_inspects_status_before_branch_creation -q` passed; `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py -q` passed with 53 tests; `PYTHONPATH=src .venv/bin/python -m compileall -q src tests` passed; `PYTHONPATH=src .venv/bin/ruff check src/mana_agent/multi_agent/agents/main_agent.py src/mana_agent/multi_agent/agents/reviewer_agent.py src/mana_agent/multi_agent/agents/verifier_agent.py src/mana_agent/multi_agent/core/types.py src/mana_agent/multi_agent/queue/queue_manager.py tests/test_multi_agent_core.py --select F,E9` passed.
+
 ## 2026-07-08 (model-driven Git tools)
 
 - Added a shared Git tool namespace with dynamic `git help -a` command discovery, structured `git.generic` execution through `subprocess.run(["git", *args], shell=False)`, redacted output, risk classification, protected-command blocking, session Git state memory, and convenience wrappers for status, diff, log, branch, branch creation, staging, commit, push, pull/fetch, remotes, merge/rebase/revert/reset/clean/tag/config.
