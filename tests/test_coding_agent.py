@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from mana_agent.multi_agent.runtime.coding_agent import CodingAgent, FlowChecklist, FlowStep
-from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerProcessError
+from mana_agent.multi_agent.runtime.agent_work_queue import WorkItem
+from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunResponse, ToolWorkerProcessError
 from mana_agent.multi_agent.runtime.tools_manager import AutoExecuteResult
 from mana_agent.services.coding_memory_service import CodingMemoryService
 
@@ -166,6 +167,36 @@ def _fixed_checklist() -> FlowChecklist:
     )
 
 
+def _git_checklist(*, tools: list[str] | None = None) -> FlowChecklist:
+    return FlowChecklist(
+        objective="Run git operation",
+        requires_edit=False,
+        steps=[
+            FlowStep(
+                id="s1",
+                title="Inspect git context",
+                reason="Git operation requires repository state first",
+                status="in_progress",
+                requires_tools=tools or ["git_status"],
+            )
+        ],
+        next_action="Inspect git context.",
+    )
+
+
+class _RecordingToolWorker:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def run_tools(self, request, on_event=None):  # noqa: ANN001
+        _ = on_event
+        self.requests.append(request)
+        return ToolRunResponse(
+            answer="ok",
+            trace=[{"tool_name": request.tool_name or "", "status": "ok"}],
+        )
+
+
 def test_checklist_requires_edit_recognizes_mutation_tools() -> None:
     # Edit intent is recognized from the planner's planned tools, not the text.
     edit_plan = FlowChecklist(
@@ -279,6 +310,89 @@ def _orchestrator_calls(agent: CodingAgent) -> list[dict]:
     orchestrator = agent.tools_manager_orchestrator
     assert isinstance(orchestrator, _FakeOrchestrator)
     return orchestrator.calls
+
+
+def test_work_queue_seed_git_commit_does_not_start_with_repo_search(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
+    monkeypatch.setattr(agent, "_plan_checklist", lambda request, flow_context=None: (_git_checklist(), []))
+
+    seeds = agent._seed_items_for_request("git commit")
+
+    assert seeds
+    assert seeds[0].tool_name == "git_status"
+    assert all(seed.tool_name != "repo_search" for seed in seeds)
+    assert all("Locate files relevant to" not in seed.question for seed in seeds)
+
+
+def test_work_queue_seed_git_status_uses_git_context_or_tool_decision(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
+    monkeypatch.setattr(agent, "_plan_checklist", lambda request, flow_context=None: (_git_checklist(), []))
+
+    seeds = agent._seed_items_for_request("git status")
+
+    assert seeds
+    assert seeds[0].tool_name in {"git_status", ""}
+    assert all(seed.tool_name != "repo_search" for seed in seeds)
+
+
+def test_work_queue_seed_git_add_commit_push_starts_with_git_context(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
+    monkeypatch.setattr(agent, "_plan_checklist", lambda request, flow_context=None: (_git_checklist(), []))
+
+    seeds = agent._seed_items_for_request("git add and git commit and push to feature/model-router-entry-no-fallback")
+
+    assert seeds
+    assert seeds[0].gate == "git_context"
+    assert seeds[0].tool_name == "git_status"
+    assert all(seed.tool_name != "repo_search" for seed in seeds)
+
+
+def test_work_queue_seed_broad_code_request_can_use_repo_search(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
+
+    seeds = agent._seed_items_for_request("fix bug in router")
+
+    assert seeds
+    assert seeds[0].tool_name == "repo_search"
+    assert "Locate files relevant to" in seeds[0].question
+
+
+def test_work_queue_seed_exact_target_file_reads_without_broad_repo_search(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
+
+    seeds = agent._seed_items_for_request("update README.md")
+
+    assert [seed.tool_name for seed in seeds] == ["read_file"]
+    assert seeds[0].tool_args == {"path": "README.md"}
+    assert all(seed.tool_name != "repo_search" for seed in seeds)
+    assert all("Locate files relevant to" not in seed.question for seed in seeds)
+
+
+def test_run_via_work_queue_preserves_explicit_seeds(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
+    worker = _RecordingToolWorker()
+    agent.tool_worker_client = worker  # type: ignore[assignment]
+
+    def _fail_auto_seed(*_args, **_kwargs):
+        raise AssertionError("automatic seed decision should not run when explicit seeds are provided")
+
+    monkeypatch.setattr(agent, "_seed_items_for_request", _fail_auto_seed)
+    explicit = WorkItem(
+        kind="inspect",
+        tool_name="git_status",
+        tool_args={},
+        question="custom explicit seed",
+        gate="explicit",
+        priority=3,
+    )
+
+    result = agent.run_via_work_queue("git status", seeds=[explicit], max_steps=1)
+
+    assert result["ok"] is True
+    assert worker.requests
+    assert worker.requests[0].tool_name == "git_status"
+    assert worker.requests[0].question == "custom explicit seed"
 
 
 def test_coding_agent_builds_structured_checklist_before_tools(tmp_path: Path, monkeypatch) -> None:

@@ -585,21 +585,12 @@ class CodingAgent:
             def _relevant(path: str) -> bool:
                 return True
 
-        seed_items: list[WorkItem] = []
         if seeds:
+            seed_items: list[WorkItem] = []
             for seed in seeds:
                 seed_items.append(seed if isinstance(seed, WorkItem) else WorkItem(**dict(seed)))
         else:
-            seed_items.append(
-                WorkItem(
-                    kind="discover",
-                    tool_name="repo_search",
-                    tool_args={"query": request},
-                    question=f"Locate files relevant to: {request}",
-                    gate="locate_candidates",
-                    priority=10,
-                )
-            )
+            seed_items = self._seed_items_for_request(request, flow_context=flow_id)
         queue.submit_many(seed_items)
 
         execute = make_worker_executor(
@@ -634,6 +625,117 @@ class CodingAgent:
             "board": board.render(),
             "snapshot": queue.snapshot(),
         }
+
+    @staticmethod
+    def _checklist_required_tools(checklist: "FlowChecklist | None") -> set[str]:
+        tools: set[str] = set()
+        if checklist is None:
+            return tools
+        for step in checklist.steps:
+            for tool in step.requires_tools or []:
+                normalized = str(tool or "").strip().lower()
+                if normalized:
+                    tools.add(normalized)
+        return tools
+
+    @staticmethod
+    def _checklist_requests_discovery(checklist: "FlowChecklist | None") -> bool:
+        tools = CodingAgent._checklist_required_tools(checklist)
+        return bool(tools & {"repo_search", "repo_batch_search", "semantic_search", "list_files", "find_symbols", "call_graph"})
+
+    @staticmethod
+    def _checklist_requests_git_context(checklist: "FlowChecklist | None") -> bool:
+        tools = CodingAgent._checklist_required_tools(checklist)
+        return bool(tool.startswith("git_") for tool in tools)
+
+    @staticmethod
+    def _explicit_git_operation_requested(request: str) -> bool:
+        text = " ".join(str(request or "").strip().lower().split())
+        if not text:
+            return False
+        git_action_terms = (
+            " commit",
+            " push",
+            " status",
+            " diff",
+            " branch",
+            " checkout",
+            " switch",
+            " pull",
+            " fetch",
+            " merge",
+            " rebase",
+            " tag",
+        )
+        return text.startswith("git ") or any(term in f" {text} " for term in git_action_terms)
+
+    def _seed_items_for_request(self, request: str, *, flow_context: str | None = None) -> list["WorkItem"]:
+        from mana_agent.multi_agent.runtime.agent_work_queue import WorkItem
+
+        decision = classify_task(request, repo_root=self.repo_root)
+        checklist, _plan_warnings = self._plan_checklist(request, flow_context=flow_context)
+        target_files = list(decision.target_files or ())
+        if not target_files and checklist is not None:
+            target_files = [str(path).strip() for path in checklist.target_files if str(path).strip()]
+
+        planned_tools = self._checklist_required_tools(checklist)
+        git_context_needed = self._checklist_requests_git_context(checklist) or (
+            self._explicit_git_operation_requested(request)
+            and decision.task_type in {"answer_only", "repo_inspection", "verification_only", "mutation_required"}
+        )
+        if git_context_needed:
+            tool_name = "git_diff" if "git_diff" in planned_tools and "git_status" not in planned_tools else "git_status"
+            question = (
+                f"Inspect repository diff before git operation: {request}"
+                if tool_name == "git_diff"
+                else f"Inspect repository status before git operation: {request}"
+            )
+            return [
+                WorkItem(
+                    kind="inspect",
+                    tool_name=tool_name,
+                    tool_args={},
+                    question=question,
+                    gate="git_context",
+                    priority=10,
+                )
+            ]
+
+        if target_files:
+            return [
+                WorkItem(
+                    kind="inspect",
+                    tool_name="read_file",
+                    tool_args={"path": path},
+                    question=f"Inspect requested file before continuing: {path}",
+                    gate="target_file_context",
+                    priority=10 + idx,
+                )
+                for idx, path in enumerate(dict.fromkeys(target_files))
+            ]
+
+        if decision.needs_repo_search or self._checklist_requests_discovery(checklist):
+            return [
+                WorkItem(
+                    kind="discover",
+                    tool_name="repo_search",
+                    tool_args={"query": request},
+                    question=f"Locate files relevant to: {request}",
+                    gate="locate_candidates",
+                    priority=10,
+                )
+            ]
+
+        return [
+            WorkItem(
+                kind="inspect",
+                tool_name="",
+                tool_args={"request": request},
+                question=f"Decide and execute the next tool-managed step for: {request}",
+                gate="tool_manager_decision",
+                priority=10,
+            )
+        ]
 
     @staticmethod
     def _normalize_prechecklist(checklist: FlowChecklist, *, source: str) -> dict[str, Any]:

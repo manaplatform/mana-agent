@@ -99,7 +99,7 @@ _DOC_EDIT_INTENT_RE = re.compile(r"\b(update|edit|write|fix|change|modify|replac
 _MUTATION_LOCKS_GUARD = threading.Lock()
 _MUTATION_LOCKS: dict[str, threading.Lock] = {}
 
-WorkKind = Literal["discover", "search", "read", "edit", "verify", "summarize"]
+WorkKind = Literal["discover", "inspect", "search", "read", "edit", "verify", "summarize"]
 WorkStatus = Literal[
     "pending",   # submitted, dependencies not yet satisfied
     "ready",     # runnable now
