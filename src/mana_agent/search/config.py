@@ -82,6 +82,8 @@ class SearchConfig:
     web_provider: str = ""
     web_api_key: str = ""
     web_endpoint: str = ""
+    web_base_url: str = ""
+    web_engine_id: str = ""
     web_max_results: int = 8
     max_injected_results: int = 5
     max_summary_words: int = 80
@@ -103,7 +105,12 @@ class SearchConfig:
             memory_ttl_days=_int_config("MANA_SEARCH_MEMORY_TTL_DAYS", settings, "mana_search_memory_ttl_days", 14, min_value=1, max_value=365),
             web_provider=_str_config("MANA_WEB_SEARCH_PROVIDER", settings, "mana_web_search_provider").strip().lower(),
             web_api_key=_str_config("MANA_WEB_SEARCH_API_KEY", settings, "mana_web_search_api_key"),
-            web_endpoint=_str_config("MANA_WEB_SEARCH_ENDPOINT", settings, "mana_web_search_endpoint"),
+            web_endpoint=(
+                _str_config("MANA_WEB_SEARCH_ENDPOINT", settings, "mana_web_search_endpoint")
+                or _str_config("MANA_WEB_SEARCH_BASE_URL", settings, "mana_web_search_base_url")
+            ),
+            web_base_url=_str_config("MANA_WEB_SEARCH_BASE_URL", settings, "mana_web_search_base_url"),
+            web_engine_id=_str_config("MANA_WEB_SEARCH_ENGINE_ID", settings, "mana_web_search_engine_id"),
             web_max_results=_int_config("MANA_WEB_SEARCH_MAX_RESULTS", settings, "mana_web_search_max_results", 8, min_value=1, max_value=25),
             max_injected_results=_int_env("MANA_SEARCH_MAX_INJECTED_RESULTS", 5, min_value=1, max_value=20),
             max_summary_words=_int_env("MANA_SEARCH_MAX_SUMMARY_WORDS", 80, min_value=20, max_value=200),

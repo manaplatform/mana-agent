@@ -19,6 +19,7 @@ def build_search_providers(config: SearchConfig) -> SearchProviders:
             provider=config.web_provider,
             api_key=config.web_api_key,
             endpoint=config.web_endpoint,
+            engine_id=config.web_engine_id,
             timeout_seconds=config.timeout_seconds,
         )
         if config.enable_web

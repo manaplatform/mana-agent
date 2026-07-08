@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from mana_agent.config.user_config import settings_source_for_pydantic
 
 
 MANA_ROOT_DIRNAME = ".mana"
@@ -31,7 +34,7 @@ def resolve_embed_model(base_url: str | None, explicit_model: str | None = None)
 
 
 class Settings(BaseSettings):
-    openai_api_key: str = Field(alias="OPENAI_API_KEY")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_tool_worker_model: str | None = Field(default=None, alias="OPENAI_TOOL_WORKER_MODEL")
@@ -39,6 +42,8 @@ class Settings(BaseSettings):
     # Left unset by default so the embedding model can be auto-selected from the
     # active base URL (see ``resolve_embed_model``). An explicit value always wins.
     openai_embed_model: str | None = Field(default=None, alias="OPENAI_EMBED_MODEL")
+    llm_model: str | None = Field(default=None, alias="LLM_MODEL")
+    mana_llm_log_file: str | None = Field(default=None, alias="MANA_LLM_LOG_FILE")
     default_top_k: int = Field(default=8, alias="DEFAULT_TOP_K")
     coding_flow_max_turns: int = Field(default=5, alias="CODING_FLOW_MAX_TURNS")
     coding_flow_max_tasks: int = Field(default=20, alias="CODING_FLOW_MAX_TASKS")
@@ -60,9 +65,35 @@ class Settings(BaseSettings):
     mana_web_search_provider: str = Field(default="", alias="MANA_WEB_SEARCH_PROVIDER")
     mana_web_search_api_key: str = Field(default="", alias="MANA_WEB_SEARCH_API_KEY")
     mana_web_search_endpoint: str = Field(default="", alias="MANA_WEB_SEARCH_ENDPOINT")
+    mana_web_search_base_url: str = Field(default="", alias="MANA_WEB_SEARCH_BASE_URL")
+    mana_web_search_engine_id: str = Field(default="", alias="MANA_WEB_SEARCH_ENGINE_ID")
     mana_web_search_max_results: int = Field(default=8, alias="MANA_WEB_SEARCH_MAX_RESULTS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        def user_config_settings() -> dict[str, object]:
+            return settings_source_for_pydantic()
+
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            user_config_settings,
+            file_secret_settings,
+        )
+
+    def model_post_init(self, __context: object) -> None:
+        if os.getenv("LLM_MODEL") and not os.getenv("OPENAI_CHAT_MODEL"):
+            self.openai_chat_model = str(self.llm_model or self.openai_chat_model)
 
 
 def default_index_dir(target_path: str | Path) -> Path:

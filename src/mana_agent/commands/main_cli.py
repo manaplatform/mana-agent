@@ -5,6 +5,8 @@ import warnings
 from .cli_internal import *
 from .output import build_output_sink
 from mana_agent.cli.menu import MenuOption, select_option
+from mana_agent.tui.menu import NonInteractivePromptError
+from mana_agent.tui.wizard import ensure_setup, settings_menu
 from mana_agent.ui.banner import render_banner, render_repository
 
 
@@ -25,6 +27,7 @@ def main(
     ),
     log_dir: str | None = typer.Option(None, "--log-dir", help="Directory for application log files."),
     output_dir: str | None = typer.Option(None, "--output-dir", help="Directory for saving command output logs."),
+    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive setup and menus."),
 ) -> None:
     global OUTPUT_DIR, LLM_DEBUG_MODE
     verbose = bool(verbose or debug)
@@ -65,6 +68,12 @@ def main(
         selected_flags = [chat_mode, analyze_mode, plan_mode]
         if sum(1 for item in selected_flags if item) > 1:
             raise typer.BadParameter("Choose only one of --chat, --analyze, or --plan.")
+        if not no_banner:
+            render_banner(console)
+        try:
+            ensure_setup(no_interactive=no_interactive, command_needs_llm=True, console=console)
+        except NonInteractivePromptError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         if chat_mode:
             args = ["--root-dir", str(root)]
             if model:
@@ -84,9 +93,9 @@ def main(
             _invoke_with_multi_agent_route(ctx, "plan", args, root=root, request="root --plan", entrypoint="root")
             return
 
-        if not no_banner:
-            render_banner(console)
         render_repository(root, console)
+        if no_interactive:
+            raise typer.BadParameter("No subcommand or mode flag was provided, and --no-interactive disables the root menu.")
         try:
             choice = select_option(
                 title="Mana Agent",
@@ -95,9 +104,12 @@ def main(
                     MenuOption("chat", "Chat with repo (mana-agent chat)", ("1", "c")),
                     MenuOption("analyze", "Analyze repo", ("2", "a")),
                     MenuOption("plan", "Create implementation plan", ("3", "p")),
-                    MenuOption("exit", "Exit", ("4", "q", "quit")),
+                    MenuOption("settings", "Settings", ("s",)),
+                    MenuOption("exit", "Exit", ("4", "5", "q", "quit")),
                 ],
             ).strip().lower()
+        except NonInteractivePromptError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         except (EOFError, KeyboardInterrupt):
             console.print("\nGoodbye!")
             return
@@ -107,5 +119,7 @@ def main(
             _invoke_with_multi_agent_route(ctx, "analyze", ["--repo", str(root)], root=root, request="root menu analyze", entrypoint="root")
         elif choice in {"plan", "3", "p"}:
             _invoke_with_multi_agent_route(ctx, "plan", ["--repo", str(root)], root=root, request="root menu plan", entrypoint="root")
+        elif choice in {"settings", "4", "s"}:
+            settings_menu(console=console)
         else:
             console.print("Goodbye!")

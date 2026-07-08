@@ -60,6 +60,8 @@ from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger  # noqa: F401
 from mana_agent.utils.project_search import project_search  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.skills import SkillManager
+from mana_agent.tui.menu import NonInteractivePromptError
+from mana_agent.tui.wizard import ensure_setup
 from mana_agent.ui.banner import render_mode_header
 from mana_agent.multi_agent import MainAgent
 from .output import build_output_sink, get_shared_console
@@ -493,6 +495,10 @@ def plan_command(
 ) -> None:
     """Create an approval-gated implementation plan."""
     _ = model
+    try:
+        ensure_setup(command_needs_llm=True, console=console)
+    except NonInteractivePromptError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     root = _resolve_repo(repo)
     render_mode_header("Plan", "Build a safe implementation plan first", console)
     if not task.strip():

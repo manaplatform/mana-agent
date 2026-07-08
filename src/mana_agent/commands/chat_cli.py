@@ -40,6 +40,8 @@ from mana_agent.cli.chat_ui import (
 )
 from mana_agent.cli.events import make_event
 from mana_agent.cli.renderers import InlineChatRenderer
+from mana_agent.tui.menu import NonInteractivePromptError
+from mana_agent.tui.wizard import ensure_setup
 
 
 _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
@@ -550,6 +552,10 @@ def chat(
     ),
 ) -> None:
     output_file = _resolve_output_file()
+    try:
+        ensure_setup(command_needs_llm=True, console=console)
+    except NonInteractivePromptError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     # Keep noisy indexing/parsing logs off the interactive console (the file log
     # still captures everything) so the prompt is usable while the index builds.
     _install_quiet_chat_console_logging()

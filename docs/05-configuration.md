@@ -1,71 +1,133 @@
 # Configuration
 
-`mana-agent` reads its runtime configuration from environment variables and optional `.env` files. The repository’s quick-start documentation shows the expected settings and the command modules expose the knobs that consume them. [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119) [src/mana_agent/commands/analyze_cli.py:1-444](src/mana_agent/commands/analyze_cli.py:1-444) [src/mana_agent/commands/ask_cli.py:1-262](src/mana_agent/commands/ask_cli.py:1-262) [src/mana_agent/commands/chat_cli.py:1-2332](src/mana_agent/commands/chat_cli.py:1-2332)
+`mana-agent` supports an interactive first-run setup wizard and still supports existing environment-variable and `.env` workflows.
 
-## Environment variables
+## First-Run Wizard
 
-The quick-start guide documents these core variables:
+Run:
 
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_CHAT_MODEL`
-- `OPENAI_TOOL_WORKER_MODEL`
-- `OPENAI_CODING_PLANNER_MODEL`
-- `OPENAI_EMBED_MODEL`
-- `DEFAULT_TOP_K` [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
+```bash
+mana-agent
+```
 
-A typical local setup uses a `.env` file with those values. The docs point to `.env.example` as the template. [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
+When no saved user config exists, the CLI prints the Mana banner first, then starts a keyboard-selectable setup wizard. The wizard can:
 
-## Model selection
+- Configure OpenAI, OpenAI-compatible, NVIDIA OpenAI-compatible, or manual provider settings.
+- Enter API keys without echoing them back to the terminal.
+- Fetch models from `GET {OPENAI_BASE_URL}/models`.
+- Select chat, tool-worker, coding-planner, and embedding models.
+- Assign model levels for Mana roles such as main, planner, coding, verifier, reviewer, tool, and summarizer.
+- Configure web and GitHub search providers.
+- Save a masked config summary for review.
 
-The CLI exposes model selection on multiple commands, so configuration can be overridden per invocation:
+Saved files:
 
-- `analyze` accepts `--model` and related analysis controls. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
-- `ask` accepts `--model` for question-answering. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
-- `chat` accepts `--model` and additional workflow-related options. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
+- `~/.mana/config.toml` for non-secret settings.
+- `~/.mana/secrets.toml` for API keys and tokens.
+- `~/.mana/model_cache.json` for fetched model IDs keyed by provider/base URL.
 
-This makes the environment the default source of truth, with CLI flags used for one-off overrides.
+The config directory is created with private permissions where the OS allows it. Secret values are masked in display output.
 
-## Search and retrieval defaults
+## Settings Menu
 
-The documentation shows `DEFAULT_TOP_K=8`, which matches the search-oriented command defaults documented elsewhere in the repo. [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
+The root menu includes:
 
-Relevant command options include:
+- Chat with repo
+- Analyze repo
+- Create implementation plan
+- Settings
+- Exit
 
-- `--k` for retrieval depth
-- `--index-dir` for selecting an existing index
-- `--ephemeral-index` for temporary indexing
-- `--dir-mode` for directory-aware indexing and retrieval [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
+Settings includes:
 
-External search is routed separately from repository-local retrieval. The agent first decides whether outside sources are useful, then reuses fresh search memory before calling configured providers. Useful results are compacted and stored under `.mana/search_memory.jsonl`.
+- Change model provider/API key
+- Refresh model list
+- Change selected models
+- Change model role levels
+- Configure search providers
+- Show current config summary
 
-External search variables:
+## Precedence
 
-- `MANA_SEARCH_ENABLE_WEB`
-- `MANA_SEARCH_ENABLE_GITHUB`
-- `MANA_SEARCH_MAX_RESULTS`
-- `MANA_SEARCH_TIMEOUT_SECONDS`
-- `MANA_SEARCH_MEMORY_TTL_DAYS`
-- `MANA_GITHUB_TOKEN`
-- `MANA_WEB_SEARCH_PROVIDER`
-- `MANA_WEB_SEARCH_API_KEY`
-- `MANA_WEB_SEARCH_ENDPOINT`
-- `MANA_WEB_SEARCH_MAX_RESULTS`
+Effective settings are resolved in this order:
 
-## Working directories and outputs
+1. CLI flags, when a command exposes a flag.
+2. Environment variables and project `.env`.
+3. `~/.mana/config.toml` and `~/.mana/secrets.toml`.
+4. Safe defaults.
 
-Several commands write generated artifacts under `.mana/` inside the target project:
+`OPENAI_CHAT_MODEL` is the canonical chat model value. `LLM_MODEL` remains a backward-compatible alias and is honored when `OPENAI_CHAT_MODEL` is not set in the environment.
 
-- `analyze` writes report artifacts such as `analyze.json`, `analyze.md`, `analyze.html`, `analyze.dot`, and `analyze.graphml`. [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
-- `chat` can persist coding memory at `<project>/.mana/index/chat_memory.sqlite3`. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
-- `continue` resumes runs from `<root>/.mana/runs/<run_id>`. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
+## Non-Interactive Use
 
-That means configuration should be kept alongside the project being analyzed so runs remain reproducible.
+Use `--no-interactive` in CI or scripts:
 
-## Recommended local setup
+```bash
+mana-agent --no-interactive chat --root-dir .
+```
 
-1. Create a virtual environment.
-2. Put API keys and model settings in `.env` or export them in your shell.
-3. Verify the configuration by running `mana-agent --help` and a small command such as `mana-agent ask ...` or `mana-agent analyze ...`. [docs/02-installation.md:1-26](docs/02-installation.md:1-26) [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
+In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if required values such as `OPENAI_API_KEY` are missing.
 
-If you need to tune behavior for a specific run, prefer CLI flags over editing global environment settings.
+## Core Variables
+
+```bash
+OPENAI_API_KEY="sk-..."
+OPENAI_BASE_URL="https://api.openai.com/v1"
+OPENAI_CHAT_MODEL="gpt-4.1"
+LLM_MODEL="gpt-4.1"
+OPENAI_TOOL_WORKER_MODEL="gpt-4.1"
+OPENAI_CODING_PLANNER_MODEL="gpt-4.1"
+OPENAI_EMBED_MODEL="text-embedding-3-small"
+DEFAULT_TOP_K=8
+MANA_LLM_LOG_FILE=
+```
+
+## Model Role Levels
+
+```bash
+MANA_MODEL_MAIN=MODEL_LEVEL_3_HIGH_REASONING
+MANA_MODEL_HEAD_DECISION=MODEL_LEVEL_3_HIGH_REASONING
+MANA_MODEL_PLANNER=MODEL_LEVEL_3_HIGH_REASONING
+MANA_MODEL_CODING=MODEL_LEVEL_2_CODING
+MANA_MODEL_VERIFIER=MODEL_LEVEL_2_CODING
+MANA_MODEL_REVIEWER=MODEL_LEVEL_3_HIGH_REASONING
+MANA_MODEL_TOOL=MODEL_LEVEL_1_FAST_TOOL
+MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
+```
+
+Allowed model levels:
+
+- `MODEL_LEVEL_1_FAST_TOOL`
+- `MODEL_LEVEL_2_CODING`
+- `MODEL_LEVEL_3_HIGH_REASONING`
+
+## Search Providers
+
+The wizard can configure:
+
+- Disabled
+- Tavily
+- Brave Search API
+- Exa
+- SerpAPI
+- Google Programmable Search / Custom Search JSON API
+- Custom HTTP provider
+
+Relevant variables:
+
+```bash
+MANA_GITHUB_TOKEN=
+MANA_SEARCH_ENABLE_WEB=true
+MANA_SEARCH_ENABLE_GITHUB=true
+MANA_SEARCH_MAX_RESULTS=8
+MANA_SEARCH_TIMEOUT_SECONDS=15
+MANA_SEARCH_MEMORY_TTL_DAYS=14
+MANA_WEB_SEARCH_PROVIDER=tavily
+MANA_WEB_SEARCH_API_KEY=
+MANA_WEB_SEARCH_MAX_RESULTS=8
+MANA_WEB_SEARCH_ENGINE_ID=
+MANA_WEB_SEARCH_BASE_URL=
+MANA_WEB_SEARCH_ENDPOINT=
+```
+
+GitHub tokens are optional. Without a token, GitHub search may still work with unauthenticated rate limits.

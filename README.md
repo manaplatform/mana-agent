@@ -329,7 +329,18 @@ Invoke-WebRequest -Uri "https://github.com/ah2727/mana-agent/releases/download/l
 
 ## Configuration
 
-Configure model providers and agent behavior with environment variables or a local `.env` file.
+Run `mana-agent` in an interactive terminal for first-run setup. The CLI prints the banner first, then opens a keyboard-selectable setup wizard when no saved user config exists. The wizard stores normal settings in `~/.mana/config.toml`, secrets in `~/.mana/secrets.toml`, and fetched provider models in `~/.mana/model_cache.json`.
+
+Configuration precedence is:
+
+1. CLI flags.
+2. Environment variables and `.env`.
+3. `~/.mana/config.toml` and `~/.mana/secrets.toml`.
+4. Safe defaults.
+
+Existing `.env` workflows continue to work. Use `mana-agent --no-interactive ...` in CI to prevent prompts; commands that require model configuration fail with a clear error when required values such as `OPENAI_API_KEY` are missing.
+
+The root menu includes Settings for changing the provider/API key, refreshing the model list from `GET {OPENAI_BASE_URL}/models`, changing selected models, assigning Mana model role levels, configuring web/GitHub search providers, and showing a masked config summary.
 
 ### Minimal configuration
 
@@ -338,6 +349,7 @@ OPENAI_API_KEY="sk-..."
 OPENAI_BASE_URL="https://api.openai.com/v1"
 
 OPENAI_CHAT_MODEL="gpt-4.1"
+LLM_MODEL="gpt-4.1"
 OPENAI_TOOL_WORKER_MODEL="gpt-4.1"
 OPENAI_CODING_PLANNER_MODEL="gpt-4.1"
 OPENAI_EMBED_MODEL="text-embedding-3-small"
@@ -374,6 +386,7 @@ MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
 | `OPENAI_API_KEY`              | API key used for chat and embedding requests.                                    |
 | `OPENAI_BASE_URL`             | Base URL for an OpenAI-compatible provider.                                      |
 | `OPENAI_CHAT_MODEL`           | Default chat model for analysis and Q&A.                                         |
+| `LLM_MODEL`                   | Backward-compatible alias for the default chat model.                            |
 | `OPENAI_TOOL_WORKER_MODEL`    | Model used by optional tool-worker execution paths.                              |
 | `OPENAI_CODING_PLANNER_MODEL` | Model used for coding-agent planning.                                            |
 | `OPENAI_EMBED_MODEL`          | Embedding model used for semantic indexing.                                      |

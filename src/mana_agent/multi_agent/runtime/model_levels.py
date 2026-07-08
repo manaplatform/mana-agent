@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from mana_agent.config.user_config import get_setting
 from mana_agent.multi_agent.core.types import AgentRole
 
 MODEL_LEVEL_3_HIGH_REASONING = "MODEL_LEVEL_3_HIGH_REASONING"
@@ -32,7 +33,7 @@ class ModelLevelAssignment:
 
 def model_level_for_role(role: AgentRole) -> ModelLevelAssignment:
     env_var, default = _DEFAULT_MODEL_LEVELS[role]
-    return ModelLevelAssignment(role=role, env_var=env_var, model_level=os.getenv(env_var, default))
+    return ModelLevelAssignment(role=role, env_var=env_var, model_level=str(get_setting(env_var, default) or default))
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ def _is_symbolic_model_level(value: str) -> bool:
 
 def resolve_model_for_role(role: AgentRole, *, global_model: str) -> ResolvedModelAssignment:
     env_var, default_level = _DEFAULT_MODEL_LEVELS[role]
-    role_value = str(os.getenv(env_var, "") or "").strip()
+    role_value = str(get_setting(env_var, "") or "").strip()
     fallback = str(global_model or "").strip()
     if role_value and not _is_symbolic_model_level(role_value):
         return ResolvedModelAssignment(
@@ -59,7 +60,7 @@ def resolve_model_for_role(role: AgentRole, *, global_model: str) -> ResolvedMod
             resolved_model=role_value,
         )
     configured = role_value or default_level
-    resolved = str(os.getenv(configured, "") or "").strip()
+    resolved = str(get_setting(configured, "") or os.getenv(configured, "") or "").strip()
     return ResolvedModelAssignment(
         role=role,
         env_var=env_var,

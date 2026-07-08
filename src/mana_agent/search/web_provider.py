@@ -26,11 +26,13 @@ class ConfiguredWebSearchProvider:
         provider: str,
         api_key: str,
         endpoint: str = "",
+        engine_id: str = "",
         timeout_seconds: int = 15,
     ) -> None:
         self.provider = provider.strip().lower()
         self.api_key = api_key
         self.endpoint = endpoint
+        self.engine_id = engine_id
         self.timeout_seconds = max(1, int(timeout_seconds))
 
     async def search(self, query: str, *, max_results: int = 8) -> list[SearchResult]:
@@ -45,6 +47,10 @@ class ConfiguredWebSearchProvider:
             return self._brave(query, max_results=max_results)
         if self.provider == "serpapi":
             return self._serpapi(query, max_results=max_results)
+        if self.provider == "exa":
+            return self._exa(query, max_results=max_results)
+        if self.provider in {"google_cse", "google", "google-cse"}:
+            return self._google_cse(query, max_results=max_results)
         if self.provider in {"bing", "bing-compatible"}:
             return self._bing(query, max_results=max_results)
         if self.provider == "custom":
@@ -80,6 +86,35 @@ class ConfiguredWebSearchProvider:
         )
         data = self._request_json(url)
         return [self._generic_result(item, query=query) for item in data.get("organic_results", [])]
+
+    def _exa(self, query: str, *, max_results: int) -> list[SearchResult]:
+        if not self.api_key:
+            raise WebSearchError("MANA_WEB_SEARCH_API_KEY is required for Exa")
+        payload = json.dumps({"query": query, "numResults": max_results}).encode("utf-8")
+        data = self._request_json(
+            self.endpoint or "https://api.exa.ai/search",
+            method="POST",
+            data=payload,
+            headers={"Content-Type": "application/json", "x-api-key": self.api_key},
+        )
+        return [self._generic_result(item, query=query) for item in data.get("results", [])]
+
+    def _google_cse(self, query: str, *, max_results: int) -> list[SearchResult]:
+        if not self.api_key:
+            raise WebSearchError("MANA_WEB_SEARCH_API_KEY is required for Google CSE")
+        if not self.engine_id:
+            raise WebSearchError("MANA_WEB_SEARCH_ENGINE_ID is required for Google CSE")
+        endpoint = self.endpoint or "https://www.googleapis.com/customsearch/v1"
+        url = endpoint + "?" + urllib.parse.urlencode(
+            {
+                "key": self.api_key,
+                "cx": self.engine_id,
+                "q": query,
+                "num": max(1, min(max_results, 10)),
+            }
+        )
+        data = self._request_json(url)
+        return [self._generic_result(item, query=query) for item in data.get("items", [])]
 
     def _bing(self, query: str, *, max_results: int) -> list[SearchResult]:
         if not self.api_key:
