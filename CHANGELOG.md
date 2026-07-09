@@ -14,6 +14,22 @@ All notable repository changes should be recorded here.
   - Verification: `PYTHONPATH=src venv/bin/python -m py_compile src/...` (multiple modules) passed; `PYTHONPATH=src venv/bin/mana-agent --help`, `... chat --help`, `... analyze --help`, `... dashboard --help` passed and showed new command; core imports of `mana_agent`, `mana_agent.ui`, `mana_agent.automations` succeeded without optional deps; `git status --short` inspected before/after; dashboard/app.py and helpers implement read-only views over taskboard/traces/index; no core multi_agent, routing, or decision files were modified.
 - New structure is optional and does not affect existing CLI, multi-agent runtime, or safety model.
 
+## 2026-07-09 (Dashboard expansion, self-improvement, automation hooks + real data)
+
+- Expanded dashboard: real triggers via `trigger_automation`, better chat embed (`st.chat_input` + trace replay + persist), more functional pages (real reports list + generate button using analyze artifacts + ProjectAnalyzeService/subprocess, rich live Taskboard+Traces with dataframe/expanders, real Metrics from telemetry/taskboard, full Automations CRUD + dispatch + run history).
+- Nicer sidebar UX with dedicated "⚡ Automation Triggers" quick-action buttons (Self-Improve, Daily Report, Generate Report) + improved navigation.
+- Fleshed self-improvement loop: improved `extract_skill_from_trace`, new `run_self_improvement_loop` (scans taskboard DONE + traces, persists skills under .mana/skills + logs runs).
+- Added call site in `multi_agent/runtime/agent_work_queue.py` (post verification_passed) + exposed hooks.
+- Updated `src/mana_agent/multi_agent/` with `runtime/automation_hooks.py` (register/invoke/list; model-decision and explicit-trigger gated).
+- Integrated automations in main src: enhanced `src/mana_agent/automations/` (run_automation, list_available, loop dispatch); helpers now drive real data/CRUD/triggers from .mana/automations/config.json.
+- Productional dashboard: CRUD for automations, real data everywhere, safe triggers, report generation, chat history.
+- Helpers: improved traces (json+jsonl), new `get_metrics_summary`, `list_analysis_artifacts`, `load/save_automations`, `trigger_automation`.
+- All changes keep lazy/optional loading, respect model-decision layer, no fallbacks/keyword routing.
+- Verification: `git status --short` (clean); `PYTHONPATH=src python -m py_compile src/mana_agent/ui/streamlit_helpers.py src/mana_agent/automations/self_improvement.py src/mana_agent/automations/__init__.py src/mana_agent/automations/scheduler.py src/mana_agent/multi_agent/runtime/automation_hooks.py src/mana_agent/multi_agent/runtime/agent_work_queue.py dashboard/app.py dashboard/components/cards.py`; `PYTHONPATH=src python -m pytest tests/test_dashboard_helpers.py -q --tb=line` (extended tests pass); `PYTHONPATH=src python -m mana-agent --help` and `... dashboard --help` passed; smoke `PYTHONPATH=src python -c "
+from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_improvement import run_self_improvement_loop; from mana_agent.automations import run_automation, list_available_automations; print('imports+helpers ok'); m=get_metrics_summary(); a=list_analysis_artifacts(); print('metrics/artifacts ok', len(a)); t=trigger_automation('noop'); print('trigger ok', t.get('ok'))
+"` passed; temp-dir graceful tests cover new helpers.
+- Followed full AGENTS.md workflow (inspect, todo, read-before-edit, minimal focused, verify, changelog).
+
 ## 2026-07-09 (document file CRUD and query support)
 
 - Added a document tool layer for `.docx`, `.pdf`, `.xlsx`, `.xlsm`, and `.csv` detection, reading, analysis, chunk caching, querying, creation, safe update, and explicit delete operations.

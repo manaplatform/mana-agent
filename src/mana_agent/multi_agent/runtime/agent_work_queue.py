@@ -2138,6 +2138,26 @@ class QueueManager:
             and (not missing_required_files)
             and (not verification.get("ran") or verification.get("passed"))
         )
+
+        # Automation hook exposure (model-decision aware).
+        # Only attempts invoke when verification passed; the hook itself checks for decision/context.
+        if verification_passed:
+            try:
+                from .automation_hooks import invoke_automation
+                invoke_automation(
+                    "self_improvement",
+                    {
+                        "root": str(getattr(self, "_root", ".")),
+                        "task_id": getattr(getattr(self, "_board", None), "current_task_id", None),
+                        "verification_passed": True,
+                        "explicit_trigger": False,  # rely on decision inside hook
+                    },
+                    decision=None,  # In full flow a DecisionRecord from taskboard can be passed
+                )
+            except Exception:
+                # Hooks are best-effort and must never break the primary run.
+                pass
+
         # Write-side flow continuity: persist this turn and reconcile the todo
         # ledger from authoritative results so the next turn (and the UI) reflect
         # what actually happened. Best-effort: memory failures never fail a run.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-__all__ = ["get_scheduler", "schedule_job"]
+__all__ = ["get_scheduler", "schedule_job", "list_jobs_stub"]
 
 
 def get_scheduler():
@@ -34,3 +34,8 @@ def schedule_job(func: Callable, trigger: str = "interval", **trigger_args) -> N
     except Exception:
         # Dashboard/automation optional; never break core
         pass
+
+
+def list_jobs_stub() -> list[str]:
+    """Return known job names (stub; real scheduler would inspect)."""
+    return ["daily_report", "self_improvement_check"]
