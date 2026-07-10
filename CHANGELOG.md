@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-10
 
+- Made the packaged dashboard discoverability assertion platform-neutral by
+  normalizing import-spec path separators before checking the module suffix.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_api_workspaces.py -q` passed.
+
 - Encoded model-facing MCP tool aliases as OpenAI-compatible function names (for example `mcp__context7__query-docs`) while retaining the original dotted MCP identity for dispatch.
   - Verification: Context7 stdio discovery returned both documentation tools; focused MCP suite updated.
 

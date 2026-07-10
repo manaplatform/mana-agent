@@ -45,4 +45,4 @@ def test_packaged_dashboard_module_is_discoverable() -> None:
 
     spec = importlib.util.find_spec("mana_agent.dashboard.app")
     assert spec is not None
-    assert spec.origin and spec.origin.endswith("mana_agent/dashboard/app.py")
+    assert spec.origin and spec.origin.replace("\\", "/").endswith("mana_agent/dashboard/app.py")
