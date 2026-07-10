@@ -47,10 +47,14 @@ try:
         get_index_stats,
         get_last_analysis_summary,
         get_metrics_summary,
+        get_observability_health,
+        get_observability_overview,
         list_analysis_artifacts,
         load_automations,
         list_schedules,
         load_recent_traces,
+        load_observability_spans,
+        load_observability_trace,
         load_taskboard_state,
         safe_read_json,
         save_automations,
@@ -94,7 +98,7 @@ st.sidebar.caption(f"Root: `{root.name}`")
 st.markdown("""<style>
 div[data-testid="stSidebar"] button[kind="secondary"] {text-align:left; border:0; border-radius:8px;}
 </style>""", unsafe_allow_html=True)
-pages = ["Overview", "Chat", "Reports", "Taskboard & Traces", "Metrics", "Automations", "Cron Jobs"]
+pages = ["Overview", "Chat", "Reports", "Observability", "Taskboard & Traces", "Metrics", "Automations", "Cron Jobs"]
 if "dashboard_page" not in st.session_state:
     st.session_state.dashboard_page = "Overview"
 st.sidebar.markdown("### Navigation")
@@ -140,7 +144,7 @@ if page == "Overview":
     col3.metric("Success Rate", f"{m.get('success_rate', 0)}%")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Tokens (sampled)", m.get("total_tokens", 0))
+    c1.metric("Total Tokens", m.get("total_tokens", 0))
     c2.metric("Avg / Turn", m.get("avg_tokens", 0))
     c3.metric("Tasks", m.get("task_count", 0))
 
@@ -300,6 +304,45 @@ elif page == "Taskboard & Traces":
     else:
         st.write("No traces found under .mana/traces/")
 
+elif page == "Observability":
+    st.header("Observability")
+    st.caption("Local, redacted trace storage. Token usage is tracked; monetary cost is intentionally unavailable until pricing is configured.")
+    f1, f2, f3 = st.columns(3)
+    status = f1.selectbox("Status", ["", "success", "failed", "running", "queued"], format_func=lambda value: value or "All")
+    kind = f2.selectbox("Span type", ["", "session", "user_request", "routing", "reasoning", "tool", "subagent", "response", "error"], format_func=lambda value: value or "All")
+    agent = f3.text_input("Agent", placeholder="main or subagent id")
+    spans = load_observability_spans(root, status=status, kind=kind, agent=agent, limit=500)
+    overview = get_observability_overview(root)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Traces", overview.get("trace_count", 0))
+    c2.metric("Spans", overview.get("span_count", 0))
+    c3.metric("p95 latency", f"{overview.get('p95_latency_ms', 0):,.0f} ms")
+    c4.metric("Errors", overview.get("error_count", 0))
+    st.subheader("Bottlenecks")
+    findings = overview.get("bottlenecks", [])
+    if findings:
+        for finding in findings:
+            with st.expander(f"{finding['kind']} · {finding['title']} ({finding['sample_size']} spans)"):
+                st.write("; ".join(finding["reasons"]))
+                if st.button("Open related trace", key=f"bottleneck_{finding['trace_id']}"):
+                    st.session_state.observability_trace_id = finding["trace_id"]
+    else:
+        st.info("No operation crosses the documented latency, error, queue, or token thresholds yet.")
+    st.subheader("Trace explorer")
+    traces = sorted({span["trace_id"] for span in spans})
+    selected_trace = st.selectbox("Trace", traces, index=0 if traces else None, key="trace_selector") if traces else ""
+    selected_trace = st.session_state.get("observability_trace_id", selected_trace)
+    if selected_trace:
+        trace = load_observability_trace(selected_trace, root)
+        for span in reversed(trace):
+            label = f"{span['kind']} · {span['title']} · {span['status']} · {float(span['duration_ms'] or 0):.0f}ms"
+            with st.expander(label):
+                st.json({k: span[k] for k in ("span_id", "parent_span_id", "agent_id", "subagent_id", "started_at", "ended_at", "queue_wait_ms", "token_usage", "input_summary", "output_summary", "error_summary", "attributes")})
+    if spans:
+        st.subheader("Filtered spans")
+        st.dataframe([{k: item[k] for k in ("trace_id", "span_id", "kind", "title", "status", "agent_id", "duration_ms", "queue_wait_ms")} for item in spans], use_container_width=True, hide_index=True)
+    st.caption("OTLP export health: " + json.dumps(get_observability_health(root), ensure_ascii=False))
+
 elif page == "Metrics":
     st.header("Metrics (real telemetry)")
     m = get_metrics_summary(root)
@@ -312,12 +355,13 @@ elif page == "Metrics":
     c4.metric("Tasks tracked", m.get("task_count", 0))
     c5.metric("Done", m.get("done_tasks", 0))
 
-    series = m.get("tokens_series", [])
-    if series:
-        st.line_chart({"real_tokens_per_turn": series})
+    overview = get_observability_overview(root)
+    by_kind = overview.get("by_kind", [])
+    if by_kind:
+        st.bar_chart({row["kind"]: row["tokens"] for row in by_kind})
     else:
-        st.line_chart({"tokens": [700, 900, 1200]})
-    st.caption("Real token usage parsed from .mana/llm_logs/*.jsonl (last runs).")
+        st.info("No observability spans have been recorded yet. Start a chat session to populate real metrics.")
+    st.caption("Metrics are read from `.mana/observability/telemetry.sqlite`; no synthetic series is displayed.")
 
 elif page == "Automations":
     st.header("Automations (CRUD + real triggers)")

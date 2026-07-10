@@ -35,6 +35,10 @@ __all__ = [
     "safe_read_json",
     "list_analysis_artifacts",
     "get_metrics_summary",
+    "get_observability_overview",
+    "load_observability_spans",
+    "load_observability_trace",
+    "get_observability_health",
     "load_automations",
     "save_automations",
     "append_automation_run",
@@ -198,89 +202,44 @@ def list_analysis_artifacts(root: Path | None = None) -> list[dict[str, Any]]:
 
 
 def get_metrics_summary(root: Path | None = None) -> dict[str, Any]:
-    """Real-ish metrics from llm_logs jsonl + taskboard state + traces.
-
-    Graceful when data missing. Returns numbers + series suitable for st.metric / charts.
-    """
+    """Compatibility metric view backed by canonical observability data only."""
     root = find_mana_root(root)
-    # Sessions/turns: count recent log entries across llm_logs and traces
-    turns = 0
-    total_tokens = 0
-    llm_dir = root / ".mana" / "llm_logs"
-    if llm_dir.exists():
-        for jf in llm_dir.glob("*.jsonl"):
-            try:
-                for ln in jf.read_text(encoding="utf-8").strip().splitlines():
-                    if not ln.strip():
-                        continue
-                    turns += 1
-                    try:
-                        obj = json.loads(ln)
-                        # Look for common token fields from telemetry/run_logger
-                        for k in ("total_tokens", "tokens", "token_count"):
-                            if k in obj:
-                                total_tokens += int(obj[k] or 0)
-                                break
-                        if "usage" in obj and isinstance(obj["usage"], dict):
-                            total_tokens += int(obj["usage"].get("total_tokens") or 0)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    # Traces as additional session signal
-    trace_count = len(load_recent_traces(root, limit=20))
-
-    # Taskboard success rate
-    tb = load_taskboard_state(root)
-    tasks = (tb.get("tasks") or {}) if isinstance(tb, dict) else {}
-    done = 0
-    total_t = 0
-    for t in tasks.values() if isinstance(tasks, dict) else []:
-        total_t += 1
-        st = (t.get("status") if isinstance(t, dict) else None) or ""
-        if str(st).lower() in {"done", "completed", "success"}:
-            done += 1
-    success_rate = (done / total_t * 100.0) if total_t > 0 else 0.0
-
-    # Real series: collect recent token usages from llm_logs for graph
-    series: list[int] = []
-    if llm_dir.exists():
-        for jf in sorted(llm_dir.glob("*.jsonl"), reverse=True)[:3]:
-            try:
-                for ln in reversed(jf.read_text(encoding="utf-8").strip().splitlines()):
-                    if not ln.strip() or len(series) >= 12:
-                        continue
-                    try:
-                        obj = json.loads(ln)
-                        tok = 0
-                        for k in ("total_tokens", "tokens", "token_count"):
-                            if k in obj:
-                                tok = int(obj[k] or 0)
-                                break
-                        if "usage" in obj and isinstance(obj.get("usage"), dict):
-                            tok = int(obj["usage"].get("total_tokens") or tok or 0)
-                        if tok > 0:
-                            series.append(tok)
-                    except Exception:
-                        continue
-            except Exception:
-                continue
-    if not series:
-        avg = (total_tokens // max(1, turns)) if turns else 850
-        series = [max(120, avg - 200 + (i * 40) % 350) for i in range(8)]
-    series = series[:12] or [850] * 8
-
+    overview = get_observability_overview(root)
+    span_count = int(overview.get("span_count", 0))
+    errors = int(overview.get("error_count", 0))
     return {
-        "sessions": max(turns, trace_count),
-        "total_tokens": total_tokens,
-        "avg_tokens": (total_tokens // max(1, turns)) if turns else 900,
-        "success_rate": round(success_rate, 1),
-        "task_count": total_t,
-        "done_tasks": done,
-        "tokens_series": series,
+        "sessions": overview.get("trace_count", 0),
+        "total_tokens": overview.get("total_tokens", 0),
+        "avg_tokens": int(overview.get("total_tokens", 0) / max(1, span_count)),
+        "success_rate": round((span_count - errors) / max(1, span_count) * 100, 1),
+        "task_count": span_count,
+        "done_tasks": span_count - errors,
+        "tokens_series": [],
         "root": str(root),
     }
+
+
+def _observability(root: Path | None = None):
+    from mana_agent.observability import ObservabilityStore
+    return ObservabilityStore(find_mana_root(root))
+
+
+def get_observability_overview(root: Path | None = None, *, since: str = "") -> dict[str, Any]:
+    """Return dashboard metrics from the canonical local SQLite trace store."""
+    return _observability(root).overview(since=since)
+
+
+def load_observability_spans(root: Path | None = None, **filters: Any) -> list[dict[str, Any]]:
+    """Query redacted spans for dashboard trace exploration."""
+    return _observability(root).spans(**filters)
+
+
+def load_observability_trace(trace_id: str, root: Path | None = None) -> list[dict[str, Any]]:
+    return _observability(root).spans(trace_id=trace_id, limit=1000)
+
+
+def get_observability_health(root: Path | None = None) -> dict[str, Any]:
+    return _observability(root).health()
 
 
 def load_automations(root: Path | None = None) -> dict[str, Any]:
