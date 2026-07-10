@@ -136,8 +136,8 @@ mana-agent dashboard --root-dir .
 ```
 
 The dashboard uses the same repository context, services, and multi-agent runtime
-as the CLI. Its sidebar is a navigation menu rather than a group of mode
-checkboxes, so each capability has a stable page and URL state.
+as the CLI. Its sidebar is the dashboard's single navigation menu rather than
+a group of mode checkboxes or duplicate multipage links.
 
 Dashboard pages include:
 
@@ -146,6 +146,7 @@ Dashboard pages include:
 * **Analysis** — run analysis and inspect generated reports and diagrams.
 * **Taskboard** — active and completed agent tasks, workers, and execution state.
 * **Traces** — tool calls, decisions, verification results, and runtime events.
+* **Observability** — local redacted trace trees, span timings, token usage, latency/error metrics, queue waits, and evidence-backed bottleneck findings.
 * **Automations** — create and manage persistent scheduled actions.
 * **Cron Jobs** — inspect deployment state, enable or disable schedules, and remove deployments.
 * **Settings** — provider, model-role, search, and runtime configuration.
@@ -159,6 +160,13 @@ For dashboard development, the Streamlit entry point can also be run directly:
 ```bash
 streamlit run dashboard/app.py -- --root-dir .
 ```
+
+### Observability and OTLP export
+
+Mana-Agent stores dashboard telemetry locally in `.mana/observability/telemetry.sqlite`.
+Payloads are bounded, structured summaries with common credentials redacted. Data is retained for 30 days and up to 500 MB by default; change these limits with `MANA_OBSERVABILITY_RETENTION_DAYS` and `MANA_OBSERVABILITY_MAX_STORAGE_MB`.
+
+Install optional OpenTelemetry support with `pip install "mana-agent[observability]"`. Export remains disabled until `MANA_OBSERVABILITY_OTLP_ENDPOINT` is set; use `MANA_OBSERVABILITY_OTLP_HEADERS` for a JSON object of endpoint headers. Local tracing remains authoritative if an export fails. The dashboard tracks exact or estimated tokens only—no dollar cost is displayed until a model-price policy is configured.
 
 ---
 

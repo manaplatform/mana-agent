@@ -18,6 +18,7 @@ from mana_agent.cli.events import ChatEvent, make_event
 from mana_agent.cli.renderers import EventRenderer
 from mana_agent.telemetry.session_trace import SessionTrace
 from mana_agent.telemetry.tokens import TokenUsageTracker
+from mana_agent.observability import ObservabilityStore
 
 
 def git_branch(root: Path) -> str:
@@ -65,6 +66,7 @@ class ChatUIState:
     session_id: str = field(default_factory=lambda: f"sess-{uuid.uuid4().hex}")
     tracker: TokenUsageTracker = field(default_factory=TokenUsageTracker)
     trace: SessionTrace | None = None
+    observability: ObservabilityStore | None = None
     events: list[ChatEvent] = field(default_factory=list)
     events_by_id: dict[str, ChatEvent] = field(default_factory=dict)
     event_order: list[str] = field(default_factory=list)
@@ -94,6 +96,8 @@ class ChatUIState:
                 trace_mode=self.trace_mode,
                 path=self.trace_path,
             )
+        if self.observability is None:
+            self.observability = ObservabilityStore(self.repo_root)
 
     @property
     def renderer(self) -> EventRenderer:
@@ -106,6 +110,8 @@ class ChatUIState:
         self._persist_session_event(event)
         if self.trace is not None:
             self.trace.record(event)
+        if self.observability is not None:
+            self.observability.record_event(stored)
         self._sync_event_collections(stored)
         return stored
 

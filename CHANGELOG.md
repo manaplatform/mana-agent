@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-10
 
+- Removed legacy Streamlit multipage stubs so the dashboard exposes only its
+  active-state sidebar navigation instead of duplicate Overview, Reports, and
+  Taskboard links.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m py_compile dashboard/app.py`.
+
+- Added SQLite-backed dashboard observability with redacted trace spans, token/latency/error/queue metrics, configurable retention, bottleneck evidence, and optional OTLP export.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_observability.py tests/test_dashboard_helpers.py tests/test_cli_ux_helpers.py -q` passed (26 tests); CLI and chat-storage smoke checks passed.
+
 - Updated CLI and dashboard project analysis to resolve its LLM connection from persisted `~/.mana/config.toml` and `~/.mana/secrets.toml`, preventing a target repository `.env` from overriding the selected analyzer model.
   - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_project_llm_analyze_service.py tests/test_dashboard_helpers.py -q`.
 
