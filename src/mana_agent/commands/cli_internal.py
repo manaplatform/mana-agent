@@ -618,6 +618,54 @@ def mcp_serve_command(
     uvicorn.run(protected_http_app(repo_root=root, token=token), host=host, port=port)
 
 
+@mcp_app.command("token-set")
+def mcp_token_set_command(
+    server_id: str | None = typer.Argument(None, help="Optional MCP server id; choose interactively when omitted."),
+    token: str | None = typer.Option(None, "--token", hide_input=True),
+) -> None:
+    """Store a remote MCP bearer token, selecting a configured server if needed."""
+    from mana_agent.mcp.config import load_mcp_servers, save_mcp_token
+    from mana_agent.tui.menu import MenuOption, NonInteractivePromptError, select_option
+
+    selected_id = str(server_id or "").strip()
+    if not selected_id:
+        servers = load_mcp_servers()
+        if not servers:
+            raise typer.BadParameter("No MCP servers are configured. Run the MCP add command first.")
+        try:
+            selected_id = select_option(
+                title="MCP server",
+                text="Use arrow keys and Enter to choose the server whose bearer token you want to store.",
+                options=[MenuOption(value=server.id, label=f"{server.id} ({server.transport})") for server in servers],
+            )
+        except NonInteractivePromptError as exc:
+            raise typer.BadParameter("Specify SERVER_ID when stdin is not interactive.") from exc
+    selected_token = str(token or "").strip()
+    if not selected_token:
+        selected_token = typer.prompt(f"Bearer token for {selected_id}", hide_input=True, confirmation_prompt=True)
+    save_mcp_token(selected_id, selected_token)
+    console.print(f"[green]Stored token for MCP server '{selected_id}' in ~/.mana/mcp_secrets.toml.[/green]")
+
+
+@mcp_app.command("add")
+def mcp_add_command(
+    server_id: str = typer.Argument(..., help="Stable local MCP provider id."),
+    transport: str = typer.Option(..., "--transport", help="stdio, streamable_http, or sse."),
+    command: str = typer.Option("", "--command", help="stdio server executable."),
+    arg: list[str] = typer.Option([], "--arg", help="Repeat for each stdio argument."),
+    url: str = typer.Option("", "--url", help="HTTP MCP endpoint."),
+    token_env: str = typer.Option("", "--token-env", help="Environment variable containing the bearer token."),
+    replace: bool = typer.Option(False, "--replace", help="Replace an existing server with this id."),
+) -> None:
+    """Register an MCP provider for future chat sessions."""
+    from mana_agent.mcp.config import McpServerConfig, save_mcp_server
+
+    normalized = transport.strip().lower().replace("-", "_")
+    server = McpServerConfig(id=server_id, transport=normalized, command=command, args=arg, url=url, token_env=token_env)
+    path = save_mcp_server(server, replace=replace)
+    console.print(f"[green]Registered MCP server '{server.id}' in {path}.[/green]")
+
+
 @app.command("dashboard")
 def dashboard_command(
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root to pass to dashboard."),

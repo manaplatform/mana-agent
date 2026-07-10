@@ -7,6 +7,7 @@ Central orchestration layer for answering questions over indexed code context.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
@@ -27,6 +28,7 @@ from mana_agent.multi_agent.runtime.route_executor import (
 )
 from mana_agent.services.search_service import SearchService
 from mana_agent.vector_store.faiss_store import FaissStore
+from mana_agent.mcp.config import load_mcp_servers
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,25 @@ class AskService:
         )
 
     @staticmethod
+    def _requested_mcp_server(question: str) -> str | None:
+        """Return an explicitly named configured MCP provider, if any.
+
+        This is a user-supplied execution constraint, not a workflow router:
+        the model still chooses the concrete tool from that provider.
+        """
+        text = str(question or "")
+        try:
+            server_ids = [server.id for server in load_mcp_servers()]
+        except Exception:
+            return None
+        matches = [
+            server_id
+            for server_id in server_ids
+            if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(server_id)}(?![A-Za-z0-9_-])", text, re.IGNORECASE)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
     def _render_context(sources: list[SearchHit]) -> str:
         blocks: list[str] = []
         for src in sources:
@@ -85,6 +106,7 @@ class AskService:
 
     def ask(self, index_dir: str | Path, question: str, k: int) -> AskResponse:
         resolved_index = Path(index_dir).resolve()
+        required_mcp_server = self._requested_mcp_server(question)
         logger.info("Running model-routed ask flow: index_dir=%s k=%d", resolved_index, k)
         decision = self._route_or_error(
             question=question,
@@ -92,6 +114,7 @@ class AskService:
             runtime_state=RouteRuntimeState(
                 index_available=self._index_available(resolved_index),
                 dir_mode=False,
+                required_mcp_server=required_mcp_server,
             ),
         )
         if isinstance(decision, AskResponseWithTrace):
@@ -104,6 +127,7 @@ class AskService:
                 project_root=self.project_root,
                 k=k,
                 index_available=self._index_available(resolved_index),
+                required_mcp_server=required_mcp_server,
             ),
         )
 
@@ -122,12 +146,14 @@ class AskService:
     ) -> AskResponseWithTrace:
 
         resolved_index = Path(index_dir).resolve()
+        required_mcp_server = self._requested_mcp_server(question)
         decision = self._route_or_error(
             question=question,
             index_dir=resolved_index,
             runtime_state=RouteRuntimeState(
                 index_available=self._index_available(resolved_index),
                 dir_mode=False,
+                required_mcp_server=required_mcp_server,
             ),
         )
         if isinstance(decision, AskResponseWithTrace):
@@ -144,6 +170,7 @@ class AskService:
                     timeout_seconds=timeout_seconds,
                     callbacks=callbacks,
                     index_available=self._index_available(resolved_index),
+                    required_mcp_server=required_mcp_server,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - no alternate route is selected here
@@ -271,12 +298,14 @@ class AskService:
 
         resolved = sorted({Path(p).resolve() for p in index_dirs})
         root = Path(root_dir or self.project_root).resolve()
+        required_mcp_server = self._requested_mcp_server(question)
         decision = self._route_or_error(
             question=question,
             index_dir=resolved[0] if resolved else None,
             runtime_state=RouteRuntimeState(
                 index_available=bool(resolved),
                 dir_mode=True,
+                required_mcp_server=required_mcp_server,
             ),
         )
         if isinstance(decision, AskResponseWithTrace):
@@ -296,6 +325,7 @@ class AskService:
                     callbacks=callbacks,
                     dir_mode=True,
                     index_available=bool(resolved),
+                    required_mcp_server=required_mcp_server,
                 )
             )
             result.source_groups = self._group_sources_by_index(

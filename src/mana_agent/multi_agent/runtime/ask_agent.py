@@ -1701,7 +1701,9 @@ class AskAgent:
             ),
         ]
 
-        mcp_tools, mcp_warnings = discovered_mcp_langchain_tools(overrides=self.mcp_server_overrides)
+        mcp_tools, mcp_warnings = discovered_mcp_langchain_tools(
+            overrides=list(getattr(self, "mcp_server_overrides", []) or [])
+        )
         warnings.extend(mcp_warnings)
         # include externally-registered tools (write_file/apply_patch/etc)
         all_tools = [*base_tools, *mcp_tools, *list(getattr(self, "tools", []) or [])]
@@ -1780,6 +1782,7 @@ class AskAgent:
         # tools like ls/list_files/read_file/repo_search.
         raw_allowed = [str(x) for x in (policy.get("allowed_tools") or []) if str(x).strip()]
         allowed_tools = set(resolve_allowed_tools(raw_allowed, strict=False))
+        allowed_tools.update(name for name in raw_allowed if name.startswith(("mcp.", "mcp__")))
         search_budget = int(policy.get("search_budget", 0) or 0)
         read_budget = int(policy.get("read_budget", 0) or 0)
         read_line_window = max(200, min(int(policy.get("read_line_window", 400) or 400), 2000))

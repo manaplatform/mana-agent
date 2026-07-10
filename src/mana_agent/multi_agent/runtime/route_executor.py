@@ -34,6 +34,7 @@ class RouteExecutionContext:
     dir_mode: bool = False
     root_dir: Path | None = None
     index_available: bool = True
+    required_mcp_server: str | None = None
 
 
 class RouteExecutor:
@@ -277,6 +278,12 @@ class RouteExecutor:
         return self.command_handler(str(decision.command_name or ""), list(decision.command_args))
 
     def _validate(self, decision: RouteDecision, context: RouteExecutionContext) -> str | None:
+        required_mcp_server = str(getattr(context, "required_mcp_server", "") or "").strip()
+        if required_mcp_server:
+            selected = str((decision.tool_plan or [{}])[0].get("tool") or "") if decision.tool_plan else ""
+            required_prefix = f"mcp__{required_mcp_server}__"
+            if decision.kind != "tool_execution" or not selected.startswith(required_prefix):
+                return f"user explicitly required MCP provider '{required_mcp_server}', but no tool from {required_prefix} was selected"
         if decision.kind == "semantic_qa" and not _index_available(context):
             return "semantic index unavailable"
         if decision.kind == "command":
@@ -302,6 +309,7 @@ class RouteExecutor:
                     index_available=_index_available(context),
                     dir_mode=context.dir_mode,
                     validation_error=validation_error,
+                    required_mcp_server=str(getattr(context, "required_mcp_server", "") or "") or None,
                 ),
             )
         except Exception:
@@ -383,7 +391,7 @@ def _render_project_context(matches: list[Any]) -> str:
 
 
 def available_tool_names() -> list[str]:
-    return [
+    names = [
         "command_inventory",
         "repo_search",
         "repo_read",
@@ -436,6 +444,14 @@ def available_tool_names() -> list[str]:
         "code_edit",
         "test_verification",
     ]
+    try:
+        from mana_agent.mcp.tools import discovered_mcp_tool_names
+        names.extend(discovered_mcp_tool_names())
+    except Exception:
+        # MCP discovery failures are surfaced by the provider itself; routing
+        # must not invent alternate tools for unavailable providers.
+        pass
+    return sorted(set(names))
 
 
 def available_command_names(project_root: Path) -> list[str]:

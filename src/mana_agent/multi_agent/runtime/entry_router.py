@@ -66,6 +66,7 @@ class RouteRuntimeState:
     validation_error: str | None = None
     web_search_enabled: bool = True
     github_search_enabled: bool = True
+    required_mcp_server: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +81,9 @@ Choose exactly one route for the user's request before any command, search, tool
 Do not use fallback behavior. Do not choose actions by keyword alone.
 Use runtime state to decide whether semantic indexes, repo context, external search, and commands are available.
 If validation_error is present, choose a new valid route or explain why execution must stop.
+If runtime_state.required_mcp_server is set, the user explicitly requires that
+MCP provider. Select tool_execution with a tool from mcp__<required_mcp_server>__*
+only. Never select web_search, github_search, or another provider as a substitute.
 
 Route kinds:
 - command: run a known Mana-Agent command only when command_name is in available_commands.

@@ -179,6 +179,14 @@ def _auto_chat_mode_from_agent_decision(decision: AgentDecision, fallback: AutoC
     return fallback
 
 
+def _explicit_mcp_server_request(*, ask_service: Any, question: str) -> str | None:
+    resolver = getattr(ask_service, "_requested_mcp_server", None)
+    if not callable(resolver):
+        return None
+    value = resolver(question)
+    return str(value).strip() or None
+
+
 def _run_web_research_answer(*, ask_service, question: str, root: Path, decision: AgentDecision) -> tuple[str, list[dict[str, str]], list[dict[str, Any]]]:
     config = SearchConfig.from_env()
     router = SearchRouter(root=str(root), llm=_agent_decision_llm(ask_service), config=config)
@@ -2153,6 +2161,10 @@ def chat(
                 agent_decision,
                 classify_auto_chat_intent(question),
             )
+            required_mcp_server = _explicit_mcp_server_request(
+                ask_service=ask_service,
+                question=question,
+            )
             if is_plan_execution_request(question):
                 auto_chat_mode = AutoChatMode.EDIT
 
@@ -2224,6 +2236,7 @@ def chat(
                 any(tool in agent_decision.selected_tools for tool in ("web_search", "github_search"))
                 and agent_decision.web_search_needed
                 and not agent_decision.code_editing_needed
+                and not required_mcp_server
             ):
                 answer_text, sources, trace = _run_chat_event_step(
                     "Web search...",
@@ -2295,6 +2308,7 @@ def chat(
                 and agent_decision.repo_context_needed
                 and not agent_decision.code_editing_needed
                 and coding_agent_instance is None
+                and not required_mcp_server
             ):
                 tool_query = str((agent_decision.tool_inputs.get("repo_search") or {}).get("query") or question).strip()
                 search_result = _run_chat_event_step(

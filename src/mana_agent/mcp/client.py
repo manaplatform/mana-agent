@@ -69,8 +69,8 @@ class McpClient:
         resources: list[dict[str, Any]] = []
         for server in self.servers.values():
             async with self._session(server) as session:
-                listed_tools = await session.list_tools()
-                listed_resources = await session.list_resources()
+                listed_tools = await asyncio.wait_for(session.list_tools(), timeout=server.timeout_seconds)
+                listed_resources = await asyncio.wait_for(session.list_resources(), timeout=server.timeout_seconds)
                 for tool in listed_tools.tools:
                     tools.append({"server_id": server.id, "name": tool.name, "qualified_name": f"mcp.{server.id}.{tool.name}", "description": tool.description or "", "input_schema": dict(tool.inputSchema or {})})
                 for resource in listed_resources.resources:
@@ -84,7 +84,7 @@ class McpClient:
         server = self.servers[server_id]
         started = time.perf_counter()
         async with self._session(server) as session:
-            result = await session.call_tool(name, arguments=arguments)
+            result = await asyncio.wait_for(session.call_tool(name, arguments=arguments), timeout=server.timeout_seconds)
         content = [item.model_dump(mode="json") if hasattr(item, "model_dump") else str(item) for item in result.content]
         return {"ok": not bool(getattr(result, "isError", False)), "server_id": server_id, "tool_name": name, "transport": server.transport, "content": content, "structured_content": getattr(result, "structuredContent", None), "is_error": bool(getattr(result, "isError", False)), "duration_ms": round((time.perf_counter() - started) * 1000, 2)}
 
@@ -92,7 +92,7 @@ class McpClient:
         server = self.servers[server_id]
         started = time.perf_counter()
         async with self._session(server) as session:
-            result = await session.read_resource(uri)
+            result = await asyncio.wait_for(session.read_resource(uri), timeout=server.timeout_seconds)
         content = [item.model_dump(mode="json") if hasattr(item, "model_dump") else str(item) for item in result.contents]
         return {"ok": True, "server_id": server_id, "uri": uri, "transport": server.transport, "content": content, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}
 
@@ -108,14 +108,30 @@ class McpClient:
         except ImportError as exc:
             raise RuntimeError("MCP support requires the 'mcp' package; reinstall mana-agent") from exc
         if server.transport == "stdio":
-            params = StdioServerParameters(command=server.command, args=server.args, env=server.env or None)
+            params = StdioServerParameters(command=server.command, args=server.args, env=server.resolved_env())
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await asyncio.wait_for(session.initialize(), timeout=server.timeout_seconds)
                     yield session
             return
-        factory = streamable_http_client if server.transport == "streamable_http" else sse_client
-        async with factory(server.url, headers=server.headers or None, timeout=server.timeout_seconds) as streams:
+        if server.transport == "streamable_http":
+            import httpx
+
+            async with httpx.AsyncClient(
+                headers=server.resolved_headers() or None,
+                timeout=server.timeout_seconds,
+            ) as http_client:
+                async with streamable_http_client(server.url, http_client=http_client) as streams:
+                    read, write = streams[0], streams[1]
+                    async with ClientSession(read, write) as session:
+                        await asyncio.wait_for(session.initialize(), timeout=server.timeout_seconds)
+                        yield session
+            return
+        async with sse_client(
+            server.url,
+            headers=server.resolved_headers() or None,
+            timeout=server.timeout_seconds,
+        ) as streams:
             read, write = streams[0], streams[1]
             async with ClientSession(read, write) as session:
                 await asyncio.wait_for(session.initialize(), timeout=server.timeout_seconds)
