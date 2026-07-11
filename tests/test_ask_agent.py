@@ -339,6 +339,22 @@ def test_ask_agent_registers_call_graph_tool(tmp_path: Path) -> None:
     assert "call_graph" in {item.name for item in tools}
 
 
+def test_ask_agent_does_not_discover_mcp_without_explicit_provider(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path)
+
+    def _unexpected_discovery(**_kwargs):
+        raise AssertionError("MCP discovery must not run for an ordinary chat turn")
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        _unexpected_discovery,
+    )
+    tools, _traces, _sources, _warnings = agent._build_tools(k_default=4, timeout_seconds=1)
+    names = {item.name for item in tools}
+    assert "email_accounts_list" in names
+    assert "email_search" in names
+
+
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
     agent = _build_agent(tmp_path)
     tools, traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1)

@@ -11,7 +11,7 @@ from mana_agent.api.routes.workspaces import router as workspaces_router
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Mana-Agent API",
-        version="0.0.12",
+        version="0.0.13",
         description="HTTP API for Mana-Agent repository intelligence workflows.",
     )
 

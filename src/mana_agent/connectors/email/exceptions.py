@@ -1,0 +1,14 @@
+class EmailConnectorError(RuntimeError): pass
+class AuthenticationRequired(EmailConnectorError): pass
+class CredentialsRevoked(EmailConnectorError): pass
+class EmailPermissionDenied(EmailConnectorError): pass
+class ApprovalRequired(EmailConnectorError): pass
+class CapabilityUnsupported(EmailConnectorError): pass
+class ProviderRateLimited(EmailConnectorError): pass
+class TemporaryProviderFailure(EmailConnectorError): pass
+class PermanentProviderFailure(EmailConnectorError): pass
+class InvalidMessageIdentifier(EmailConnectorError): pass
+class AttachmentTooLarge(EmailConnectorError): pass
+class UnsafeAttachment(EmailConnectorError): pass
+class AmbiguousSendResult(EmailConnectorError): pass
+class SynchronizationCursorExpired(EmailConnectorError): pass

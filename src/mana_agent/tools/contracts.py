@@ -342,11 +342,14 @@ def _document_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]
 def coding_tool_contracts() -> list[ToolContract]:
     """Return contracts for the built-in coding-agent tool surface."""
 
+    from mana_agent.connectors.email.tools import email_tool_contracts
+
     common_error = {
         "ok": False,
         "error": {"code": "string", "message": "string", "details": "object"},
     }
     return [
+        *email_tool_contracts(),
         ToolContract(
             name="semantic_search",
             description="Search indexed code chunks semantically using the local vector index when available.",

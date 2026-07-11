@@ -1701,12 +1701,22 @@ class AskAgent:
             ),
         ]
 
-        mcp_tools, mcp_warnings = discovered_mcp_langchain_tools(
-            overrides=list(getattr(self, "mcp_server_overrides", []) or [])
+        # Starting a stdio MCP server is an external side effect. Registered
+        # providers are not discovered for every chat turn; discovery happens
+        # only when the caller explicitly selected an MCP provider.
+        mcp_overrides = list(getattr(self, "mcp_server_overrides", []) or [])
+        mcp_tools, mcp_warnings = (
+            discovered_mcp_langchain_tools(overrides=mcp_overrides)
+            if mcp_overrides
+            else ([], [])
         )
         warnings.extend(mcp_warnings)
         # include externally-registered tools (write_file/apply_patch/etc)
-        all_tools = [*base_tools, *mcp_tools, *list(getattr(self, "tools", []) or [])]
+        from mana_agent.connectors.email.runtime_tools import build_email_langchain_tools
+
+        # Account metadata is local; Gmail is contacted only if the model calls
+        # one of these explicitly selected tools.
+        all_tools = [*base_tools, *build_email_langchain_tools(), *mcp_tools, *list(getattr(self, "tools", []) or [])]
         return all_tools, traces, sources, warnings
 
     # ✅ NEW: public "ask" API (what your CodingAgent expects)

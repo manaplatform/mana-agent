@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-11
+
+- Stopped configured MCP providers from starting during ordinary chat routing; MCP discovery now occurs only for an explicitly selected provider. Registered executable Gmail tools are now available to the model-selected chat tool loop, and metadata-only Gmail search can return the latest message headers without requesting a full message body.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/connectors/test_email_core.py tests/test_ask_agent.py tests/test_ask_entry_router.py -q` passed; a connected Gmail account completed a metadata-only search.
+
+- Added an optional provider-neutral Email Connector with Gmail support, normalized models, keyring-backed OAuth credentials, sanitization, permission and approval primitives, account CLI commands, and model-visible tool contracts.
+  - Verification: Focused email connector tests and CLI help added.
+
 ## 2026-07-10
 
 - Made the packaged dashboard discoverability assertion platform-neutral by

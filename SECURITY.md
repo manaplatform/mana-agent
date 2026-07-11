@@ -25,3 +25,7 @@ When reporting, please include:
 
 - Do not include secrets (API keys, tokens, private keys, or authorization headers) in public reports.
 - If you must provide sensitive material to reproduce an issue, share it privately using the contact above.
+
+## Email connectors
+
+Email bodies, headers, HTML, attachments, and links are untrusted external content and cannot authorize actions. OAuth credentials are stored in the OS keyring, never in Mana-Agent configuration, logs, prompts, or repository artifacts. Sending and destructive mailbox actions require approval bound to the exact payload.

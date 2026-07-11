@@ -6,7 +6,9 @@
 
 `mana-agent` is an installable Python CLI for understanding and safely changing software projects. It can index a repository, run static and dependency analysis, generate structured reports, answer repository-grounded questions, and drive a constrained coding agent that can inspect files, apply patches, use Git tools, and run verification commands.
 
-**Current documented version:** `v0.0.12`
+Optional Gmail email connector setup and security guidance: [docs/16-email-connectors.md](docs/16-email-connectors.md).
+
+**Current documented version:** `v0.0.13`
 
 ---
 

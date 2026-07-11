@@ -443,14 +443,13 @@ def available_tool_names() -> list[str]:
         "structure_analysis",
         "code_edit",
         "test_verification",
+        "email_accounts_list",
+        "email_search",
+        "email_read",
+        "email_thread_read",
     ]
-    try:
-        from mana_agent.mcp.tools import discovered_mcp_tool_names
-        names.extend(discovered_mcp_tool_names())
-    except Exception:
-        # MCP discovery failures are surfaced by the provider itself; routing
-        # must not invent alternate tools for unavailable providers.
-        pass
+    # Do not start configured MCP providers while merely collecting router
+    # context. A selected provider is discovered later by AskAgent.
     return sorted(set(names))
 
 
