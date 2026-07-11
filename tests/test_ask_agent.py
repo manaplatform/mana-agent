@@ -355,6 +355,23 @@ def test_ask_agent_does_not_discover_mcp_without_explicit_provider(tmp_path: Pat
     assert "email_search" in names
 
 
+def test_ask_agent_discovers_only_the_explicitly_required_mcp_provider(tmp_path: Path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path)
+    calls: list[dict] = []
+
+    def _discover(**kwargs):
+        calls.append(kwargs)
+        return [], []
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        _discover,
+    )
+    agent._build_tools(k_default=4, timeout_seconds=1, required_mcp_server="context7")
+
+    assert calls == [{"overrides": [], "server_ids": ["context7"]}]
+
+
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
     agent = _build_agent(tmp_path)
     tools, traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1)

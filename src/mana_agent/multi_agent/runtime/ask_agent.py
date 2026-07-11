@@ -1051,6 +1051,7 @@ class AskAgent:
         run_id: str | None = None,
         ephemeral_read_cache: dict[str, list[dict[str, Any]]] | None = None,
         read_telemetry: dict[str, int] | None = None,
+        required_mcp_server: str | None = None,
     ) -> tuple[list[BaseTool], list[ToolInvocationTrace], list[SearchHit], list[str]]:
         traces: list[ToolInvocationTrace] = []
         sources: list[SearchHit] = []
@@ -1705,9 +1706,13 @@ class AskAgent:
         # providers are not discovered for every chat turn; discovery happens
         # only when the caller explicitly selected an MCP provider.
         mcp_overrides = list(getattr(self, "mcp_server_overrides", []) or [])
+        selected_mcp_servers = [str(required_mcp_server).strip()] if str(required_mcp_server or "").strip() else []
         mcp_tools, mcp_warnings = (
-            discovered_mcp_langchain_tools(overrides=mcp_overrides)
-            if mcp_overrides
+            discovered_mcp_langchain_tools(
+                overrides=mcp_overrides,
+                server_ids=selected_mcp_servers,
+            )
+            if mcp_overrides or selected_mcp_servers
             else ([], [])
         )
         warnings.extend(mcp_warnings)
@@ -1764,6 +1769,7 @@ class AskAgent:
         tool_policy: dict[str, Any] | None = None,
         flow_id: str | None = None,
         run_id: str | None = None,
+        required_mcp_server: str | None = None,
     ) -> AskResponseWithTrace:
         started = perf_counter()
 
@@ -1818,6 +1824,7 @@ class AskAgent:
             run_id=run_id,
             ephemeral_read_cache=ephemeral_read_cache,
             read_telemetry=read_telemetry,
+            required_mcp_server=required_mcp_server,
         )
         pending_external_traces = list(getattr(self, "_pending_external_search_traces", []) or [])
         if pending_external_traces:
@@ -2439,6 +2446,7 @@ class AskAgent:
         if getattr(self, "search_service", None) is None:
             raise RuntimeError("AskAgent.search_service is required for run_multi()")
         tool_policy = kwargs.pop("tool_policy", None)
+        required_mcp_server = kwargs.pop("required_mcp_server", None)
 
         resolved_indexes = [Path(p).resolve() for p in index_dirs]
         if not resolved_indexes:
@@ -2456,6 +2464,7 @@ class AskAgent:
                 tool_policy=tool_policy,
                 flow_id=flow_id,
                 run_id=run_id,
+                required_mcp_server=required_mcp_server,
                 **kwargs,
             )
 
@@ -2513,6 +2522,7 @@ class AskAgent:
             tool_policy=tool_policy,
             flow_id=flow_id,
             run_id=run_id,
+            required_mcp_server=required_mcp_server,
             **kwargs,
         )
 

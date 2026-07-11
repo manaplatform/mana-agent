@@ -366,7 +366,9 @@ class AskService:
                 index_dir=index_dir,
                 project_root=self.project_root,
                 available_commands=available_command_names(self.project_root),
-                available_tools=available_tool_names(),
+                available_tools=available_tool_names(
+                    required_mcp_server=runtime_state.required_mcp_server,
+                ),
                 runtime_state=runtime_state,
             )
         except RouteDecisionError as exc:

@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-11
 
+- Restored explicitly requested configured MCP providers to the chat tool loop. The selected provider is now propagated through route execution and only that provider is discovered, so a Context7 request no longer fails because its tools were never registered.
+  - Included the selected provider's model-visible tools in routing context, so the router can produce a valid constrained tool decision before execution.
+  - Verification: Focused MCP and AskAgent tests added.
+
 - Stopped configured MCP providers from starting during ordinary chat routing; MCP discovery now occurs only for an explicitly selected provider. Registered executable Gmail tools are now available to the model-selected chat tool loop, and metadata-only Gmail search can return the latest message headers without requesting a full message body.
   - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/connectors/test_email_core.py tests/test_ask_agent.py tests/test_ask_entry_router.py -q` passed; a connected Gmail account completed a metadata-only search.
 

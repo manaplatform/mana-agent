@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from mana_agent.analysis.models import AskResponse, AskResponseWithTrace, SearchHit, ToolInvocationTrace
+from mana_agent.mcp.tools import discovered_mcp_tool_names
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision, RouteRuntimeState
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
@@ -213,6 +214,7 @@ class RouteExecutor:
                 max_steps=context.max_steps,
                 timeout_seconds=context.timeout_seconds,
                 callbacks=context.callbacks,
+                required_mcp_server=context.required_mcp_server,
             )
         except TypeError:
             return self.ask_agent.run(
@@ -232,6 +234,7 @@ class RouteExecutor:
                 max_steps=context.max_steps,
                 timeout_seconds=context.timeout_seconds,
                 callbacks=context.callbacks,
+                required_mcp_server=context.required_mcp_server,
             )
         except TypeError:
             return self.ask_agent.run_multi(
@@ -304,7 +307,9 @@ class RouteExecutor:
                 index_dir=context.index_dir,
                 project_root=context.project_root,
                 available_commands=available_command_names(context.project_root),
-                available_tools=available_tool_names(),
+                available_tools=available_tool_names(
+                    required_mcp_server=str(getattr(context, "required_mcp_server", "") or "") or None,
+                ),
                 runtime_state=RouteRuntimeState(
                     index_available=_index_available(context),
                     dir_mode=context.dir_mode,
@@ -390,7 +395,7 @@ def _render_project_context(matches: list[Any]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def available_tool_names() -> list[str]:
+def available_tool_names(*, required_mcp_server: str | None = None) -> list[str]:
     names = [
         "command_inventory",
         "repo_search",
@@ -449,7 +454,11 @@ def available_tool_names() -> list[str]:
         "email_thread_read",
     ]
     # Do not start configured MCP providers while merely collecting router
-    # context. A selected provider is discovered later by AskAgent.
+    # context. An explicitly selected provider is the exception: the router
+    # needs its actual model-visible tool names to make a valid constrained
+    # decision, and AskAgent will rediscover that same provider for execution.
+    if required_mcp_server:
+        names.extend(discovered_mcp_tool_names(server_ids=[required_mcp_server]))
     return sorted(set(names))
 
 

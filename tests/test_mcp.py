@@ -5,14 +5,15 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from mana_agent.analysis.models import AskResponseWithTrace
 from mana_agent.mcp.client import McpClient
-from mana_agent.mcp.tools import mcp_model_tool_name
+from mana_agent.mcp.tools import discovered_mcp_langchain_tools, mcp_model_tool_name
 from mana_agent.mcp.config import McpConfigError, McpServerConfig, load_mcp_servers, load_mcp_token, parse_mcp_server_json, save_mcp_server, save_mcp_token
 from mana_agent.mcp.server import protected_http_app
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision
-from mana_agent.multi_agent.runtime.route_executor import RouteExecutionContext, RouteExecutor
+from mana_agent.multi_agent.runtime.route_executor import RouteExecutionContext, RouteExecutor, available_tool_names
 from mana_agent.services.ask_service import AskService
 from mana_agent.commands.chat_cli import _explicit_mcp_server_request
 
@@ -34,6 +35,7 @@ def test_mcp_config_rejects_invalid_inline_definition():
 
 
 def test_mcp_queue_job_uses_namespaced_tool(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
     calls = []
 
     class FakeClient:
@@ -53,6 +55,27 @@ def test_mcp_queue_job_uses_namespaced_tool(monkeypatch, tmp_path):
 
 def test_mcp_model_tool_name_is_openai_compatible():
     assert mcp_model_tool_name("context7", "query-docs") == "mcp__context7__query-docs"
+
+
+def test_explicit_mcp_discovery_uses_only_the_requested_configured_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    save_mcp_server(McpServerConfig(id="context7", transport="stdio", command="context7"))
+    save_mcp_server(McpServerConfig(id="unrelated", transport="stdio", command="unrelated"))
+    captured = []
+
+    class FakeClient:
+        def __init__(self, servers):
+            captured.extend(server.id for server in servers)
+
+        def discover(self):
+            return {"tools": []}
+
+    monkeypatch.setattr("mana_agent.mcp.tools.McpClient", FakeClient)
+    tools, warnings = discovered_mcp_langchain_tools(server_ids=["context7"])
+
+    assert tools == []
+    assert warnings == []
+    assert captured == ["context7"]
 
 
 def test_mcp_stdio_discovers_calls_tool_and_reads_resource(tmp_path):
@@ -137,6 +160,57 @@ def test_explicit_mcp_provider_blocks_web_search_substitution(monkeypatch, tmp_p
     decision = RouteDecision(kind="web_search", confidence=1.0, reason="wrong route")
     context = RouteExecutionContext(question="use Context7", index_dir=None, required_mcp_server="context7")
     assert "explicitly required MCP provider" in str(executor._validate(decision, context))
+
+
+def test_route_executor_passes_required_mcp_provider_to_ask_agent():
+    calls = []
+
+    class RecordingAskAgent:
+        def run(self, **kwargs):
+            calls.append(kwargs)
+            return AskResponseWithTrace(answer="ok", sources=[])
+
+    executor = RouteExecutor(
+        router=EntryRouter(llm=object()),
+        store=None,
+        qna_chain=None,
+        ask_agent=RecordingAskAgent(),
+    )
+    executor._run_agent_single(
+        RouteExecutionContext(
+            question="Use Context7",
+            index_dir=None,
+            required_mcp_server="context7",
+        )
+    )
+
+    assert calls == [{
+        "question": "Use Context7",
+        "index_dir": None,
+        "k": 8,
+        "max_steps": 6,
+        "timeout_seconds": 30,
+        "callbacks": None,
+        "required_mcp_server": "context7",
+    }]
+
+
+def test_router_tool_context_includes_only_explicitly_required_mcp_tools(monkeypatch):
+    calls = []
+
+    def _discovered_tool_names(*, server_ids=None):
+        calls.append(server_ids)
+        return ["mcp__context7__query-docs"]
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.route_executor.discovered_mcp_tool_names",
+        _discovered_tool_names,
+    )
+
+    names = available_tool_names(required_mcp_server="context7")
+
+    assert "mcp__context7__query-docs" in names
+    assert calls == [["context7"]]
 
 
 def test_chat_fast_path_detects_explicit_mcp_provider():

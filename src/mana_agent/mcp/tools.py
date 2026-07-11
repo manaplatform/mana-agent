@@ -16,7 +16,11 @@ def mcp_model_tool_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{server_id}__{tool_name}".replace(".", "_")
 
 
-def discovered_mcp_langchain_tools(*, overrides: list[str] | None = None) -> tuple[list[Any], list[str]]:
+def discovered_mcp_langchain_tools(
+    *,
+    overrides: list[str] | None = None,
+    server_ids: list[str] | None = None,
+) -> tuple[list[Any], list[str]]:
     """Build model-visible MCP tools from configured providers."""
     try:
         selected_overrides = list(overrides or [])
@@ -25,7 +29,17 @@ def discovered_mcp_langchain_tools(*, overrides: list[str] | None = None) -> tup
             if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
                 raise McpConfigError("MANA_MCP_SERVER_OVERRIDES must be a JSON list of server definitions")
             selected_overrides = raw
-        client = McpClient(load_mcp_servers(overrides=selected_overrides))
+        servers = load_mcp_servers(overrides=selected_overrides)
+        selected_server_ids = {str(server_id).strip() for server_id in (server_ids or []) if str(server_id).strip()}
+        if selected_server_ids:
+            available_server_ids = {server.id for server in servers}
+            missing_server_ids = sorted(selected_server_ids - available_server_ids)
+            if missing_server_ids:
+                raise McpConfigError(
+                    "requested MCP provider is not configured: " + ", ".join(missing_server_ids)
+                )
+            servers = [server for server in servers if server.id in selected_server_ids]
+        client = McpClient(servers)
         discovery = client.discover()
     except (McpConfigError, RuntimeError, ValueError) as exc:
         return [], [f"MCP discovery failed; no MCP tools were registered: {exc}"]
@@ -46,6 +60,6 @@ def discovered_mcp_langchain_tools(*, overrides: list[str] | None = None) -> tup
     return tools, []
 
 
-def discovered_mcp_tool_names() -> list[str]:
-    tools, _warnings = discovered_mcp_langchain_tools()
+def discovered_mcp_tool_names(*, server_ids: list[str] | None = None) -> list[str]:
+    tools, _warnings = discovered_mcp_langchain_tools(server_ids=server_ids)
     return sorted(str(tool.name) for tool in tools)
