@@ -3,7 +3,11 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
-from mana_agent.llm.compatibility import CompatibleChatOpenAI, ModelCapabilities, create_chat_model
+from mana_agent.multi_agent.runtime.compatibility import (
+    CompatibleChatOpenAI,
+    ModelCapabilities,
+    create_chat_model,
+)
 
 
 TOOL = {

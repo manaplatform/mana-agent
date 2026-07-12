@@ -336,7 +336,7 @@ class LLMAnalyzer:
 
     def __init__(self, model_config: ModelConfig) -> None:
         from langchain_core.prompts import ChatPromptTemplate
-        from mana_agent.llm import create_chat_model
+        from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 
         from mana_agent.multi_agent.runtime.prompts import (
             PROJECT_ANALYZE_HUMAN_TEMPLATE,

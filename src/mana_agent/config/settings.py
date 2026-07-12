@@ -79,11 +79,17 @@ class Settings(BaseSettings):
     mana_web_search_base_url: str = Field(default="", alias="MANA_WEB_SEARCH_BASE_URL")
     mana_web_search_engine_id: str = Field(default="", alias="MANA_WEB_SEARCH_ENGINE_ID")
     mana_web_search_max_results: int = Field(default=8, alias="MANA_WEB_SEARCH_MAX_RESULTS")
+    mana_search_max_injected_results: int = Field(default=5, alias="MANA_SEARCH_MAX_INJECTED_RESULTS")
+    mana_search_max_summary_words: int = Field(default=80, alias="MANA_SEARCH_MAX_SUMMARY_WORDS")
+    mana_search_enable_ask_agent: bool = Field(default=True, alias="MANA_SEARCH_ENABLE_ASK_AGENT")
     mana_workspace_allowed_roots: str = Field(default="", alias="MANA_WORKSPACE_ALLOWED_ROOTS")
     mana_api_token: str = Field(default="", alias="MANA_API_TOKEN")
     mana_mcp_server_token: str = Field(default="", alias="MANA_MCP_SERVER_TOKEN")
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Mana-managed settings are intentionally repository-independent.  Loading
+    # a project's ``.env`` here can silently replace the API key selected in
+    # the setup wizard with an unrelated development credential.
+    model_config = SettingsConfigDict(extra="ignore")
 
     @classmethod
     def settings_customise_sources(
@@ -99,15 +105,12 @@ class Settings(BaseSettings):
 
         return (
             init_settings,
-            env_settings,
-            dotenv_settings,
             user_config_settings,
             file_secret_settings,
         )
 
     def model_post_init(self, __context: object) -> None:
-        if os.getenv("LLM_MODEL") and not os.getenv("OPENAI_CHAT_MODEL"):
-            self.openai_chat_model = str(self.llm_model or self.openai_chat_model)
+        _ = __context
 
 
 def default_index_dir(target_path: str | Path) -> Path:

@@ -6,7 +6,8 @@
 
 - Python 3.10 through 3.14. [pyproject.toml:1-51](pyproject.toml:1-51)
 - An OpenAI-compatible chat and embedding endpoint. [README.md:1-242](README.md:1-242)
-- `OPENAI_API_KEY` plus model settings in the environment or a `.env` file. [README.md:1-242](README.md:1-242)
+- An OpenAI API key plus model settings saved through Mana-Agent's first-run
+  Settings wizard under `~/.mana`. [README.md:1-242](README.md:1-242)
 
 The default dependency set includes Typer, Rich, Pydantic, python-dotenv, LangChain, OpenAI, FAISS, Safety, Redis, RQ, and Tenacity. [pyproject.toml:1-51](pyproject.toml:1-51)
 
@@ -30,7 +31,9 @@ python -m pip install pytest ruff mypy
 
 ## Configure
 
-Create a `.env` file or export environment variables before running the CLI. The repository documents these settings:
+Run `mana-agent` in an interactive terminal and enter your provider settings in
+the first-run wizard. Mana-Agent saves the values under `~/.mana`; it does not
+read credentials from the current repository's `.env` file.
 
 ```bash
 OPENAI_API_KEY="sk-..."
@@ -42,7 +45,7 @@ OPENAI_EMBED_MODEL="text-embedding-3-small"
 DEFAULT_TOP_K=8
 ```
 
-The README points to `.env.example` as the local template. [README.md:1-242](README.md:1-242)
+Use the Settings menu to update the saved provider configuration later.
 
 ## First run
 

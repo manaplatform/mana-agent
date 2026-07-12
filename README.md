@@ -451,14 +451,13 @@ Invoke-WebRequest -Uri "https://github.com/ah2727/mana-agent/releases/download/l
 
 Run `mana-agent` in an interactive terminal for first-run setup. The CLI prints the banner first, then opens a keyboard-selectable setup wizard when no saved user config exists. The wizard stores normal settings in `~/.mana/config.toml`, secrets in `~/.mana/secrets.toml`, and fetched provider models in `~/.mana/model_cache.json`.
 
-Configuration precedence is:
-
-1. CLI flags.
-2. Environment variables and `.env`.
-3. `~/.mana/config.toml` and `~/.mana/secrets.toml`.
-4. Safe defaults.
-
-Existing `.env` workflows continue to work. Use `mana-agent --no-interactive ...` in CI to prevent prompts; commands that require model configuration fail with a clear error when required values such as `OPENAI_API_KEY` are missing.
+Mana-managed configuration is loaded only from `~/.mana/config.toml` and
+`~/.mana/secrets.toml`, followed by safe defaults. Repository `.env` files and
+environment variables are deliberately ignored so opening a repository cannot
+silently replace the provider credentials selected in Mana-Agent's settings.
+Use `mana-agent --no-interactive ...` in CI to prevent prompts; commands that
+require model configuration fail clearly when `~/.mana/secrets.toml` has no
+`OPENAI_API_KEY`.
 
 The root menu includes Settings for changing the provider/API key, refreshing the model list from `GET {OPENAI_BASE_URL}/models`, changing selected models, assigning Mana model role levels, configuring web/GitHub search providers, and showing a masked config summary.
 
@@ -506,7 +505,10 @@ MANA_MODEL_TOOL=MODEL_LEVEL_1_FAST_TOOL
 MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
 ```
 
-### Environment variables
+### User configuration keys
+
+Set these through the interactive Settings menu; they are persisted under
+`~/.mana` rather than read from the current repository or shell environment.
 
 | Variable                      | Purpose                                                                          |
 | ----------------------------- | -------------------------------------------------------------------------------- |

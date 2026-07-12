@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from mana_agent.config.user_config import get_setting
@@ -60,7 +59,7 @@ def resolve_model_for_role(role: AgentRole, *, global_model: str) -> ResolvedMod
             resolved_model=role_value,
         )
     configured = role_value or default_level
-    resolved = str(get_setting(configured, "") or os.getenv(configured, "") or "").strip()
+    resolved = str(get_setting(configured, "") or "").strip()
     return ResolvedModelAssignment(
         role=role,
         env_var=env_var,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import stat
 import tomllib
 from dataclasses import dataclass
@@ -61,6 +60,9 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_WEB_SEARCH_BASE_URL": "",
     "MANA_WEB_SEARCH_ENDPOINT": "",
     "MANA_WEB_SEARCH_QUERY_PARAM": "q",
+    "MANA_SEARCH_MAX_INJECTED_RESULTS": 5,
+    "MANA_SEARCH_MAX_SUMMARY_WORDS": 80,
+    "MANA_SEARCH_ENABLE_ASK_AGENT": True,
     "MANA_WORKSPACE_ALLOWED_ROOTS": "",
     "MANA_API_TOKEN": "",
     "MANA_MCP_SERVER_TOKEN": "",
@@ -89,6 +91,9 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_WEB_SEARCH_ENGINE_ID": "mana_web_search_engine_id",
     "MANA_WEB_SEARCH_BASE_URL": "mana_web_search_base_url",
     "MANA_WEB_SEARCH_ENDPOINT": "mana_web_search_endpoint",
+    "MANA_SEARCH_MAX_INJECTED_RESULTS": "mana_search_max_injected_results",
+    "MANA_SEARCH_MAX_SUMMARY_WORDS": "mana_search_max_summary_words",
+    "MANA_SEARCH_ENABLE_ASK_AGENT": "mana_search_enable_ask_agent",
     "MANA_MODEL_TOOL_WORKER": "mana_model_tool_worker",
     "MANA_WORKSPACE_ALLOWED_ROOTS": "mana_workspace_allowed_roots",
     "MANA_API_TOKEN": "mana_api_token",
@@ -127,6 +132,9 @@ CONFIG_WRITE_ORDER = [
     "MANA_WEB_SEARCH_BASE_URL",
     "MANA_WEB_SEARCH_ENDPOINT",
     "MANA_WEB_SEARCH_QUERY_PARAM",
+    "MANA_SEARCH_MAX_INJECTED_RESULTS",
+    "MANA_SEARCH_MAX_SUMMARY_WORDS",
+    "MANA_SEARCH_ENABLE_ASK_AGENT",
 ]
 
 
@@ -209,17 +217,21 @@ def is_user_config_valid() -> bool:
 
 
 def load_effective_settings(*, include_env: bool = True) -> dict[str, Any]:
+    """Load Mana-managed settings exclusively from the user configuration.
+
+    ``include_env`` remains an accepted compatibility argument for callers
+    from older releases, but environment variables and repository ``.env``
+    files must never override the user-selected configuration.
+    """
+    _ = include_env
     values = dict(DEFAULT_USER_CONFIG)
-    values.update(load_user_config())
+    user_values = load_user_config()
+    values.update(user_values)
     values.update(load_user_secrets())
+    if user_values.get("LLM_MODEL") and not user_values.get("OPENAI_CHAT_MODEL"):
+        values["OPENAI_CHAT_MODEL"] = user_values["LLM_MODEL"]
     if not values.get("LLM_MODEL") and values.get("OPENAI_CHAT_MODEL"):
         values["LLM_MODEL"] = values["OPENAI_CHAT_MODEL"]
-    if include_env:
-        for key in set(values) | set(FIELD_NAME_BY_ENV) | SECRET_KEYS:
-            if key in os.environ:
-                values[key] = os.environ[key]
-        if "LLM_MODEL" in os.environ and "OPENAI_CHAT_MODEL" not in os.environ:
-            values["OPENAI_CHAT_MODEL"] = os.environ["LLM_MODEL"]
     return values
 
 
@@ -233,7 +245,7 @@ def settings_source_for_pydantic() -> dict[str, Any]:
 
 
 def get_setting(name: str, default: Any = None) -> Any:
-    return load_effective_settings(include_env=True).get(name, default)
+    return load_effective_settings(include_env=False).get(name, default)
 
 
 def mask_secret(value: Any) -> str:

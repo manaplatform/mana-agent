@@ -15,7 +15,7 @@ from collections import defaultdict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool, BaseTool
-from mana_agent.llm import create_chat_model
+from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 from pydantic import BaseModel, Field
 
 from langchain_core.callbacks.base import BaseCallbackHandler

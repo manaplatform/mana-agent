@@ -1,6 +1,6 @@
 """Gmail implementation; Google response dictionaries are normalized here only."""
 from __future__ import annotations
-import asyncio, base64
+import asyncio, base64, json
 from datetime import datetime, timezone
 from email.message import EmailMessage as MimeMessage
 from email.utils import getaddresses, parseaddr
@@ -11,6 +11,16 @@ from mana_agent.connectors.email.providers.base import EmailProvider
 from mana_agent.connectors.email.sanitizer import safe_attachment_filename, sanitize_html
 
 GMAIL_CAPABILITIES = EmailProviderCapabilities(supports_threads=True, supports_labels=True, supports_drafts=True, supports_push_notifications=True, supports_server_search=True, supports_send_as=True, supports_archive=True, supports_reply_all=True)
+
+
+def _google_error_message(exc: Exception) -> str:
+    raw = getattr(exc, "content", b"")
+    try:
+        payload = json.loads(bytes(raw).decode("utf-8", "replace"))
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        return str(error.get("message", "")) if isinstance(error, dict) else ""
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return ""
 
 def gmail_query(query: EmailQuery) -> str:
     parts = [query.text or ""] + [f"from:{x}" for x in query.sender] + [f"to:{x}" for x in query.recipients]
@@ -37,6 +47,12 @@ class GmailProvider(EmailProvider):
             # without serializing its potentially sensitive response body.
             status = getattr(getattr(exc, "resp", None), "status", None)
             if status in {401, 403}:
+                detail = _google_error_message(exc)
+                if "Metadata scope does not support 'q' parameter" in detail:
+                    raise AuthenticationRequired(
+                        "Gmail authorization is valid, but its combined metadata/read scopes block inbox searches. "
+                        "Reconnect with `email.read` only (do not include `email.metadata`)."
+                    ) from exc
                 raise AuthenticationRequired(
                     "Gmail rejected this account's authorization "
                     f"({status}). Reconnect the account with `email.metadata,email.read`; "

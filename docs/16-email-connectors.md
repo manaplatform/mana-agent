@@ -13,12 +13,12 @@ pip install "mana-agent[email]"
 Create a Desktop OAuth client in Google Cloud, enable the Gmail API, and download its client JSON outside the repository. Then connect with only the capabilities required by the account:
 
 ```bash
-mana-agent connector email add --provider gmail --client-secret-file ~/Downloads/google-client.json --permissions email.metadata,email.read,email.compose
+mana-agent connector email add --provider gmail --client-secret-file ~/Downloads/google-client.json --permissions email.read,email.compose
 ```
 
 The local OAuth callback opens a browser. Tokens and the OAuth client secret are stored in the operating-system keyring; account metadata stores only a keyring reference. Do not pass credentials as command-line flags or place them in `.env` files.
 
-Use `mana-agent connector email list`, `status ACCOUNT`, `permissions ACCOUNT`, and `remove ACCOUNT` to manage accounts.
+Use `mana-agent connector email list`, `status ACCOUNT`, `permissions ACCOUNT`, and `remove ACCOUNT` to manage accounts. To replace an existing OAuth token without creating a duplicate account, run `mana-agent connector email reconnect ACCOUNT --client-secret-file ~/Downloads/google-client.json --permissions email.read`.
 
 ## Safety model
 

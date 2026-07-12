@@ -4,6 +4,23 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-12
 
+- Fixed Gmail inbox-search authorization when `email.metadata` and `email.read`
+  were selected together. OAuth now requests the searchable readonly scope
+  without the conflicting metadata scope, reports Google’s exact query-scope
+  denial, and supports reconnecting an existing account in place.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/connectors/test_email_core.py tests/test_ask_agent.py tests/test_ask_entry_router.py -q` passed (58 tests); reconnect CLI help, focused module compilation, and `git diff --check` passed.
+
+- Moved the shared LLM compatibility client into the multi-agent runtime and
+  retargeted all runtime callers and its regression tests, removing the
+  remaining retired-package imports.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py::test_no_stale_mana_agent_llm_imports_remain tests/test_llm_compatibility.py -q` passed (11 tests).
+
+- Made Mana-managed configuration repository-independent: `Settings` and
+  model-role resolution now read only `~/.mana/config.toml` and
+  `~/.mana/secrets.toml`, so shell variables or a repository `.env` cannot
+  replace the configured API key.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tui_user_config.py tests/test_search_config.py tests/test_project_llm_analyze_service.py tests/test_llm_compatibility.py -q` passed (31 tests); focused module compilation and `git diff --check` passed.
+
 - Normalized Gmail 401/403 API responses into an actionable OAuth reconnect error instead of incorrectly claiming that metadata-only access was the cause.
   - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/connectors/test_email_core.py tests/test_ask_agent.py tests/test_llm_compatibility.py -q` passed (56 tests).
 

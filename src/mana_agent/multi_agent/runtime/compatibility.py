@@ -1,7 +1,7 @@
 """Capability-driven OpenAI-compatible request construction.
 
 This module is the single construction point for chat models used by the
-runtime.  It keeps Responses and Chat Completions request shapes separate while
+runtime. It keeps Responses and Chat Completions request shapes separate while
 preserving LangChain's tool adapter and response parsing.
 """
 
@@ -53,7 +53,7 @@ def resolve_model_capabilities(*, base_url: str | None) -> tuple[ApiMode, ModelC
     """Resolve safe defaults, with explicit environment overrides for gateways.
 
     A custom OpenAI-compatible URL is intentionally *not* presumed to implement
-    the Responses API.  Operators can opt in after verifying their gateway.
+    the Responses API. Operators can opt in after verifying their gateway.
     """
 
     normalized_url = str(base_url or "https://api.openai.com/v1").rstrip("/").lower()
@@ -115,7 +115,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
         if _has_tools(payload) and _has_reasoning(payload):
             return self.compatibility_capabilities.supports_responses_api
         # Do not make a custom gateway a Responses API client merely because
-        # ``reasoning_effort`` is configured.  Chat Completions still accepts it
+        # ``reasoning_effort`` is configured. Chat Completions still accepts it
         # when no tools are attached.
         return False
 
@@ -131,7 +131,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
         )
         if _has_tools(payload) and needs_chat_reasoning_normalization:
             # Chat Completions providers disagree on whether ``none`` is
-            # accepted.  The documented OpenAI-compatible form is used here;
+            # accepted. The documented OpenAI-compatible form is used here;
             # explicit overrides can instead select Responses API support.
             payload.pop("reasoning", None)
             payload["reasoning_effort"] = "none"

@@ -22,7 +22,7 @@ from langchain_community.tools.file_management import (
     WriteFileTool,
     ListDirectoryTool,
 )
-from mana_agent.llm import create_chat_model
+from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 from mana_agent.config.settings import (
     Settings,
     default_diagrams_dir,  # noqa: F401 - consumed by chat_cli through wildcard command wiring
