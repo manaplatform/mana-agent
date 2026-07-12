@@ -26,6 +26,20 @@ Start a normal chat session and describe the outcome you want:
 Check https://example.test and report the visible controls, page title, and any broken links.
 ```
 
+For an interactive task, the routing model selects the browser workflow and the
+browser operator follows this evidence-driven sequence:
+
+1. `browser_open` opens the exact URL in an isolated session.
+2. `browser_inspect` returns current controls, refs, URL, and page version.
+3. The model chooses `browser_click`, `browser_type`, `browser_select`, or another
+   browser action from that inspection.
+4. The model inspects again after navigation or a changed page version.
+5. CAPTCHA/MFA stops execution; sensitive final submission returns an exact
+   confirmation challenge.
+
+The terminal tool panel displays every browser tool actually started, completed,
+or failed. Typed values are redacted from terminal output, traces, and memory.
+
 ```text
 Create an account with the details I provide. Stop for CAPTCHA or MFA, and ask
 before accepting terms or sending the final registration form.

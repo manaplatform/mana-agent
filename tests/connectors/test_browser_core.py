@@ -46,7 +46,7 @@ def test_pending_confirmation_requires_explicit_interactive_promotion(tmp_path) 
 
 def test_contracts_are_strict_and_complete() -> None:
     contracts = {item.name: item for item in browser_tool_contracts()}
-    expected = {"browser_open", "browser_inspect", "browser_click", "browser_type", "browser_select", "browser_scroll", "browser_wait", "browser_screenshot", "browser_upload", "browser_download", "browser_back", "browser_tabs", "browser_switch_tab", "browser_close"}
+    expected = {"browser_open", "browser_inspect", "browser_click", "browser_type", "browser_select", "browser_scroll", "browser_wait", "browser_screenshot", "browser_upload", "browser_download", "browser_check_links", "browser_back", "browser_tabs", "browser_switch_tab", "browser_close"}
     assert expected == set(contracts)
     assert all(item.input_schema["additionalProperties"] is False for item in contracts.values())
     assert all(any("model decision" in rule for rule in item.safety_rules) for item in contracts.values())

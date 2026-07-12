@@ -1846,8 +1846,18 @@ class AskAgent:
             traces.extend(pending_external_traces)
             self._pending_external_search_traces = []
         tool_map = {tool.name: tool for tool in tools}
+        # Preserve explicitly model-selected registered tools that are not part
+        # of the repository alias registry (for example browser_* connectors).
+        # Unknown names remain excluded and never widen the policy.
+        allowed_tools.update(name for name in raw_allowed if name in tool_map)
 
-        bound = self.llm.bind_tools(tools)
+        bound_tools = [tool for tool in tools if not allowed_tools or tool.name in allowed_tools]
+        bound = self.llm.bind_tools(bound_tools)
+        bound_initial_required = (
+            self.llm.bind_tools(bound_tools, tool_choice="required")
+            if bool(policy.get("require_initial_tool_call"))
+            else None
+        )
 
         # Mutation-required runs (the forced-write deliverable path) must end in a
         # real write. Prepare a mutation-only bound model so that, when the step
@@ -2003,7 +2013,7 @@ class AskAgent:
             use_bound = (
                 bound_mutation
                 if (forced_write_done and not mutation_succeeded and bound_mutation is not None)
-                else bound
+                else (bound_initial_required if step_idx == 0 and bound_initial_required is not None else bound)
             )
             try:
                 ai_msg = use_bound.invoke(messages, config=cfg)

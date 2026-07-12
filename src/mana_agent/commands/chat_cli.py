@@ -2354,8 +2354,22 @@ def chat(
             selected_browser_tools = [
                 tool for tool in agent_decision.selected_tools if str(tool).startswith("browser_")
             ]
-            if selected_browser_tools and not agent_decision.code_editing_needed and not required_mcp_server:
-                browser_status = BrowserSessionManager.status()
+            if selected_browser_tools and not required_mcp_server:
+                from mana_agent.connectors.browser.contracts import browser_tool_contracts
+                from mana_agent.multi_agent.runtime.prompts import BROWSER_AGENT_SYSTEM_PROMPT
+
+                available_browser_tools = [contract.name for contract in browser_tool_contracts()]
+                browser_status = (
+                    BrowserSessionManager.status()
+                    if agent_decision.verifier_passed
+                    else {
+                        "ok": False,
+                        "error": (
+                            "Model browser decision failed validation. No browser or repository action was executed. "
+                            + agent_decision.verifier_summary
+                        ),
+                    }
+                )
                 if not browser_status.get("ok"):
                     answer_text = (
                         "Browser execution is unavailable. "
@@ -2375,22 +2389,30 @@ def chat(
                         trace = []
                     else:
                         selected_index = resolved_index_dir or default_index_dir(root)
-                        response = _run_chat_event_step(
-                            "Browser session...",
-                            lambda: browser_agent.run(
+                        browser_activity = LiveToolActivity(
+                            spinner_text="Browser…",
+                            show_all_logs=_cli_verbose_enabled(),
+                        )
+                        response, _browser_debug_tail = _run_with_live_buffer(
+                            console,
+                            spinner_text="Browser…",
+                            fn=lambda callbacks: browser_agent.run(
                                 question=question,
                                 index_dir=selected_index,
                                 k=resolved_k,
-                                max_steps=max(6, len(selected_browser_tools) + 3),
+                                max_steps=max(12, len(available_browser_tools) + 4),
                                 timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
                                 tool_policy={
-                                    "allowed_tools": selected_browser_tools,
+                                    "allowed_tools": available_browser_tools,
                                     "disable_external_search": True,
+                                    "require_initial_tool_call": True,
                                 },
+                                callbacks=callbacks,
+                                system_prompt=BROWSER_AGENT_SYSTEM_PROMPT,
                                 run_id=current_turn_id,
                             ),
-                            event_type="ToolStarted",
-                            tool_name="browser",
+                            callbacks=[RichToolCallbackHandler(show_inputs=True)],
+                            activity=browser_activity,
                         )
                         answer_text = str(getattr(response, "answer", "") or "")
                         sources = list(getattr(response, "sources", []) or [])
@@ -2407,7 +2429,11 @@ def chat(
                         session_id=chat_ui_state.session_id,
                         turn_id=current_turn_id,
                         step_id="05",
-                        metadata={"intent": agent_decision.intent, "selected_tools": selected_browser_tools},
+                        metadata={
+                            "intent": agent_decision.intent,
+                            "selected_tools": selected_browser_tools,
+                            "available_browser_tools": available_browser_tools,
+                        },
                     ).finish(status="success" if agent_decision.verifier_passed else "failed")
                 )
                 turn_record = ChatTurnTelemetry(
@@ -2419,7 +2445,15 @@ def chat(
                     warnings=warnings,
                     trace=trace,
                     tool_steps_total=len(trace),
-                    decisions=[agent_decision.to_dict()],
+                    decisions=[
+                        {
+                            "decision": (
+                                f"{agent_decision.intent}: "
+                                + ", ".join(selected_browser_tools)
+                            ),
+                            "rationale": agent_decision.reasoning_summary,
+                        }
+                    ],
                     changed_files=[],
                     has_diff=False,
                     coding_state={"flow_id": active_flow_id},

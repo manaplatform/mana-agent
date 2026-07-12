@@ -241,6 +241,31 @@ class BrowserSessionManager:
         session = self.session(session_id)
         return {"ok": True, "active_tab": session.active_tab, "tabs": [{"tab_id": key, "url": page.url, "title": page.title()} for key, page in session.pages.items()]}
 
+    def check_links(self, session_id: str, *, tab_id: str | None = None, max_links: int = 50) -> dict[str, Any]:
+        """Validate rendered HTTP(S) anchors without navigating the active page."""
+        session = self.session(session_id); page = self._page(session, tab_id)
+        anchors = page.locator("a[href]").evaluate_all(
+            "els => els.map(a => ({href: a.href, text: (a.innerText || a.getAttribute('aria-label') || '').trim().slice(0, 160), visible: !!(a.offsetWidth || a.offsetHeight || a.getClientRects().length)}))"
+        )
+        unique: dict[str, dict[str, Any]] = {}
+        for item in anchors:
+            href = str(item.get("href") or "").split("#", 1)[0]
+            if href.startswith(("http://", "https://")) and href not in unique:
+                unique[href] = {**item, "href": href}
+        results: list[dict[str, Any]] = []
+        for item in list(unique.values())[: max(1, min(int(max_links), 100))]:
+            try:
+                response = session.context.request.get(
+                    item["href"],
+                    timeout=self.config.navigation_timeout_ms,
+                    fail_on_status_code=False,
+                )
+                results.append({**item, "status": response.status, "ok": response.status < 400})
+            except Exception as exc:
+                results.append({**item, "status": None, "ok": False, "error": str(exc)[:300]})
+        broken = [item for item in results if not item.get("ok")]
+        return {"ok": True, "url": page.url, "checked": len(results), "broken": broken, "links": results, "page_version": session.page_version}
+
     def switch_tab(self, session_id: str, tab_id: str) -> dict[str, Any]:
         session = self.session(session_id)
         if tab_id not in session.pages: raise BrowserConnectorError("invalid_tab", "Unknown browser tab id.")

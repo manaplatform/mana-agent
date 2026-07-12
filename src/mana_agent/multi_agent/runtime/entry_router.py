@@ -108,6 +108,9 @@ For gitops, the route decision only selects the GitOps workflow. The GitOps
 executor must inspect Git state first, then use a later model decision to choose
 the exact commands, files to stage, commit message, branch action, and push action.
 Do not encode a rigid Git command sequence in this route decision.
+Rendered website inspection, visible controls, forms, page functionality,
+authentication, and broken-link checking require browser_task. command_inventory
+describes Mana-Agent's own CLI and must never be used to inspect a target URL.
 
 Return JSON only with this schema:
 {

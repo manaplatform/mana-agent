@@ -27,6 +27,7 @@ def browser_tool_contracts() -> list[ToolContract]:
         *[(f"browser_{name}", f"Perform the model-selected {name} action using current page evidence.", action, ["session_id"]) for name in ("click", "type", "select", "scroll", "wait", "download", "back")],
         ("browser_screenshot", "Capture the current page to the private session artifact directory.", {**inspected, "full_page": {"type": "boolean"}}, ["session_id"]),
         ("browser_upload", "Upload an allowed local file using a current file input ref.", {**session, "ref": {"type": "string"}, "path": {"type": "string"}, "observed_page_version": {"type": "integer"}, "tab_id": {"type": ["string", "null"]}}, ["session_id", "ref", "path", "observed_page_version"]),
+        ("browser_check_links", "Validate rendered HTTP(S) links without navigating the active page.", {**inspected, "max_links": {"type": "integer", "minimum": 1, "maximum": 100}}, ["session_id"]),
         ("browser_tabs", "List tabs and popups in the selected session.", session, ["session_id"]),
         ("browser_switch_tab", "Switch to a selected tab id.", {**session, "tab_id": {"type": "string"}}, ["session_id", "tab_id"]),
         ("browser_close", "Close and clean the selected browser session.", session, ["session_id"]),

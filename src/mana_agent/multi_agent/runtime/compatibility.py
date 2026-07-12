@@ -96,19 +96,12 @@ def _is_tools_reasoning_error(exc: Exception) -> bool:
     )
 
 
-def _is_retryable_permission_error(exc: Exception) -> bool:
-    """Recognize the transient authorization response observed from OpenAI."""
-
-    return "insufficient permissions for this operation" in str(exc).lower()
-
-
 class CompatibleChatOpenAI(ChatOpenAI):
     """``ChatOpenAI`` with endpoint selection and one safe compatibility retry."""
 
     compatibility_api_mode: ApiMode = "auto"
     compatibility_capabilities: ModelCapabilities = ModelCapabilities(False)
     compatibility_retry_attempted: bool = False
-    compatibility_permission_retry_attempted: bool = False
     # Set only for the bounded recovery request. This is intentionally a
     # request-construction guard rather than an inference from provider
     # metadata: the provider has already rejected the previous payload.
@@ -176,21 +169,10 @@ class CompatibleChatOpenAI(ChatOpenAI):
             }
         )
 
-    def _retry_after_permission_error(self) -> "CompatibleChatOpenAI":
-        return self.model_copy(update={"compatibility_permission_retry_attempted": True})
-
     def _generate(self, messages: list[Any], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> Any:
         try:
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as exc:
-            if not self.compatibility_permission_retry_attempted and _is_retryable_permission_error(exc):
-                logger.warning(
-                    "llm.compatibility_adjustment model=%s reason=transient_permission_error retry=1",
-                    self.model_name,
-                )
-                return self._retry_after_permission_error()._generate(
-                    messages, stop=stop, run_manager=run_manager, **kwargs
-                )
             if self.compatibility_retry_attempted or not _has_tools(kwargs) or not _is_tools_reasoning_error(exc):
                 raise
             logger.warning(
@@ -209,13 +191,6 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 yielded = True
                 yield chunk
         except Exception as exc:
-            if not yielded and not self.compatibility_permission_retry_attempted and _is_retryable_permission_error(exc):
-                logger.warning(
-                    "llm.compatibility_adjustment model=%s reason=transient_permission_error retry=1 streaming=true",
-                    self.model_name,
-                )
-                yield from self._retry_after_permission_error()._stream(*args, **kwargs)
-                return
             if yielded or self.compatibility_retry_attempted or not _has_tools(kwargs) or not _is_tools_reasoning_error(exc):
                 raise
             logger.warning(

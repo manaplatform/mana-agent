@@ -44,6 +44,24 @@ def test_email_tool_error_row_uses_sanitized_failure_reason() -> None:
     assert activity.log.entries[-1].error == "Invalid message reference returned by email_search"
 
 
+def test_browser_tool_activity_shows_tool_name_but_redacts_typed_secret() -> None:
+    activity = LiveToolActivity()
+    set_active_tool_activity(activity)
+    try:
+        callback = RichToolCallbackHandler(show_inputs=True)
+        callback.on_tool_start(
+            {"name": "browser_type"},
+            '{"session_id":"s1","target":"e1-2","value":"ManaAgent!123"}',
+        )
+        callback.on_tool_end('{"ok": true}')
+    finally:
+        set_active_tool_activity(None)
+    entry = activity.log.entries[-1]
+    assert entry.tool_name == "browser_type"
+    assert "ManaAgent!123" not in entry.tool_args
+    assert "REDACTED" in entry.tool_args
+
+
 class DummySettings:
     openai_api_key = "test"
     openai_base_url = None

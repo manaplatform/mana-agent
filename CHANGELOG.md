@@ -2,6 +2,17 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-13
+
+- Corrected interactive website requests so account creation, login, and form
+  work route to the browser operator rather than repository coding/mutation.
+  Added an explicit model browser-tool procedure, browser-only tool binding,
+  required initial browser tool execution, model route review, per-tool terminal
+  activity, typed-secret redaction, and a read-only `browser_check_links` tool.
+  Permission-denied model responses now stop after one request instead of being
+  retried as transient authorization failures.
+  - Verification: browser routing, connector, terminal UX, AskAgent, compatibility, and decision tests passed (85 tests); live Playwright link checking passed for 14 links; compileall, targeted Ruff, and `git diff --check` passed. End-to-end Luna execution remains blocked by the provider's HTTP 401 insufficient-permissions response.
+
 ## 2026-07-12
 
 - Added an optional model-controlled Playwright browser for chat, with
