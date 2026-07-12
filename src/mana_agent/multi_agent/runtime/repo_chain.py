@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
-from mana_agent.llm import CompatibleChatOpenAI, create_chat_model
+from mana_agent.multi_agent.runtime.compatibility import CompatibleChatOpenAI, create_chat_model
 from tenacity import (
     retry,
     stop_after_attempt,

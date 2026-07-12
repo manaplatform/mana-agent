@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from mana_agent.llm import create_chat_model
+from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 from pydantic import ValidationError
 
 from mana_agent.agent.task_classifier import classify_task

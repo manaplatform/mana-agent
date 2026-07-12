@@ -4,6 +4,38 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-12
 
+- Updated multi-agent model-level tests to isolate persisted `~/.mana` settings
+  and verify that shell model variables cannot override configured role tiers.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py -q` (53 passed) and `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tui_user_config.py -q` (13 passed).
+
+- Fixed OpenAI tool-chat requests for models that enable reasoning by default.
+  Tool calls now use the supported Responses API before a Chat Completions
+  rejection can occur, and the client retries the observed transient
+  insufficient-permission response once without changing the request.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_llm_compatibility.py tests/connectors/test_email_core.py tests/test_ask_entry_router.py -q` passed (32 tests); a live default chat/Gmail request completed through `email_accounts_list`, `email_search`, `email_read`, and `email_thread_read`; `git diff --check` passed.
+
+- Fixed Gmail inbox-search authorization when `email.metadata` and `email.read`
+  were selected together. OAuth now requests the searchable readonly scope
+  without the conflicting metadata scope, reports Google’s exact query-scope
+  denial, and supports reconnecting an existing account in place. Inbox-only
+  metadata searches now use Gmail's `labelIds` API parameter instead of the
+  metadata-blocked `q=in:INBOX` query, so existing combined-scope tokens work.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/connectors/test_email_core.py -q` passed (10 tests); focused module compilation, a live existing-token inbox metadata search, and `git diff --check` passed. A broader AskAgent suite remains blocked by four unrelated concurrent read-cache failures.
+
+- Moved the shared LLM compatibility client into the multi-agent runtime and
+  retargeted all runtime callers and its regression tests, removing the
+  remaining retired-package imports.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py::test_no_stale_mana_agent_llm_imports_remain tests/test_llm_compatibility.py -q` passed (11 tests).
+
+- Made Mana-managed configuration repository-independent: `Settings` and
+  model-role resolution now read only `~/.mana/config.toml` and
+  `~/.mana/secrets.toml`, so shell variables or a repository `.env` cannot
+  replace the configured API key.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tui_user_config.py tests/test_search_config.py tests/test_project_llm_analyze_service.py tests/test_llm_compatibility.py -q` passed (31 tests); focused module compilation and `git diff --check` passed.
+
+- Normalized Gmail 401/403 API responses into an actionable OAuth reconnect error instead of incorrectly claiming that metadata-only access was the cause.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/connectors/test_email_core.py tests/test_ask_agent.py tests/test_llm_compatibility.py -q` passed (56 tests).
+
 - Added a centralized capability-driven LLM request compatibility layer. Tool calls with enabled reasoning now use Responses API only when the selected provider supports it; Chat Completions gateways instead retain tools and normalize incompatible reasoning effort to `none`.
   - Added one safe retry for the documented unsupported tools-plus-reasoning HTTP error, with structured API-mode/adjustment logging and no model-name-specific routing.
   - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_llm_compatibility.py tests/test_ask_agent.py tests/test_project_llm_analyze_service.py tests/test_cli_smoke.py -q` passed; compatibility regression suite has 10 passing tests.

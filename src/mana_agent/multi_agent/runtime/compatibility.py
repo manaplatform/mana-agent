@@ -1,7 +1,7 @@
 """Capability-driven OpenAI-compatible request construction.
 
 This module is the single construction point for chat models used by the
-runtime.  It keeps Responses and Chat Completions request shapes separate while
+runtime. It keeps Responses and Chat Completions request shapes separate while
 preserving LangChain's tool adapter and response parsing.
 """
 
@@ -53,7 +53,7 @@ def resolve_model_capabilities(*, base_url: str | None) -> tuple[ApiMode, ModelC
     """Resolve safe defaults, with explicit environment overrides for gateways.
 
     A custom OpenAI-compatible URL is intentionally *not* presumed to implement
-    the Responses API.  Operators can opt in after verifying their gateway.
+    the Responses API. Operators can opt in after verifying their gateway.
     """
 
     normalized_url = str(base_url or "https://api.openai.com/v1").rstrip("/").lower()
@@ -96,12 +96,19 @@ def _is_tools_reasoning_error(exc: Exception) -> bool:
     )
 
 
+def _is_retryable_permission_error(exc: Exception) -> bool:
+    """Recognize the transient authorization response observed from OpenAI."""
+
+    return "insufficient permissions for this operation" in str(exc).lower()
+
+
 class CompatibleChatOpenAI(ChatOpenAI):
     """``ChatOpenAI`` with endpoint selection and one safe compatibility retry."""
 
     compatibility_api_mode: ApiMode = "auto"
     compatibility_capabilities: ModelCapabilities = ModelCapabilities(False)
     compatibility_retry_attempted: bool = False
+    compatibility_permission_retry_attempted: bool = False
     # Set only for the bounded recovery request. This is intentionally a
     # request-construction guard rather than an inference from provider
     # metadata: the provider has already rejected the previous payload.
@@ -112,10 +119,16 @@ class CompatibleChatOpenAI(ChatOpenAI):
             return True
         if self.compatibility_api_mode == "chat_completions":
             return False
-        if _has_tools(payload) and _has_reasoning(payload):
+        if _has_tools(payload):
+            # Some OpenAI reasoning models apply reasoning by default even
+            # when callers omit ``reasoning_effort``.  Their Chat
+            # Completions endpoint rejects function tools unless callers
+            # explicitly disable that default.  The Responses API is the
+            # compatible native tool path, so use it whenever it is available
+            # rather than waiting for a provider rejection and a lossy retry.
             return self.compatibility_capabilities.supports_responses_api
         # Do not make a custom gateway a Responses API client merely because
-        # ``reasoning_effort`` is configured.  Chat Completions still accepts it
+        # ``reasoning_effort`` is configured. Chat Completions still accepts it
         # when no tools are attached.
         return False
 
@@ -131,7 +144,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
         )
         if _has_tools(payload) and needs_chat_reasoning_normalization:
             # Chat Completions providers disagree on whether ``none`` is
-            # accepted.  The documented OpenAI-compatible form is used here;
+            # accepted. The documented OpenAI-compatible form is used here;
             # explicit overrides can instead select Responses API support.
             payload.pop("reasoning", None)
             payload["reasoning_effort"] = "none"
@@ -163,10 +176,21 @@ class CompatibleChatOpenAI(ChatOpenAI):
             }
         )
 
+    def _retry_after_permission_error(self) -> "CompatibleChatOpenAI":
+        return self.model_copy(update={"compatibility_permission_retry_attempted": True})
+
     def _generate(self, messages: list[Any], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> Any:
         try:
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as exc:
+            if not self.compatibility_permission_retry_attempted and _is_retryable_permission_error(exc):
+                logger.warning(
+                    "llm.compatibility_adjustment model=%s reason=transient_permission_error retry=1",
+                    self.model_name,
+                )
+                return self._retry_after_permission_error()._generate(
+                    messages, stop=stop, run_manager=run_manager, **kwargs
+                )
             if self.compatibility_retry_attempted or not _has_tools(kwargs) or not _is_tools_reasoning_error(exc):
                 raise
             logger.warning(
@@ -185,6 +209,13 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 yielded = True
                 yield chunk
         except Exception as exc:
+            if not yielded and not self.compatibility_permission_retry_attempted and _is_retryable_permission_error(exc):
+                logger.warning(
+                    "llm.compatibility_adjustment model=%s reason=transient_permission_error retry=1 streaming=true",
+                    self.model_name,
+                )
+                yield from self._retry_after_permission_error()._stream(*args, **kwargs)
+                return
             if yielded or self.compatibility_retry_attempted or not _has_tools(kwargs) or not _is_tools_reasoning_error(exc):
                 raise
             logger.warning(

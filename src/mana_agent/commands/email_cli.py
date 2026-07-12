@@ -41,5 +41,25 @@ def remove(account: str) -> None:
     if item.secret_ref: CredentialStore().delete(item.secret_ref)
     typer.echo(f"Disconnected {account}.")
 @email_app.command("reconnect")
-def reconnect(account: str) -> None:
-    _account(account); raise typer.BadParameter("Run `mana-agent connector email add --provider gmail` to create a new OAuth connection; existing credentials are never printed or reused in CLI arguments.")
+def reconnect(
+    account: str,
+    client_secret_file: Path = typer.Option(..., "--client-secret-file", exists=True, readable=True),
+    permissions: str = typer.Option("email.read", "--permissions"),
+) -> None:
+    existing = _account(account)
+    if existing.provider != "gmail": raise typer.BadParameter("Only Gmail is currently functional.")
+    selected = [item.strip() for item in permissions.split(",") if item.strip()]
+    try: granted = {EmailPermission(item) for item in selected}
+    except ValueError as exc: raise typer.BadParameter("Permissions must be email.metadata,email.read,email.compose,email.send,email.modify.") from exc
+    credentials = gmail_authorization_flow(client_secret_file, [item.value for item in granted])
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+        address = EmailAddress(address=str(service.users().getProfile(userId="me").execute()["emailAddress"]))
+    except ImportError as exc: raise typer.BadParameter("Gmail API client is missing: install `mana-agent[email]`.") from exc
+    except Exception as exc: raise typer.BadParameter("Gmail authorization succeeded but account profile validation failed.") from exc
+    reference = CredentialStore().put({"token": credentials.token, "refresh_token": credentials.refresh_token, "token_uri": credentials.token_uri, "client_id": credentials.client_id, "client_secret": credentials.client_secret, "scopes": list(credentials.scopes or [])}, reference=existing.secret_ref)
+    updated = existing.model_copy(update={"address": address, "granted_permissions": granted, "secret_ref": reference, "last_error": None})
+    save_accounts([updated if item.id == account else item for item in load_accounts()])
+    typer.echo(f"Reconnected Gmail account {updated.id} ({updated.address.address}).")

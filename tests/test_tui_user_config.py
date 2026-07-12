@@ -52,22 +52,26 @@ def test_user_config_save_load_and_settings_source(isolated_user_config: Path) -
     assert (isolated_user_config / "secrets.toml").exists()
 
 
-def test_env_overrides_user_config(isolated_user_config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    user_config.save_effective_user_config({"OPENAI_API_KEY": "file-key", "OPENAI_CHAT_MODEL": "file-model"}, merge=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
-    monkeypatch.setenv("OPENAI_CHAT_MODEL", "env-model")
-
-    settings = Settings()
-
-    assert settings.openai_api_key == "env-key"
-    assert settings.openai_chat_model == "env-model"
-
-
-def test_llm_model_alias_overrides_chat_model_when_chat_env_missing(
+def test_environment_and_repository_dotenv_do_not_override_user_config(
     isolated_user_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLM_MODEL", "alias-model")
+    user_config.save_effective_user_config({"OPENAI_API_KEY": "file-key", "OPENAI_CHAT_MODEL": "file-model"}, merge=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", "env-model")
+    (isolated_user_config.parent / ".env").write_text(
+        'OPENAI_API_KEY="dotenv-key"\nOPENAI_CHAT_MODEL="dotenv-model"\n',
+        encoding="utf-8",
+    )
+
+    settings = Settings()
+
+    assert settings.openai_api_key == "file-key"
+    assert settings.openai_chat_model == "file-model"
+
+
+def test_llm_model_alias_applies_when_saved_chat_model_is_missing(isolated_user_config: Path) -> None:
+    user_config.save_effective_user_config({"LLM_MODEL": "alias-model"}, merge=False)
 
     settings = Settings()
 
@@ -159,7 +163,10 @@ def test_user_config_writes_grouped_model_order(isolated_user_config: Path) -> N
     ]
 
 
-def test_model_level_targets_resolve_from_user_config(isolated_user_config: Path) -> None:
+def test_model_level_targets_resolve_from_user_config(
+    isolated_user_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     user_config.save_effective_user_config(
         {
             "OPENAI_CHAT_MODEL": "main",
@@ -172,6 +179,7 @@ def test_model_level_targets_resolve_from_user_config(isolated_user_config: Path
         },
         merge=False,
     )
+    monkeypatch.setenv("MODEL_LEVEL_3_HIGH_REASONING", "environment-high")
 
     assert resolve_model_for_role(AgentRole.MAIN, global_model="fallback").resolved_model == "high"
     assert resolve_model_for_role(AgentRole.CODING, global_model="fallback").resolved_model == "coding"

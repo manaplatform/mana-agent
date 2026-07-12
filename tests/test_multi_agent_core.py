@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from mana_agent.commands.cli import app
 from mana_agent.commands.cli_internal import _record_multi_agent_request
 from mana_agent.commands import cli_internal
+from mana_agent.config import user_config
 from mana_agent.multi_agent import MainAgent
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
@@ -967,43 +968,66 @@ def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
     assert task.status == TaskStatus.DONE
 
 
-def test_model_levels_are_configurable_by_tier(monkeypatch):
-    monkeypatch.setenv("MANA_MODEL_CODING", "MODEL_LEVEL_2_CUSTOM")
-    assert model_level_for_role(AgentRole.CODING).model_level == "MODEL_LEVEL_2_CUSTOM"
-    monkeypatch.delenv("MANA_MODEL_CODING")
-    assert model_level_for_role(AgentRole.CODING).model_level == MODEL_LEVEL_2_CODING
-
-
-def test_role_model_resolution_uses_distinct_level_envs(monkeypatch):
-    for name in (
-        "MANA_MODEL_MAIN",
-        "MANA_MODEL_CODING",
-        "MANA_MODEL_TOOL_WORKER",
-        MODEL_LEVEL_3_HIGH_REASONING,
-        MODEL_LEVEL_2_CODING,
-        MODEL_LEVEL_1_FAST_TOOL,
-    ):
+@pytest.fixture
+def isolated_model_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    config_dir = tmp_path / "mana"
+    monkeypatch.setattr(user_config, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(user_config, "CONFIG_FILE", config_dir / "config.toml")
+    monkeypatch.setattr(user_config, "SECRETS_FILE", config_dir / "secrets.toml")
+    monkeypatch.setattr(user_config, "MODEL_CACHE_FILE", config_dir / "model_cache.json")
+    for name in set(user_config.DEFAULT_USER_CONFIG) | set(user_config.FIELD_NAME_BY_ENV):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(MODEL_LEVEL_3_HIGH_REASONING, "high-model")
-    monkeypatch.setenv(MODEL_LEVEL_2_CODING, "coding-model")
-    monkeypatch.setenv(MODEL_LEVEL_1_FAST_TOOL, "fast-model")
+    return config_dir
+
+
+def test_model_levels_are_configurable_by_persisted_tier(
+    isolated_model_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_config.save_effective_user_config({"MANA_MODEL_CODING": "MODEL_LEVEL_2_CUSTOM"}, merge=False)
+    monkeypatch.setenv("MANA_MODEL_CODING", "MODEL_LEVEL_1_FAST_TOOL")
+    assert model_level_for_role(AgentRole.CODING).model_level == "MODEL_LEVEL_2_CUSTOM"
+
+
+def test_role_model_resolution_uses_distinct_persisted_levels(
+    isolated_model_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_config.save_effective_user_config(
+        {
+            MODEL_LEVEL_3_HIGH_REASONING: "high-model",
+            MODEL_LEVEL_2_CODING: "coding-model",
+            MODEL_LEVEL_1_FAST_TOOL: "fast-model",
+        },
+        merge=False,
+    )
+    monkeypatch.setenv(MODEL_LEVEL_3_HIGH_REASONING, "environment-high")
+    monkeypatch.setenv(MODEL_LEVEL_2_CODING, "environment-coding")
+    monkeypatch.setenv(MODEL_LEVEL_1_FAST_TOOL, "environment-fast")
 
     assert resolve_model_for_role(AgentRole.MAIN, global_model="fallback").resolved_model == "high-model"
     assert resolve_model_for_role(AgentRole.CODING, global_model="fallback").resolved_model == "coding-model"
     assert resolve_model_for_role(AgentRole.TOOL_WORKER, global_model="fallback").resolved_model == "fast-model"
 
 
-def test_role_specific_model_env_overrides_level_env(monkeypatch):
+def test_role_specific_model_environment_does_not_override_persisted_level(
+    isolated_model_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_config.save_effective_user_config({MODEL_LEVEL_1_FAST_TOOL: "fast-model"}, merge=False)
     monkeypatch.setenv(MODEL_LEVEL_1_FAST_TOOL, "fast-model")
     monkeypatch.setenv("MANA_MODEL_TOOL_WORKER", "tool-worker-override")
 
     assignment = resolve_model_for_role(AgentRole.TOOL_WORKER, global_model="fallback")
 
     assert assignment.model_level == MODEL_LEVEL_1_FAST_TOOL
-    assert assignment.resolved_model == "tool-worker-override"
+    assert assignment.resolved_model == "fast-model"
 
 
-def test_missing_symbolic_model_level_falls_back_to_global(monkeypatch):
+def test_missing_symbolic_model_level_falls_back_to_global(
+    isolated_model_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("MANA_MODEL_CODING", raising=False)
     monkeypatch.delenv(MODEL_LEVEL_2_CODING, raising=False)
 

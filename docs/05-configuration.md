@@ -1,6 +1,8 @@
 # Configuration
 
-`mana-agent` supports an interactive first-run setup wizard and still supports existing environment-variable and `.env` workflows.
+`mana-agent` stores and reads its managed settings from the user-level `~/.mana`
+directory. Repository `.env` files and shell environment variables are not used
+for Mana-managed configuration.
 
 ## First-Run Wizard
 
@@ -49,14 +51,13 @@ Settings includes:
 
 ## Precedence
 
-Effective settings are resolved in this order:
+Effective settings are resolved from `~/.mana/config.toml` and
+`~/.mana/secrets.toml`, then safe defaults. This repository-independent policy
+prevents a project's `.env` or a shell variable from replacing credentials or
+model settings selected through the Mana-Agent Settings menu.
 
-1. CLI flags, when a command exposes a flag.
-2. Environment variables and project `.env`.
-3. `~/.mana/config.toml` and `~/.mana/secrets.toml`.
-4. Safe defaults.
-
-`OPENAI_CHAT_MODEL` is the canonical chat model value. `LLM_MODEL` remains a backward-compatible alias and is honored when `OPENAI_CHAT_MODEL` is not set in the environment.
+`OPENAI_CHAT_MODEL` is the canonical chat model value. `LLM_MODEL` remains a
+backward-compatible alias when `OPENAI_CHAT_MODEL` is not saved.
 
 ## Non-Interactive Use
 
@@ -68,7 +69,9 @@ mana-agent --no-interactive chat --root-dir .
 
 In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if required values such as `OPENAI_API_KEY` are missing.
 
-## Core Variables
+## Core configuration keys
+
+Set these through the Settings menu; Mana-Agent writes them to `~/.mana`.
 
 ```bash
 OPENAI_API_KEY="sk-..."
@@ -87,12 +90,14 @@ MANA_LLM_LOG_FILE=
 
 ## OpenAI-Compatible LLM Capabilities
 
-Mana-Agent automatically uses the Responses API for tool calls with enabled
-reasoning when the active endpoint is OpenAI. Custom `OPENAI_BASE_URL`
-gateways are treated as Chat Completions-only by default, so tool calls stay
-enabled and incompatible reasoning is sent as `none`.
+Mana-Agent automatically uses the Responses API for tool calls when the active
+endpoint is OpenAI. This also supports reasoning models that enable reasoning
+by default and reject function tools through Chat Completions. Custom
+`OPENAI_BASE_URL` gateways are treated as Chat Completions-only by default, so
+tool calls stay enabled and incompatible reasoning is sent as `none`.
 
-For a verified nonstandard gateway, use these optional environment overrides:
+For a verified nonstandard gateway, configure these optional values in
+`~/.mana/config.toml`:
 
 ```bash
 MANA_LLM_API_MODE=auto # auto, responses, or chat_completions
