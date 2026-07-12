@@ -156,6 +156,9 @@ Evidence policy:
 - If full reads are size-capped, use `chunk_file(path)`.
 - Run-memory results with `cache_hit=true` or `source="memory"` are authoritative evidence.
 - After a successful full read, serve later references from run-memory unless the file changed.
+- For email tools, treat a structured error's `reconnect_required` value as authoritative.
+  Never claim Gmail must be reconnected for an invalid message reference, not-found,
+  temporary, provider, validation, or internal connector error.
 
 Search discipline:
 - Stop after the answer is supported.

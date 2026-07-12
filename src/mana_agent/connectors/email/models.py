@@ -51,6 +51,21 @@ class EmailAccount(BaseModel):
     last_error: str | None = None
 
 
+class EmailAccountCapabilities(BaseModel):
+    can_list: bool = False
+    can_search: bool = False
+    can_read: bool = False
+    can_send: bool = False
+    can_modify: bool = False
+
+
+class EmailMessageReference(BaseModel):
+    """The sole cross-tool reference for one message in one account."""
+    account_id: str
+    provider: str
+    provider_message_id: str
+
+
 class ProviderHealth(BaseModel):
     healthy: bool
     message: str | None = None
@@ -103,6 +118,13 @@ class EmailMessage(BaseModel):
     is_draft: bool = False
     is_trashed: bool = False
     headers: dict[str, str] = Field(default_factory=dict)
+
+    def reference(self, *, provider: str) -> EmailMessageReference:
+        return EmailMessageReference(
+            account_id=self.account_id,
+            provider=provider,
+            provider_message_id=self.provider_message_id,
+        )
 
 
 class EmailThread(BaseModel):

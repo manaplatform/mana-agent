@@ -100,7 +100,7 @@ class GitHubSearchProvider:
                 retry_after=_int_header(exc.headers.get("retry-after")),
             )
             self.last_rate_limit = rate
-            if exc.code in {403, 429}:
+            if exc.code == 429 or self._is_rate_limit_error(exc, rate):
                 delay = rate.retry_after
                 if delay is None and rate.reset_at:
                     delay = max(0, int(rate.reset_at - time.time()))
@@ -108,6 +108,16 @@ class GitHubSearchProvider:
             raise GitHubSearchError(f"GitHub search failed with HTTP {exc.code}", rate_limit=rate) from exc
         except urllib.error.URLError as exc:
             raise GitHubSearchError(f"GitHub search failed: {exc.reason}") from exc
+
+    @staticmethod
+    def _is_rate_limit_error(error: urllib.error.HTTPError, rate: GitHubRateLimit) -> bool:
+        if rate.remaining == 0:
+            return True
+        try:
+            body = error.read().decode("utf-8", "replace").lower()
+        except OSError:
+            body = ""
+        return "rate limit" in body or "abuse detection" in body
 
     def _to_result(self, item: dict[str, Any], *, kind: str) -> SearchResult:
         if kind == "repositories":

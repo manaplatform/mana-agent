@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-12
 
+- Hardened external HTTP 403 handling. Gmail now decodes string and byte error
+  bodies, normalizes provider status values, and preserves non-secret provider
+  diagnostics; GitHub search now labels only actual quota denials as rate
+  limits instead of treating every 403 as one. Worker and direct chat tool
+  callbacks now render JSON `ok: false` payloads as failed steps rather than
+  successful calls. AskAgent now also recognizes the warning-prefixed JSON
+  payload before persisting its trace, so logs no longer record those failures
+  as successful tool calls.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_ask_agent.py::test_ask_agent_detects_wrapped_structured_tool_error tests/test_tool_worker_process.py tests/test_cli_ux_helpers.py::test_email_tool_error_row_uses_sanitized_failure_reason tests/connectors/test_email_core.py tests/test_github_provider.py -q` passed (55 tests); targeted Ruff and `git diff --check` passed. Two unrelated full CLI UI tests could not write their session state under sandboxed `~/.mana`.
+
+- Fixed Gmail search-to-read handoff with account-bound canonical message references, typed provider errors, explicit account capabilities, one stale-reference refresh retry, and sanitized failed-tool diagnostics. Reconnection is now suggested only for verified authentication or authorization failures.
+  - Verification: Focused Gmail connector, AskAgent, and TUI tool-event tests.
+
 - Updated multi-agent model-level tests to isolate persisted `~/.mana` settings
   and verify that shell model variables cannot override configured role tiers.
   - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py -q` (53 passed) and `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tui_user_config.py -q` (13 passed).

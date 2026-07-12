@@ -35,6 +35,7 @@ from mana_agent.tools.apply_patch import extract_patch_touched_files
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.utils.redaction import redact_json_line, redact_secrets
+from mana_agent.utils.tool_results import structured_tool_error_detail
 from mana_agent.utils.tool_policy import expand_tool_aliases
 from mana_agent.config.settings import default_tools_logs_dir
 
@@ -1696,12 +1697,20 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
         )
 
     def on_tool_end(self, output: str, **kwargs: Any) -> None:
-        _ = (output, kwargs)
+        _ = kwargs
         tool = self._tool or "tool"
         event_id = self._event_id
         dt = max(0.0, time.time() - self._t0)
         self._tool = None
         self._event_id = None
+        error = structured_tool_error_detail(output)
+        if error:
+            self._emit(
+                name="tool_error",
+                message=f"TOOL error: {tool} - {error}",
+                data={"tool": tool, "duration_seconds": round(dt, 3), "error": error, "event_id": event_id},
+            )
+            return
         self._emit(
             name="tool_end",
             message=f"TOOL end: {tool} ({dt:0.1f}s)",

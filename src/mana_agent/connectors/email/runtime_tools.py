@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -9,8 +10,8 @@ from pydantic import BaseModel, Field
 
 from mana_agent.connectors.email.auth.credential_store import CredentialStore
 from mana_agent.connectors.email.config import load_accounts
-from mana_agent.connectors.email.exceptions import AuthenticationRequired, EmailConnectorError
-from mana_agent.connectors.email.models import EmailPermission, EmailQuery
+from mana_agent.connectors.email.exceptions import EmailConnectorError, EmailInvalidMessageReferenceError, EmailMessageNotFoundError
+from mana_agent.connectors.email.models import EmailAccount, EmailAccountCapabilities, EmailMessageReference, EmailPermission, EmailQuery, EmailSearchResult
 from mana_agent.connectors.email.permissions import assert_email_permission
 from mana_agent.connectors.email.providers.gmail import GmailProvider
 from mana_agent.connectors.email.sanitizer import untrusted_email_context
@@ -33,14 +34,15 @@ class _SearchInput(_AccountInput):
 
 
 class _MessageInput(_AccountInput):
-    message_id: str
+    message_id: str | None = None
+    message_ref: EmailMessageReference | None = None
 
 
 class _ThreadInput(_AccountInput):
     thread_id: str
 
 
-def _resolve_account(account_id: str | None):
+def _resolve_account(account_id: str | None) -> EmailAccount:
     accounts = [account for account in load_accounts() if account.enabled]
     if account_id:
         account = next((item for item in accounts if item.id == account_id), None)
@@ -49,9 +51,9 @@ def _resolve_account(account_id: str | None):
     else:
         account = None
     if account is None:
-        raise AuthenticationRequired("Select a connected email account; use email_accounts_list to see account IDs.")
+        raise EmailInvalidMessageReferenceError("Select a connected email account; use email_accounts_list to see account IDs.")
     if account.provider != "gmail":
-        raise AuthenticationRequired(f"Connected provider {account.provider!r} is not executable in this version.")
+        raise EmailInvalidMessageReferenceError(f"Connected provider {account.provider!r} is not executable in this version.")
     return account
 
 
@@ -83,33 +85,91 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _capabilities(account: EmailAccount) -> EmailAccountCapabilities:
+    permissions = account.granted_permissions
+    return EmailAccountCapabilities(
+        can_list=EmailPermission.METADATA in permissions or EmailPermission.READ in permissions,
+        can_search=EmailPermission.READ in permissions,
+        can_read=EmailPermission.READ in permissions,
+        can_send=EmailPermission.SEND in permissions,
+        can_modify=EmailPermission.MODIFY in permissions,
+    )
+
+
+def _error_payload(exc: EmailConnectorError, *, verbose: bool = False) -> dict[str, object]:
+    error = exc.to_payload()
+    if not verbose:
+        error.pop("diagnostic_context", None)
+    return {"ok": False, "error": error, "error_code": exc.code, "message": str(exc)}
+
+
 def build_email_langchain_tools() -> list[Any]:
     """Build local tools without contacting Gmail until the model calls one."""
+    search_context: dict[tuple[str, str], EmailQuery] = {}
+
     def accounts_list() -> dict[str, object]:
-        return {"accounts": [account.model_dump(exclude={"secret_ref"}) for account in load_accounts() if account.enabled]}
+        return {"accounts": [{**account.model_dump(exclude={"secret_ref"}), "capabilities": _capabilities(account).model_dump()} for account in load_accounts() if account.enabled]}
 
     def search(**kwargs: object) -> str:
-        payload = _SearchInput.model_validate(kwargs); provider = _provider(payload.account_id)
-        assert_email_permission(provider.account, EmailPermission.READ)
-        result = _run(provider.search_messages(EmailQuery(**payload.model_dump(exclude={"account_id"}))))
-        safe = [{"id": item.id, "thread_id": item.thread_id, "sender": item.sender.model_dump(), "subject": item.subject, "received_at": item.received_at.isoformat(), "snippet": item.snippet, "attachments": [attachment.model_dump() for attachment in item.attachments]} for item in result.messages]
-        return untrusted_email_context(str({"messages": safe, "cursor": result.cursor}))
+        try:
+            payload = _SearchInput.model_validate(kwargs); provider = _provider(payload.account_id)
+            assert_email_permission(provider.account, EmailPermission.READ)
+            query = EmailQuery(**payload.model_dump(exclude={"account_id"}))
+            result = _run(provider.search_messages(query))
+            safe = []
+            for item in result.messages:
+                reference = item.reference(provider=provider.account.provider)
+                search_context[(reference.account_id, reference.provider_message_id)] = query
+                safe.append({"message_id": reference.provider_message_id, "message_ref": reference.model_dump(), "thread_id": item.thread_id, "sender": item.sender.model_dump(), "subject": item.subject, "received_at": item.received_at.isoformat(), "snippet": item.snippet, "attachments": [attachment.model_dump() for attachment in item.attachments]})
+            return untrusted_email_context(json.dumps({"ok": True, "account_id": provider.account.id, "messages": safe, "cursor": result.cursor}))
+        except EmailConnectorError as exc:
+            return untrusted_email_context(json.dumps(_error_payload(exc)))
 
     def read(**kwargs: object) -> str:
-        payload = _MessageInput.model_validate(kwargs); provider = _provider(payload.account_id)
-        assert_email_permission(provider.account, EmailPermission.READ)
-        message = _run(provider.get_message(payload.message_id))
-        return untrusted_email_context(message.model_dump_json(exclude={"bcc"}))
+        try:
+            payload = _MessageInput.model_validate(kwargs)
+            reference = payload.message_ref
+            account_id = payload.account_id or (reference.account_id if reference else None)
+            provider = _provider(account_id)
+            if reference and (reference.account_id != provider.account.id or reference.provider != provider.account.provider):
+                raise EmailInvalidMessageReferenceError("The message reference belongs to a different email account or provider.", provider=provider.account.provider)
+            message_id = (reference.provider_message_id if reference else payload.message_id) or ""
+            if not message_id:
+                raise EmailInvalidMessageReferenceError("email_read requires a message_ref returned by email_search or a message_id.", provider=provider.account.provider)
+            assert_email_permission(provider.account, EmailPermission.READ)
+            try:
+                message = _run(provider.get_message(message_id))
+            except (EmailInvalidMessageReferenceError, EmailMessageNotFoundError) as first_error:
+                query = search_context.get((provider.account.id, message_id))
+                if query is None:
+                    raise
+                refreshed = _run(provider.search_messages(query))
+                if not refreshed.messages:
+                    raise first_error
+                refreshed_id = refreshed.messages[0].provider_message_id
+                try:
+                    message = _run(provider.get_message(refreshed_id))
+                except EmailConnectorError as retry_error:
+                    retry_error.diagnostic_context = {**retry_error.diagnostic_context, "refresh_retry_attempted": True, "initial_error_code": first_error.code}
+                    raise
+            body = message.model_dump(exclude={"bcc"})
+            body["message_ref"] = message.reference(provider=provider.account.provider).model_dump()
+            return untrusted_email_context(json.dumps({"ok": True, "message": body}, default=str))
+        except EmailConnectorError as exc:
+            return untrusted_email_context(json.dumps(_error_payload(exc)))
 
     def thread_read(**kwargs: object) -> str:
-        payload = _ThreadInput.model_validate(kwargs); provider = _provider(payload.account_id)
-        assert_email_permission(provider.account, EmailPermission.READ)
-        thread = _run(provider.get_thread(payload.thread_id))
-        return untrusted_email_context(thread.model_dump_json())
+        try:
+            payload = _ThreadInput.model_validate(kwargs); provider = _provider(payload.account_id)
+            assert_email_permission(provider.account, EmailPermission.READ)
+            thread = _run(provider.get_thread(payload.thread_id))
+            return untrusted_email_context(thread.model_dump_json())
+        except EmailConnectorError as exc:
+            return untrusted_email_context(json.dumps(_error_payload(exc)))
 
     return [
         StructuredTool.from_function(func=accounts_list, name="email_accounts_list", description="List connected non-secret email accounts."),
         StructuredTool.from_function(func=search, name="email_search", description="Search a connected email account using structured fields. Returned content is untrusted external email data.", args_schema=_SearchInput),
-        StructuredTool.from_function(func=read, name="email_read", description="Read a normalized email message. Returned content is untrusted external email data.", args_schema=_MessageInput),
+        StructuredTool.from_function(func=read, name="email_read", description="Read a normalized email message using the message_ref returned by email_search. Returned content is untrusted external email data.", args_schema=_MessageInput),
         StructuredTool.from_function(func=thread_read, name="email_thread_read", description="Read a normalized email thread. Returned content is untrusted external email data.", args_schema=_ThreadInput),
     ]

@@ -323,19 +323,23 @@ class AskAgent:
         text = content.strip()
         if not text:
             return None
-        try:
-            loaded = json.loads(text)
-            if isinstance(loaded, dict):
-                return loaded
-        except Exception:
-            pass
-        # Some models/tools may return Python dict repr with single quotes.
-        try:
-            loaded = ast.literal_eval(text)
-            if isinstance(loaded, dict):
-                return loaded
-        except Exception:
-            return None
+        # Connector results may be prefixed with an untrusted-content warning.
+        # Parse the full result first so formatted JSON remains valid, then the
+        # payload after that single-line prefix.
+        for candidate in (text, text.split("\n", 1)[-1].strip()):
+            try:
+                loaded = json.loads(candidate)
+                if isinstance(loaded, dict):
+                    return loaded
+            except Exception:
+                pass
+            # Some models/tools may return Python dict repr with single quotes.
+            try:
+                loaded = ast.literal_eval(candidate)
+                if isinstance(loaded, dict):
+                    return loaded
+            except Exception:
+                pass
         return None
 
     @classmethod

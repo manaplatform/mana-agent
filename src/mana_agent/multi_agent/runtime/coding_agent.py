@@ -1300,9 +1300,11 @@ class CodingAgent:
             )
             return
         if name in {"tool_error", "worker_request_error"}:
+            dt = data.get("duration_seconds")
             emit_tool_event(
                 "error",
                 tool,
+                duration=dt if isinstance(dt, (int, float)) else None,
                 error=str(data.get("error", "") or "").strip(),
                 event_id=event_id,
                 agent_id=agent_id,
