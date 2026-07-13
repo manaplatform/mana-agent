@@ -111,6 +111,39 @@ def test_patch_precondition_failure_rereads_target_and_retries_once(tmp_path: Pa
     assert [row.get("path") for row in result.trace if row.get("tool_name") == "read_file"] == ["README.md"]
 
 
+def test_patch_precondition_accepts_unchanged_crlf_file(tmp_path: Path) -> None:
+    target = tmp_path / "README.md"
+    normalized = "# Demo\n\n## Documentation\n"
+    target.write_bytes(normalized.replace("\n", "\r\n").encode("utf-8"))
+    command = MutationCommand(
+        plan_id="mp_crlf",
+        tool_name="apply_patch",
+        tool_args={
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: README.md\n"
+                "@@\n"
+                "-## Documentation\n"
+                "+## Windows documentation\n"
+                "*** End Patch\n"
+            ),
+            "content_hashes": {"README.md": hashlib.sha256(normalized.encode("utf-8")).hexdigest()},
+        },
+        target_files=["README.md"],
+        reason="test platform-independent text precondition",
+    )
+
+    result = execute_registered_mutation_command(repo_root=tmp_path, command=command)
+
+    assert result.ok is True
+    assert result.files_changed == ["README.md"]
+    assert "## Windows documentation" in target.read_text(encoding="utf-8")
+    patch_rows = [row for row in result.trace if row.get("tool_name") == "apply_patch"]
+    assert len(patch_rows) == 1
+    assert patch_rows[0]["status"] == "ok"
+    assert not patch_rows[0].get("patch_retry_count")
+
+
 def test_patch_retry_failure_is_precise_and_does_not_discover(tmp_path: Path) -> None:
     target = tmp_path / "README.md"
     target.write_text("# Completely different\n", encoding="utf-8")

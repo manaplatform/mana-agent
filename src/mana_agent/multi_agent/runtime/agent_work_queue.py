@@ -174,12 +174,19 @@ def _patch_context_mismatch(result: dict[str, Any]) -> bool:
     return "patch_context_not_found" in text or "re-read the target file" in text or "hunk" in text
 
 
+def _text_content_hash(content: str) -> str:
+    """Hash decoded text so platform newline translation cannot stale a patch."""
+
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def _current_content_hashes(repo_root: Path, paths: Sequence[str]) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for rel in paths:
         target = repo_root / rel
         try:
-            hashes[rel] = hashlib.sha256(target.read_bytes()).hexdigest()
+            content = target.read_text(encoding="utf-8", errors="replace")
+            hashes[rel] = _text_content_hash(content)
         except OSError:
             continue
     return hashes
@@ -1088,7 +1095,7 @@ class QueueManager:
                 resolved_args.setdefault(
                     "content_hashes",
                     {
-                        path: hashlib.sha256(content.encode("utf-8")).hexdigest()
+                        path: _text_content_hash(content)
                         for path, content in current_files.items()
                     },
                 )

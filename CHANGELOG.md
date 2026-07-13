@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-13
 
+- Fixed Windows mutation-plan patch preconditions to hash decoded text
+  consistently during command synthesis and execution, preventing unchanged
+  CRLF files from being incorrectly rejected as stale.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/test_agent_work_queue.py tests/test_lightweight_edit_policy.py` passed
+    (71 tests, 1 filesystem-dependent test skipped); targeted Ruff and
+    `git diff --check` passed.
+
 - Removed the blocking active-flow divergence prompt from interactive chat.
   The validated routing decision now explicitly selects whether distinct
   repository work starts a new coding flow or related work continues the
