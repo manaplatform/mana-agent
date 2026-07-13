@@ -905,7 +905,7 @@ Optional packages are lazy-loaded. Install only the extras required by the activ
 | [`docs/15-development.md`](docs/15-development.md) | Development workflow. |
 | [`docs/16-email-connectors.md`](docs/16-email-connectors.md) | Gmail connector setup and security. |
 | [`docs/17-browser-automation.md`](docs/17-browser-automation.md) | Browser automation setup and safety. |
-| [`docs/17-telegram-connector.md`](docs/18-telegram-connector.md) | Telegram bot setup, polling/webhook deployment, security, and troubleshooting. |
+| [`docs/18-telegram-connector.md`](docs/18-telegram-connector.md) | Telegram bot setup, polling/webhook deployment, security, and troubleshooting. |
 | [`docs/analyze.md`](docs/analyze.md) | Additional analysis documentation. |
 
 ---
