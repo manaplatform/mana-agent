@@ -109,6 +109,26 @@ The chat command supports classic and directory-aware index modes, coding-agent 
 4. Use `mana-agent ask ...` for targeted questions.
 5. Use `mana-agent chat ...` for interactive repository analysis or coding tasks.
 
+## Optional browser tasks
+
+Install Mana-Agent and its managed Chromium runtime:
+
+```bash
+python -m pip install -e .
+python -m playwright install chromium
+```
+
+Browser tools are available from the normal chat experience. For example:
+
+```text
+Check https://example.test and summarize the page's forms and interactive controls.
+```
+
+The model selects each structured browser action. It pauses before payments,
+publishing, deletion, legal acceptance, or final form submission, and it never
+attempts to bypass CAPTCHA, MFA, or access controls. See
+[Browser Automation](./17-browser-automation.md).
+
 ## Useful flags
 
 The README documents several global flags that work across commands:

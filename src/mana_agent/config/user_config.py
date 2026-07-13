@@ -66,6 +66,14 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_WORKSPACE_ALLOWED_ROOTS": "",
     "MANA_API_TOKEN": "",
     "MANA_MCP_SERVER_TOKEN": "",
+    "MANA_BROWSER_ENABLED": True,
+    "MANA_BROWSER_HEADLESS": True,
+    "MANA_BROWSER_TIMEOUT_SECONDS": 30,
+    "MANA_BROWSER_PERSIST_AUTH": False,
+    "MANA_BROWSER_DOWNLOAD_MAX_MB": 100,
+    "MANA_BROWSER_UPLOAD_ROOTS": "",
+    "MANA_BROWSER_ARTIFACT_DIR": "",
+    "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": 30,
 }
 
 
@@ -98,6 +106,14 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_WORKSPACE_ALLOWED_ROOTS": "mana_workspace_allowed_roots",
     "MANA_API_TOKEN": "mana_api_token",
     "MANA_MCP_SERVER_TOKEN": "mana_mcp_server_token",
+    "MANA_BROWSER_ENABLED": "mana_browser_enabled",
+    "MANA_BROWSER_HEADLESS": "mana_browser_headless",
+    "MANA_BROWSER_TIMEOUT_SECONDS": "mana_browser_timeout_seconds",
+    "MANA_BROWSER_PERSIST_AUTH": "mana_browser_persist_auth",
+    "MANA_BROWSER_DOWNLOAD_MAX_MB": "mana_browser_download_max_mb",
+    "MANA_BROWSER_UPLOAD_ROOTS": "mana_browser_upload_roots",
+    "MANA_BROWSER_ARTIFACT_DIR": "mana_browser_artifact_dir",
+    "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": "mana_browser_profile_max_age_days",
 }
 
 CONFIG_WRITE_ORDER = [
@@ -135,6 +151,14 @@ CONFIG_WRITE_ORDER = [
     "MANA_SEARCH_MAX_INJECTED_RESULTS",
     "MANA_SEARCH_MAX_SUMMARY_WORDS",
     "MANA_SEARCH_ENABLE_ASK_AGENT",
+    "MANA_BROWSER_ENABLED",
+    "MANA_BROWSER_HEADLESS",
+    "MANA_BROWSER_TIMEOUT_SECONDS",
+    "MANA_BROWSER_PERSIST_AUTH",
+    "MANA_BROWSER_DOWNLOAD_MAX_MB",
+    "MANA_BROWSER_UPLOAD_ROOTS",
+    "MANA_BROWSER_ARTIFACT_DIR",
+    "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
 ]
 
 

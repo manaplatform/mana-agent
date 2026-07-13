@@ -95,6 +95,18 @@ class ToolsManager:
                     result,
                     None if result.get("ok") else str(result.get("error") or "document tool failed"),
                 )
+            if job.job_type == QueueJobType.BROWSER:
+                from mana_agent.connectors.browser.runtime_tools import build_browser_langchain_tools
+                tool_name = str(job.payload.get("tool") or job.payload.get("tool_name") or "")
+                args = dict(job.payload.get("args") or {})
+                tools = {tool.name: tool for tool in build_browser_langchain_tools()}
+                selected = tools.get(tool_name)
+                if selected is None:
+                    return ToolResult(new_message_id(), job.task_id, False, error=f"unsupported browser tool: {tool_name}")
+                raw = selected.invoke(args)
+                result = json.loads(raw) if isinstance(raw, str) else raw
+                ok = bool(isinstance(result, dict) and result.get("ok"))
+                return ToolResult(new_message_id(), job.task_id, ok, result, None if ok else str(result.get("message") or result.get("error_code") or "browser tool failed"))
             if job.job_type == QueueJobType.MCP_TOOL:
                 client = McpClient(load_mcp_servers(overrides=list(job.payload.get("server_overrides") or [])))
                 result = client.call_tool(

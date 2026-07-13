@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     mana_workspace_allowed_roots: str = Field(default="", alias="MANA_WORKSPACE_ALLOWED_ROOTS")
     mana_api_token: str = Field(default="", alias="MANA_API_TOKEN")
     mana_mcp_server_token: str = Field(default="", alias="MANA_MCP_SERVER_TOKEN")
+    mana_browser_enabled: bool = Field(default=True, alias="MANA_BROWSER_ENABLED")
+    mana_browser_headless: bool = Field(default=True, alias="MANA_BROWSER_HEADLESS")
+    mana_browser_timeout_seconds: int = Field(default=30, alias="MANA_BROWSER_TIMEOUT_SECONDS")
+    mana_browser_persist_auth: bool = Field(default=False, alias="MANA_BROWSER_PERSIST_AUTH")
+    mana_browser_download_max_mb: int = Field(default=100, alias="MANA_BROWSER_DOWNLOAD_MAX_MB")
+    mana_browser_upload_roots: str = Field(default="", alias="MANA_BROWSER_UPLOAD_ROOTS")
+    mana_browser_artifact_dir: str = Field(default="", alias="MANA_BROWSER_ARTIFACT_DIR")
+    mana_browser_profile_max_age_days: int = Field(default=30, alias="MANA_BROWSER_PROFILE_MAX_AGE_DAYS")
 
     # Mana-managed settings are intentionally repository-independent.  Loading
     # a project's ``.env`` here can silently replace the API key selected in

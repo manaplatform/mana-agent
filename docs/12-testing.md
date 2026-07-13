@@ -24,6 +24,18 @@ so repository changes can be validated with confidence.
 - Run the narrowest useful verification first, then expand if needed.
 - Report any skipped checks and why they were skipped.
 
+## Browser Integration
+
+Browser integration coverage runs against a deterministic local HTTP server,
+not a public website. Install Chromium to enable it:
+
+```bash
+python -m playwright install chromium
+python -m pytest tests/integration/test_browser_playwright.py -q
+```
+
+The integration module skips cleanly when Playwright or Chromium is absent.
+
 ## Related Docs
 
 - [Error Handling](./10-error-handling.md)

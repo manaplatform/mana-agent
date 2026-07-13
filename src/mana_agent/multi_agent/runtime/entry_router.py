@@ -16,6 +16,7 @@ from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
 RouteKind = Literal[
     "command",
     "tool_execution",
+    "browser_task",
     "semantic_qa",
     "repo_search",
     "web_search",
@@ -30,6 +31,7 @@ RouteKind = Literal[
 ROUTE_KINDS: set[str] = {
     "command",
     "tool_execution",
+    "browser_task",
     "semantic_qa",
     "repo_search",
     "web_search",
@@ -88,6 +90,7 @@ only. Never select web_search, github_search, or another provider as a substitut
 Route kinds:
 - command: run a known Mana-Agent command only when command_name is in available_commands.
 - tool_execution: execute a named tool/action from available_tools, such as command_inventory.
+- browser_task: run a multi-step interactive website session using only advertised browser_* tools.
 - semantic_qa: answer from the semantic index; requires_index must be true.
 - repo_search: search/read local repository files directly.
 - web_search: use public web search when enabled.
@@ -105,10 +108,13 @@ For gitops, the route decision only selects the GitOps workflow. The GitOps
 executor must inspect Git state first, then use a later model decision to choose
 the exact commands, files to stage, commit message, branch action, and push action.
 Do not encode a rigid Git command sequence in this route decision.
+Rendered website inspection, visible controls, forms, page functionality,
+authentication, and broken-link checking require browser_task. command_inventory
+describes Mana-Agent's own CLI and must never be used to inspect a target URL.
 
 Return JSON only with this schema:
 {
-  "kind": "command|tool_execution|semantic_qa|repo_search|web_search|github_search|gitops|coding_task|analysis_task|clarification|unsupported",
+  "kind": "command|tool_execution|browser_task|semantic_qa|repo_search|web_search|github_search|gitops|coding_task|analysis_task|clarification|unsupported",
   "confidence": 0.0,
   "reason": "short reason",
   "command_name": null,

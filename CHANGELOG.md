@@ -2,7 +2,32 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-13
+
+- Corrected interactive website requests so account creation, login, and form
+  work route to the browser operator rather than repository coding/mutation.
+  Added an explicit model browser-tool procedure, browser-only tool binding,
+  required initial browser tool execution, model route review, per-tool terminal
+  activity, typed-secret redaction, and a read-only `browser_check_links` tool.
+  Permission-denied model responses now stop after one request instead of being
+  retried as transient authorization failures.
+  The generic entry router now advertises browser contracts and executes a
+  dedicated browser_task path instead of misrouting target-URL inspection to
+  command inventory.
+  - Verification: browser routing, entry-router, AskService, connector, terminal UX, AskAgent, compatibility, and decision tests passed (110 tests); live Playwright link checking passed for 14 links; an end-to-end `gpt-5.4-mini` CLI run used `browser_open`, `browser_inspect`, `browser_check_links`, and `browser_close`; compileall, targeted Ruff, and `git diff --check` passed.
+
 ## 2026-07-12
+
+- Added an optional model-controlled Playwright browser for chat, with
+  structured inspection and interaction tools, isolated multi-step sessions,
+  guarded uploads and downloads, and confirmation gates for sensitive final
+  actions. Added setup, security, examples, and local integration-test
+  documentation.
+  Direct chat now dispatches validated `browser_*` decisions into the AskAgent
+  tool loop instead of falling through to a plain answer, and the Playwright
+  adapter can use an installed Google Chrome/Chromium binary when its managed
+  runtime is unavailable.
+  - Verification: browser, routing, AskAgent, CLI-event, tool-manager, and multi-agent tests passed (189 tests); compileall, targeted Ruff, CLI browser status/help, and `git diff --check` passed. The Playwright integration test skipped because local sockets are unavailable in the sandbox.
 
 - Hardened external HTTP 403 handling. Gmail now decodes string and byte error
   bodies, normalizes provider status values, and preserves non-secret provider

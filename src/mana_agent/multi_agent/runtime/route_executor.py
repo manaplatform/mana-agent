@@ -83,6 +83,8 @@ class RouteExecutor:
             return self._semantic_qa(context)
         if decision.kind == "repo_search":
             return self._repo_search(context)
+        if decision.kind == "browser_task":
+            return self._browser_tools(context)
         if decision.kind == "tool_execution":
             return self._tool_execution(decision, context)
         if decision.kind in {"web_search", "github_search"}:
@@ -204,6 +206,30 @@ class RouteExecutor:
             result = self._run_agent_single(context)
         result.mode = mode
         return result
+
+    def _browser_tools(self, context: RouteExecutionContext) -> AskResponseWithTrace:
+        if self.ask_agent is None:
+            return self._plain_error("Browser task selected, but the AskAgent is not configured.")
+        from mana_agent.connectors.browser.contracts import browser_tool_contracts
+        from mana_agent.multi_agent.runtime.prompts import BROWSER_AGENT_SYSTEM_PROMPT
+
+        index_dir = context.index_dir or (context.index_dirs[0] if context.index_dirs else None)
+        if index_dir is None:
+            return self._plain_error("Browser task selected, but no runtime index context is configured.")
+        return self.ask_agent.run(
+            question=context.question,
+            index_dir=index_dir,
+            k=context.k,
+            max_steps=max(12, context.max_steps),
+            timeout_seconds=max(60, context.timeout_seconds),
+            callbacks=context.callbacks,
+            system_prompt=BROWSER_AGENT_SYSTEM_PROMPT,
+            tool_policy={
+                "allowed_tools": [contract.name for contract in browser_tool_contracts()],
+                "disable_external_search": True,
+                "require_initial_tool_call": True,
+            },
+        )
 
     def _run_agent_single(self, context: RouteExecutionContext) -> AskResponseWithTrace:
         try:
@@ -453,6 +479,10 @@ def available_tool_names(*, required_mcp_server: str | None = None) -> list[str]
         "email_read",
         "email_thread_read",
     ]
+    from mana_agent.config.user_config import get_setting
+    if bool(get_setting("MANA_BROWSER_ENABLED", True)):
+        from mana_agent.connectors.browser.contracts import browser_tool_contracts
+        names.extend(contract.name for contract in browser_tool_contracts())
     # Do not start configured MCP providers while merely collecting router
     # context. An explicitly selected provider is the exception: the router
     # needs its actual model-visible tool names to make a valid constrained

@@ -105,6 +105,15 @@ class RichToolCallbackHandler(BaseCallbackHandler):
         args = ""
         if self.show_inputs and input_str:
             args = input_str.strip().replace("\n", " ")
+        if self._tool == "browser_type" and args:
+            try:
+                payload = json.loads(args)
+            except Exception:
+                args = "[browser input redacted]"
+            else:
+                if isinstance(payload, dict) and "value" in payload:
+                    payload["value"] = "[REDACTED]"
+                args = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         emit_tool_event("start", self._tool, args=args, event_id=self._event_id)
 
     def on_tool_end(self, output: str, **kwargs) -> None:

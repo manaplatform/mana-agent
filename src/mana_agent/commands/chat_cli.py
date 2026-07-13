@@ -43,6 +43,7 @@ from mana_agent.cli.renderers import InlineChatRenderer
 from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup
 from mana_agent.skills.chat import ChatSkillCoordinator
+from mana_agent.connectors.browser.session import BrowserSessionManager
 
 
 _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
@@ -1963,6 +1964,16 @@ def chat(
                 console.clear()
                 console.print("[green]Chat history cleared. Session preserved.[/green]")
                 continue
+            if question.strip().startswith("/approve-browser "):
+                from mana_agent.connectors.browser.session import BrowserConnectorError, default_browser_manager
+                token = question.strip().split(maxsplit=1)[1]
+                try:
+                    default_browser_manager().approve(None, token)
+                except BrowserConnectorError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                else:
+                    console.print("[green]Browser action approved for this exact page and target. Ask Mana-Agent to continue.[/green]")
+                continue
             if pending_conflict_question is None and _is_new_topic_command(question):
                 reset_id = _start_new_topic()
                 if reset_id:
@@ -1994,6 +2005,8 @@ def chat(
                     )
                     continue
                 if action == "new":
+                    from mana_agent.connectors.browser.session import default_browser_manager
+                    default_browser_manager().close(chat_ui_state.session_id)
                     created = service.create_session(root)
                     chat_ui_state.activate_session(created.session_id)
                     session_turns.clear()
@@ -2002,6 +2015,8 @@ def chat(
                     console.print(f"[green]New isolated session:[/green] {created.session_id}")
                     continue
                 if action == "switch" and len(parts) > 2:
+                    from mana_agent.connectors.browser.session import default_browser_manager
+                    default_browser_manager().close(chat_ui_state.session_id)
                     try:
                         chat_ui_state.activate_session(parts[2])
                     except (FileNotFoundError, ValueError) as exc:
@@ -2013,6 +2028,8 @@ def chat(
                     console.print(f"[green]Switched session:[/green] {chat_ui_state.session_id}")
                     continue
                 if action == "archive":
+                    from mana_agent.connectors.browser.session import default_browser_manager
+                    default_browser_manager().close(chat_ui_state.session_id)
                     archived = service.archive_session(chat_ui_state.session_id)
                     console.print(f"[green]Archived session:[/green] {archived.session_id}")
                     continue
@@ -2334,6 +2351,119 @@ def chat(
             # -----------------------------
             # Model-selected immediate tools for read-only research/search turns.
             # -----------------------------
+            selected_browser_tools = [
+                tool for tool in agent_decision.selected_tools if str(tool).startswith("browser_")
+            ]
+            if selected_browser_tools and not required_mcp_server:
+                from mana_agent.connectors.browser.contracts import browser_tool_contracts
+                from mana_agent.multi_agent.runtime.prompts import BROWSER_AGENT_SYSTEM_PROMPT
+
+                available_browser_tools = [contract.name for contract in browser_tool_contracts()]
+                browser_status = (
+                    BrowserSessionManager.status()
+                    if agent_decision.verifier_passed
+                    else {
+                        "ok": False,
+                        "error": (
+                            "Model browser decision failed validation. No browser or repository action was executed. "
+                            + agent_decision.verifier_summary
+                        ),
+                    }
+                )
+                if not browser_status.get("ok"):
+                    answer_text = (
+                        "Browser execution is unavailable. "
+                        + str(browser_status.get("error") or "Chromium is not installed; run `python -m playwright install chromium`.")
+                    )
+                    response = None
+                    sources = []
+                    warnings = [answer_text]
+                    trace = []
+                else:
+                    browser_agent = getattr(ask_service, "ask_agent", None)
+                    if browser_agent is None:
+                        answer_text = "Browser execution is unavailable because the chat tool agent is not configured."
+                        response = None
+                        sources = []
+                        warnings = [answer_text]
+                        trace = []
+                    else:
+                        selected_index = resolved_index_dir or default_index_dir(root)
+                        browser_activity = LiveToolActivity(
+                            spinner_text="Browser…",
+                            show_all_logs=_cli_verbose_enabled(),
+                        )
+                        response, _browser_debug_tail = _run_with_live_buffer(
+                            console,
+                            spinner_text="Browser…",
+                            fn=lambda callbacks: browser_agent.run(
+                                question=question,
+                                index_dir=selected_index,
+                                k=resolved_k,
+                                max_steps=max(12, len(available_browser_tools) + 4),
+                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                tool_policy={
+                                    "allowed_tools": available_browser_tools,
+                                    "disable_external_search": True,
+                                    "require_initial_tool_call": True,
+                                },
+                                callbacks=callbacks,
+                                system_prompt=BROWSER_AGENT_SYSTEM_PROMPT,
+                                run_id=current_turn_id,
+                            ),
+                            callbacks=[RichToolCallbackHandler(show_inputs=True)],
+                            activity=browser_activity,
+                        )
+                        answer_text = str(getattr(response, "answer", "") or "")
+                        sources = list(getattr(response, "sources", []) or [])
+                        warnings = [str(item) for item in (getattr(response, "warnings", []) or [])]
+                        trace = _coerce_trace_items(list(getattr(response, "trace", []) or []))
+                _render_answer_header(console, title="Browser")
+                console.print(Markdown(answer_text))
+                chat_ui_state.record_event(
+                    make_event(
+                        "agent.decision",
+                        title="Agent decision",
+                        message=agent_decision.reasoning_summary,
+                        status="success" if agent_decision.verifier_passed else "failed",
+                        session_id=chat_ui_state.session_id,
+                        turn_id=current_turn_id,
+                        step_id="05",
+                        metadata={
+                            "intent": agent_decision.intent,
+                            "selected_tools": selected_browser_tools,
+                            "available_browser_tools": available_browser_tools,
+                        },
+                    ).finish(status="success" if agent_decision.verifier_passed else "failed")
+                )
+                turn_record = ChatTurnTelemetry(
+                    turn_index=len(session_turns) + 1,
+                    timestamp=_now_iso(),
+                    question=question,
+                    answer_text=answer_text,
+                    sources=sources,
+                    warnings=warnings,
+                    trace=trace,
+                    tool_steps_total=len(trace),
+                    decisions=[
+                        {
+                            "decision": (
+                                f"{agent_decision.intent}: "
+                                + ", ".join(selected_browser_tools)
+                            ),
+                            "rationale": agent_decision.reasoning_summary,
+                        }
+                    ],
+                    changed_files=[],
+                    has_diff=False,
+                    coding_state={"flow_id": active_flow_id},
+                )
+                session_turns.append(turn_record)
+                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
+                _render_turn_transparency(console, turn=turn_record, history=session_turns)
+                _finish_ui_turn(current_turn_id)
+                continue
+
             if (
                 any(tool in agent_decision.selected_tools for tool in ("web_search", "github_search"))
                 and agent_decision.web_search_needed

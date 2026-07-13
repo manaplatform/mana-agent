@@ -48,6 +48,21 @@ KNOWN_AGENT_TOOLS = frozenset(
         "find_symbols",
         "call_graph",
         "read_skill",
+        "browser_open",
+        "browser_inspect",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_scroll",
+        "browser_wait",
+        "browser_screenshot",
+        "browser_upload",
+        "browser_download",
+        "browser_check_links",
+        "browser_back",
+        "browser_tabs",
+        "browser_switch_tab",
+        "browser_close",
     }
 )
 
@@ -117,6 +132,23 @@ def agent_tool_descriptions() -> list[dict[str, Any]]:
                 "input_schema": contract.input_schema,
             }
         )
+    from mana_agent.config.user_config import get_setting
+
+    browser_tool_contracts = None
+    if bool(get_setting("MANA_BROWSER_ENABLED", True)):
+        try:
+            from mana_agent.connectors.browser.contracts import browser_tool_contracts
+        except ImportError:
+            browser_tool_contracts = None
+    if browser_tool_contracts is not None:
+        for contract in browser_tool_contracts():
+            descriptions.append(
+                {
+                    "name": contract.name,
+                    "description": contract.description,
+                    "input_schema": contract.input_schema,
+                }
+            )
     return descriptions
 
 
@@ -125,9 +157,12 @@ Choose tools from the provided tool descriptions based on the user's intent.
 Do not route by keywords alone. Infer whether the user needs local repository context, public web research, code editing, verification, planning, review, or a plain answer.
 Explicit commands such as /analyze, /plan, or "search repo" are hints, but ordinary words like "search", "find", "web", "repo", "read", "edit", and "analyze" do not bypass your intent decision.
 Use web_search for public/current/unknown-topic research, official docs, and questions that the local repo is unlikely to answer.
+Browser/search boundary: web_search cannot inspect a rendered target page or interact with it. When the user supplies a target URL and asks to check the website, inspect visible controls, forms, buttons, page title, navigation, functionality, authentication, or broken links, select browser tools with intent="tool". Do not select web_search as a substitute, and do not combine web_search with browser tools unless the user separately requests broader public-web research.
 Use github_search for public GitHub project/repository/code research.
 Use both web_search and github_search when the user asks for internet/web plus GitHub.
 Use repo_search/read_file for local repository inspection.
+Use browser tools for interactive website tasks that require navigation, page inspection, forms, clicks, uploads, downloads, tabs, account creation, sign-up, login, or authenticated browser state. Website actions do not edit repository code: set intent="tool", repo_context_needed=false, and code_editing_needed=false. Words such as create, change, submit, delete, or edit refer to the website when their target is a page, account, form, or URL; they must not select repository mutation tools. Select browser_open and browser_inspect plus the browser interaction capabilities the browser operator may need. Choose each concrete action later from current page evidence; do not assume a website-specific workflow.
+Never select browser actions intended to bypass CAPTCHA, MFA, access restrictions, or website security controls. Sensitive or irreversible final actions require explicit user approval before execution.
 Use apply_patch or edit/write tools only when the user wants code or files changed.
 Return JSON only with this schema:
 {
@@ -140,6 +175,26 @@ Return JSON only with this schema:
   "code_editing_needed": false,
   "reasoning_summary": "short reason"
 }
+"""
+
+AGENT_DECISION_REVIEW_PROMPT = """You are Mana-Agent's routing decision reviewer.
+Review the proposed structured decision against the user request and available
+tool descriptions. Return one complete corrected decision using exactly the
+same JSON schema as the routing decision. This review is required before any
+tool executes.
+
+Enforce these boundaries:
+- Rendered website inspection, visible controls, page functionality, forms,
+  navigation, authentication, and link checking require browser_* tools with
+  intent=tool, repo_context_needed=false, web_search_needed=false, and
+  code_editing_needed=false.
+- web_search is only for public information retrieval and cannot substitute for
+  inspecting or interacting with a target URL.
+- Website account/form/content actions are not repository edits.
+- Repository mutation tools are valid only when repository files must change.
+- Select only tools present in available_tools. Preserve a valid proposal; fix
+  an invalid one. Do not infer a static route from keywords alone.
+Return JSON only.
 """
 
 
@@ -224,7 +279,30 @@ class AgentDecisionEngine:
             if isinstance(content, list):
                 content = " ".join(str(part.get("text", part)) if isinstance(part, dict) else str(part) for part in content)
             data = _extract_json(str(content))
-            return self._decision_from_payload(data)
+            proposed = self._decision_from_payload(data)
+            review_response = self.llm.invoke(
+                [
+                    SystemMessage(content=AGENT_DECISION_REVIEW_PROMPT),
+                    HumanMessage(
+                        content=json.dumps(
+                            {
+                                "user_request": request,
+                                "proposed_decision": proposed.to_dict(),
+                                "available_tools": self.tool_descriptions,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    ),
+                ]
+            )
+            review_content = getattr(review_response, "content", review_response)
+            if isinstance(review_content, list):
+                review_content = " ".join(
+                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                    for part in review_content
+                )
+            return self._decision_from_payload(_extract_json(str(review_content)))
         except Exception:
             return None
 
@@ -281,6 +359,11 @@ def verify_agent_decision(
         warnings.append("repo_context_needed=true but no repository read/search tool was selected")
     if decision.code_editing_needed and not any(tool in decision.selected_tools for tool in ("apply_patch", "apply_patch_batch", "edit_file", "multi_edit_file", "write_file", "create_file", "delete_file")):
         warnings.append("code_editing_needed=true but no mutation tool was selected")
+    browser_selected = any(tool.startswith("browser_") for tool in decision.selected_tools)
+    if browser_selected and decision.intent != "tool":
+        warnings.append("browser tools require intent=tool")
+    if browser_selected and (decision.repo_context_needed or decision.code_editing_needed):
+        warnings.append("browser tasks must not request repository context or code editing")
     if decision.intent == "web_research" and not decision.web_search_needed:
         warnings.append("web_research intent must set web_search_needed=true")
     if decision.intent in {"repo_search", "analyze", "edit", "review"} and not decision.repo_context_needed:

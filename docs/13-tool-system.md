@@ -27,6 +27,9 @@ inspection, file patching, file writing, and verification steps.
   and file deletion.
 - Validation tools: project verification, single command execution, grouped
   script execution, and git status or diff review.
+- Browser tools: model-selected page navigation, DOM and accessibility
+  inspection, interaction, screenshots, tabs, uploads, downloads, and isolated
+  session cleanup. Sensitive final actions require exact-action confirmation.
 - Reporting tools: the in-chat `/analyze` slash command runs the existing
   analysis services (dependency graph, project structure, static checks) and
   writes report artifacts under `.mana/` (`analyze.json`, `analyze.md`,
@@ -52,3 +55,4 @@ inspection, file patching, file writing, and verification steps.
 - [Architecture](./08-architecture.md)
 - [Agent Behavior](./09-agent-behavior.md)
 - [README](../README.md)
+- [Browser Automation](./17-browser-automation.md)

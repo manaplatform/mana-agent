@@ -7,6 +7,8 @@ from mana_agent.connectors.email.auth.oauth import gmail_authorization_flow
 from mana_agent.connectors.email.config import load_accounts, remove_account, save_accounts
 from mana_agent.connectors.email.models import EmailAccount, EmailAddress, EmailPermission
 connector_app = typer.Typer(help="Manage optional provider-neutral connectors.")
+from mana_agent.commands.browser_cli import browser_app
+connector_app.add_typer(browser_app, name="browser")
 email_app = typer.Typer(help="Manage email accounts. Gmail is the currently supported provider.")
 connector_app.add_typer(email_app, name="email")
 def _account(account_id: str) -> EmailAccount:
@@ -53,7 +55,6 @@ def reconnect(
     except ValueError as exc: raise typer.BadParameter("Permissions must be email.metadata,email.read,email.compose,email.send,email.modify.") from exc
     credentials = gmail_authorization_flow(client_secret_file, [item.value for item in granted])
     try:
-        from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
         service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
         address = EmailAddress(address=str(service.users().getProfile(userId="me").execute()["emailAddress"]))

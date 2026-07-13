@@ -16,6 +16,8 @@ Chat uses the same repository-isolated store. `/skills`, `/skills available`, `/
 
 Optional Gmail email connector setup and security guidance: [docs/16-email-connectors.md](docs/16-email-connectors.md).
 
+Optional model-controlled browser setup and safety guidance: [docs/17-browser-automation.md](docs/17-browser-automation.md).
+
 **Current documented version:** `v0.0.13`
 
 ---
@@ -62,6 +64,7 @@ Use it to:
 * **Control file mutation** through explicit repository tools instead of unrestricted editing.
 * **Work with project document files** through model-selected Word, PDF, Excel, and CSV tools.
 * **Use external search** only when the model decides current web or GitHub context is needed.
+* **Complete website tasks** through an isolated, model-controlled Playwright browser session.
 
 ---
 
@@ -75,6 +78,7 @@ Use it to:
 | Git automation           | Safety-checked Git tools for status, diff, branch, commit, push, pull, fetch, merge, rebase, and more. |
 | Mutation safety          | Plans, constrained file tools, patch application, command gates, and verification after changes.       |
 | Document files           | Capability tools for detecting, reading, querying, creating, updating, and deleting supported documents. |
+| Browser automation       | Model-selected navigation, inspection, forms, tabs, uploads, downloads, screenshots, and guarded submissions. |
 | Search memory            | Optional web/GitHub search with cached results under `.mana/search_memory.jsonl`.                      |
 | Artifacts                | JSON, Markdown, HTML, DOT, GraphML, and Mermaid outputs.                                               |
 
@@ -111,6 +115,7 @@ It supports:
 * Model-selected Git tools
 * Model-selected document tools for `.docx`, `.pdf`, `.xlsx`, `.xlsm`, and `.csv`
 * Optional external web and GitHub search
+* Optional Playwright browser tools for multi-step website tasks
 * Final summaries with changed files, checks, skipped checks, and warnings
 
 ### Multi-agent orchestration
@@ -397,6 +402,12 @@ Install common development tools:
 
 ```bash
 python -m pip install pytest ruff mypy
+```
+
+Install the managed Chromium runtime before using browser tools:
+
+```bash
+python -m playwright install chromium
 ```
 
 Check the CLI:

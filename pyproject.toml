@@ -54,6 +54,7 @@ dependencies = [
 dev = [
   "pytest>=8.0,<9.0",
 ]
+browser = ["playwright>=1.45,<2.0"]
 
 # Grok Build: optional dashboard + automations extras (Phase 1)
 # These keep the core CLI + multi-agent runtime dependency-free.
@@ -75,6 +76,7 @@ observability = [
 ]
 email = ["google-api-python-client>=2.0,<3.0", "google-auth-oauthlib>=1.2,<2.0", "keyring>=24.0,<26.0"]
 full = [
+  "playwright>=1.45,<2.0",
   "streamlit>=1.38,<2.0",
   "plotly>=5.22,<6",
   "pandas>=2.2,<3",
