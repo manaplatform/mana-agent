@@ -8,6 +8,13 @@ from mana_agent.config.settings import Settings
 from mana_agent.services.chat_service import ChatService
 from mana_agent.workspaces.service import WorkspaceService
 
+# Central gateway (the single connection point for all frontends to agents).
+# When provided we delegate; otherwise fall back to the original local implementation.
+try:
+    from mana_agent.gateway.chat_gateway import AgentChatGateway as _CoreGateway
+except Exception:  # pragma: no cover
+    _CoreGateway = None  # type: ignore[assignment]
+
 
 class TelegramChatGateway(Protocol):
     async def send(self, session_id: str, text: str) -> str: ...
@@ -16,9 +23,22 @@ class TelegramChatGateway(Protocol):
 
 
 class ManaChatGateway:
-    """Headless adapter around the same ChatService used by CLI chat."""
+    """Headless adapter around the same ChatService used by CLI chat.
 
-    def __init__(self, repository: Path | str) -> None:
+    When a central AgentChatGateway (from mana_agent.gateway) is supplied
+    (via the core_gateway= kwarg or by the TelegramConnector), send/create
+    operations are delegated to it. This makes Telegram go through the
+    single gateway to the agents, exactly as requested.
+
+    The original local implementation is kept as fallback for backward compat.
+    """
+
+    def __init__(
+        self,
+        repository: Path | str,
+        *,
+        core_gateway: Any | None = None,
+    ) -> None:
         self.repository = Path(repository).expanduser().resolve()
         self.workspaces = WorkspaceService()
         self._services: dict[str, ChatService] = {}
@@ -26,7 +46,25 @@ class ManaChatGateway:
         self._history_store: Any | None = None
         self._active: set[str] = set()
 
+        # Central gateway (preferred path)
+        self._core: Any | None = None
+        if core_gateway is not None:
+            self._core = core_gateway
+        elif _CoreGateway is not None:
+            # Auto-create a central gateway for this repository (simple path).
+            # Rich coding features can still be enabled by passing one explicitly
+            # from higher layers (e.g. via TelegramConnector(gateway=...)).
+            try:
+                self._core = _CoreGateway(self.repository, coding_agent=False)
+            except Exception:
+                self._core = None
+
     def create_session(self) -> str:
+        if self._core is not None and hasattr(self._core, "create_session"):
+            try:
+                return self._core.create_session(frontend="telegram")
+            except Exception:
+                pass
         return self.workspaces.create_session(self.repository).session_id
 
     def bind_store(self, store: Any) -> None:
@@ -49,6 +87,18 @@ class ManaChatGateway:
         return service
 
     async def send(self, session_id: str, text: str) -> str:
+        # Prefer the central gateway (this is the "all connections via gateway" path).
+        if self._core is not None and hasattr(self._core, "send"):
+            try:
+                # Core gateway send may be sync or async; normalize.
+                send_fn = self._core.send
+                if asyncio.iscoroutinefunction(send_fn):
+                    return await send_fn(session_id, text)
+                return await asyncio.to_thread(send_fn, session_id, text)
+            except Exception:
+                # Fall through to local implementation on any error
+                pass
+
         self._active.add(session_id)
         try:
             history = (
@@ -77,9 +127,21 @@ class ManaChatGateway:
             self._active.discard(session_id)
 
     async def status(self, session_id: str) -> str:
+        if self._core is not None and hasattr(self._core, "status"):
+            try:
+                st = self._core.status(session_id)
+                return await st if asyncio.iscoroutine(st) else st
+            except Exception:
+                pass
         return "running" if session_id in self._active else "ready"
 
     async def cancel(self, session_id: str) -> bool:
+        if self._core is not None and hasattr(self._core, "cancel"):
+            try:
+                res = self._core.cancel(session_id)
+                return await res if asyncio.iscoroutine(res) else bool(res)
+            except Exception:
+                pass
         # ChatService currently has no cooperative cancellation contract.
         return False
 

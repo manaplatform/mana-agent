@@ -14,14 +14,20 @@ from mana_agent.api.routes.repository_analyze import router as repository_analyz
 from mana_agent.api.routes.workspaces import router as workspaces_router
 
 
-def create_app(*, telegram_config: Any | None = None, telegram_gateway: Any | None = None) -> FastAPI:
+def create_app(
+    *,
+    telegram_config: Any | None = None,
+    telegram_gateway: Any | None = None,
+    chat_gateway: Any | None = None,
+) -> FastAPI:
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
         telegram_config = load_telegram_config()
+    effective_telegram_gateway = telegram_gateway or chat_gateway
     if telegram_config.enabled and telegram_config.effective_transport == "webhook":
         from mana_agent.connectors.telegram.connector import TelegramConnector
-        telegram_connector = TelegramConnector(telegram_config, gateway=telegram_gateway)
+        telegram_connector = TelegramConnector(telegram_config, gateway=effective_telegram_gateway)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -56,6 +62,10 @@ def create_app(*, telegram_config: Any | None = None, telegram_gateway: Any | No
     app.include_router(conversations_router)
     app.include_router(events_ws_router)
     app.include_router(workspaces_router)
+
+    # Make the central chat gateway (if provided) available to routes / services
+    if chat_gateway is not None:
+        app.state.chat_gateway = chat_gateway
     if telegram_connector is not None:
         from fastapi import Response
 

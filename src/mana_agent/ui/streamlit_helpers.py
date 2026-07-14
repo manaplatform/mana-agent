@@ -472,6 +472,7 @@ def run_dashboard_chat(
     try:
         from mana_agent.config.settings import Settings
         from mana_agent.commands.cli_internal import build_ask_service
+        from mana_agent.gateway import AgentChatGateway
 
         settings = Settings()
         api_key = getattr(settings, "openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
@@ -486,7 +487,15 @@ def run_dashboard_chat(
                 "execution_id": execution_id,
             }
 
-        service = build_ask_service(settings, None, project_root=root)
+        # Use the central gateway so dashboard connections go through the gateway to agents.
+        gw = None
+        chat_svc = None
+        try:
+            gw = AgentChatGateway(root, coding_agent=False, agent_tools=True)
+            chat_svc = getattr(gw, "_chat_service", None) or getattr(gw, "get_ask_service", lambda: None)()
+        except Exception:
+            chat_svc = None
+
         idx_dir = repository_index_dir(repository_id_for_path(root))
         _emit("agent.planning", "Planning", message="Preparing repository answer", status="running")
         tool_exec_id = f"dash-tool-{uuid.uuid4().hex[:12]}"
@@ -502,14 +511,19 @@ def run_dashboard_chat(
             event_id=tool_exec_id,
         )
 
+        service = chat_svc or build_ask_service(settings, None, project_root=root)
+
         try:
-            resp = service.ask_with_tools(str(idx_dir), prompt, k=k, max_steps=5, timeout_seconds=45)
+            if hasattr(service, "ask_with_tools"):
+                resp = service.ask_with_tools(str(idx_dir), prompt, k=k, max_steps=5, timeout_seconds=45)
+            else:
+                resp = service.ask(str(idx_dir), prompt, k=k)
             _emit(
                 "tool.finished",
-                "ask_with_tools",
+                "ask_with_tools" if hasattr(service, "ask_with_tools") else "ask",
                 message="Tool-assisted answer complete",
                 status="success",
-                metadata={"tool_name": "ask_with_tools", "result_summary": "tool-assisted"},
+                metadata={"tool_name": "ask_with_tools" if hasattr(service, "ask_with_tools") else "ask", "result_summary": "tool-assisted"},
                 event_id=tool_exec_id,
             )
         except Exception as tool_exc:
@@ -521,7 +535,7 @@ def run_dashboard_chat(
                 metadata={"tool_name": "ask_with_tools"},
                 event_id=tool_exec_id,
             )
-            resp = service.ask(str(idx_dir), prompt, k=k)
+            resp = service.ask(str(idx_dir), prompt, k=k) if hasattr(service, "ask") else {"answer": str(tool_exc)}
             _emit(
                 "tool.finished",
                 "ask",

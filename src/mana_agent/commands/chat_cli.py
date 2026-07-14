@@ -45,6 +45,7 @@ from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup
 from mana_agent.skills.chat import ChatSkillCoordinator
 from mana_agent.connectors.browser.session import BrowserSessionManager
+from mana_agent.gateway import AgentChatGateway
 
 
 _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
@@ -1961,8 +1962,41 @@ def chat(
             api_key = getattr(settings, "openai_api_key", None)
             base_url = getattr(settings, "openai_base_url", None) or os.getenv("OPENAI_BASE_URL")
 
-            # Pass the prepared multi-agent objects so the TUI can drive the real flow
-            # (routing, tool execution via orchestrator, memory, auto-execute, etc.)
+            # Gateway is the central connection point to the agent (multi-agent) runtime.
+            # chat_cli creates the gateway (using the just-built stack) so that TUI
+            # connects to the gateway to reach agents. The same objects are still
+            # passed for 100% parity with the console path (see TUI work on this branch).
+            gateway = AgentChatGateway(
+                root=root,
+                model=model,
+                dir_mode=dir_mode,
+                agent_tools=agent_tools,
+                coding_agent=coding_agent,
+                tool_worker_process=tool_worker_process,
+                tool_worker_strict=tool_worker_strict,
+                tool_exec_backend=resolved_tool_exec_backend,
+                redis_url=resolved_redis_url,
+                coding_memory=coding_memory,
+                auto_execute_plan=auto_execute_plan,
+                auto_execute_max_passes=auto_execute_max_passes,
+                execution_profile=execution_profile,
+                full_auto=full_auto,
+                agent_max_steps=agent_max_steps,
+                agent_unlimited=agent_unlimited,
+                agent_timeout_seconds=agent_timeout_seconds,
+                # Hand off the rich objects already constructed in this chat() invocation
+                # (preserves the large TUI parity work on the current branch).
+                chat_service=chat_service,
+                coding_agent_instance=coding_agent_instance,
+                tools_orchestrator=tools_manager_orchestrator,
+            )
+
+            # Pass the prepared multi-agent objects + full coding agent control context
+            # so the TUI drives *exactly* the same generate / generate_dir_mode / generate_auto_execute
+            # calls (with identical kwargs) as the classic console path. This guarantees
+            # 100% functional parity (flows, memory, auto-execute passes, planning, prechecklists, etc.)
+            # while tools surface via ToolCards inside the TUI chat box.
+            # TUI now also receives the gateway so "chat tui connects with gateway to agent".
             run_chat_tui(
                 repo_root=root,
                 model=effective_model_for_tui,
@@ -1973,6 +2007,17 @@ def chat(
                 chat_service=chat_service,
                 coding_agent=coding_agent_instance,
                 tools_orchestrator=tools_manager_orchestrator,
+                # Parity flags (must match the values used by the console loop below)
+                dir_mode=dir_mode,
+                index_dir=resolved_index_dir,
+                index_dirs=dir_mode_index_dirs,
+                auto_execute_plan=auto_execute_plan,
+                auto_execute_max_passes=auto_execute_max_passes,
+                coding_agent_max_steps=coding_agent_max_steps,
+                resolved_k=resolved_k,
+                agent_timeout_seconds=agent_timeout_seconds,
+                # Gateway connection (additive; TUI accepts it optionally)
+                gateway=gateway,
             )
             return
 

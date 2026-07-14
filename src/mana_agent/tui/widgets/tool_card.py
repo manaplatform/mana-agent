@@ -26,6 +26,29 @@ from textual.widgets import Collapsible, Static
 from mana_agent.chat.events import ToolCallEvent, ToolResultEvent
 
 
+def _safe_textual_id(raw: str | None) -> str | None:
+    """Return a Textual-safe widget id.
+
+    Textual DOM ids must contain only letters, numbers, underscores or hyphens
+    and must not begin with a digit. Call ids from workers can contain ":"
+    (e.g. "5061ef...:1"), which we map to "-".
+    """
+    if not raw:
+        return None
+    s = str(raw)
+    # Keep only allowed chars; map others to hyphen
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in s)
+    # Collapse runs of separators
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    safe = safe.strip("-_")
+    if not safe:
+        return None
+    if safe[0].isdigit():
+        safe = "x" + safe
+    return safe
+
+
 class ToolCard(Vertical):
     """
     A self-contained collapsible card representing one tool invocation.
@@ -74,7 +97,8 @@ class ToolCard(Vertical):
         *,
         id: str | None = None,
     ) -> None:
-        super().__init__(id=id or f"tool-{call_event.call_id}")
+        raw = id or f"tool-{call_event.call_id}"
+        super().__init__(id=_safe_textual_id(raw))
         self.call_event = call_event
         self.result_event: ToolResultEvent | None = None
         self._collapsible: Collapsible | None = None

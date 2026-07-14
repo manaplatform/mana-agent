@@ -1,9 +1,12 @@
-"""TUI live tools + auto-scroll related unit checks.
+"""TUI live tools + auto-scroll related unit checks (full coding agent integration).
 
 Proves:
-1. ManaChatApp drives CodingAgent via generate() (not missing handle()).
-2. emit_tool_event bridge records ToolCall/ToolResult into ChatHistory live.
-3. Answer extraction handles coding-agent dict payloads.
+1. ManaChatApp drives CodingAgent via the exact generate* surface (parity with console chat_cli).
+2. emit_tool_event bridge + actions_taken safety net records ToolCall/ToolResult into ChatHistory.
+   These become ToolCards inside the ChatLog (the chat box / "tool box").
+3. Full parity flags (dir_mode, auto_execute_*, k, max_steps, etc.) are accepted and used to build
+   identical calls. Tools reliably surface inside the chat log (no raw emissions).
+4. Answer extraction handles coding-agent dict payloads.
 """
 
 from __future__ import annotations
@@ -43,7 +46,16 @@ def test_extract_answer_from_coding_agent_dict() -> None:
 def test_handle_real_turn_uses_generate_and_emits_tools_live() -> None:
     history = ChatHistory()
     agent = _FakeCodingAgent()
-    app = ManaChatApp(history=history, coding_agent=agent, repo_root=".")
+    app = ManaChatApp(
+        history=history,
+        coding_agent=agent,
+        repo_root=".",
+        # exercise new parity context (used for full generate call construction)
+        dir_mode=False,
+        auto_execute_plan=True,
+        coding_agent_max_steps=42,
+        resolved_k=5,
+    )
 
     user = UserMessageEvent(content="read the readme")
     history.add(user)
@@ -53,6 +65,9 @@ def test_handle_real_turn_uses_generate_and_emits_tools_live() -> None:
     assert agent.calls, "coding agent generate() must be invoked"
     assert agent.calls[0]["request"] == "read the readme"
     assert "index_dir" in agent.calls[0]
+    # Full parity context is threaded through (exact same kwargs surface as console path)
+    assert agent.calls[0].get("max_steps") == 42
+    assert agent.calls[0].get("k") == 5
 
     events = history.get_events()
     tool_calls = [e for e in events if isinstance(e, ToolCallEvent)]

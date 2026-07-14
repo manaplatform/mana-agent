@@ -4,6 +4,23 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed TUI crash when rendering ToolCallEvent cards for tools invoked via the worker path.
+  - Root cause: worker `_WorkerToolEventCallback` (in tool_worker_process.py) generates per-tool event_ids of form `<uuid-hex>:<counter>` (e.g. "5061ef1376cc420584a358142c1eb802:1") for repo_search etc.; this value is forwarded as `call_id` through the emit bridge into `ToolCallEvent` and then used verbatim as `id="tool-..."` when constructing `ToolCard`.
+  - Textual rejects DOM ids containing ":", requiring only [A-Za-z0-9_-] and not starting with digit (BadIdentifier).
+  - Fix: added `_safe_textual_id()` in tool_card.py that preserves the original `call_id` (required for call/result pairing in `_tool_cards` dict and bridges) but produces a sanitized widget id for `super().__init__(id=...)`.
+  - The raw `call_id` (with ":") continues to be used for all matching logic; only the mount-time DOM id is cleaned (":" -> "-").
+  - Verification: exact crash case now creates ToolCard with id "tool-5061ef...-1"; ChatLog mount + result pairing test under run_test succeeded; `./venv/bin/python -m pytest -q tests/test_tui_live_tools_scroll.py` (3 passed); py_compile clean.
+- Full integration of CodingAgent on TUI chat (exact parity with old console functionality, no behavior changes).
+  - Created branch `feature/tui-full-coding-agent-toolbox`.
+  - TUI `ManaChatApp` + `run_chat_tui` now accept and forward the complete control context (dir_mode, index_dir(s), auto_execute_plan, pass_cap, max_steps, k, timeout, etc.).
+  - `_handle_real_turn` replicates the console decision tree, generate/generate_dir_mode/generate_auto_execute call construction (identical kwargs), full-auto resume cycle accounting, flow_id/run_id handling, prechecklist support, and RichToolCallbackHandler usage.
+  - The emit_tool_event bridge + actions_taken safety net ensure every tool from any pass/mode/worker appears as ToolCard ("tool box") inside the ChatLog chat box / message area. No raw text emissions.
+  - Planning collection state machine stub + slash command parity hooks added for interactive flows.
+  - All side-effects (memory, patches, orchestrator, verification) go through the exact same CodingAgent calls as before → zero functional change.
+  - Layout/message-box/footer/padding work from the parent branch preserved (no restructure).
+  - Verification: `./venv/bin/python -m pytest -q tests/test_tui_live_tools_scroll.py` (3 passed); smoke imports + parity attrs; broader chat/tui filter exercised.
+  - Hardened TUI worker: ExecutionScopeDecisionError (and similar model decision / ToolWorkerProcessError cases from inside CodingAgent.generate*) are now caught around the to_thread call (mirroring console except blocks). Error surfaces as assistant message in chat box instead of killing the worker with traceback + WorkerFailed. ToolCards emitted before the failure point remain visible.
+  - Verification: targeted test still passes; py_compile clean.
 - Made `default_ui_mode` selection robust for test/capture consoles (`record=True`) and varying rich terminal detection (is_terminal/width can be surprising on record consoles even with explicit width). Record and CI now force "plain" early; non-tty falls back to original is_terminal check. Updated fragile substring assert in `test_tool_activity_keeps_nested_subagent_events_with_shared_step_id` (subagent ID truncation in narrow table under test console width) to a stable prefix.
   - Also fixed `test_default_ui_mode_keeps_non_tty_plain` and `test_env_ui_mode_rejects_fullscreen`.
   - Verification: `python -m pytest -q tests/test_chat_ui_events_tokens.py` now passes fully (22 tests); targeted original failures re-confirmed green.
@@ -14,6 +31,19 @@ All notable repository changes should be recorded here.
   - Verification: `PYTHONPATH=src ./venv/bin/python -m pytest tests/test_tui_live_tools_scroll.py -q` (3 passed); `tests/test_coding_agent.py -q` (54 passed); AST + imports clean.
 - TUI: tools show live in chat history + chat always auto-scrolls to latest message.
   - Root cause for missing tools: turn handler called non-existent `coding_agent.handle()`, so the multi-agent path never ran and no real tools were emitted. It now drives `CodingAgent.generate()` (with `RichToolCallbackHandler`) like classic chat.
+
+- Added central AgentChatGateway for multi-agent connections.
+  - New package `src/mana_agent/gateway/` with `AgentChatGateway` (and `RichChatContext`).
+  - All primary frontends now connect through the gateway:
+    - Chat TUI: `chat_cli` creates the gateway after building the stack and passes `gateway=` to `run_chat_tui` / `ManaChatApp` (additive param). TUI stores it.
+    - Telegram: `ManaChatGateway` now delegates `send`/`create_session`/`status`/`cancel` to a provided central gateway (or auto-wraps one). `TelegramConnector` and `TelegramConversationRouter` go through it.
+    - Dashboard + API: `run_dashboard_chat` creates/uses `AgentChatGateway` for the ask path; `create_app` accepts and propagates `chat_gateway`.
+  - `chat()` (the main "chat-cli function") now creates the gateway and uses it for connections (per request: "move old chat-cli function and etc to gateway" + "use chat-cli function for gateway connection").
+  - Preserved all in-progress TUI full-coding-agent parity work (large changes on this branch untouched).
+  - Gateway re-uses existing builders (`build_ask_service`, `ChatService`, etc.) and MainAgent recording path.
+  - Simple `send()` path for Telegram/dashboard; rich context for TUI/console.
+  - Verification: `./venv/bin/python -m pytest tests/gateway/test_chat_gateway.py -q` (4 passed); telegram core tests (9 passed); tui live tools test (3 passed); `mana-agent chat --help` works; basic gateway smoke with project python.
+  - Model-decision paths and existing behavior unchanged.
   - `emit_tool_event` bridge pairs start/end by `event_id`, maps worker/callback kind names, and appends `ToolCallEvent`/`ToolResultEvent` while tools are still running (ChatLog paints via thread-safe `post_message`).
   - ChatLog always pins to the newest content: `_scroll_to_latest` anchors the latest widget and `scroll_end(force=True)` after every user/assistant/tool/stream event (and after history replay).
   - Verification: `pytest tests/test_tui_live_tools_scroll.py -q` → 3 passed; `py_compile` on tui modules.

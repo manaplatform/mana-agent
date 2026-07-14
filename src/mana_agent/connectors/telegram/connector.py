@@ -34,6 +34,13 @@ class TelegramConnector:
             if not config.default_repository:
                 raise TelegramConfigurationError("Telegram default_repository is required to execute Mana-Agent chat tasks.")
             gateway = ManaChatGateway(Path(config.default_repository))
+        else:
+            # If a central gateway (AgentChatGateway) was supplied from outside
+            # (api, higher layer, or tests), wrap it so Telegram goes through
+            # the gateway to the agents.
+            if not isinstance(gateway, ManaChatGateway):
+                repo_for_mana = Path(config.default_repository) if config.default_repository else "."
+                gateway = ManaChatGateway(repo_for_mana, core_gateway=gateway)
         self.gateway = gateway
         self.identity: Any = None
         self.router: TelegramConversationRouter | None = None
