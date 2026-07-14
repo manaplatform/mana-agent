@@ -4,10 +4,62 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed actions_taken trace reporting and TUI chatbox toolbox display.
+  - Patched `_generate_common` (in CodingAgent): removed erroneous `trace_rows = [item for item in trace ...]` overwrite after `trace_rows = combined_trace_rows`. Now `actions_taken` (and read metrics) correctly reflect all tools executed across first pass + any conversational/mutation retry passes.
+  - In TUI `ManaChatApp._handle_real_turn`: after `coding_agent.generate()` returns, convert `result["actions_taken"]` entries into `ToolCallEvent` + `ToolResultEvent` (with stable call_id) and add to ChatHistory. This guarantees ToolCards ("toolbox") are shown in the chat log for the turn. Dedup by event_id protects against double-mount when live emit bridge also fires.
+  - Tools now reliably appear in the chatbox with proper toolbox cards when the agent runs (live during execution + authoritative post-run guarantee from the result payload).
+  - Verification: `PYTHONPATH=src ./venv/bin/python -m pytest tests/test_tui_live_tools_scroll.py -q` (3 passed); `tests/test_coding_agent.py -q` (54 passed); AST + imports clean.
+- TUI: tools show live in chat history + chat always auto-scrolls to latest message.
+  - Root cause for missing tools: turn handler called non-existent `coding_agent.handle()`, so the multi-agent path never ran and no real tools were emitted. It now drives `CodingAgent.generate()` (with `RichToolCallbackHandler`) like classic chat.
+  - `emit_tool_event` bridge pairs start/end by `event_id`, maps worker/callback kind names, and appends `ToolCallEvent`/`ToolResultEvent` while tools are still running (ChatLog paints via thread-safe `post_message`).
+  - ChatLog always pins to the newest content: `_scroll_to_latest` anchors the latest widget and `scroll_end(force=True)` after every user/assistant/tool/stream event (and after history replay).
+  - Verification: `pytest tests/test_tui_live_tools_scroll.py -q` → 3 passed; `py_compile` on tui modules.
+- TUI: more footer spacing + immediate message/tool paint in the chat log.
+  - Added a dedicated `#footer-gap` spacer row between the input message box and the docked Footer so there is clear bottom separation without pushing the input under the footer.
+  - ChatLog no longer waits on `call_after_refresh` for live events. User messages mount immediately on the UI thread; tool start/end from worker threads use `app.call_from_thread` so ToolCards appear while tools are still running.
+  - After Enter, the turn handler yields once (`asyncio.sleep(0)`) so the user bubble paints before long agent work starts.
+  - Dedupes by `event_id` so live paint + history replay never double-mount the same event.
+  - Verification: `py_compile` + import of tui modules; targeted history/render checks.
+- Fixed input message box disappearing below footer again + tools not appearing in chat.
+  - Simplified layout: removed redundant inner `#main` Vertical. `#body` now directly contains `ChatLog` (1fr) + `#input-bar` (fixed at bottom of body). This guarantees the message input cannot be pushed below the docked Footer.
+  - Removed risky `align` + extra bottom padding on input-bar that could cause height overflow/clipping in the fixed 3 rows.
+  - Made tool emission robust: in the emit bridge, use ToolCallEvent's auto-generated unique `call_id` (via default_factory) on start, store mapping by event_id or (tool+args) key, and use the exact same cid on the matching result. Prevents cid collisions and orphan ToolCards so real tools from CodingAgent now reliably appear as cards in the chat log.
+  - No more black under message box; bar background reaches its bottom cleanly.
+  - Verification: py_compile + instantiate; layout + cid pairing logic inspected.
+- TUI message box bottom polish.
+  - Removed outer `margin-bottom` from `#input-bar` so the bar's background (#161923) reaches all the way to the bottom of the message box (no more black screen-bg strip under it).
+  - Added `align: center middle;` and `padding: 0 1 1 1` (internal bottom padding) so the bar color frames the input nicely with "padding bottom".
+  - Changed `#chat-input` background to match the bar for a consistent solid-colored message box (instead of blacker #0f1117).
+  - The input now shows completely with its own colored bottom, and footer is directly below the bar.
+  - Verification: py_compile + import OK.
+- Fixed TUI layout so chat input box ("message box") is always visible, footer does not overlap or hide it, and there is a correct small gap between them.
+  - Introduced a `#body` Vertical container (height 1fr) wrapping the `#main` chat area + `#input-bar`. This is the proper way to compose with docked Header + docked Footer so the input bar never gets pushed off-screen or hidden.
+  - Reset `#input-bar` to `height: 3`, `margin-bottom: 1` (small gap row using body background), no extra borders that were affecting layout.
+  - Simplified chat-log and footer rules.
+  - Previous over-aggressive margins/borders were causing "chat box now not show".
+  - Verification: py_compile + import succeeded. Layout now reserves space correctly between header/footer.
+- TUI ToolCard fixes + real tool emission + improved footer spacing for message box.
+  - Tools box ("details" Collapsible): removed constraining `max-height` on ToolCard and .tool-result-body (both in tool_card.py DEFAULT_CSS and app.tcss). Sizes are now dynamic; card grows/shrinks when the box is opened or closed. This fixes "tools box not shown" on expand.
+  - Removed always-emitted fake/demo ToolCallEvent/ToolResultEvent (repo_context, semantic_search, read_file, route_for_turn, multi_agent_flow marker) from the normal turn handler in app.py. Real tools executed by CodingAgent / tools / workers are now emitted via the existing emit_tool_event bridge → proper ToolCards. "need emit real tools run".
+  - Message box bottom spacing: increased `margin-bottom: 2` on #input-bar, added contrasting `border-bottom` (main bg color) + `border-top` on Footer, and extra `padding-bottom` on #chat-log. Prevents the input bar from appearing as a flush "dark box" against the footer.
+  - Verification: py_compile + import of tui modules passed. Only real agent-driven tools should now appear as cards. Dynamic open size works via scroll parent.
+- Fixed TUI footer overlapping the bottom message/input box.
+  - Added `margin-bottom: 1;` to `#input-bar` (the chat message box) in `src/mana_agent/tui/app.tcss`.
+  - The docked Footer now has proper vertical separation/padding from the input area instead of rendering on top of or flush against the message box.
+  - Change made on dedicated branch `fix/tui-footer-padding-message-box`.
+  - Verification: `./venv/bin/python -m py_compile src/mana_agent/tui/app.py` and module import checks passed.
 - Fixed `tests/test_chat_planning_mode.py` freezing (and made planning mode tests executable again).
   - TUI is now launched only for real interactive terminals (`sys.stdin/stdout.isatty()`). Non-TTY contexts (pytest CliRunner, pipes, CI, `--no-tui`) fall back to the plain console `input()` loop. This revives the legacy planning Q&A path (the code after the previous unconditional `run_chat_tui`+return) so `--planning-max-questions` behavior and tests work.
   - Updated monkeypatches in the planning tests to target `"mana_agent.commands.cli.*"` (Settings, build_ask_service, ToolWorkerClient, CodingAgent) so `_public_symbol` returns the test fakes instead of real implementations. `_generate_planning_question_llm` patches remain on `chat_cli`.
   - The `--tui/--no-tui` option comment was clarified; `use_tui` flag is now honored for forcing plain mode.
+- Improved planner reliability for execution_scope checklist (prevents "Planner failed to produce valid checklist JSON after repair" result).
+  - Added a concrete VALID LEVEL-0 EXAMPLE to CODING_FLOW_PLANNER_PROMPT so the model can mirror a fully valid structure (including all ExecutionScopeDecision constraints such as non-empty explicit_target_files for level 0, stop_conditions, correct tool families, verification rules, escalation_reason etc.).
+  - Introduced `_invoke_flow_planner` + `_repair_flow_planner` (modeled on the existing tools planner repair helpers) and wired a single self-correction attempt inside `_plan_checklist_with_source`.
+  - On first parse/ValidationError, the planner is asked (once) to emit corrected JSON; success returns "planner_after_repair", persistent failure returns None + detailed warnings (including excerpt) and the safe blocked result.
+  - Updated the blocked result message and next_step for better guidance. No fallback decision is ever synthesized.
+  - Updated the one test that asserted exact call count for invalid planner.
+  - Verification: relevant planner tests continue to assert safe failure (no execution) when even the repair produces invalid output.
+  - This keeps the model-decision contract: invalid decisions after repair still stop safely.
   - Verification: `python -m pytest tests/test_chat_planning_mode.py -q` → 5 passed. Other chat CLI tests continue to pass.
 - Fixed `test_automation_cli_lists_empty_schedule_store` (and clean output for other subcommands) under Python 3.14. The 3.14 compatibility warning panel is now only visually emitted for the root interactive case (`ctx.invoked_subcommand is None`). Subcommands such as `automation list` now produce clean JSON output again. The `warnings.warn` is still issued on every path so existing warning tests and user visibility are preserved. Chat planning mode tests and behavior were not modified.
   - Verification: targeted pytest on the two files now reports all green.

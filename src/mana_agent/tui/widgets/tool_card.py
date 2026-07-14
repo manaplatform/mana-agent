@@ -38,8 +38,9 @@ class ToolCard(Vertical):
     ToolCard {
         margin: 0 0 1 0;
         padding: 0;
-        min-height: 4;   /* at least header visible */
-        max-height: 18;  /* fixed-ish max height regardless of terminal size; ChatLog scrolls the list on small heights */
+        min-height: 3;   /* at least the always-visible header line */
+        /* Dynamic height: allow the card (and Collapsible content) to grow when "details" is opened.
+           The parent ChatLog (VerticalScroll) handles scrolling for tall content. No max-height. */
     }
     ToolCard Collapsible {
         border: round $primary;
@@ -59,7 +60,7 @@ class ToolCard(Vertical):
     }
     .tool-result-body {
         padding: 0 1;
-        max-height: 12;
+        /* No max-height so expanded details are fully visible and size can change on open */
     }
     .tool-card-header {
         text-style: bold;

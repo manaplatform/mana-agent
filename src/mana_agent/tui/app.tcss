@@ -21,18 +21,17 @@ Footer {
 }
 
 #input-bar {
-    height: 3;
+    height: 4;
     background: #161923;
     border-top: thick #334155;
-    padding: 0 1;
+    /* Fixed at bottom of #body (above #footer-gap). ChatLog is 1fr and shrinks. */
 }
 
 #chat-input {
     width: 100%;
     border: round #475569;
-    background: #0f1117;
+    background: #161923;  /* consistent with bar so bottom of message box isn't black */
     color: #e2e8f0;
-    padding: 0 1;
 }
 
 #chat-input:focus {
@@ -44,6 +43,12 @@ Footer {
     border: round #334155;
     background: #0f1117;
     padding: 1;
+    /* Extra bottom padding so last messages aren't flush against the input bar */
+    padding-bottom: 1;
+}
+
+#body {
+    height: 1fr;
 }
 
 #main {
@@ -70,8 +75,9 @@ Footer {
 /* Tool cards styling is also in the Python DEFAULT_CSS of ToolCard */
 ToolCard {
     margin: 0 2 1 2;
-    min-height: 4;   /* at least the header is always visible */
-    max-height: 18;  /* fixed-ish max height on all terminal sizes; the #chat-log scrolls when needed */
+    min-height: 3;   /* at least the always-visible header line */
+    /* Dynamic sizing: remove max-height so the tools box can grow when the "details" Collapsible is opened.
+       Size changes on expand/collapse. ChatLog VerticalScroll manages overflow. */
 }
 
 ToolCard Collapsible {
@@ -92,7 +98,7 @@ ToolCard .tool-call-header {
 }
 
 .tool-result-body {
-    max-height: 12;
+    /* No max-height: content is fully visible and card height adjusts when opened */
 }
 
 .tool-card-header {

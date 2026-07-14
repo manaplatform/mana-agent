@@ -598,6 +598,10 @@ Planning rules:
 - Keep step count small enough for direct execution.
 - Every acceptance criterion must be verifiable.
 - Do not put terminal conversation text in `next_action`; describe the next execution action.
+- Replicate the structure of the EXAMPLE below precisely (all required keys present, correct types, satisfying the execution_scope validation rules).
+
+VALID LEVEL-0 (DIRECT) EXAMPLE — emit only JSON matching this shape exactly (values adapted to the request):
+{"objective":"Fix TUI footer padding in message box","requires_edit":true,"target_files":["src/mana_agent/tui/widgets/chat_log.py"],"constraints":["edit only files under allowed prefixes"],"acceptance":["footer gap and padding render correctly","message box does not overlap footer"],"execution_scope":{"decision_id":"scope_001","task_type":"edit","scope_level":0,"complexity":"small","risk":"low","explicit_target_files":["src/mana_agent/tui/widgets/chat_log.py"],"related_files":[],"required_evidence":["current footer and input layout code"],"allowed_tool_families":["read","mutation","verification"],"search_scope":"none","max_search_operations":0,"max_unique_file_reads":2,"mutation_strategy":"single_patch","verification_strategy":"artifact","verification_commands":[],"delegated_agents":[],"stop_conditions":["requested layout change is applied and safe"],"confidence":0.82,"escalation_reason":"","unresolved_questions":[],"out_of_bounds":[]},"steps":[{"id":"s1","title":"Read the chat_log widget to see footer/input code","reason":"capture exact current padding implementation","status":"in_progress","requires_tools":["read_file"]},{"id":"s2","title":"Apply targeted edit for padding","reason":"correct the spacing per request","status":"pending","requires_tools":["edit_file"]},{"id":"s3","title":"Verify no layout regression","reason":"confirm UI remains usable","status":"pending","requires_tools":["run_command"]}],"next_action":"Read the target file."}
 """.strip()
 
 
