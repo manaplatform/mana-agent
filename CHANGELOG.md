@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Demoted memory operational traces (`duplicate_task_hit`, `scoped_bundle_created`,
+  `queue_duplicate_rejected`, `tool_cache_hit`) from INFO to DEBUG so they appear
+  only with `--verbose` / `--debug`, not in normal mode console or file logs.
+  - Verification: `python -m py_compile src/mana_agent/services/memory_service.py` and
+    targeted grep that no `[memory]` logger.info remains.
+
 - Fixed core CI collection for dashboard navigation tests by lazy-loading
   Streamlit in timeline render helpers and making Streamlit-dependent dashboard
   page/app assertions skip when the optional dashboard extra is not installed.

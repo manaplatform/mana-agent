@@ -557,7 +557,7 @@ class MultiAgentMemoryService:
         )
         self.task_records[task_id] = record
         self._persist()
-        logger.info("[memory] duplicate_task_hit task_id=%s duplicate_of=%s", task_id, record.duplicate_of or "")
+        logger.debug("[memory] duplicate_task_hit task_id=%s duplicate_of=%s", task_id, record.duplicate_of or "")
         return record
 
     def update_task(self, task_id: str, *, status: str | None = None, result_summary: str = "") -> None:
@@ -574,7 +574,7 @@ class MultiAgentMemoryService:
     def register_queue_item(self, *, queue_item_id: str, fingerprint: str) -> tuple[bool, str | None]:
         existing = self.queue_fingerprints.get(fingerprint)
         if existing:
-            logger.info("[memory] queue_duplicate_rejected queue_item_id=%s existing=%s", queue_item_id, existing)
+            logger.debug("[memory] queue_duplicate_rejected queue_item_id=%s existing=%s", queue_item_id, existing)
             return False, existing
         self.queue_fingerprints[fingerprint] = queue_item_id
         return True, None
@@ -637,7 +637,7 @@ class MultiAgentMemoryService:
         record = self.tool_executions.get(key)
         if record and record.reusable and record.status == "ok":
             record.result = self._normalized_reusable_result(record.result, cache_hit=True, source="memory")
-            logger.info("[memory] tool_cache_hit tool=%s", normalized)
+            logger.debug("[memory] tool_cache_hit tool=%s", normalized)
             return record
         return None
 
@@ -789,7 +789,7 @@ class MultiAgentMemoryService:
             session_id=self.session_id,
             repository_ids=[self.repository_id],
         )
-        logger.info("[memory] scoped_bundle_created bundle_id=%s agent_id=%s role=%s", bundle.bundle_id, agent_id, role)
+        logger.debug("[memory] scoped_bundle_created bundle_id=%s agent_id=%s role=%s", bundle.bundle_id, agent_id, role)
         return bundle
 
     @staticmethod
