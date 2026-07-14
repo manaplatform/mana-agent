@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Removed post-response diagnostic panels (Summary, Steps, Decisions, History /
+  Session History) from chat presentation. Final turns now render the normal
+  assistant answer plus concise warnings; live tool progress while a request is
+  running is preserved. Execution telemetry, traces, decisions, and session
+  history remain available for logging, debugging, tests, and future dashboard
+  use.
+  - Verification: `./venv/bin/python -m pytest -q tests/test_cli_smoke.py
+    tests/test_cli_ux_helpers.py tests/test_chat_direct_commands.py` passed
+    (94 tests); focused panel-regression filter also passed (22 tests);
+    `py_compile` and `git diff --check` passed.
+
 - Reworked coding turns around one validated adaptive execution-scope decision
   with a four-level escalation ladder, canonical run-scoped evidence caching,
   direct batch reads for exact paths, one-pass focused mutation generation,

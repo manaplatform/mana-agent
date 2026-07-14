@@ -2498,7 +2498,7 @@ def chat(
                 )
                 session_turns.append(turn_record)
                 chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                _render_turn_transparency(console, turn=turn_record, history=session_turns)
+                # Answer already rendered above; keep telemetry, skip diagnostic panels.
                 _finish_ui_turn(current_turn_id)
                 continue
 
@@ -3046,7 +3046,7 @@ def chat(
                         step_id="05",
                         metadata={
                             "next_action": "final response",
-                            "verification_target": "answer rendered with transparency sections",
+                            "verification_target": "answer rendered without diagnostic panels",
                         },
                     ).finish(status="success")
                 )
@@ -3514,6 +3514,8 @@ def chat(
                         result if isinstance(result, dict) else {},
                         rendered_dynamic=rendered_dynamic,
                         show_actions=False,
+                        # Warnings already printed with the answer above.
+                        show_warnings=False,
                     )
                     if payload_sources:
                         _render_answer_sections(

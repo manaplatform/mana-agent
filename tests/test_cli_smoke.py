@@ -408,7 +408,99 @@ def test_chat_blocks_edit_requests_without_coding_agent(monkeypatch, tmp_path: P
     assert "--coding-agent" in result.stdout
 
 
-def test_chat_transparency_sections_always_render_in_normal_mode(monkeypatch, tmp_path: Path) -> None:
+def test_chat_zero_tool_response_renders_only_answer(monkeypatch, tmp_path: Path) -> None:
+    """Regression: classic chat with no tool calls shows only the answer."""
+    class _AskService(FakeAskService):
+        def __init__(self) -> None:
+            self.ask_agent = object()
+
+        def ask(self, index_dir: str, question: str, k: int) -> AskResponse:
+            _ = (index_dir, question, k)
+            return AskResponse(answer="Plain answer with no tools.", sources=[])
+
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None: _AskService())
+
+    result = runner.invoke(
+        app,
+        ["chat"],
+        input="hello world\nquit\n",
+    )
+    assert result.exit_code == 0
+    assert "Plain answer with no tools." in result.stdout
+    assert "Answer" in result.stdout
+    assert "Session History" not in result.stdout
+    assert "Answer preview" not in result.stdout
+    assert "No tool steps ran for this answer." not in result.stdout
+    assert "No decisions were recorded for this turn." not in result.stdout
+    assert "No prior turns in this session." not in result.stdout
+
+
+def test_chat_tool_backed_response_omits_diagnostic_panels(monkeypatch, tmp_path: Path) -> None:
+    """Regression: tool-backed answers keep telemetry internally but omit panels."""
+    class _TracingAskService(FakeAskService):
+        def __init__(self) -> None:
+            self.ask_agent = object()
+
+        def ask_with_tools(
+            self,
+            index_dir: str,
+            question: str,
+            k: int,
+            max_steps: int = 6,
+            timeout_seconds: int = 30,
+        ) -> AskResponseWithTrace:
+            _ = (index_dir, question, k, max_steps, timeout_seconds)
+            return AskResponseWithTrace(
+                answer="Tool-backed final answer.",
+                sources=[],
+                mode="agent-tools",
+                trace=[
+                    {
+                        "tool_name": "read_file",
+                        "status": "ok",
+                        "duration_ms": 4.0,
+                        "args_summary": "path='README.md'",
+                    }
+                ],
+                warnings=[],
+            )
+
+    logged: list[dict] = []
+
+    class _FakeRunLogger:
+        def __init__(self, log_file=None) -> None:
+            _ = log_file
+
+        def log(self, payload: dict) -> None:
+            logged.append(payload)
+
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None: _TracingAskService())
+    monkeypatch.setattr("mana_agent.commands.cli.LlmRunLogger", _FakeRunLogger)
+
+    result = runner.invoke(
+        app,
+        ["chat", "--agent-tools"],
+        input="read the readme\nquit\n",
+    )
+    assert result.exit_code == 0
+    assert "Tool-backed final answer." in result.stdout
+    assert "Session History" not in result.stdout
+    assert "Answer preview" not in result.stdout
+    assert "No tool steps ran for this answer." not in result.stdout
+    # Internal trace still logged for debugging/dashboard use.
+    chat_rows = [row for row in logged if row.get("flow") == "chat"]
+    assert chat_rows
+    assert chat_rows[-1].get("tool_steps") == 1
+    assert any(
+        (item or {}).get("tool_name") == "read_file"
+        for item in (chat_rows[-1].get("trace") or [])
+        if isinstance(item, dict)
+    )
+
+
+def test_chat_normal_mode_renders_answer_without_diagnostic_panels(monkeypatch, tmp_path: Path) -> None:
     class _AskService(FakeAskService):
         def __init__(self) -> None:
             self.ask_agent = object()
@@ -422,11 +514,14 @@ def test_chat_transparency_sections_always_render_in_normal_mode(monkeypatch, tm
         input="first question\nsecond question\nquit\n",
     )
     assert result.exit_code == 0
-    assert result.stdout.count("Summary") >= 2
-    assert result.stdout.count("Steps") >= 2
-    assert result.stdout.count("Decisions") >= 2
-    assert result.stdout.count("History") >= 2
-    assert "Session History" in result.stdout
+    assert "Uses add. /tmp/good.py:2-4" in result.stdout
+    assert result.stdout.count("Answer") >= 2
+    assert "Session History" not in result.stdout
+    assert "Answer preview" not in result.stdout
+    # Diagnostic panel titles must not appear as post-response sections.
+    assert "No tool steps ran for this answer." not in result.stdout
+    assert "No decisions were recorded for this turn." not in result.stdout
+    assert "No prior turns in this session." not in result.stdout
 
 
 def test_chat_root_dir_applies_to_worker_and_coding_agent_in_classic_mode(monkeypatch, tmp_path: Path) -> None:
@@ -580,7 +675,7 @@ def test_chat_root_dir_changes_default_index_dir_in_classic_mode(monkeypatch, tm
     )
 
 
-def test_chat_transparency_uses_trace_steps_in_agent_tools_mode(monkeypatch, tmp_path: Path) -> None:
+def test_chat_agent_tools_mode_renders_answer_without_diagnostic_panels(monkeypatch, tmp_path: Path) -> None:
     class _TracingAskService(FakeAskService):
         def __init__(self) -> None:
             self.ask_agent = object()
@@ -618,10 +713,11 @@ def test_chat_transparency_uses_trace_steps_in_agent_tools_mode(monkeypatch, tmp
         input="plan this\nquit\n",
     )
     assert result.exit_code == 0
-    assert "Steps" in result.stdout
-    assert "semantic_search" in result.stdout
-    assert "Decisions" in result.stdout
     assert "Use semantic search first" in result.stdout
+    assert "Answer" in result.stdout
+    assert "Session History" not in result.stdout
+    assert "No tool steps ran for this answer." not in result.stdout
+    assert "No decisions were recorded for this turn." not in result.stdout
 
 
 def test_chat_writes_llm_run_log_rows(monkeypatch, tmp_path: Path) -> None:
@@ -1353,11 +1449,12 @@ def test_flow_checklist_cli_view_renders_codex_sections(monkeypatch, tmp_path: P
     assert "Plan" in result.stdout
     assert "Progress" in result.stdout
     assert "Checklist" in result.stdout
-    assert "Steps" in result.stdout
-    assert "Decisions" in result.stdout
-    assert "History" in result.stdout
     assert "Next Step" in result.stdout
     assert "Flow Checklist" in result.stdout
+    assert "done" in result.stdout
+    assert "Session History" not in result.stdout
+    assert "Answer preview" not in result.stdout
+    assert "No decisions were recorded for this turn." not in result.stdout
 
 
 def test_chat_coding_agent_answer_only_on_tools_only_fallback(monkeypatch, tmp_path: Path) -> None:
@@ -1583,7 +1680,7 @@ def test_chat_coding_agent_unlimited_mode_bypasses_default_step_cap(monkeypatch,
     assert _FakeCodingAgent.last_max_steps > 200
 
 
-def test_chat_summary_uses_actions_taken_total_when_trace_is_truncated(monkeypatch, tmp_path: Path) -> None:
+def test_chat_turn_log_preserves_actions_taken_total_when_trace_is_truncated(monkeypatch, tmp_path: Path) -> None:
     class _FakeAskService(FakeAskService):
         def __init__(self) -> None:
             self.ask_agent = object()
@@ -1619,9 +1716,19 @@ def test_chat_summary_uses_actions_taken_total_when_trace_is_truncated(monkeypat
         def generate_dir_mode(self, *_args: object, **_kwargs: object) -> dict:
             return self.generate(*_args, **_kwargs)
 
+    rows: list[dict] = []
+
+    class _FakeRunLogger:
+        def __init__(self, log_file=None) -> None:
+            _ = log_file
+
+        def log(self, payload: dict) -> None:
+            rows.append(payload)
+
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None: _FakeAskService())
     monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", _FakeCodingAgent)
+    monkeypatch.setattr("mana_agent.commands.cli.LlmRunLogger", _FakeRunLogger)
 
     result = runner.invoke(
         app,
@@ -1629,8 +1736,12 @@ def test_chat_summary_uses_actions_taken_total_when_trace_is_truncated(monkeypat
         input="implement\nquit\n",
     )
     assert result.exit_code == 0
-    assert "Tool steps" in result.stdout
-    assert "37" in result.stdout
+    assert "done" in result.stdout
+    assert "Session History" not in result.stdout
+    assert "Tool steps" not in result.stdout
+    chat_rows = [row for row in rows if row.get("flow") == "chat"]
+    assert chat_rows
+    assert chat_rows[-1].get("tool_steps") == 37
 
 
 def test_chat_renders_dynamic_plan_and_diagram_blocks_in_normal_path(monkeypatch, tmp_path: Path) -> None:
@@ -1720,7 +1831,9 @@ def test_chat_inferrs_mermaid_diagram_block_and_renders_before_summary(monkeypat
     assert result.exit_code == 0
     assert len(_MermaidAskService.calls) == 1
     assert "graph TD" in result.stdout
-    assert result.stdout.find("Diagram") < result.stdout.find("Summary")
+    assert "Diagram" in result.stdout
+    assert "Session History" not in result.stdout
+    assert "Answer preview" not in result.stdout
 
 
 def test_chat_diagram_artifact_render_invokes_mermaid_renderer(monkeypatch, tmp_path: Path) -> None:
@@ -1950,7 +2063,9 @@ def test_chat_coding_path_inferrs_mermaid_diagram_block_and_renders_before_summa
     )
     assert result.exit_code == 0
     assert "graph LR" in result.stdout
-    assert result.stdout.find("Diagram") < result.stdout.find("Summary")
+    assert "Diagram" in result.stdout
+    assert "Session History" not in result.stdout
+    assert "Answer preview" not in result.stdout
 
 
 def test_chat_ignores_malformed_ui_blocks_and_falls_back_to_answer(monkeypatch, tmp_path: Path) -> None:

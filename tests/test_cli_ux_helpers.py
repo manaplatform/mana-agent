@@ -121,6 +121,8 @@ def test_render_turn_summary_and_transparency_sections() -> None:
         changed_files_count=2,
         has_diff=True,
     )
+    # Summary text builder remains available for logs/debug, but is not
+    # presented as a chat panel by the final-turn renderer.
     assert "Summary" in summary
     assert "Changed files: 2" in summary
     assert "Diff: yes" in summary
@@ -148,12 +150,94 @@ def test_render_turn_summary_and_transparency_sections() -> None:
     console = Console(record=True)
     cli._render_turn_transparency(console, turn=turn, history=[turn])
     rendered = console.export_text()
-    assert "Summary" in rendered
-    assert "Steps" in rendered
-    assert "Decisions" in rendered
-    assert "History" in rendered
-    assert "Session History" in rendered
-    assert "10:00:00" in rendered
+    assert "Decision: Use deterministic fallback checklist." in rendered
+    assert "Warning:" in rendered
+    assert "patch-only loop detected" in rendered
+    # Diagnostic panels must not appear in the final chat presentation.
+    assert "Session History" not in rendered
+    assert "Answer preview" not in rendered
+    # Telemetry remains intact for logging / future dashboard use.
+    assert turn.trace[0]["tool_name"] == "semantic_search"
+    assert turn.decisions[0]["decision"] == "Use deterministic fallback checklist"
+    assert turn.warnings == ["patch-only loop detected"]
+
+
+def test_zero_tool_response_renders_only_answer_without_diagnostic_panels() -> None:
+    """Regression: a no-tool final turn shows the answer only."""
+    turn = cli.ChatTurnTelemetry(
+        turn_index=1,
+        timestamp="2026-07-14T12:00:00",
+        question="what is this?",
+        answer_text="This project is Mana-Agent.",
+        sources=[],
+        warnings=[],
+        trace=[],
+        tool_steps_total=0,
+        decisions=[],
+    )
+    console = Console(record=True)
+    cli._render_turn_transparency(console, turn=turn, history=[turn])
+    rendered = console.export_text()
+    assert "This project is Mana-Agent." in rendered
+    assert "Answer" in rendered
+    assert "Session History" not in rendered
+    assert "Answer preview" not in rendered
+    assert "No tool steps ran for this answer." not in rendered
+    assert "No decisions were recorded for this turn." not in rendered
+    assert "No prior turns in this session." not in rendered
+
+
+def test_tool_backed_response_keeps_live_progress_without_diagnostic_panels() -> None:
+    """Regression: live tool progress remains, final diagnostic panels do not."""
+    console = Console(record=True)
+
+    def _call(callbacks):
+        _ = callbacks
+        emit_tool_event("start", "read_file", args="path='README.md'")
+        emit_tool_event("end", "read_file", duration=1.5)
+        return {"ok": True}
+
+    result, debug_tail = _run_with_live_buffer(
+        console,
+        spinner_text="Working…",
+        fn=_call,
+        callbacks=[],
+    )
+    assert result == {"ok": True}
+    assert debug_tail == ""
+    live_rendered = console.export_text()
+    # Live execution status is preserved while tools run / complete.
+    assert "read_file" in live_rendered
+
+    turn = cli.ChatTurnTelemetry(
+        turn_index=1,
+        timestamp="2026-07-14T12:01:00",
+        question="summarize README",
+        answer_text="README describes the chat CLI.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "read_file",
+                "status": "ok",
+                "duration_ms": 1.5,
+                "args_summary": "path='README.md'",
+            }
+        ],
+        tool_steps_total=1,
+        decisions=[{"decision": "read_file", "rationale": "Need README content"}],
+    )
+    final_console = Console(record=True)
+    cli._render_turn_transparency(final_console, turn=turn, history=[turn])
+    final_rendered = final_console.export_text()
+    assert "README describes the chat CLI." in final_rendered
+    assert "Session History" not in final_rendered
+    assert "Answer preview" not in final_rendered
+    assert "No tool steps ran for this answer." not in final_rendered
+    assert "No decisions were recorded for this turn." not in final_rendered
+    # Trace remains available internally even though the Steps panel is gone.
+    assert turn.trace[0]["tool_name"] == "read_file"
+    assert turn.decisions[0]["decision"] == "read_file"
 
 
 def test_tool_activity_buffer_renders_one_box_for_managed_request() -> None:
@@ -477,9 +561,11 @@ def test_render_turn_transparency_preserves_multiline_command_preview() -> None:
     rendered = console.export_text()
     assert "Command surface:" in rendered
     assert "mana-agent ask" in rendered
-    assert "Sources" in rendered
-    assert "11" in rendered
-    assert "00:34:27" in rendered
+    assert "mana-agent chat" in rendered
+    # Full answer is shown; diagnostic panels are not.
+    assert "Session History" not in rendered
+    assert "Answer preview" not in rendered
+    assert "00:34:27" not in rendered
 
 
 def test_render_coding_sections_contains_expected_blocks() -> None:

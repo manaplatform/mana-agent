@@ -1465,11 +1465,25 @@ def _render_turn_transparency(
     turn: ChatTurnTelemetry,
     history: list[ChatTurnTelemetry],
 ) -> None:
-    """Render summary, steps, decisions, and history blocks for one turn."""
-    _render_summary_section(console, turn=turn)
-    _render_steps_section(console, turn.trace)
-    _render_decisions_section(console, turn.decisions)
-    _render_history_section(console, history)
+    """Render the final assistant response for one chat turn.
+
+    Diagnostic panels (Summary, Steps, Decisions, History / Session History)
+    are intentionally not printed. Callers still build full ``ChatTurnTelemetry``
+    and session history for logging, debugging, tests, verbose tooling, and
+    future dashboard use; only the presentation layer is disabled here.
+    """
+    _ = history  # retained by callers for session telemetry; not presented
+    answer_text = (turn.answer_text or "").strip()
+    _render_answer_header(console)
+    if answer_text:
+        console.print(Markdown(answer_text))
+    else:
+        console.print("[dim](no answer text)[/dim]")
+
+    # Surface necessary failure context without restoring diagnostic panels.
+    warnings = [str(item).strip() for item in list(turn.warnings or []) if str(item).strip()]
+    for warning in warnings[:12]:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
 
 
 def _log_chat_turn(
