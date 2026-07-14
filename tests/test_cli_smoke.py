@@ -3216,7 +3216,9 @@ def test_chat_full_auto_pass_cap_auto_resumes_until_completion(monkeypatch, tmp_
     assert _FakeCodingAgent.auto_calls == 2
     assert "Tool activity" not in result.stdout
     assert result.stdout.count("─ tools ") == 1
-    assert result.stdout.count("tool_worker") == 2
+    # "tool_worker" appears once per cycle in the tools panel + once per cycle from the
+    # terminal tool event decoration lines written via InlineChatRenderer after console.print(activity).
+    assert result.stdout.count("tool_worker") == 4
     assert result.stdout.count("Full-auto Checkpoint") == 1
     assert "checklist: done 1 | pending 1 | blocked 0 | total 2" in result.stdout
     assert "Status: executing (pass_cap_reached)." not in result.stdout
