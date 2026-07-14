@@ -318,8 +318,10 @@ def test_inline_renderer_renders_tool_and_subagent_events_compactly() -> None:
     )
 
     rendered = console.export_text()
-    assert '→ tool repo_search "openclaw"' in rendered
-    assert "✓ tool repo_search 12 matches" in rendered
+    # Running ("ToolStarted") tool events are suppressed in the InlineChatRenderer transcript
+    # (in-progress progress is handled by LiveToolActivity); only terminal state produces a line.
+    assert '→ tool repo_search "openclaw"' not in rendered
+    assert "✓ repo_search 12 matches" in rendered
     assert "↳ subagent coding-agent-0002 created: refactor chat renderer" in rendered
     assert "  ✓ coding-agent-0002 completed" in rendered
     assert "{" not in rendered

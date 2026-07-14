@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Updated stale test expectations in `test_inline_renderer_renders_tool_and_subagent_events_compactly` and `test_chat_full_auto_pass_cap_auto_resumes_until_completion` to match current InlineChatRenderer and full-auto transcript behavior (running tool events are suppressed in the main transcript; tool names surface via both the "tools" panel and terminal decoration lines).
+  - Verification: `python -m pytest -q tests/test_chat_ui_events_tokens.py::test_inline_renderer_renders_tool_and_subagent_events_compactly tests/test_cli_smoke.py::test_chat_full_auto_pass_cap_auto_resumes_until_completion` passed.
+
 - Fixed hard crash on `mana-agent` startup (and any CLI command) under Python 3.14. Root cause was an unconditional top-level import of the deprecated `langchain.agents.initialize_agent` + legacy `langchain_community` file tools inside `cli_internal.py`. These were only used by a dead, unused `build_file_agent()` helper (no callers anywhere in src/ or tests/). The legacy code triggered Pydantic model construction + Python 3.14 `annotationlib`/`typing._eval_type` failure on `Optional[dict[str, Any]]` inside langchain's `Chain` class.
   - Removed the two problematic top-level imports and the entire dead `build_file_agent` function.
   - `mana-agent` (and `mana-agent --help`) now starts cleanly on Python 3.14.
