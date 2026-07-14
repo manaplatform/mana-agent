@@ -388,82 +388,133 @@ class ManaChatApp(App):
                 summary=tsummary, duration_ms=42, turn_id=turn_id
             ))
 
+        # Bridge the old emit_tool_event (used inside coding_agent, tools_orchestrator etc.)
+        # so that REAL tool calls made by the multi-agent flow are translated to our
+        # ToolCallEvent/ToolResultEvent and appear as cards in the TUI.
+        import mana_agent.commands.ui_helpers as ui_helpers
+        original_emit = ui_helpers.emit_tool_event
+
+        def bridged_emit(kind, tool, *, args="", duration=None, error="", event_id=None, **kwargs):
+            # Let the original run (it may update internal state/activity)
+            try:
+                original_emit(kind, tool, args=args, duration=duration, error=error, event_id=event_id, **kwargs)
+            except Exception:
+                pass
+            # Translate to TUI events so cards show
+            kind_l = str(kind).lower()
+            cid = str(event_id) if event_id else f"tool-{tool}"
+            if any(x in kind_l for x in ("start", "started")):
+                tcall = ToolCallEvent(
+                    tool_name=str(tool),
+                    args=args or {},
+                    call_id=cid,
+                    summary=str(args)[:60] if args else "",
+                    turn_id=turn_id,
+                )
+                self.history.add(tcall)
+            elif any(x in kind_l for x in ("end", "finished", "done", "success")):
+                tres = ToolResultEvent(
+                    call_id=cid,
+                    tool_name=str(tool),
+                    success=True,
+                    result={"duration": duration} if duration else None,
+                    summary=f"{tool} completed",
+                    duration_ms=int(duration * 1000) if duration else None,
+                    turn_id=turn_id,
+                )
+                self.history.add(tres)
+            elif "error" in kind_l or "fail" in kind_l:
+                tres = ToolResultEvent(
+                    call_id=cid,
+                    tool_name=str(tool),
+                    success=False,
+                    error=str(error or "failed"),
+                    summary=f"{tool} failed",
+                    turn_id=turn_id,
+                )
+                self.history.add(tres)
+
+        ui_helpers.emit_tool_event = bridged_emit
+
         # 2. Use the real multi-agent objects if provided by chat_cli (preferred path, like old chat)
         answer = None
         used_full_flow = False
 
-        if self.coding_agent is not None and hasattr(self.coding_agent, "handle"):
-            try:
-                # Drive the actual CodingAgent (full flow: planning, tools, memory, edits, verification)
-                # Many implementations are async; fall back to thread if needed.
-                if asyncio.iscoroutinefunction(self.coding_agent.handle):
-                    result = await self.coding_agent.handle(question, context={"root": str(self.repo_root)})
-                else:
-                    result = await asyncio.to_thread(self.coding_agent.handle, question, {"root": str(self.repo_root)})
-                answer = str(getattr(result, "answer", result) or result)
-                used_full_flow = True
-            except Exception:
-                pass
-
-        if not answer and self.tools_orchestrator is not None:
-            # Fall back to tools orchestrator if available
-            try:
-                if hasattr(self.tools_orchestrator, "run"):
-                    result = await asyncio.to_thread(self.tools_orchestrator.run, question)
-                    answer = str(result)
+        try:
+            if self.coding_agent is not None and hasattr(self.coding_agent, "handle"):
+                try:
+                    # Drive the actual CodingAgent (full flow: planning, tools, memory, edits, verification)
+                    # Many implementations are async; fall back to thread if needed.
+                    if asyncio.iscoroutinefunction(self.coding_agent.handle):
+                        result = await self.coding_agent.handle(question, context={"root": str(self.repo_root)})
+                    else:
+                        result = await asyncio.to_thread(self.coding_agent.handle, question, {"root": str(self.repo_root)})
+                    answer = str(getattr(result, "answer", result) or result)
                     used_full_flow = True
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-        if not answer and self.chat_service is not None:
-            try:
-                if hasattr(self.chat_service, "ask"):
-                    resp = self.chat_service.ask(question)
-                    answer = str(getattr(resp, "answer", resp) or resp)
-                    used_full_flow = True
-            except Exception:
-                pass
+            if not answer and self.tools_orchestrator is not None:
+                # Fall back to tools orchestrator if available
+                try:
+                    if hasattr(self.tools_orchestrator, "run"):
+                        result = await asyncio.to_thread(self.tools_orchestrator.run, question)
+                        answer = str(result)
+                        used_full_flow = True
+                except Exception:
+                    pass
 
-        # 3. Repo-aware ask (from project services) as next best
-        if not answer:
-            try:
-                from mana_agent.config.settings import Settings
-                from mana_agent.services.ask_service import _build_ask_service_compat  # type: ignore[attr-defined]
+            if not answer and self.chat_service is not None:
+                try:
+                    if hasattr(self.chat_service, "ask"):
+                        resp = self.chat_service.ask(question)
+                        answer = str(getattr(resp, "answer", resp) or resp)
+                        used_full_flow = True
+                except Exception:
+                    pass
 
-                settings = Settings()
-                ask = _build_ask_service_compat(settings, model_override=self.model, project_root=str(self.repo_root))
-                if hasattr(ask, "ask_with_tools"):
-                    resp = ask.ask_with_tools(index_dir=str(self.repo_root), question=question, k=6)
-                    answer = getattr(resp, "answer", None) or str(resp)
-                else:
-                    resp = ask.ask(str(self.repo_root), question, k=6)
-                    answer = getattr(resp, "answer", None) or str(resp)
-            except Exception:
-                pass
+            # 3. Repo-aware ask (from project services) as next best
+            if not answer:
+                try:
+                    from mana_agent.config.settings import Settings
+                    from mana_agent.services.ask_service import _build_ask_service_compat  # type: ignore[attr-defined]
 
-        # 4. Direct LLM (with correct credentials)
-        if not answer:
-            try:
-                answer = await self._call_llm(question, extra_context=str(ctx_result))
-            except Exception as exc:
-                answer = f"Understood: {question[:80]}. (All paths failed: {exc})"
+                    settings = Settings()
+                    ask = _build_ask_service_compat(settings, model_override=self.model, project_root=str(self.repo_root))
+                    if hasattr(ask, "ask_with_tools"):
+                        resp = ask.ask_with_tools(index_dir=str(self.repo_root), question=question, k=6)
+                        answer = getattr(resp, "answer", None) or str(resp)
+                    else:
+                        resp = ask.ask(str(self.repo_root), question, k=6)
+                        answer = getattr(resp, "answer", None) or str(resp)
+                except Exception:
+                    pass
 
-        if used_full_flow:
-            # Emit an extra visible marker that we used the real multi-agent path
-            self.history.add(ToolCallEvent(
-                tool_name="multi_agent_flow",
-                args={"objects": "coding_agent+tools_orchestrator"},
-                summary="used real multi-agent runtime",
-                turn_id=turn_id,
-            ))
-            self.history.add(ToolResultEvent(
-                call_id="multi-flow",
-                tool_name="multi_agent_flow",
-                success=True,
-                result="full flow (routing + execution + memory)",
-                summary="connected",
-                turn_id=turn_id,
-            ))
+            # 4. Direct LLM (with correct credentials)
+            if not answer:
+                try:
+                    answer = await self._call_llm(question, extra_context=str(ctx_result))
+                except Exception as exc:
+                    answer = f"Understood: {question[:80]}. (All paths failed: {exc})"
+
+            if used_full_flow:
+                # Emit an extra visible marker that we used the real multi-agent path
+                self.history.add(ToolCallEvent(
+                    tool_name="multi_agent_flow",
+                    args={"objects": "coding_agent+tools_orchestrator"},
+                    summary="used real multi-agent runtime",
+                    turn_id=turn_id,
+                ))
+                self.history.add(ToolResultEvent(
+                    call_id="multi-flow",
+                    tool_name="multi_agent_flow",
+                    success=True,
+                    result="full flow (routing + execution + memory)",
+                    summary="connected",
+                    turn_id=turn_id,
+                ))
+        finally:
+            ui_helpers.emit_tool_event = original_emit
 
         # Stream the final assistant response (tokens visible live)
         assistant = AssistantMessageEvent(

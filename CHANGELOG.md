@@ -7,6 +7,7 @@ All notable repository changes should be recorded here.
 - Updated to latest langchain (0.3.50+), langchain-community, langchain-openai pins and extended Python support to 3.14.6 (requires-python <=3.14.6).
 - Fixed TUI tool events not appearing and "flashing then immediately gone" on tool calls:
   - In real multi-agent path (via coding_agent/tools_orchestrator), now explicitly emit representative ToolCallEvent/ToolResultEvent (semantic_search, read_file, multi_agent_flow) around the agent execution so they are always visible via the ChatHistory subscription.
+  - Added runtime bridge for emit_tool_event calls inside the agent so ACTUAL tool invocations (read_file, edit etc.) from the multi-agent flow are captured and rendered as ToolCards live.
   - ToolCard no longer overwrites the call header title on result (keeps "🔧 toolname" visible); status shown in result body only. Prevents visual "gone" after result.
   - Additional sleeps and emits ensure cards persist without flash during long-running agent turns.
 - Verification: py_compile, demo script, headless run_test.
