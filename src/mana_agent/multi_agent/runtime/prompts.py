@@ -523,6 +523,29 @@ Schema:
   "target_files": ["repo/relative/path.ext"],
   "constraints": ["string"],
   "acceptance": ["string"],
+  "execution_scope": {
+    "decision_id": "stable id for this turn",
+    "task_type": "answer|inspect|edit|verify|plan",
+    "scope_level": 0,
+    "complexity": "trivial|small|medium|large",
+    "risk": "low|medium|high",
+    "explicit_target_files": ["files the mutation may change"],
+    "related_files": ["read-only evidence files"],
+    "required_evidence": ["specific facts required before mutation"],
+    "allowed_tool_families": ["read", "mutation", "verification"],
+    "search_scope": "none|named_files|bounded|dependency|repository",
+    "max_search_operations": 0,
+    "max_unique_file_reads": 2,
+    "mutation_strategy": "none|single_patch|bounded_patch|multi_file_patch",
+    "verification_strategy": "none|artifact|targeted|related|full",
+    "verification_commands": [["python", "-m", "pytest", "-q", "tests/test_nearest.py"]],
+    "delegated_agents": [],
+    "stop_conditions": ["requested deliverable complete"],
+    "confidence": 0.95,
+    "escalation_reason": "empty only for level 0",
+    "unresolved_questions": [],
+    "out_of_bounds": ["unrelated repository files"]
+  },
   "steps": [
     {
       "id": "string",
@@ -555,6 +578,15 @@ Schema:
 }
 
 Planning rules:
+- Produce exactly one complete `execution_scope` decision. This is the semantic
+  authority for the turn; runtime code will reject missing or invalid decisions.
+- Start at scope level 0 for directly named, isolated, low-risk edits; use level
+  1 for one bounded lookup, level 2 for dependency impact, and level 3 only for
+  genuinely cross-cutting repository work. Record why any level above 0 is needed.
+- Distinguish mutation targets from read-only related evidence. A file supplying
+  link text or reference content is not automatically a mutation target.
+- Level 0 has zero searches, no delegated agents, one mutation generation, and
+  artifact or targeted verification. Reviewer/verifier agents are unnecessary.
 - Set `requires_edit` from the user's intent, not keyword matching.
 - When edit intent is clear, include at least one mutation step and one verification step.
 - Set `target_files` to known repo-relative files when identifiable.

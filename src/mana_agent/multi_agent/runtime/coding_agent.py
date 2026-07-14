@@ -325,52 +325,6 @@ class CodingAgent:
 
         raise json.JSONDecodeError("No checklist payload found", raw, 0)
 
-    def _fallback_checklist(self, request: str) -> FlowChecklist:
-        explicit_files = sorted(
-            {
-                match.group(1).strip()
-                for match in self._EXPLICIT_FILE_RE.finditer(request or "")
-                if match.group(1).strip()
-            }
-        )
-        objective = " ".join((request or "").strip().split())[:220] or "Implement requested change"
-        inspect_title = "Inspect target file(s)" if explicit_files else "Discover target file(s)"
-        inspect_reason = (
-            f"Validate current behavior in: {', '.join(explicit_files[:3])}"
-            if explicit_files
-            else "Collect concrete evidence before edits"
-        )
-        return FlowChecklist(
-            objective=objective,
-            requires_edit=True,
-            target_files=explicit_files,
-            acceptance=["Requested change is applied", "No obvious regressions in touched files"],
-            steps=[
-                FlowStep(
-                    id="s1",
-                    title=inspect_title,
-                    reason=inspect_reason,
-                    status="in_progress",
-                    requires_tools=["semantic_search", "read_file"],
-                ),
-                FlowStep(
-                    id="s2",
-                    title="Apply requested change",
-                    reason="Implement the user request in repository files",
-                    status="pending",
-                    requires_tools=["apply_patch", "create_file", "write_file", "delete_file"],
-                ),
-                FlowStep(
-                    id="s3",
-                    title="Verify and summarize",
-                    reason="Confirm edits and report outcomes",
-                    status="pending",
-                    requires_tools=["run_command", "read_file"],
-                ),
-            ],
-            next_action="Inspect file context, then apply the requested edit.",
-        )
-
     def __init__(
         self,
         *,
@@ -784,6 +738,11 @@ class CodingAgent:
             "target_files": [str(item).strip() for item in checklist.target_files if str(item).strip()],
             "steps": steps,
             "source": str(source or ""),
+            "execution_scope": (
+                checklist.execution_scope.model_dump(mode="json")
+                if checklist.execution_scope is not None
+                else None
+            ),
         }
 
     def preview_execution_checklist(
@@ -817,27 +776,25 @@ class CodingAgent:
         )
         warnings.extend(plan_warnings)
         if checklist is None:
+            decision_error = next(
+                (str(item) for item in warnings if str(item).startswith("Model decision failed:")),
+                "Model decision failed: execution_scope. No action executed. Reason: planner returned no decision.",
+            )
             return {
                 "flow_id": active_flow_id,
                 "flow_context": effective_flow_context,
-                "prechecklist": {
-                    "objective": "",
-                    "requires_edit": True,
-                    "target_files": [],
-                    "steps": [],
-                    "source": "deterministic_fallback",
-                },
-                "prechecklist_source": "deterministic_fallback",
-                "prechecklist_warning": "Planner failed to produce a preview checklist.",
-                "requires_edit": True,
+                "prechecklist": None,
+                "prechecklist_source": source,
+                "prechecklist_warning": decision_error,
+                "decision_error": decision_error,
+                "requires_edit": False,
                 "target_files": [],
+                "execution_scope": None,
                 "warnings": warnings,
             }
 
         prechecklist = self._normalize_prechecklist(checklist, source=source)
         prechecklist_warning = ""
-        if source == "deterministic_fallback":
-            prechecklist_warning = "Planner parse failed; using deterministic fallback checklist."
 
         if (
             self.coding_memory_enabled
@@ -863,6 +820,11 @@ class CodingAgent:
             "prechecklist_warning": prechecklist_warning,
             "requires_edit": self._checklist_requires_edit(checklist),
             "target_files": [str(item).strip() for item in checklist.target_files if str(item).strip()],
+            "execution_scope": (
+                checklist.execution_scope.model_dump(mode="json")
+                if checklist.execution_scope is not None
+                else None
+            ),
             "warnings": warnings,
         }
 
@@ -891,6 +853,38 @@ class CodingAgent:
         prechecklist = preview_payload.get("prechecklist") if isinstance(preview_payload.get("prechecklist"), dict) else None
         prechecklist_source = str(preview_payload.get("prechecklist_source", "") or "")
         prechecklist_warning = str(preview_payload.get("prechecklist_warning", "") or "")
+        decision_error = str(preview_payload.get("decision_error", "") or "").strip()
+
+        if decision_error:
+            return {
+                "status": "warning",
+                "answer": decision_error,
+                "changed_files": [],
+                "diff": "",
+                "warnings": [decision_error],
+                "flow_id": flow_id,
+                "plan": None,
+                "progress": {"phase": "blocked", "why": "execution_scope_decision_failed"},
+                "checklist": {"done": 0, "pending": 0, "blocked": 1, "total": 0},
+                "actions_taken_total": 0,
+                "actions_taken_truncated": False,
+                "actions_taken": [],
+                "next_step": "Return a valid execution-scope decision and retry.",
+                "static_analysis": {"finding_count": 0, "findings": []},
+                "auto_execute_passes": 0,
+                "auto_execute_terminal_reason": "execution_scope_decision_failed",
+                "toolsmanager_requests_count": 0,
+                "pass_logs": [],
+                "planner_decisions": [],
+                "tool_execution_backend": "",
+                "tool_execution_run_id": "",
+                "tool_execution_duration_ms": 0.0,
+                "tool_execution_requests_ok": 0,
+                "tool_execution_requests_failed": 0,
+                "prechecklist": None,
+                "prechecklist_source": str(preview_payload.get("prechecklist_source", "") or ""),
+                "prechecklist_warning": decision_error,
+            }
 
         if self.tools_manager_orchestrator is None:
             return {
@@ -952,6 +946,7 @@ class CodingAgent:
             for item in (preview_payload.get("target_files") if isinstance(preview_payload.get("target_files"), list) else [])
             if str(item).strip()
         ]
+        execution_scope = preview_payload.get("execution_scope")
         tool_policy = self._tool_policy_for_request(
             request,
             flow_context=effective_flow_context,
@@ -972,6 +967,7 @@ class CodingAgent:
                 pass_cap=max(1, int(pass_cap)),
                 requires_edit=requires_edit,
                 target_files=target_files,
+                execution_scope=execution_scope if isinstance(execution_scope, dict) else None,
                 on_event=self._log_worker_event,
                 flow_id=active_flow_id,
                 run_id=run_id,
@@ -1322,24 +1318,11 @@ class CodingAgent:
         flow_context: str | None = None,
     ) -> tuple[FlowChecklist | None, list[str], str]:
         warnings: list[str] = []
-        decision = classify_task(request, repo_root=self.repo_root)
-        clear_explicit_mutation = (
-            decision.task_type == "mutation_required"
-            and decision.scope in {"single_file", "single_file_section"}
-            and bool(decision.target_files)
-            and decision.confidence >= 0.8
-        )
-        if clear_explicit_mutation:
-            fallback = self._fallback_checklist(request)
-            fallback.requires_edit = True
-            fallback.target_files = list(decision.target_files)
-            return fallback, warnings, "deterministic_clear_task"
         if self._planner_unavailable:
-            warnings.append("planner unavailable; using deterministic checklist")
-            fallback = self._fallback_checklist(request)
-            if len(fallback.steps) > self.plan_max_steps:
-                fallback.steps = fallback.steps[: self.plan_max_steps]
-            return fallback, warnings, "deterministic_fallback"
+            warnings.append(
+                "Model decision failed: execution_scope. No action executed. Reason: planner is unavailable."
+            )
+            return None, warnings, "decision_unavailable"
         user_prompt = (
             f"User request:\n{request}\n\n"
             f"Max steps: {self.plan_max_steps}\n\n"
@@ -1354,44 +1337,24 @@ class CodingAgent:
             first = self.planner_llm.invoke(messages)
             raw = str(getattr(first, "content", "") or "").strip()
             checklist = self._parse_flow_checklist_json(raw, request=request)
+            if checklist.execution_scope is None:
+                raise ValueError("planner output is missing execution_scope")
             if len(checklist.steps) > self.plan_max_steps:
                 checklist.steps = checklist.steps[: self.plan_max_steps]
             return checklist, warnings, "planner"
-        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-            warnings.append(f"planner parse failed; attempting repair: {exc}")
-            try:
-                repair = self.planner_llm.invoke(
-                    [
-                        SystemMessage(content=CODING_FLOW_PLANNER_PROMPT),
-                        HumanMessage(
-                            content=(
-                                "Repair this into strict schema JSON only.\n\n"
-                                f"Broken output:\n{raw if 'raw' in locals() else ''}\n\n"
-                                f"Original request:\n{request}"
-                            )
-                        ),
-                    ]
-                )
-                repaired_raw = str(getattr(repair, "content", "") or "").strip()
-                checklist = self._parse_flow_checklist_json(repaired_raw, request=request)
-                if len(checklist.steps) > self.plan_max_steps:
-                    checklist.steps = checklist.steps[: self.plan_max_steps]
-                return checklist, warnings, "planner_repair"
-            except Exception as exc2:  # pragma: no cover - deterministic fallback
-                warnings.append(f"planner repair failed: {exc2}")
-                warnings.append("planner fallback: using deterministic checklist")
-                fallback = self._fallback_checklist(request)
-                if len(fallback.steps) > self.plan_max_steps:
-                    fallback.steps = fallback.steps[: self.plan_max_steps]
-                return fallback, warnings, "deterministic_fallback"
+        except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+            warnings.append(
+                "Model decision failed: execution_scope. No action executed. "
+                f"Reason: planner output is invalid: {exc}"
+            )
+            return None, warnings, "decision_invalid"
         except Exception as exc:  # pragma: no cover
             self._planner_unavailable = True
-            warnings.append(f"planner invocation failed once; planner unavailable: {exc}")
-            warnings.append("planner fallback: using deterministic checklist")
-            fallback = self._fallback_checklist(request)
-            if len(fallback.steps) > self.plan_max_steps:
-                fallback.steps = fallback.steps[: self.plan_max_steps]
-            return fallback, warnings, "deterministic_fallback"
+            warnings.append(
+                "Model decision failed: execution_scope. No action executed. "
+                f"Reason: planner invocation failed: {exc}"
+            )
+            return None, warnings, "decision_unavailable"
 
     def _plan_checklist(self, request: str, *, flow_context: str | None = None) -> tuple[FlowChecklist | None, list[str]]:
         checklist, warnings, _source = self._plan_checklist_with_source(request, flow_context=flow_context)

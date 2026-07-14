@@ -36,6 +36,8 @@ from mana_agent.multi_agent.runtime.mutation_plan import (
     representative_architecture_sources,
     requires_document_evidence_discovery,
 )
+from mana_agent.multi_agent.runtime.delegation import DelegationRequest
+from mana_agent.multi_agent.runtime.execution_scope import ExecutionScopeDecision, ScopeLevel
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolRunRequest, ToolRunResponse
 from mana_agent.multi_agent.runtime.tools_executor import BatchToolRequest, ToolsExecutor
 
@@ -523,6 +525,7 @@ class CodingAgentSniffer:
         max_follow_per_read: int = 4,
         relevant: Callable[[str], bool] | None = None,
         orchestrator: Any | None = None,
+        execution_scope: ExecutionScopeDecision | None = None,
     ) -> None:
         self._repo_root = Path(repo_root).resolve()
         self._request = str(request or "").strip()
@@ -538,13 +541,17 @@ class CodingAgentSniffer:
         self._reads_emitted = 0
         self._finalization_emitted = False
         self._read_files: set[str] = set()
+        self._evidence_references: set[str] = set()
         self._orchestrator = orchestrator
+        self._execution_scope = execution_scope
+        if execution_scope is not None:
+            self._max_reads = execution_scope.max_unique_file_reads
         self._target_files = [
             self._normalize_repo_path(str(item))
             for item in (target_files or [])
             if str(item).strip()
         ]
-        if requires_document_evidence_discovery(self._request, self._target_files):
+        if execution_scope is None and requires_document_evidence_discovery(self._request, self._target_files):
             extra_architecture_reads = (
                 len(representative_architecture_sources(self._repo_root))
                 if is_architecture_docs_update(self._request, self._target_files)
@@ -580,13 +587,26 @@ class CodingAgentSniffer:
             return out
         if kind == "read":
             self._read_files.update(result.files_read)
+            for row in result.trace:
+                if not isinstance(row, dict):
+                    continue
+                self._evidence_references.update(
+                    str(reference)
+                    for reference in (row.get("evidence_references") or [])
+                    if str(reference).strip()
+                )
             out: list[WorkItem] = []
             if self._orchestrator is not None and self._orchestrator.state.evidence_sufficient:
                 out.extend(self._finalization_jobs())
                 return out
-            out.extend(self._follow_local_imports(result, parent=item))
+            if self._execution_scope is None or self._execution_scope.scope_level >= ScopeLevel.IMPACT:
+                out.extend(self._follow_local_imports(result, parent=item))
             return out
         return []
+
+    def initial_jobs(self) -> list[WorkItem]:
+        """Start mutation directly when the model selected no read/search evidence."""
+        return self._finalization_jobs()
 
     def _finalization_jobs(self) -> list[WorkItem]:
         """Emit the edit + verify jobs for a mutating request, exactly once.
@@ -605,25 +625,37 @@ class CodingAgentSniffer:
             if target_file
             else ""
         )
+        evidence_references = sorted(self._evidence_references)
+        scope = self._execution_scope
+        delegation = DelegationRequest(
+            user_goal=self._request,
+            delegated_objective="Generate and apply the smallest mutation satisfying the user goal.",
+            known_repository_facts=["All listed evidence files were selected by the parent scope decision."],
+            canonical_target_paths=list(self._target_files),
+            evidence_references=evidence_references,
+            unresolved_questions=list(scope.unresolved_questions if scope else []),
+            allowed_tools=["apply_patch", "edit_file", "multi_edit_file", "create_file", "write_file"],
+            max_tool_calls=1 if scope and scope.scope_level == ScopeLevel.DIRECT else 3,
+            max_tokens=4000 if scope and scope.scope_level == ScopeLevel.DIRECT else 8000,
+            out_of_bounds=list(scope.out_of_bounds if scope else []),
+            expected_result="One structured mutation command and a concise changed-file summary.",
+            success_conditions=list(scope.stop_conditions if scope else ["requested mutation completed"]),
+            stop_conditions=list(scope.stop_conditions if scope else ["requested mutation completed"]),
+            parent_agent_id="coding_agent",
+            task_id="current_run",
+            root_task_id="current_run",
+        )
         edit = WorkItem(
             kind="edit",
             tool_name="",
             tool_args={},
-            question=(
-                "Using the file evidence already gathered in this run, carry out "
-                f"the user's request: {self._request}. "
-                "Apply concrete changes with "
-                "edit_file/multi_edit_file/apply_patch/create_file/write_file/delete_file/document_create/document_update/document_delete and report the changed files. "
-                "Before mutating, use bounded exact path/name/symbol evidence to account for "
-                "related importers, exports, registries, routers, commands, call sites, tests, "
-                "and stale docs/config references; update or remove each one required for the "
-                "project to remain working."
-                f"{target_instruction}"
-            ),
+            question=delegation.ephemeral_prompt() + target_instruction,
             gate="apply_edit",
             priority=80,
             created_by="coding_agent_sniffer",
         )
+        if scope is not None and scope.verification_strategy == "none":
+            return [edit]
         verify = WorkItem(
             kind="verify",
             tool_name="verify",
@@ -671,18 +703,20 @@ class CodingAgentSniffer:
 
     def _reads_from_discovery(self, paths: list[str], *, parent: WorkItem) -> list[WorkItem]:
         out: list[WorkItem] = []
-        create_intent = bool(re.search(r"\b(create|add|generate)\b", self._request, re.IGNORECASE))
+        create_intent = False if self._execution_scope is not None else bool(re.search(r"\b(create|add|generate)\b", self._request, re.IGNORECASE))
         ranked = [
             path for path in self._target_files
             if (self._repo_root / path).is_file() or not create_intent
         ]
-        if requires_document_evidence_discovery(self._request, self._target_files):
+        if self._execution_scope is not None:
+            ranked.extend(path for path in self._execution_scope.related_files if path not in ranked)
+        elif requires_document_evidence_discovery(self._request, self._target_files):
             ranked.extend(
                 path
                 for path in representative_document_sources(self._repo_root, readme="readme.md" in self._request.lower())
                 if path not in ranked
             )
-        if is_architecture_docs_update(self._request, self._target_files):
+        if self._execution_scope is None and is_architecture_docs_update(self._request, self._target_files):
             ranked.extend(path for path in representative_architecture_sources(self._repo_root) if path not in ranked)
         ranked.extend(path for path in self._rank_candidates(paths) if path not in ranked)
         for path in ranked:

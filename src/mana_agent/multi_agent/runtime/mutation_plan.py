@@ -8,6 +8,7 @@ from typing import Any, Literal, Sequence
 from pydantic import BaseModel, Field
 
 from mana_agent.multi_agent.runtime.edit_scope import TaskScope, budget_for_scope, select_scope
+from mana_agent.multi_agent.runtime.execution_scope import ExecutionScopeDecision, ScopeLevel
 
 
 MutationTool = Literal["write_file", "apply_patch", "create_file"]
@@ -310,20 +311,34 @@ def build_mutation_plan(
     user_goal: str,
     target_files: Sequence[str],
     evidence_files_read: Sequence[str],
+    execution_scope: ExecutionScopeDecision | None = None,
 ) -> MutationPlan:
     targets = [normalize_repo_path(path) for path in target_files if normalize_repo_path(path)]
     read = sorted(dict.fromkeys(normalize_repo_path(path) for path in evidence_files_read if normalize_repo_path(path)))
-    readme_update = is_readme_document_update(user_goal, targets)
-    arch_update = is_architecture_docs_update(user_goal, targets)
+    readme_update = is_readme_document_update(user_goal, targets) if execution_scope is None else False
+    arch_update = is_architecture_docs_update(user_goal, targets) if execution_scope is None else execution_scope.scope_level == ScopeLevel.BROAD
     required = list(targets)
     intended: list[str]
     checks: list[str]
     manifest: dict[str, Any] = {}
-    evidence_discovery_required = requires_document_evidence_discovery(user_goal, targets)
-    task_scope = select_scope(
-        resolved_targets=targets,
-        model_scope="single_file" if len(targets) == 1 else "multi_file" if targets else "unknown",
-        architecture_sync=evidence_discovery_required,
+    evidence_discovery_required = (
+        requires_document_evidence_discovery(user_goal, targets)
+        if execution_scope is None
+        else execution_scope.scope_level == ScopeLevel.BROAD
+    )
+    task_scope = (
+        select_scope(
+            resolved_targets=targets,
+            model_scope="single_file" if len(targets) == 1 else "multi_file" if targets else "unknown",
+            architecture_sync=evidence_discovery_required,
+        )
+        if execution_scope is None
+        else {
+            ScopeLevel.DIRECT: "direct_edit",
+            ScopeLevel.BOUNDED: "localized_change",
+            ScopeLevel.IMPACT: "cross_file_change",
+            ScopeLevel.BROAD: "architecture_change",
+        }[execution_scope.scope_level]
     )
     scope_budget = budget_for_scope(task_scope)
     if evidence_discovery_required:
@@ -352,10 +367,18 @@ def build_mutation_plan(
             "rewrite or expand concrete current-source sections instead of appending a request note."
         )
     else:
-        intended = [f"Implement the requested change in {path}" for path in targets] or ["Implement the requested repository change"]
+        intended = (
+            [f"Satisfy the exact user goal in {path}: {str(user_goal).strip()}" for path in targets]
+            if execution_scope is not None
+            else [f"Implement the requested change in {path}" for path in targets]
+        ) or ["Implement the requested repository change"]
         checks = ["changed files match the mutation plan targets", "relevant verification passes"]
         edit_type = "unknown"
-        strategy = "Patch the listed target files using current file content and gathered source evidence."
+        strategy = (
+            "Generate one minimal patch limited to the selected mutation targets using only the selected evidence."
+            if execution_scope is not None and execution_scope.mutation_strategy == "single_patch"
+            else "Patch the listed target files using current file content and gathered source evidence."
+        )
 
     plan = MutationPlan(
         target_files=targets,

@@ -12,13 +12,14 @@ from mana_agent.workspaces.service import WorkspaceService
 
 
 class MessageBus:
-    def __init__(self, root: str | Path = ".") -> None:
+    def __init__(self, root: str | Path = ".", *, max_messages_per_task: int = 24) -> None:
         self.root = Path(root).resolve()
         service = WorkspaceService()
         repo = service.register_repository(self.root)
         workspace = service.workspace_for_repository(repo.repository_id)
         self.path = workspace_dir(workspace.workspace_id) / "taskboard" / "messages.jsonl"
         self.messages: dict[str, AgentMessage] = {}
+        self.max_messages_per_task = max(1, int(max_messages_per_task))
         self._load()
 
     def send(
@@ -30,8 +31,19 @@ class MessageBus:
         message_type: MessageType,
         content: str,
         discussion_id: str | None = None,
+        root_task_id: str = "",
+        evidence_references: list[str] | None = None,
+        confidence: float = 0.0,
+        requested_action: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> AgentMessage:
+        if not str(task_id).strip() or not str(from_agent_id).strip():
+            raise ValueError("task_id and from_agent_id are required")
+        if not 0.0 <= float(confidence) <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        task_messages = sum(1 for item in self.messages.values() if item.task_id == task_id)
+        if task_messages >= self.max_messages_per_task:
+            raise RuntimeError(f"agent communication budget exhausted for task {task_id}")
         message = AgentMessage(
             message_id=new_message_id(),
             discussion_id=discussion_id,
@@ -40,6 +52,10 @@ class MessageBus:
             task_id=task_id,
             message_type=message_type,
             content=content.strip(),
+            root_task_id=str(root_task_id or task_id).strip(),
+            evidence_references=list(dict.fromkeys(str(item).strip() for item in (evidence_references or []) if str(item).strip())),
+            confidence=float(confidence),
+            requested_action=str(requested_action or "").strip(),
             metadata=metadata or {},
         )
         self.messages[message.message_id] = message

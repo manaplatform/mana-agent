@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from mana_agent.multi_agent.runtime.agent_session import AgentSession
 from mana_agent.multi_agent.runtime.agent_work_queue import (
     AgentWorkQueue,
@@ -41,6 +43,32 @@ _AGENTIC_EDIT_TOOLS = [
     "document_update",
     "document_delete",
 ]
+
+
+def _broad_execution_scope(target: str, related_files: list[str]) -> dict[str, Any]:
+    return {
+        "decision_id": f"scope_broad_{Path(target).stem}",
+        "task_type": "edit",
+        "scope_level": 3,
+        "complexity": "large",
+        "risk": "high",
+        "explicit_target_files": [target],
+        "related_files": related_files,
+        "required_evidence": ["model-selected architecture sources"],
+        "allowed_tool_families": ["search", "read", "mutation", "verification", "agents"],
+        "search_scope": "repository",
+        "max_search_operations": 1,
+        "max_unique_file_reads": len(related_files) + 1,
+        "mutation_strategy": "multi_file_patch",
+        "verification_strategy": "artifact",
+        "verification_commands": [],
+        "delegated_agents": ["search", "reviewer"],
+        "stop_conditions": ["architecture document updated", "artifact verification passes"],
+        "confidence": 0.9,
+        "escalation_reason": "the model selected a cross-cutting architecture documentation update",
+        "unresolved_questions": [],
+        "out_of_bounds": ["files not selected by the scope decision"],
+    }
 
 
 def _substantive(title: str) -> str:
@@ -597,7 +625,8 @@ def test_queue_manager_prefers_injected_tools_executor(tmp_path: Path):
     assert result.execution_backend == "work_queue:local"
     assert result.run_status == "completed"
     assert result.changed_files == ["docs/overview.md"]
-    assert [req.tool_name for req in executor.requests][:3] == ["repo_search", "read_file", ""]
+    assert all(req.tool_name != "repo_search" for req in executor.requests)
+    assert [req.tool_name for req in executor.requests] == ["", ""]
     assert {req.run_id for req in executor.requests} == {"run-queue"}
     assert {req.flow_id for req in executor.requests} == {"flow-queue"}
 
@@ -866,9 +895,10 @@ def test_typo_target_resolution_clears_missing_required_files(tmp_path: Path):
     assert decision["missing_required_files"] == []
     assert "architectue.md" not in decision["missing_required_files"]
     read_paths = [
-        str(req.tool_args.get("path"))
-        for req in worker.requests
-        if (req.tool_name or "") == "read_file"
+        str(path)
+        for row in result.trace
+        if row.get("tool_name") in {"read_file", "repo_batch_read"}
+        for path in (row.get("paths") or ([row.get("path")] if row.get("path") else []))
     ]
     assert "docs/08-architecture.md" in read_paths
     edit_questions = [str(req.question) for req in worker.requests if "MutationCommand" in str(req.question)]
@@ -912,17 +942,12 @@ def test_edit_intent_forces_mutation_tool_attempt(tmp_path: Path):
             )
 
     worker = _FakeWorker()
-    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
-        request="update docs/08-architecture.md",
-        index_dir=str(tmp_path),
-        requires_edit=None,
-    )
-
-    decision = result.planner_decisions[0]
-    assert decision["mutation_required"] is True
-    assert decision["mutation_tool_attempted"] is True
-    assert decision["mutation_tools_called"]
-    assert worker.mutation_tools_called == []
+    with pytest.raises(RuntimeError, match="Model decision failed: execution_scope"):
+        QueueManager(worker_client=worker, repo_root=tmp_path).run(
+            request="update docs/08-architecture.md",
+            index_dir=str(tmp_path),
+            requires_edit=None,
+        )
 
 
 def test_docs_edit_without_approved_fallback_blocks_when_worker_writes_nothing(tmp_path: Path):
@@ -966,20 +991,12 @@ def test_docs_edit_without_approved_fallback_blocks_when_worker_writes_nothing(t
             )
 
     worker = _ReadOnlyWorker()
-    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
-        request="update 08-architecture.md in docs",
-        index_dir=str(tmp_path),
-        requires_edit=None,
-    )
-
-    decision = result.planner_decisions[0]
-    assert result.run_status == "blocked"
-    assert decision["mutation_required"] is True
-    assert decision["forced_mutation_retry_ran"] is True
-    assert decision["mutation_tool_successful"] is False
-    assert decision["mutation_plan_approved"] is True
-    assert decision["mutation_plan_executed"] is False
-    assert "docs/08-architecture.md" not in result.changed_files
+    with pytest.raises(RuntimeError, match="No action executed"):
+        QueueManager(worker_client=worker, repo_root=tmp_path).run(
+            request="update 08-architecture.md in docs",
+            index_dir=str(tmp_path),
+            requires_edit=None,
+        )
 
 
 def test_explicit_fallback_decision_can_mutate_existing_update_notes_section(tmp_path: Path):
@@ -1093,12 +1110,14 @@ def test_source_architecture_update_reads_src_evidence_before_mutation(tmp_path:
         request="08-architecture.md update this files with new architecture exist in src",
         index_dir=str(tmp_path),
         requires_edit=True,
+        execution_scope=_broad_execution_scope("docs/08-architecture.md", src_files),
     )
 
     read_paths = [
-        str(req.tool_args.get("path"))
-        for req in worker.requests
-        if (req.tool_name or "") == "read_file"
+        str(path)
+        for row in result.trace
+        if row.get("tool_name") in {"read_file", "repo_batch_read"}
+        for path in (row.get("paths") or ([row.get("path")] if row.get("path") else []))
     ]
     assert result.run_status == "completed"
     assert "docs/08-architecture.md" in read_paths
@@ -1201,9 +1220,27 @@ def test_readme_update_discovers_project_architecture_when_diff_empty(tmp_path: 
         index_dir=str(tmp_path),
         requires_edit=True,
         pass_cap=4,
+        execution_scope=_broad_execution_scope(
+            "README.md",
+            [
+                "pyproject.toml",
+                "src/mana_agent/commands/cli.py",
+                "src/mana_agent/multi_agent/runtime/agent_work_queue.py",
+                "src/mana_agent/tools/apply_patch.py",
+                "src/mana_agent/services/ask_service.py",
+                "src/mana_agent/config/settings.py",
+                "tests/test_cli.py",
+                "docs/04-commands.md",
+            ],
+        ),
     )
 
-    read_paths = [str(req.tool_args.get("path")) for req in worker.requests if (req.tool_name or "") == "read_file"]
+    read_paths = [
+        str(path)
+        for row in result.trace
+        if row.get("tool_name") in {"read_file", "repo_batch_read"}
+        for path in (row.get("paths") or ([row.get("path")] if row.get("path") else []))
+    ]
     assert result.run_status == "completed"
     assert "README.md" in read_paths
     assert any(path.startswith("src/mana_agent/commands/") for path in read_paths)
@@ -1514,20 +1551,12 @@ def test_simple_docs_edit_does_not_read_all_docs(tmp_path: Path):
             return ToolRunResponse(answer="prose only", mode="agent-tools", trace=[])
 
     worker = _ReadOnlyWorker()
-    result = QueueManager(worker_client=worker, repo_root=tmp_path).run(
-        request="update 08-architecture.md in docs",
-        index_dir=str(tmp_path),
-        requires_edit=None,
-    )
-
-    read_files = [
-        str(req.tool_args.get("path"))
-        for req in worker.requests
-        if (req.tool_name or "") == "read_file" and str(req.tool_args.get("path", "")).startswith("docs/")
-    ]
-    assert result.run_status == "blocked"
-    assert "docs/08-architecture.md" in read_files
-    assert len(read_files) <= 3
+    with pytest.raises(RuntimeError, match="No action executed"):
+        QueueManager(worker_client=worker, repo_root=tmp_path).run(
+            request="update 08-architecture.md in docs",
+            index_dir=str(tmp_path),
+            requires_edit=None,
+        )
 
 
 def test_deterministic_preview_uses_project_level_edit_checklist(tmp_path: Path):
@@ -1720,8 +1749,10 @@ def test_sniffer_uses_planner_target_file_for_edit_job(tmp_path: Path):
     assert edit.tool_name == ""
     assert edit.tool_args == {}
     assert "Target file: docs/analyze.md" in edit.question
-    assert "related importers, exports, registries" in edit.question
-    assert "stale docs/config references" in edit.question
+    payload = json.loads(edit.question.split(" Target file:", 1)[0])
+    assert payload["delegated_objective"].startswith("Generate and apply the smallest mutation")
+    assert payload["canonical_target_paths"] == ["docs/analyze.md"]
+    assert payload["max_tool_calls"] == 3
 
 
 def test_edit_with_evidence_uses_agentic_policy_without_duplicate_reads(tmp_path: Path):

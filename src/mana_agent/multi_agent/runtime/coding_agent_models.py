@@ -6,6 +6,8 @@ from typing import Any, ClassVar, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from mana_agent.multi_agent.runtime.execution_scope import ExecutionScopeDecision
+
 
 class FlowStep(BaseModel):
     """Represents a planned step with tooling guidance and execution status."""
@@ -27,6 +29,7 @@ class FlowChecklist(BaseModel):
     acceptance: list[str] = Field(default_factory=list)
     steps: list[FlowStep] = Field(default_factory=list)
     next_action: str = ""
+    execution_scope: ExecutionScopeDecision | None = None
 
 
 class ExecutionDecision(BaseModel):

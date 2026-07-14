@@ -35,6 +35,9 @@ them while a sniffer steers follow-up reads/edits/verification.
 
 ### Coding orchestration (work queue + decision lifecycle)
 
+The adaptive scope, evidence, delegation, communication, and stop contracts are
+described in [`adaptive-coding-runtime.md`](adaptive-coding-runtime.md).
+
 - **`src/mana_agent/multi_agent/runtime/agent_work_queue.py`** is the orchestration spine.
   It defines:
   - `WorkItem`: a unit of work (tool call + gate + priority + dependencies +

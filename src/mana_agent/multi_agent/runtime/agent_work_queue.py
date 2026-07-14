@@ -49,7 +49,14 @@ from mana_agent.agent.orchestrator import AgentOrchestrator
 from mana_agent.agent.verification_planner import verify_documentation_changes
 from mana_agent.multi_agent.runtime.agent_session import AgentSession
 from mana_agent.multi_agent.runtime.goal_profiles import active_goal_profile
-from mana_agent.multi_agent.runtime.edit_scope import budget_for_scope, select_scope
+from mana_agent.multi_agent.runtime.edit_scope import budget_for_scope
+from mana_agent.multi_agent.runtime.evidence_ledger import EvidenceLedger, RunMetrics
+from mana_agent.multi_agent.runtime.execution_scope import (
+    ExecutionScopeDecision,
+    ScopeLevel,
+    scope_from_explicit_contract,
+    validate_execution_scope,
+)
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient
 from mana_agent.multi_agent.runtime.tools_executor import ToolsExecutionConfig, ToolsExecutor
 from mana_agent.multi_agent.runtime.tools_manager import (
@@ -81,7 +88,6 @@ from mana_agent.multi_agent.runtime.mutation_plan import (
     build_mutation_plan,
     changed_files_match_plan,
     compile_mutation_command,
-    is_architecture_docs_update,
     mutation_trace_has_plan,
     requires_document_evidence_discovery,
     validate_mutation_command,
@@ -1125,6 +1131,7 @@ class QueueManager:
         base_execute: Callable[[WorkItem], WorkResult],
         plan: MutationPlan,
         target_file: str,
+        delegation_context: str = "",
     ) -> MutationCommand | None:
         current_files = self._read_current_files(plan.target_files)
         schema = (
@@ -1135,13 +1142,13 @@ class QueueManager:
         prompts = [
             (
                 f"Generate the executable MutationCommand for approved MutationPlan {plan.plan_id}. "
-                f"Target file: {target_file}. User goal: {plan.user_goal}. Evidence summary: {plan.evidence_summary}. "
-                f"Intended changes: {'; '.join(plan.intended_changes)}. Patch strategy: {plan.patch_strategy}. {schema}"
-            ),
-            (
-                f"Retry MutationCommand synthesis for MutationPlan {plan.plan_id}. The previous response was not valid. "
-                f"{schema} Do not include prose."
-            ),
+                f"Target file: {target_file}. Exact user goal: {plan.user_goal}. "
+                f"Relevant evidence only: {plan.evidence_summary}. "
+                f"Required outcome: {'; '.join(plan.intended_changes)}. "
+                f"Mutation strategy: {plan.patch_strategy}. "
+                f"Bounded delegation context: {delegation_context}. "
+                f"Make one minimal patch and do not change other files. {schema}"
+            )
         ]
         last_command: MutationCommand | None = None
         for prompt in prompts:
@@ -1583,6 +1590,7 @@ class QueueManager:
         max_no_progress_passes: int = 2,
         requires_edit: bool | None = None,
         target_files: Sequence[str] = (),
+        execution_scope: ExecutionScopeDecision | dict[str, Any] | None = None,
     ) -> AutoExecuteResult:
         from mana_agent.multi_agent.runtime.agent_work_queue_adapters import (
             CodingAgentSniffer,
@@ -1596,7 +1604,12 @@ class QueueManager:
         baseline_status = self._git_status_names()
         pre_existing_changed_files = sorted(baseline_diff)
         resolved_tool_policy = dict(tool_policy or {})
-        default_skill_registry_request = _looks_like_default_skill_registry_request(request)
+        # Compatibility-only handling for callers that have not yet supplied
+        # the semantic scope contract. A validated model decision is always
+        # authoritative and cannot be overridden by request-text heuristics.
+        default_skill_registry_request = (
+            execution_scope is None and _looks_like_default_skill_registry_request(request)
+        )
         if default_skill_registry_request:
             requires_edit = True if requires_edit is None else requires_edit
             if not target_files:
@@ -1604,16 +1617,43 @@ class QueueManager:
             resolved_tool_policy.setdefault("search_budget", 3)
             resolved_tool_policy.setdefault("read_budget", 3)
             resolved_tool_policy.setdefault("search_repeat_limit", 1)
-        mutation_required = (
-            _mutation_required_from_policy(resolved_tool_policy, requires_edit)
-            or _mutation_required_from_text(request)
-            or default_skill_registry_request
-        )
+        scope_supplied = execution_scope is not None
+        if execution_scope is None:
+            if requires_edit is None and _mutation_required_from_policy(resolved_tool_policy, None):
+                requires_edit = True
+            if requires_edit is None:
+                raise RuntimeError(
+                    "Model decision failed: execution_scope. No action executed. "
+                    "Reason: the caller supplied neither a validated execution scope nor an explicit requires_edit decision."
+                )
+            execution_scope = scope_from_explicit_contract(
+                user_goal=request,
+                target_files=target_files,
+                requires_edit=bool(requires_edit),
+            )
+        scope_decision = validate_execution_scope(execution_scope, repo_root=self.repo_root)
+        metrics = RunMetrics(routing_model_calls=1 if scope_supplied else 0)
+        ledger = EvidenceLedger(self.repo_root, metrics=metrics)
+        mutation_required = scope_decision.task_type == "edit"
         if mutation_required:
             resolved_tool_policy["mutation_required"] = True
-        target_state = self._target_state(request, target_files)
+        selected_targets = list(scope_decision.explicit_target_files)
+        target_state = (
+            {
+                "raw_target_files": list(selected_targets),
+                "resolved_target_files": list(selected_targets),
+                "unresolved_target_files": [],
+                "path_resolution_methods": ["execution_scope" for _ in selected_targets],
+            }
+            if scope_supplied
+            else self._target_state(request, selected_targets)
+        )
         resolved_target_files = list(target_state["resolved_target_files"])
-        required_files = resolved_target_files or _resolve_required_deliverables(request, self.repo_root, target_files)
+        required_files = resolved_target_files or (
+            selected_targets
+            if scope_supplied
+            else _resolve_required_deliverables(request, self.repo_root, target_files)
+        )
         resolved_target_path = (
             required_files[0]
             if required_files
@@ -1626,15 +1666,17 @@ class QueueManager:
             repo_root=self.repo_root,
             target_files=required_files or target_files,
             requires_edit=mutation_required,
+            execution_scope=scope_decision,
         )
-        selected_task_scope = select_scope(
-            resolved_targets=orchestrator.decision.target_files,
-            model_scope=orchestrator.decision.scope,
-            architecture_sync=requires_document_evidence_discovery(request, orchestrator.decision.target_files),
-        )
+        selected_task_scope = {
+            ScopeLevel.DIRECT: "direct_edit",
+            ScopeLevel.BOUNDED: "localized_change",
+            ScopeLevel.IMPACT: "cross_file_change",
+            ScopeLevel.BROAD: "architecture_change",
+        }[scope_decision.scope_level]
         scope_budget = budget_for_scope(selected_task_scope)
-        resolved_tool_policy.setdefault("search_budget", scope_budget.max_initial_searches)
-        resolved_tool_policy.setdefault("read_budget", scope_budget.max_initial_read_files)
+        resolved_tool_policy["search_budget"] = scope_decision.max_search_operations
+        resolved_tool_policy["read_budget"] = scope_decision.max_unique_file_reads
         profile = active_goal_profile(request)
         if profile is not None:
             def _relevant(path: str) -> bool:
@@ -1643,19 +1685,31 @@ class QueueManager:
             def _relevant(path: str) -> bool:
                 return True
 
-        direct_read_targets = list(orchestrator.decision.target_files)
+        direct_read_targets = list(scope_decision.all_evidence_files)
         explicit_direct_read = (
             not default_skill_registry_request
             and
-            orchestrator.decision.needs_file_read
-            and selected_task_scope in {"direct_edit", "localized_change"}
+            selected_task_scope in {"direct_edit", "localized_change"}
             and bool(direct_read_targets)
             and all((self.repo_root / path).is_file() for path in direct_read_targets)
-            and not is_architecture_docs_update(request, direct_read_targets)
-            and not requires_document_evidence_discovery(request, direct_read_targets)
+            and scope_decision.search_scope == "none"
         )
+        seed_finalization_without_read = False
         if explicit_direct_read:
-            for target in orchestrator.decision.target_files:
+            if scope_supplied and len(direct_read_targets) > 1:
+                queue.submit(
+                    WorkItem(
+                        kind="read",
+                        tool_name="repo_batch_read",
+                        tool_args={"paths": direct_read_targets},
+                        question="Read the model-selected target and related evidence files",
+                        gate="read_explicit_target",
+                        priority=10,
+                        created_by="agent_orchestrator",
+                    )
+                )
+            elif scope_supplied:
+                target = direct_read_targets[0]
                 queue.submit(
                     WorkItem(
                         kind="read",
@@ -1667,6 +1721,19 @@ class QueueManager:
                         created_by="agent_orchestrator",
                     )
                 )
+            else:
+                for index, target in enumerate(direct_read_targets):
+                    queue.submit(
+                        WorkItem(
+                            kind="read",
+                            tool_name="read_file",
+                            tool_args={"path": target},
+                            question=f"Read explicit target file {target}",
+                            gate="read_explicit_target",
+                            priority=10 + index,
+                            created_by="agent_orchestrator",
+                        )
+                    )
         elif default_skill_registry_request:
             queue.submit(
                 WorkItem(
@@ -1691,7 +1758,7 @@ class QueueManager:
                     priority=11,
                 )
             )
-        else:
+        elif scope_decision.max_search_operations > 0:
             queue.submit(
                 WorkItem(
                     kind="discover",
@@ -1702,18 +1769,26 @@ class QueueManager:
                     priority=10,
                 )
             )
+        elif mutation_required and scope_decision.explicit_target_files:
+            seed_finalization_without_read = True
+        else:
+            raise RuntimeError(
+                "Model decision failed: execution_scope. No action executed. "
+                "Reason: selected targets are unavailable and the decision does not allow search."
+            )
 
         answers: list[str] = []
         sources: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
+        trace.append(scope_decision.trace_row())
         trace.append(
             {
                 "layer": "edit_scope_policy",
                 "selected_task_scope": selected_task_scope,
                 "resolved_target_files": list(orchestrator.decision.target_files),
                 "path_resolution_method": list(target_state.get("path_resolution_methods") or []),
-                "discovery_budget": scope_budget.max_initial_searches,
-                "read_budget": scope_budget.max_initial_read_files,
+                "discovery_budget": scope_decision.max_search_operations,
+                "read_budget": scope_decision.max_unique_file_reads,
                 "mutation_plan_limit": scope_budget.mutation_plan_limit,
                 "patch_retry_limit": scope_budget.patch_retry_limit,
             }
@@ -1768,10 +1843,52 @@ class QueueManager:
         # one file written. Falls back to the single primary target when the
         # request named no explicit files (e.g. generic "fix the bug").
         deliverables = list(required_files) or ([resolved_target_path] if resolved_target_path else [])
-        initially_missing_deliverables = _missing_required_files(self.repo_root, deliverables, changed=set())
+        initially_missing_deliverables = (
+            [path for path in deliverables if not (self.repo_root / path).is_file()]
+            if scope_supplied
+            else _missing_required_files(self.repo_root, deliverables, changed=set())
+        )
 
         def execute(item: "WorkItem"):  # noqa: F821 - imported above
             nonlocal mutation_state, approved_mutation_plan
+            if scope_supplied and item.tool_name in {"read_file", "repo_batch_read"}:
+                started = time.perf_counter()
+                try:
+                    if item.tool_name == "repo_batch_read":
+                        paths = [str(path) for path in (item.tool_args.get("paths") or []) if str(path).strip()]
+                        references, cache_hits = ledger.read_many(paths, purpose=item.gate or item.question)
+                    else:
+                        reference, cache_hit = ledger.read_file(
+                            str(item.tool_args.get("path") or ""),
+                            start_line=item.tool_args.get("start_line"),
+                            end_line=item.tool_args.get("end_line"),
+                            purpose=item.gate or item.question,
+                        )
+                        references, cache_hits = [reference], int(cache_hit)
+                except (OSError, ValueError) as exc:
+                    return WorkResult(ok=False, summary="direct file read failed", error=str(exc))
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                metrics.tool_latency_ms += duration_ms
+                row = {
+                    "tool_name": item.tool_name,
+                    "status": "ok",
+                    "paths": [reference.canonical_path for reference in references],
+                    "evidence_references": [reference.evidence_id for reference in references],
+                    "cache_hit": cache_hits == len(references),
+                    "cache_hits": cache_hits,
+                    "requested_by": item.created_by,
+                    "selection_reason": item.gate or item.question,
+                    "duration_ms": round(duration_ms, 3),
+                }
+                trace.append(row)
+                return WorkResult(
+                    ok=True,
+                    summary="selected file evidence collected",
+                    files_read=[reference.canonical_path for reference in references],
+                    answer="\n\n".join(reference.content for reference in references),
+                    trace=[row],
+                    duration_ms=duration_ms,
+                )
             if mutation_required and item.kind == "verify" and not mutation_state.get("mutation_succeeded"):
                 blocked_trace = [
                     {
@@ -1789,6 +1906,7 @@ class QueueManager:
                     trace=blocked_trace,
                 )
             if item.kind == "verify" and changed_files and all(path.lower().endswith((".md", ".markdown", ".txt", ".rst")) for path in changed_files):
+                metrics.verification_commands += 1
                 verification_result = verify_documentation_changes(repo_root=self.repo_root, changed_files=changed_files)
                 row = verification_result.trace_row()
                 trace.append(row)
@@ -1797,6 +1915,52 @@ class QueueManager:
                     summary="documentation artifacts verified" if verification_result.ok else "documentation artifact verification failed",
                     error="" if verification_result.ok else verification_result.failure_code,
                     files_read=list(verification_result.affected_files),
+                    trace=[row],
+                )
+            if item.kind == "verify" and scope_decision.verification_commands:
+                checks: list[dict[str, Any]] = []
+                all_ok = True
+                for argv in scope_decision.verification_commands:
+                    started = time.perf_counter()
+                    try:
+                        proc = subprocess.run(
+                            [str(arg) for arg in argv],
+                            cwd=self.repo_root,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=min(300, int(timeout_seconds)),
+                            shell=False,
+                        )
+                        ok = proc.returncode == 0
+                        output = (proc.stdout or proc.stderr or "")[-4000:]
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        ok = False
+                        output = str(exc)
+                    duration_ms = (time.perf_counter() - started) * 1000.0
+                    metrics.tool_latency_ms += duration_ms
+                    metrics.verification_commands += 1
+                    all_ok = all_ok and ok
+                    checks.append(
+                        {
+                            "command": list(argv),
+                            "status": "passed" if ok else "failed",
+                            "output_preview": output,
+                            "duration_ms": round(duration_ms, 3),
+                        }
+                    )
+                row = {
+                    "tool_name": "verify_selected_commands",
+                    "status": "ok" if all_ok else "error",
+                    "verification_class": scope_decision.verification_strategy,
+                    "checks": checks,
+                    "planned_commands": [list(argv) for argv in scope_decision.verification_commands],
+                }
+                trace.append(row)
+                return WorkResult(
+                    ok=all_ok,
+                    summary="model-selected verification completed",
+                    error="" if all_ok else "selected_verification_failed",
                     trace=[row],
                 )
             if mutation_required and item.kind == "edit":
@@ -1821,8 +1985,9 @@ class QueueManager:
                     user_goal=request,
                     target_files=plan_targets,
                     evidence_files_read=read_files,
+                    execution_scope=scope_decision,
                 )
-                if requires_document_evidence_discovery(request, plan_targets):
+                if scope_decision.scope_level == ScopeLevel.BROAD:
                     manifest = build_document_evidence_manifest(
                         repo_root=self.repo_root,
                         target_document=plan_targets[0] if plan_targets else "",
@@ -1875,12 +2040,15 @@ class QueueManager:
                     if command and validate_mutation_command(command):
                         command = None
                 if command is None:
+                    if scope_supplied:
+                        metrics.delegation_model_calls += 1
                     command = self._synthesize_mutation_command(
                         base_execute=base_execute,
                         plan=plan,
                         target_file=target,
+                        delegation_context=item.question,
                     )
-                if command is None:
+                if command is None and not scope_supplied:
                     legacy_result = base_execute(
                         WorkItem(
                             kind="edit",
@@ -1904,7 +2072,10 @@ class QueueManager:
                             ]
                         )
                     )
-                    if mutation_trace_has_plan(legacy_result.trace, plan.plan_id) and legacy_changed:
+                    if legacy_changed:
+                        for row in legacy_result.trace:
+                            if isinstance(row, dict) and str(row.get("tool_name") or "") in REGISTERED_MUTATION_TOOLS:
+                                row.setdefault("mutation_plan_id", plan.plan_id)
                         legacy_result.files_changed = legacy_changed
                         if legacy_result.answer:
                             answers.append(legacy_result.answer)
@@ -1917,26 +2088,12 @@ class QueueManager:
                     legacy_payload = self._json_object_from_answer(legacy_result.answer)
                     if legacy_payload:
                         current_files = self._read_current_files(plan.target_files)
-                        legacy_command = self._command_from_payload(
+                        command = self._command_from_payload(
                             plan=plan,
                             payload=legacy_payload,
                             current_files=current_files,
                         )
-                        if legacy_command and not validate_mutation_command(legacy_command):
-                            command_result = execute_registered_mutation_command(
-                                repo_root=self.repo_root,
-                                command=legacy_command,
-                            )
-                            if command_result.ok:
-                                if command_result.answer:
-                                    answers.append(command_result.answer)
-                                sources.extend(command_result.sources)
-                                trace.extend(command_result.trace)
-                                changed_files.extend(command_result.files_changed)
-                                changed_files.extend(_extract_changed_files_from_value(command_result.trace))
-                                changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
-                                mutation_state = _mutation_state_from_trace(trace, changed_files)
-                                return command_result
+                if command is None:
                     blocked_trace = [
                         {
                             "tool_name": "mutation_command",
@@ -2005,9 +2162,18 @@ class QueueManager:
                 changed_files.extend(result.files_changed)
                 changed_files.extend(_extract_changed_files_from_value(result.trace))
                 changed_files[:] = sorted(dict.fromkeys(path for path in changed_files if path))
+                if result.files_changed:
+                    ledger.invalidate(result.files_changed)
+                    metrics.mutations += 1
+                    metrics.mutation_retries += sum(
+                        int(row.get("patch_retry_count") or 0) for row in result.trace if isinstance(row, dict)
+                    )
                 mutation_state = _mutation_state_from_trace(trace, changed_files)
                 return result
+            if item.kind in {"search", "discover"}:
+                metrics.unique_searches += 1
             result = base_execute(item)
+            metrics.tool_latency_ms += float(result.duration_ms or 0.0)
             if result.answer:
                 answers.append(result.answer)
             sources.extend(result.sources)
@@ -2018,11 +2184,7 @@ class QueueManager:
             mutation_state = _mutation_state_from_trace(trace, changed_files)
             return result
 
-        sniffer_target_files = [
-            str(item).strip()
-            for item in (target_files or required_files or ([resolved_target_path] if resolved_target_path else []))
-            if str(item).strip()
-        ]
+        sniffer_target_files = list(scope_decision.explicit_target_files)
         # Whether to finalize with an edit + verify is recognized upstream by the
         # coding agent's planner (the LLM checklist) and passed in as requires_edit.
         sniffer = CodingAgentSniffer(
@@ -2032,17 +2194,22 @@ class QueueManager:
             target_files=sniffer_target_files,
             relevant=_relevant,
             orchestrator=orchestrator,
+            execution_scope=scope_decision,
         )
+        if seed_finalization_without_read:
+            queue.submit_many(sniffer.initial_jobs())
         runner = WorkQueueRunner(
             queue=queue,
             execute=execute,
             sniffer=sniffer,
             board=board,
             orchestrator=orchestrator,
-            disable_evidence_short_circuit=requires_document_evidence_discovery(request, sniffer_target_files or required_files),
+            disable_evidence_short_circuit=scope_decision.scope_level == ScopeLevel.BROAD,
             max_steps=max(12, int(pass_cap) * 8),
         )
         report = runner.run()
+        metrics.queue_wait_ms = 0.0
+        metrics.deduplicated_jobs = report.skipped
         forced_retry_ran = False
         forced_retry_mutation_attempted = False
         forced_retry_changed_files = False
@@ -2061,7 +2228,7 @@ class QueueManager:
         # were named, when nothing was mutated) re-run the worker under a strict
         # MUTATION_REQUIRED prompt that forbids natural-language-only answers.
         forced_missing_before: list[str] = []
-        if mutation_required and not mutation_state.get("no_op_reason"):
+        if (not scope_supplied) and mutation_required and not mutation_state.get("no_op_reason"):
             forced_missing_before = _missing_required_files(
                 self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
             )
@@ -2212,7 +2379,7 @@ class QueueManager:
         # the requested "docs/01-overview.md". Move substantial misplaced content
         # into the required path before deciding what still needs generating.
         removed_strays: list[str] = []
-        if mutation_required and not mutation_state.get("no_op_reason") and deliverables:
+        if (not scope_supplied) and mutation_required and not mutation_state.get("no_op_reason") and deliverables:
             relocated = _salvage_misplaced_deliverables(self.repo_root, deliverables, changed_files, trace)
             removed_strays.extend(relocated)
             if relocated:
@@ -2225,7 +2392,7 @@ class QueueManager:
         # placeholder stub the worker left behind, we surface that as a failure
         # (the verification gate below blocks the run) rather than inventing
         # content. This keeps every produced file genuinely project-grounded.
-        if mutation_required and not mutation_state.get("no_op_reason") and deliverables:
+        if (not scope_supplied) and mutation_required and not mutation_state.get("no_op_reason") and deliverables:
             for path in deliverables:
                 target_abs = self.repo_root / path
                 stub_left_behind = False
@@ -2239,15 +2406,25 @@ class QueueManager:
                     warnings.append(f"deliverable_not_authored:{path}")
 
         # --- Cleanup: remove leftover wrong-path duplicates now satisfied. ---
-        if mutation_required and not mutation_state.get("no_op_reason") and deliverables:
+        if (not scope_supplied) and mutation_required and not mutation_state.get("no_op_reason") and deliverables:
             removed_strays.extend(
                 _cleanup_stray_deliverables(self.repo_root, deliverables, changed_files, trace)
             )
 
         # --- Verification gate: every required deliverable must exist on disk. ---
-        missing_required_files = _missing_required_files(
-            self.repo_root, deliverables, changed=set(mutation_state.get("changed_files") or [])
+        strict_missing = set(
+            _missing_required_files(
+                self.repo_root,
+                [path for path in deliverables if path in set(initially_missing_deliverables)],
+                changed=set(mutation_state.get("changed_files") or []),
+            )
         )
+        missing_required_files = [
+            path
+            for path in deliverables
+            if path in strict_missing
+            or (path not in set(initially_missing_deliverables) and not (self.repo_root / path).is_file())
+        ]
         terminal_reason = report.terminal_reason
         run_status = "completed"
         if mutation_required and not mutation_state.get("no_op_reason"):
@@ -2357,6 +2534,30 @@ class QueueManager:
         )
         orchestrator.finalize_trace()
         trace.extend(orchestrator.trace)
+        metrics.total_elapsed_ms = report.duration_ms
+        trace.append(
+            {
+                "layer": "run_metrics",
+                "status": "recorded",
+                **metrics.to_dict(),
+            }
+        )
+        trace.append(
+            {
+                "layer": "stop_conditions",
+                "decision": "stop" if run_status == "completed" else "blocked",
+                "reason": (
+                    "deliverable complete; required mutation and focused verification satisfied; no outstanding escalation"
+                    if run_status == "completed"
+                    else terminal_reason
+                ),
+                "rejected_follow_up_reasons": [
+                    "scope already satisfied",
+                    "deliverable complete",
+                    "verification not applicable" if scope_decision.verification_strategy == "none" else "focused verification complete",
+                ],
+            }
+        )
         return AutoExecuteResult(
             answer=final_answer,
             sources=sources,
@@ -2423,6 +2624,8 @@ class QueueManager:
                         else approved_mutation_plan.mutation_goals if approved_mutation_plan else []
                     ),
                     "verification_commands": list(verification_decision.commands),
+                    "execution_scope_decision": scope_decision.model_dump(mode="json"),
+                    "run_metrics": metrics.to_dict(),
                     "skip_full_pytest_reason": verification_decision.skip_full_pytest_reason,
                     "task_decision": {
                         "task_type": orchestrator.decision.task_type,

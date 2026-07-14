@@ -84,7 +84,15 @@ class QueueJobStatus(_ValueEnum):
 
 
 class MessageType(_ValueEnum):
+    TASK_REQUEST = "task_request"
+    EVIDENCE_FOUND = "evidence_found"
+    CLARIFICATION_REQUEST = "clarification_request"
+    SCOPE_ESCALATION = "scope_escalation"
     PROPOSAL = "proposal"
+    REVIEW_FEEDBACK = "review_feedback"
+    CONFLICT = "conflict"
+    DECISION = "decision"
+    TASK_RESULT = "task_result"
     QUESTION = "question"
     ANSWER = "answer"
     OBJECTION = "objection"
@@ -323,6 +331,10 @@ class AgentMessage:
     task_id: str
     message_type: MessageType
     content: str
+    root_task_id: str = ""
+    evidence_references: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    requested_action: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
 

@@ -164,7 +164,43 @@ def _fixed_checklist() -> FlowChecklist:
             FlowStep(id="s3", title="Apply edit", reason="implement request", status="pending"),
         ],
         next_action="Inspect target files.",
+        execution_scope={
+            "decision_id": "scope_test",
+            "task_type": "edit",
+            "scope_level": 1,
+            "complexity": "small",
+            "risk": "low",
+            "explicit_target_files": [],
+            "related_files": [],
+            "required_evidence": ["model-selected target"],
+            "allowed_tool_families": ["search", "read", "mutation", "verification"],
+            "search_scope": "bounded",
+            "max_search_operations": 1,
+            "max_unique_file_reads": 4,
+            "mutation_strategy": "bounded_patch",
+            "verification_strategy": "artifact",
+            "verification_commands": [],
+            "delegated_agents": [],
+            "stop_conditions": ["requested change complete"],
+            "confidence": 0.9,
+            "escalation_reason": "test planner selected one bounded lookup",
+        },
     )
+
+
+def _fixed_preview_payload(*, flow_id: str = "flow-test") -> dict[str, object]:
+    checklist = _fixed_checklist()
+    return {
+        "flow_id": flow_id,
+        "flow_context": None,
+        "prechecklist": CodingAgent._normalize_prechecklist(checklist, source="planner"),
+        "prechecklist_source": "planner",
+        "prechecklist_warning": "",
+        "requires_edit": True,
+        "target_files": [],
+        "execution_scope": checklist.execution_scope.model_dump(mode="json"),
+        "warnings": [],
+    }
 
 
 def _git_checklist(*, tools: list[str] | None = None) -> FlowChecklist:
@@ -996,7 +1032,7 @@ def test_coding_agent_conversational_noop_retries_before_terminal(tmp_path: Path
     assert any("edit_intent_conversational_noop_detected" in str(item) for item in warnings)
 
 
-def test_plan_checklist_falls_back_when_planner_json_is_invalid(tmp_path: Path, monkeypatch) -> None:
+def test_plan_checklist_stops_when_planner_json_is_invalid(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     agent._plan_checklist = CodingAgent._plan_checklist.__get__(agent, CodingAgent)  # type: ignore[method-assign]
@@ -1007,16 +1043,13 @@ def test_plan_checklist_falls_back_when_planner_json_is_invalid(tmp_path: Path, 
 
         def invoke(self, _messages):
             self.calls += 1
-            # first call: invalid schema text, second call: invalid repair text
-            if self.calls == 1:
-                return type("_Msg", (), {"content": "not json"})()
-            return type("_Msg", (), {"content": "```json\n{ broken }\n```"})()
+            return type("_Msg", (), {"content": "not json"})()
 
     agent.planner_llm = _BadPlanner()
     checklist, warnings = agent._plan_checklist("update README.md with new version")
-    assert checklist is not None
-    assert checklist.steps
-    assert any("planner parse failed" in str(item) for item in warnings)
+    assert checklist is None
+    assert agent.planner_llm.calls == 1
+    assert any("No action executed" in str(item) for item in warnings)
 
 
 def test_generate_auto_execute_delegates_to_tools_manager_orchestrator(tmp_path: Path, monkeypatch) -> None:
@@ -1048,6 +1081,7 @@ def test_generate_auto_execute_delegates_to_tools_manager_orchestrator(tmp_path:
         index_dir=tmp_path / ".mana/index",
         k=4,
         pass_cap=3,
+        prechecklist_payload=_fixed_preview_payload(),
     )
     assert orchestrator.calls == 1
     assert result["answer"] == "auto-complete"
@@ -1085,6 +1119,7 @@ def test_generate_auto_execute_propagates_flow_id_to_tools_manager(tmp_path: Pat
         k=4,
         pass_cap=3,
         flow_id="flow-xyz",
+        prechecklist_payload=_fixed_preview_payload(flow_id="flow-xyz"),
     )
     assert orchestrator.seen_flow_id == "flow-xyz"
     assert result["flow_id"] == "flow-xyz"
@@ -1115,7 +1150,13 @@ def test_generate_auto_execute_returns_optional_dedup_retry_telemetry(tmp_path: 
             )
 
     agent.set_tools_manager_orchestrator(_Orchestrator())
-    result = agent.generate_auto_execute("Implement planner", index_dir=tmp_path / ".mana/index", k=4, pass_cap=3)
+    result = agent.generate_auto_execute(
+        "Implement planner",
+        index_dir=tmp_path / ".mana/index",
+        k=4,
+        pass_cap=3,
+        prechecklist_payload=_fixed_preview_payload(),
+    )
     assert result["duplicate_request_skips"] == 2
     assert result["duplicate_semantic_search_skips"] == 3
     assert result["request_retry_attempts"] == 1
@@ -1143,18 +1184,24 @@ def test_generate_auto_execute_preserves_flow_id_continuity(tmp_path: Path, monk
             )
 
     agent.set_tools_manager_orchestrator(_Orchestrator())
-    first = agent.generate_auto_execute("Implement A", index_dir=tmp_path / ".mana/index", k=4)
+    first = agent.generate_auto_execute(
+        "Implement A",
+        index_dir=tmp_path / ".mana/index",
+        k=4,
+        prechecklist_payload=_fixed_preview_payload(flow_id="flow-a"),
+    )
     second = agent.generate_auto_execute(
         "Continue A",
         index_dir=tmp_path / ".mana/index",
         k=4,
         flow_id=first["flow_id"],
+        prechecklist_payload=_fixed_preview_payload(flow_id="flow-a"),
     )
     assert isinstance(first.get("flow_id"), str)
     assert second.get("flow_id") == first.get("flow_id")
 
 
-def test_plan_checklist_parses_python_literal_payload_without_repair(tmp_path: Path, monkeypatch) -> None:
+def test_plan_checklist_rejects_literal_without_execution_scope(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     agent._plan_checklist = CodingAgent._plan_checklist.__get__(agent, CodingAgent)  # type: ignore[method-assign]
@@ -1176,13 +1223,11 @@ def test_plan_checklist_parses_python_literal_payload_without_repair(tmp_path: P
 
     agent.planner_llm = _LiteralPlanner()
     checklist, warnings = agent._plan_checklist("update README.md with new version")
-    assert checklist is not None
-    assert checklist.objective == "Update README"
-    assert checklist.steps
-    assert warnings == []
+    assert checklist is None
+    assert any("missing execution_scope" in warning for warning in warnings)
 
 
-def test_plan_checklist_parses_list_blocks_with_plan_text(tmp_path: Path, monkeypatch) -> None:
+def test_plan_checklist_rejects_plan_text_without_execution_scope(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     agent._plan_checklist = CodingAgent._plan_checklist.__get__(agent, CodingAgent)  # type: ignore[method-assign]
@@ -1202,13 +1247,11 @@ def test_plan_checklist_parses_list_blocks_with_plan_text(tmp_path: Path, monkey
 
     agent.planner_llm = _ListPlanner()
     checklist, warnings = agent._plan_checklist("update README.md with new version")
-    assert checklist is not None
-    assert len(checklist.steps) >= 3
-    assert checklist.steps[0].title.startswith("Inspect README.md")
-    assert warnings == []
+    assert checklist is None
+    assert any("missing execution_scope" in warning for warning in warnings)
 
 
-def test_plan_checklist_parses_wrapped_answer_markdown_payload_without_repair(tmp_path: Path, monkeypatch) -> None:
+def test_plan_checklist_rejects_wrapped_answer_without_execution_scope(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     agent._plan_checklist = CodingAgent._plan_checklist.__get__(agent, CodingAgent)  # type: ignore[method-assign]
@@ -1226,13 +1269,11 @@ def test_plan_checklist_parses_wrapped_answer_markdown_payload_without_repair(tm
 
     agent.planner_llm = _WrappedAnswerPlanner()
     checklist, warnings = agent._plan_checklist("update README.md with new version")
-    assert checklist is not None
-    assert len(checklist.steps) >= 3
-    assert checklist.steps[0].title.startswith("Inspect README.md")
-    assert warnings == []
+    assert checklist is None
+    assert any("missing execution_scope" in warning for warning in warnings)
 
 
-def test_plan_checklist_parses_wrapped_content_markdown_fence_without_repair(tmp_path: Path, monkeypatch) -> None:
+def test_plan_checklist_rejects_wrapped_content_without_execution_scope(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     agent._plan_checklist = CodingAgent._plan_checklist.__get__(agent, CodingAgent)  # type: ignore[method-assign]
@@ -1253,10 +1294,8 @@ def test_plan_checklist_parses_wrapped_content_markdown_fence_without_repair(tmp
 
     agent.planner_llm = _WrappedContentPlanner()
     checklist, warnings = agent._plan_checklist("update README.md with new version")
-    assert checklist is not None
-    assert len(checklist.steps) >= 3
-    assert checklist.steps[0].title.startswith("Inspect README.md")
-    assert warnings == []
+    assert checklist is None
+    assert any("missing execution_scope" in warning for warning in warnings)
 
 
 def test_parse_flow_checklist_json_uses_nested_answer_field() -> None:
@@ -1298,33 +1337,38 @@ def test_preview_execution_checklist_uses_planner_and_persists_to_flow_memory(tm
     assert checklist.get("objective") == "Implement request"
 
 
-def test_preview_execution_checklist_reports_repair_source(tmp_path: Path, monkeypatch) -> None:
+def test_preview_execution_checklist_preserves_validated_source(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     monkeypatch.setattr(
         agent,
         "_plan_checklist_with_source",
-        lambda request, flow_context=None: (_fixed_checklist(), ["planner parse failed; attempting repair"], "planner_repair"),
+        lambda request, flow_context=None: (_fixed_checklist(), [], "planner"),
     )
     preview = agent.preview_execution_checklist("implement plan.")
-    assert preview["prechecklist_source"] == "planner_repair"
+    assert preview["prechecklist_source"] == "planner"
     assert str(preview.get("prechecklist_warning", "")).strip() == ""
 
 
-def test_preview_execution_checklist_surfaces_deterministic_fallback_warning(tmp_path: Path, monkeypatch) -> None:
+def test_preview_execution_checklist_surfaces_decision_failure(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
     monkeypatch.setattr(
         agent,
         "_plan_checklist_with_source",
-        lambda request, flow_context=None: (_fixed_checklist(), ["planner parse failed"], "deterministic_fallback"),
+        lambda request, flow_context=None: (
+            None,
+            ["Model decision failed: execution_scope. No action executed. Reason: invalid schema."],
+            "decision_invalid",
+        ),
     )
     preview = agent.preview_execution_checklist("implement plan.")
-    assert preview["prechecklist_source"] == "deterministic_fallback"
-    assert "deterministic fallback checklist" in str(preview.get("prechecklist_warning", "")).lower()
+    assert preview["prechecklist_source"] == "decision_invalid"
+    assert preview["prechecklist"] is None
+    assert "No action executed" in str(preview.get("prechecklist_warning", ""))
 
 
-def test_explicit_file_heading_task_skips_planner_questions(tmp_path: Path, monkeypatch) -> None:
+def test_explicit_file_heading_task_requires_model_scope_decision(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "README.md").write_text("# Demo\n\n## Project Layout\n\nOld\n", encoding="utf-8")
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
@@ -1334,22 +1378,20 @@ def test_explicit_file_heading_task_skips_planner_questions(tmp_path: Path, monk
 
         def invoke(self, _messages):
             self.calls += 1
-            raise AssertionError("planner should not be called for clear target tasks")
+            raise RuntimeError("planner unavailable")
 
     planner = _FailingPlanner()
     agent.planner_llm = planner
 
     checklist, warnings, source = agent._plan_checklist_with_source("task:update readme.md ## Project Layout")
 
-    assert source == "deterministic_clear_task"
-    assert warnings == []
-    assert checklist is not None
-    assert checklist.requires_edit is True
-    assert checklist.target_files == ["README.md"]
-    assert planner.calls == 0
+    assert source == "decision_unavailable"
+    assert checklist is None
+    assert any("No action executed" in warning for warning in warnings)
+    assert planner.calls == 1
 
 
-def test_planner_failure_circuit_breaker_uses_fallback_once(tmp_path: Path, monkeypatch) -> None:
+def test_planner_failure_circuit_breaker_stops_without_fallback(tmp_path: Path, monkeypatch) -> None:
     payload = {"answer": "ok", "trace": [], "warnings": []}
     agent = _build_agent(tmp_path, monkeypatch, payload=payload)
 
@@ -1366,10 +1408,11 @@ def test_planner_failure_circuit_breaker_uses_fallback_once(tmp_path: Path, monk
     first, first_warnings, first_source = agent._plan_checklist_with_source("explain the project structure")
     second, second_warnings, second_source = agent._plan_checklist_with_source("explain another area")
 
-    assert first is not None
-    assert second is not None
-    assert first_source == "deterministic_fallback"
-    assert second_source == "deterministic_fallback"
+    assert first is None
+    assert second is None
+    assert first_source == "decision_unavailable"
+    assert second_source == "decision_unavailable"
     assert planner.calls == 1
-    assert any("planner unavailable" in warning for warning in first_warnings)
-    assert second_warnings == ["planner unavailable; using deterministic checklist"]
+    assert any("No action executed" in warning for warning in first_warnings)
+    assert len(second_warnings) == 1
+    assert "No action executed" in second_warnings[0]

@@ -2,6 +2,23 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-14
+
+- Reworked coding turns around one validated adaptive execution-scope decision
+  with a four-level escalation ladder, canonical run-scoped evidence caching,
+  direct batch reads for exact paths, one-pass focused mutation generation,
+  targeted patch retry, risk-proportional deterministic verification, bounded
+  dynamic delegation prompts, typed inter-agent evidence/escalation messages,
+  explicit stop reasons, and structured performance metrics. Invalid or missing
+  semantic scope decisions now stop before tool execution; broad model-selected
+  refactors retain repository discovery and full verification. Updated legacy
+  queue tests whose assertions required wasteful discovery/model-backed reads.
+  - Verification: `./venv/bin/python -m pytest -q` passed (841 tests,
+    2 skipped); the focused adaptive/runtime suite passed (145 tests,
+    1 filesystem-dependent test skipped); targeted `py_compile` and
+    `git diff --check` passed. Ruff was not run because it is not installed in
+    the repository virtual environment.
+
 ## 2026-07-13
 
 - Fixed Windows mutation-plan patch preconditions to hash decoded text

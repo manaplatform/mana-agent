@@ -8,6 +8,7 @@ from mana_agent.agent.evaluation_gate import AgentRunPhase, AgentRunState, Evalu
 from mana_agent.agent.evidence_queue import EvidenceQueue, EvidenceQueueItem
 from mana_agent.agent.task_classifier import TaskDecision, classify_task
 from mana_agent.agent.verification_planner import VerificationDecision, plan_verification
+from mana_agent.multi_agent.runtime.execution_scope import ExecutionScopeDecision, ScopeLevel
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +130,37 @@ class AgentOrchestrator:
         repo_root: str | Path,
         target_files: Sequence[str] = (),
         requires_edit: bool | None = None,
+        execution_scope: ExecutionScopeDecision | None = None,
     ) -> "AgentOrchestrator":
         root = Path(repo_root).resolve()
-        decision = classify_task(request, repo_root=root, target_files=target_files, requires_edit=requires_edit)
+        if execution_scope is not None:
+            task_type = {
+                "answer": "answer_only",
+                "inspect": "repo_inspection",
+                "edit": "mutation_required",
+                "verify": "verification_only",
+                "plan": "answer_only",
+            }[execution_scope.task_type]
+            scope = {
+                ScopeLevel.DIRECT: "single_file" if len(execution_scope.explicit_target_files) == 1 else "multi_file",
+                ScopeLevel.BOUNDED: "multi_file",
+                ScopeLevel.IMPACT: "multi_file",
+                ScopeLevel.BROAD: "project_wide",
+            }[execution_scope.scope_level]
+            decision = TaskDecision(
+                task_type=task_type,  # type: ignore[arg-type]
+                target_files=tuple(execution_scope.explicit_target_files),
+                mutation_intent=str(request).strip() if execution_scope.task_type == "edit" else "",
+                constraints=tuple(execution_scope.out_of_bounds),
+                needs_repo_search=execution_scope.max_search_operations > 0,
+                needs_file_read=bool(execution_scope.all_evidence_files),
+                needs_mutation=execution_scope.task_type == "edit",
+                needs_verification=execution_scope.verification_strategy != "none",
+                scope=scope,  # type: ignore[arg-type]
+                confidence=execution_scope.confidence,
+            )
+        else:
+            decision = classify_task(request, repo_root=root, target_files=target_files, requires_edit=requires_edit)
         plan = PlanBuilder().build(decision)
         return cls(repo_root=root, decision=decision, plan=plan)
 
