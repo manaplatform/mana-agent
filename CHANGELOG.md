@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed actions_taken trace reporting and TUI chatbox toolbox display.
+  - Patched `_generate_common` (in CodingAgent): removed erroneous `trace_rows = [item for item in trace ...]` overwrite after `trace_rows = combined_trace_rows`. Now `actions_taken` (and read metrics) correctly reflect all tools executed across first pass + any conversational/mutation retry passes.
+  - In TUI `ManaChatApp._handle_real_turn`: after `coding_agent.generate()` returns, convert `result["actions_taken"]` entries into `ToolCallEvent` + `ToolResultEvent` (with stable call_id) and add to ChatHistory. This guarantees ToolCards ("toolbox") are shown in the chat log for the turn. Dedup by event_id protects against double-mount when live emit bridge also fires.
+  - Tools now reliably appear in the chatbox with proper toolbox cards when the agent runs (live during execution + authoritative post-run guarantee from the result payload).
+  - Verification: `PYTHONPATH=src ./venv/bin/python -m pytest tests/test_tui_live_tools_scroll.py -q` (3 passed); `tests/test_coding_agent.py -q` (54 passed); AST + imports clean.
+- TUI: tools show live in chat history + chat always auto-scrolls to latest message.
+  - Root cause for missing tools: turn handler called non-existent `coding_agent.handle()`, so the multi-agent path never ran and no real tools were emitted. It now drives `CodingAgent.generate()` (with `RichToolCallbackHandler`) like classic chat.
+  - `emit_tool_event` bridge pairs start/end by `event_id`, maps worker/callback kind names, and appends `ToolCallEvent`/`ToolResultEvent` while tools are still running (ChatLog paints via thread-safe `post_message`).
+  - ChatLog always pins to the newest content: `_scroll_to_latest` anchors the latest widget and `scroll_end(force=True)` after every user/assistant/tool/stream event (and after history replay).
+  - Verification: `pytest tests/test_tui_live_tools_scroll.py -q` → 3 passed; `py_compile` on tui modules.
 - TUI: more footer spacing + immediate message/tool paint in the chat log.
   - Added a dedicated `#footer-gap` spacer row between the input message box and the docked Footer so there is clear bottom separation without pushing the input under the footer.
   - ChatLog no longer waits on `call_after_refresh` for live events. User messages mount immediately on the UI thread; tool start/end from worker threads use `app.call_from_thread` so ToolCards appear while tools are still running.
@@ -42,6 +52,14 @@ All notable repository changes should be recorded here.
   - TUI is now launched only for real interactive terminals (`sys.stdin/stdout.isatty()`). Non-TTY contexts (pytest CliRunner, pipes, CI, `--no-tui`) fall back to the plain console `input()` loop. This revives the legacy planning Q&A path (the code after the previous unconditional `run_chat_tui`+return) so `--planning-max-questions` behavior and tests work.
   - Updated monkeypatches in the planning tests to target `"mana_agent.commands.cli.*"` (Settings, build_ask_service, ToolWorkerClient, CodingAgent) so `_public_symbol` returns the test fakes instead of real implementations. `_generate_planning_question_llm` patches remain on `chat_cli`.
   - The `--tui/--no-tui` option comment was clarified; `use_tui` flag is now honored for forcing plain mode.
+- Improved planner reliability for execution_scope checklist (prevents "Planner failed to produce valid checklist JSON after repair" result).
+  - Added a concrete VALID LEVEL-0 EXAMPLE to CODING_FLOW_PLANNER_PROMPT so the model can mirror a fully valid structure (including all ExecutionScopeDecision constraints such as non-empty explicit_target_files for level 0, stop_conditions, correct tool families, verification rules, escalation_reason etc.).
+  - Introduced `_invoke_flow_planner` + `_repair_flow_planner` (modeled on the existing tools planner repair helpers) and wired a single self-correction attempt inside `_plan_checklist_with_source`.
+  - On first parse/ValidationError, the planner is asked (once) to emit corrected JSON; success returns "planner_after_repair", persistent failure returns None + detailed warnings (including excerpt) and the safe blocked result.
+  - Updated the blocked result message and next_step for better guidance. No fallback decision is ever synthesized.
+  - Updated the one test that asserted exact call count for invalid planner.
+  - Verification: relevant planner tests continue to assert safe failure (no execution) when even the repair produces invalid output.
+  - This keeps the model-decision contract: invalid decisions after repair still stop safely.
   - Verification: `python -m pytest tests/test_chat_planning_mode.py -q` → 5 passed. Other chat CLI tests continue to pass.
 - Fixed `test_automation_cli_lists_empty_schedule_store` (and clean output for other subcommands) under Python 3.14. The 3.14 compatibility warning panel is now only visually emitted for the root interactive case (`ctx.invoked_subcommand is None`). Subcommands such as `automation list` now produce clean JSON output again. The `warnings.warn` is still issued on every path so existing warning tests and user visibility are preserved. Chat planning mode tests and behavior were not modified.
   - Verification: targeted pytest on the two files now reports all green.

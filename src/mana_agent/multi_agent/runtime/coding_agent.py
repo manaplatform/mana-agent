@@ -1328,14 +1328,10 @@ class CodingAgent:
             f"Max steps: {self.plan_max_steps}\n\n"
             f"Flow context:\n{(flow_context or 'none').strip()}\n"
         )
-        messages = [
-            SystemMessage(content=CODING_FLOW_PLANNER_PROMPT),
-            HumanMessage(content=user_prompt),
-        ]
 
+        raw = ""
         try:
-            first = self.planner_llm.invoke(messages)
-            raw = str(getattr(first, "content", "") or "").strip()
+            raw = self._invoke_flow_planner(user_prompt)
             checklist = self._parse_flow_checklist_json(raw, request=request)
             if checklist.execution_scope is None:
                 raise ValueError("planner output is missing execution_scope")
@@ -1347,7 +1343,25 @@ class CodingAgent:
                 "Model decision failed: execution_scope. No action executed. "
                 f"Reason: planner output is invalid: {exc}"
             )
-            return None, warnings, "decision_invalid"
+            # One repair attempt to give the model a chance to self-correct its decision.
+            try:
+                repaired_raw = self._repair_flow_planner(raw, str(exc), user_prompt)
+                checklist = self._parse_flow_checklist_json(repaired_raw, request=request)
+                if checklist.execution_scope is None:
+                    raise ValueError("repaired planner output is missing execution_scope")
+                warnings.append("planner_repair_succeeded")
+                if len(checklist.steps) > self.plan_max_steps:
+                    checklist.steps = checklist.steps[: self.plan_max_steps]
+                return checklist, warnings, "planner_after_repair"
+            except Exception as rexc:
+                warnings.append(
+                    "Model decision failed: execution_scope. No action executed. "
+                    f"Reason after repair: {rexc}"
+                )
+                excerpt = (raw or "")[:350].replace("\n", "\\n")
+                if excerpt:
+                    warnings.append(f"planner_raw_excerpt: {excerpt}")
+                return None, warnings, "decision_invalid"
         except Exception as exc:  # pragma: no cover
             self._planner_unavailable = True
             warnings.append(
@@ -1790,7 +1804,7 @@ class CodingAgent:
         if checklist is None:
             result = {
                 "status": "warning",
-                "answer": "Planner failed to produce valid checklist JSON after repair; stopping to avoid blind tool loop.",
+                "answer": "Planner failed to produce valid checklist JSON (after repair attempt); stopping to avoid blind tool loop.",
                 "changed_files": [],
                 "diff": "",
                 "warnings": warnings,
@@ -1799,7 +1813,7 @@ class CodingAgent:
                 "progress": {"phase": "blocked", "why": "planner_failed"},
                 "checklist": {"done": 0, "pending": 0, "blocked": 1, "total": 0},
                 "actions_taken": [],
-                "next_step": "Refine request or retry planner with stricter constraints.",
+                "next_step": "Refine request or retry planner with stricter constraints. Check warnings for the exact validation failure.",
             }
             return result, active_flow_id, effective_flow_context
 
@@ -1903,7 +1917,7 @@ class CodingAgent:
                 ),
             )
 
-        trace_rows = combined_trace_rows
+        trace_rows = list(combined_trace_rows)
         findings = self._run_static_analysis([p for p in changed if p.endswith(".py")])
         diff = self._git_diff(changed)
         checklist_counts = self._checklist_counts(checklist)
@@ -1939,7 +1953,6 @@ class CodingAgent:
         status = "ok" if not findings else "warning"
         if decision.phase == "blocked":
             status = "warning"
-        trace_rows = [item for item in trace if isinstance(item, dict)]
         read_metrics = self._trace_read_metrics(trace_rows)
         warning_text = "\n".join(str(item) for item in warnings).lower()
         tools_only_fallback = (
@@ -2295,6 +2308,29 @@ class CodingAgent:
             f"Original prompt:\n{human_prompt}"
         )
         return self._invoke_tools_batcher(repair_prompt)
+
+    def _invoke_flow_planner(self, human_prompt: str) -> str:
+        """Invoke the flow/checklist planner (CODING_FLOW_PLANNER_PROMPT)."""
+        if not hasattr(self, "planner_llm"):
+            raise AttributeError("planner_llm is not initialized")
+        messages = [
+            SystemMessage(content=CODING_FLOW_PLANNER_PROMPT),
+            HumanMessage(content=human_prompt),
+        ]
+        response = self.planner_llm.invoke(messages)
+        return str(getattr(response, "content", response) or "").strip()
+
+    def _repair_flow_planner(self, raw: str, error_info: str, human_prompt: str) -> str:
+        """Ask the planner LLM to repair a previous invalid flow checklist output."""
+        repair_prompt = (
+            "The previous coding flow planner output was invalid or failed schema/validation for execution_scope.\n"
+            f"Error: {error_info}\n\n"
+            "Return ONLY the corrected strict JSON object. No markdown, no explanations.\n"
+            "Follow the CODING_FLOW_PLANNER_PROMPT schema and the provided EXAMPLE exactly.\n\n"
+            f"Invalid previous output:\n{raw}\n\n"
+            f"Original planning prompt:\n{human_prompt}"
+        )
+        return self._invoke_flow_planner(repair_prompt)
 
     def _git_status_paths(self) -> set[str]:
         try:

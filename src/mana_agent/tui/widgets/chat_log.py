@@ -189,33 +189,60 @@ class ChatLog(VerticalScroll):
 
     def _render_event(self, event: ChatEvent) -> None:
         """Create appropriate visual representation and mount it."""
+        focus_widget = None
         if isinstance(event, UserMessageEvent):
-            self._add_user_message(event)
+            focus_widget = self._add_user_message(event)
         elif isinstance(event, AssistantMessageEvent):
-            self._add_or_update_assistant(event)
+            focus_widget = self._add_or_update_assistant(event)
         elif isinstance(event, ToolCallEvent):
-            self._add_tool_call(event)
+            focus_widget = self._add_tool_call(event)
         elif isinstance(event, ToolResultEvent):
-            self._add_tool_result(event)
+            focus_widget = self._add_tool_result(event)
         elif isinstance(event, StreamTokenEvent):
-            self._handle_stream_token(event)
+            focus_widget = self._handle_stream_token(event)
 
         self.message_count = len(self._history.get_events()) if self._history else self.message_count + 1
-        self.scroll_end(animate=False)
+        # Always pin the viewport to the newest content (user requirement).
+        self._scroll_to_latest(focus_widget)
+
+    def _scroll_to_latest(self, focus_widget: Static | Markdown | ToolCard | None = None) -> None:
+        """Keep chat history pinned to the latest message / tool card.
+
+        Uses Textual ``anchor`` so size growth (streaming tokens, tool results)
+        stays visible, and ``scroll_end`` (deferred until after layout) so the
+        virtual height is correct when content is newly mounted.
+        """
+        try:
+            target = focus_widget
+            if target is None:
+                children = list(self.children)
+                target = children[-1] if children else None
+            if target is not None:
+                try:
+                    target.anchor(animate=False)
+                except Exception:
+                    pass
+            # force=True ignores overflow restrictions; animate=False for snappy live updates.
+            # scroll_end schedules itself after refresh when immediate=False (default),
+            # which is required so max_scroll_y includes the newly mounted widget.
+            self.scroll_end(animate=False, force=True)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Individual renderers
     # ------------------------------------------------------------------
 
-    def _add_user_message(self, event: UserMessageEvent) -> None:
+    def _add_user_message(self, event: UserMessageEvent) -> Static:
         panel_content = Text(event.content, style="bold blue")
         widget = Static(
             Panel(panel_content, title="You", border_style="blue", padding=(0, 1)),
             classes="user-message",
         )
         self.mount(widget)
+        return widget
 
-    def _add_or_update_assistant(self, event: AssistantMessageEvent) -> None:
+    def _add_or_update_assistant(self, event: AssistantMessageEvent) -> Static | Markdown:
         """Create or replace the assistant message widget."""
         content = event.content or ""
         md = RichMarkdown(content) if content else Text("(thinking...)", style="dim")
@@ -241,37 +268,42 @@ class ChatLog(VerticalScroll):
 
         setattr(widget, "_turn_id", event.turn_id)
         self.mount(widget)
+        return widget
 
-    def _add_tool_call(self, event: ToolCallEvent) -> None:
+    def _add_tool_call(self, event: ToolCallEvent) -> ToolCard:
         card = ToolCard(event)
         self._tool_cards[event.call_id] = card
         self.mount(card)
+        return card
 
-    def _add_tool_result(self, event: ToolResultEvent) -> None:
+    def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard:
         card = self._tool_cards.get(event.call_id)
         if card is not None:
             card.set_result(event)
-        else:
-            # Orphan result (shouldn't happen with proper pairing) — render anyway
-            fallback = Static(
-                f"[tool result for {event.tool_name}] {'ok' if event.success else 'error'}",
-                classes="system-note",
-            )
-            self.mount(fallback)
+            return card
+        # Orphan result (shouldn't happen with proper pairing) — render anyway
+        fallback = Static(
+            f"[tool result for {event.tool_name}] {'ok' if event.success else 'error'}",
+            classes="system-note",
+        )
+        self.mount(fallback)
+        return fallback
 
-    def _handle_stream_token(self, event: StreamTokenEvent) -> None:
+    def _handle_stream_token(self, event: StreamTokenEvent) -> Static | Markdown | None:
         """Append token to the live assistant message widget if we can find it."""
         # Prefer explicit assistant_event_id
         target_id = event.assistant_event_id
         if target_id and target_id in self._assistant_widgets:
             w = self._assistant_widgets[target_id]
             self._append_to_assistant_widget(w, event.token)
-            return
+            return w
 
         # Fallback: update the most recent assistant widget
         if self._assistant_widgets:
             last = list(self._assistant_widgets.values())[-1]
             self._append_to_assistant_widget(last, event.token)
+            return last
+        return None
 
     def _append_to_assistant_widget(self, widget: Static | Markdown, token: str) -> None:
         """Best-effort live update of an assistant message."""
@@ -324,3 +356,5 @@ class ChatLog(VerticalScroll):
             return
         for ev in self._history.get_events():
             self._safe_render(ev)
+        # After replaying a session, land on the latest message.
+        self._scroll_to_latest()

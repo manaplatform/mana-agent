@@ -1048,8 +1048,10 @@ def test_plan_checklist_stops_when_planner_json_is_invalid(tmp_path: Path, monke
     agent.planner_llm = _BadPlanner()
     checklist, warnings = agent._plan_checklist("update README.md with new version")
     assert checklist is None
-    assert agent.planner_llm.calls == 1
+    # Initial call + one repair attempt on invalid output
+    assert agent.planner_llm.calls == 2
     assert any("No action executed" in str(item) for item in warnings)
+    assert any("repair" in str(item).lower() or "planner_raw" in str(item) for item in warnings)
 
 
 def test_generate_auto_execute_delegates_to_tools_manager_orchestrator(tmp_path: Path, monkeypatch) -> None:

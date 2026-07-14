@@ -315,14 +315,32 @@ class ManaChatApp(App):
             self.history.add(user_event)
         await self._handle_real_turn(user_event)
 
+    @staticmethod
+    def _extract_answer(result: Any) -> str:
+        """Normalize coding-agent / chat-service results into plain answer text."""
+        if result is None:
+            return ""
+        if isinstance(result, dict):
+            for key in ("answer", "content", "text", "message", "output"):
+                value = result.get(key)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return str(result).strip()
+        for attr in ("answer", "content", "text"):
+            value = getattr(result, attr, None)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        text = str(result).strip()
+        return text if text and text != "None" else ""
+
     async def _handle_real_turn(self, user_event: UserMessageEvent) -> None:
         """Real turn handler connected to multi-agent style flow.
 
         - Uses project settings + create_chat_model (with api_key) for the LLM.
         - Emits proper ToolCall / ToolResult so they are always visible (the core fix).
-        - Tries to use ChatService / ask_with_tools when available for repo-aware + tool-using answers (closer to old chat).
-        - Falls back gracefully. Full CodingAgent + QueueManager + auto-execute pipeline
-          can be injected by launching TUI *after* the setup in chat_cli.py.
+        - Drives CodingAgent via ``generate()`` (not a non-existent ``handle``).
+        - Bridges ``emit_tool_event`` so tool start/end paint as live ToolCards while
+          the agent is still running.
         """
         question = user_event.content
         turn_id = user_event.turn_id
@@ -346,33 +364,53 @@ class ManaChatApp(App):
             # Use agent's event_id when present (consistent across start/end).
             # Otherwise let ToolCallEvent auto-generate a unique call_id and remember it
             # via a key so the matching result pairs correctly (prevents orphan cards).
-            kind_l = str(kind).lower()
+            kind_l = str(kind).lower().strip()
             key = str(event_id).strip() if event_id else f"{tool}:{str(args)[:80]}"
-            if any(x in kind_l for x in ("start", "started")):
-                tcall = ToolCallEvent(
-                    tool_name=str(tool),
-                    args=args or {},
-                    # do not pass call_id -> dataclass default_factory gives unique good id
-                    summary=str(args)[:60] if args else "",
-                    turn_id=turn_id,
-                )
-                cid = tcall.call_id
-                self._tool_cid_map[key] = cid
+            # Worker / callback names: start|tool_start|worker_request_start, end|finished|...
+            is_start = kind_l in {"start", "started", "tool_start", "worker_request_start"} or kind_l.endswith("_start")
+            is_end = kind_l in {"end", "finished", "done", "success", "tool_end", "worker_request_end"} or kind_l.endswith("_end")
+            is_error = (
+                kind_l in {"error", "fail", "failed", "tool_error", "worker_request_error"}
+                or "error" in kind_l
+                or "fail" in kind_l
+            )
+            if is_start:
+                # Prefer stable call_id from agent event_id so start/end pair exactly.
+                call_kwargs: dict[str, Any] = {
+                    "tool_name": str(tool),
+                    "args": args or {},
+                    "summary": str(args)[:60] if args else "running…",
+                    "turn_id": turn_id,
+                }
+                if event_id and str(event_id).strip():
+                    call_kwargs["call_id"] = str(event_id).strip()
+                tcall = ToolCallEvent(**call_kwargs)
+                self._tool_cid_map[key] = tcall.call_id
+                if event_id and str(event_id).strip():
+                    self._tool_cid_map[str(event_id).strip()] = tcall.call_id
                 self.history.add(tcall)
-            elif any(x in kind_l for x in ("end", "finished", "done", "success")):
-                cid = self._tool_cid_map.get(key) or (str(event_id) if event_id else f"tool-{tool}")
+            elif is_end and not is_error:
+                cid = self._tool_cid_map.get(key) or self._tool_cid_map.get(str(event_id or "").strip()) or (
+                    str(event_id) if event_id else f"tool-{tool}"
+                )
+                duration_ms = None
+                if isinstance(duration, (int, float)):
+                    # duration may already be ms from some emitters; treat < 50 as seconds.
+                    duration_ms = int(duration * 1000) if duration < 50 else int(duration)
                 tres = ToolResultEvent(
                     call_id=cid,
                     tool_name=str(tool),
                     success=True,
-                    result={"duration": duration} if duration else None,
+                    result={"duration": duration} if duration is not None else "(ok)",
                     summary=f"{tool} completed",
-                    duration_ms=int(duration * 1000) if duration else None,
+                    duration_ms=duration_ms,
                     turn_id=turn_id,
                 )
                 self.history.add(tres)
-            elif "error" in kind_l or "fail" in kind_l:
-                cid = self._tool_cid_map.get(key) or (str(event_id) if event_id else f"tool-{tool}")
+            elif is_error:
+                cid = self._tool_cid_map.get(key) or self._tool_cid_map.get(str(event_id or "").strip()) or (
+                    str(event_id) if event_id else f"tool-{tool}"
+                )
                 tres = ToolResultEvent(
                     call_id=cid,
                     tool_name=str(tool),
@@ -387,39 +425,119 @@ class ManaChatApp(App):
 
         # Use the real multi-agent objects if provided (preferred). Real tool events
         # will be emitted via the bridged_emit above from inside CodingAgent etc.
-        answer = None
+        answer = ""
         used_full_flow = False
 
         ctx_result = {"root": str(self.repo_root)}  # minimal context for fallbacks only
 
         try:
-            if self.coding_agent is not None and hasattr(self.coding_agent, "handle"):
+            # CodingAgent API is generate() / generate_dir_mode() / generate_auto_execute().
+            # There is no handle() on the runtime CodingAgent — calling it silently skipped
+            # the whole multi-agent path, so tools never appeared in chat history.
+            if self.coding_agent is not None:
                 try:
-                    # Drive the actual CodingAgent (full flow: planning, tools, memory, edits, verification)
-                    if asyncio.iscoroutinefunction(self.coding_agent.handle):
-                        result = await self.coding_agent.handle(question, context={"root": str(self.repo_root)})
-                    else:
-                        result = await asyncio.to_thread(self.coding_agent.handle, question, {"root": str(self.repo_root)})
-                    answer = str(getattr(result, "answer", result) or result)
-                    used_full_flow = True
-                except Exception:
-                    pass
+                    self.update_status("Running coding agent (tools live)…")
+                    try:
+                        from mana_agent.commands.ui_helpers import RichToolCallbackHandler
+
+                        callbacks = [RichToolCallbackHandler(show_inputs=True)]
+                    except Exception:
+                        callbacks = None
+
+                    def _run_coding_agent() -> Any:
+                        agent = self.coding_agent
+                        # Prefer generate() — matches classic mana-agent chat path.
+                        if hasattr(agent, "generate"):
+                            kwargs: dict[str, Any] = {
+                                "index_dir": str(self.repo_root),
+                            }
+                            if callbacks is not None:
+                                kwargs["callbacks"] = callbacks
+                            return agent.generate(question, **kwargs)
+                        # Custom / legacy agents may still expose handle().
+                        if hasattr(agent, "handle"):
+                            handle = agent.handle
+                            if asyncio.iscoroutinefunction(handle):
+                                # Should not be called from a worker thread; fall through.
+                                return None
+                            return handle(question, {"root": str(self.repo_root)})
+                        return None
+
+                    result = await asyncio.to_thread(_run_coding_agent)
+                    # If handle was async (rare), run it on the loop.
+                    if result is None and self.coding_agent is not None and hasattr(self.coding_agent, "handle"):
+                        handle = self.coding_agent.handle
+                        if asyncio.iscoroutinefunction(handle):
+                            result = await handle(question, context={"root": str(self.repo_root)})
+                    extracted = self._extract_answer(result)
+                    if extracted:
+                        answer = extracted
+                        used_full_flow = True
+
+                    # Guarantee tools appear in chatbox immediately (as ToolCard "toolbox")
+                    # using the result payload from generate(). This complements the live
+                    # emit_tool_event bridge. Uses actions_taken (fixed in _generate_common
+                    # to cover first-pass + any internal retries). ChatLog dedupes by event_id
+                    # so live events + this safety net never duplicate cards.
+                    if isinstance(result, dict):
+                        for row in (result.get("actions_taken") or []):
+                            if not isinstance(row, dict):
+                                continue
+                            tname = str(row.get("tool_name") or row.get("tool") or row.get("name") or "tool")
+                            args_val = row.get("args") or row.get("input") or row.get("tool_args") or {}
+                            cid = str(
+                                row.get("event_id")
+                                or row.get("tool_call_id")
+                                or row.get("call_id")
+                                or f"tui-{tname}-{abs(hash(str(row)[:120])) % 1000000}"
+                            )
+                            tcall = ToolCallEvent(
+                                tool_name=tname,
+                                args=args_val,
+                                call_id=cid,
+                                summary=str(args_val)[:60] if args_val else "",
+                                turn_id=turn_id,
+                            )
+                            self.history.add(tcall)
+                            ok = bool(row.get("ok", True))
+                            if "success" in row:
+                                ok = bool(row.get("success"))
+                            res_val = row.get("result") or row.get("output") or row.get("answer") or "(ok)"
+                            err = row.get("error")
+                            if err:
+                                ok = False
+                            tres = ToolResultEvent(
+                                call_id=cid,
+                                tool_name=tname,
+                                success=ok,
+                                result=None if not ok else res_val,
+                                error=str(err) if err else None,
+                                summary=f"{tname} {'ok' if ok else 'error'}",
+                                turn_id=turn_id,
+                            )
+                            self.history.add(tres)
+                except Exception as exc:
+                    self.update_status(f"Coding agent error: {type(exc).__name__}")
 
             if not answer and self.tools_orchestrator is not None:
                 try:
                     if hasattr(self.tools_orchestrator, "run"):
                         result = await asyncio.to_thread(self.tools_orchestrator.run, question)
-                        answer = str(result)
-                        used_full_flow = True
+                        extracted = self._extract_answer(result)
+                        if extracted:
+                            answer = extracted
+                            used_full_flow = True
                 except Exception:
                     pass
 
             if not answer and self.chat_service is not None:
                 try:
                     if hasattr(self.chat_service, "ask"):
-                        resp = self.chat_service.ask(question)
-                        answer = str(getattr(resp, "answer", resp) or resp)
-                        used_full_flow = True
+                        resp = await asyncio.to_thread(self.chat_service.ask, question)
+                        extracted = self._extract_answer(resp)
+                        if extracted:
+                            answer = extracted
+                            used_full_flow = True
                 except Exception:
                     pass
 
@@ -432,11 +550,16 @@ class ManaChatApp(App):
                     settings = Settings()
                     ask = _build_ask_service_compat(settings, model_override=self.model, project_root=str(self.repo_root))
                     if hasattr(ask, "ask_with_tools"):
-                        resp = ask.ask_with_tools(index_dir=str(self.repo_root), question=question, k=6)
-                        answer = getattr(resp, "answer", None) or str(resp)
+                        resp = await asyncio.to_thread(
+                            ask.ask_with_tools,
+                            index_dir=str(self.repo_root),
+                            question=question,
+                            k=6,
+                        )
+                        answer = self._extract_answer(resp) or str(resp)
                     else:
-                        resp = ask.ask(str(self.repo_root), question, k=6)
-                        answer = getattr(resp, "answer", None) or str(resp)
+                        resp = await asyncio.to_thread(ask.ask, str(self.repo_root), question, 6)
+                        answer = self._extract_answer(resp) or str(resp)
                 except Exception:
                     pass
 
@@ -449,6 +572,9 @@ class ManaChatApp(App):
         finally:
             ui_helpers.emit_tool_event = original_emit
 
+        if not answer:
+            answer = f"Understood: {question[:80]}. (No answer produced.)"
+
         # Optional marker (non-tool) that full flow was used. Real tool cards come from the bridge.
         if used_full_flow:
             self.update_status("Ready (real multi-agent tools)")
@@ -460,6 +586,8 @@ class ManaChatApp(App):
             turn_id=turn_id,
         )
         self.history.add(assistant)
+        # Yield so the assistant placeholder + any final tool cards paint before tokens.
+        await asyncio.sleep(0)
 
         for i, tok in enumerate(answer.split(" ")):
             self.history.add(StreamTokenEvent(
