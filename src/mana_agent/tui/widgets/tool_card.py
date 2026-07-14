@@ -130,9 +130,10 @@ class ToolCard(Vertical):
 
         # Rebuild or append result section
         try:
-            # mutate title if possible
             if self._collapsible:
-                self._collapsible.title = header
+                # Do not overwrite the original call header (keeps "🔧 toolname" visible).
+                # This prevents the "tool call immediately gone" visual after result.
+                # Status is shown inside the result body instead.
                 # Open it automatically on result for visibility (premium feel)
                 self._collapsible.collapsed = False
         except Exception:
