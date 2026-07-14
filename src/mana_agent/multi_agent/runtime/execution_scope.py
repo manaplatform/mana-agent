@@ -57,6 +57,7 @@ class ExecutionScopeDecision(BaseModel):
     search_scope: SearchScope
     max_search_operations: int = Field(ge=0, le=16)
     max_unique_file_reads: int = Field(ge=0, le=64)
+    search_terms: list[str] = Field(default_factory=list, max_length=6)
     mutation_strategy: MutationStrategy
     verification_strategy: VerificationStrategy
     verification_commands: list[list[str]] = Field(default_factory=list, max_length=12)
@@ -73,6 +74,7 @@ class ExecutionScopeDecision(BaseModel):
         "related_files",
         "required_evidence",
         "allowed_tool_families",
+        "search_terms",
         "delegated_agents",
         "stop_conditions",
         "unresolved_questions",
@@ -106,6 +108,13 @@ class ExecutionScopeDecision(BaseModel):
                 raise ValueError("level 0 cannot delegate")
         if self.search_scope == "none" and self.max_search_operations:
             raise ValueError("search budget must be zero when search_scope is none")
+        if self.search_scope == "none" and self.search_terms:
+            raise ValueError("search_terms require a non-none search_scope")
+        if self.max_search_operations == 0 and self.search_terms:
+            raise ValueError("search_terms require max_search_operations > 0")
+        for term in self.search_terms:
+            if len(term) > 80:
+                raise ValueError("search_terms entries must be compact needles (<=80 chars)")
         if self.task_type == "edit" and self.mutation_strategy == "none":
             raise ValueError("edit task requires a mutation strategy")
         if self.task_type != "edit" and self.mutation_strategy != "none":
@@ -137,6 +146,7 @@ class ExecutionScopeDecision(BaseModel):
             "explicit_target_files": list(self.explicit_target_files),
             "related_files": list(self.related_files),
             "search_scope": self.search_scope,
+            "search_terms": list(self.search_terms),
             "budgets": {
                 "searches": self.max_search_operations,
                 "unique_file_reads": self.max_unique_file_reads,

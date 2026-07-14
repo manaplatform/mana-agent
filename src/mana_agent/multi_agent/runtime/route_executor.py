@@ -6,6 +6,12 @@ from typing import Any, Callable, Sequence
 
 from mana_agent.analysis.models import AskResponse, AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.mcp.tools import discovered_mcp_tool_names
+from mana_agent.multi_agent.routing.repo_search_terms import (
+    RepoSearchTermsDecisionEngine,
+    RepoSearchTermsDecisionError,
+    project_search_with_terms,
+    resolve_repo_search_terms,
+)
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision, RouteRuntimeState
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
@@ -49,6 +55,7 @@ class RouteExecutor:
         search_service: SearchService | None = None,
         command_handler: Callable[[str, list[str]], AskResponseWithTrace] | None = None,
         project_root: str | Path | None = None,
+        repo_search_terms_engine: RepoSearchTermsDecisionEngine | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -57,6 +64,7 @@ class RouteExecutor:
         self.search_service = search_service
         self.command_handler = command_handler
         self.project_root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
+        self.repo_search_terms_engine = repo_search_terms_engine
 
     def execute(self, decision: RouteDecision, context: RouteExecutionContext) -> AskResponseWithTrace:
         validation = self._validate(decision, context)
@@ -142,7 +150,27 @@ class RouteExecutor:
 
     def _repo_search(self, context: RouteExecutionContext) -> AskResponseWithTrace:
         root = (context.root_dir or context.project_root).resolve()
-        result = project_search(context.question, root, max_results=max(5, int(context.k) * 4))
+        try:
+            terms_decision = resolve_repo_search_terms(
+                user_request=context.question,
+                llm=getattr(self.router, "llm", None),
+                engine=self.repo_search_terms_engine,
+            )
+        except RepoSearchTermsDecisionError as exc:
+            return AskResponseWithTrace(
+                answer=str(exc),
+                sources=[],
+                warnings=["repo_search_terms decision failed; no repository search was executed"],
+                mode="route-repo_search",
+                trace=[],
+            )
+        result = project_search_with_terms(
+            terms_decision.terms,
+            root,
+            max_results=max(5, int(context.k) * 4),
+            fixed_strings=terms_decision.fixed_strings,
+        )
+        terms_label = ", ".join(f"'{term}'" for term in terms_decision.terms)
         sources = [
             SearchHit(
                 score=0.0,
@@ -156,11 +184,21 @@ class RouteExecutor:
         ]
         if not result.matches:
             return AskResponseWithTrace(
-                answer=f"No direct project matches for that query under {root}.",
+                answer=(
+                    f"No direct project matches for model-selected terms [{terms_label}] under {root}."
+                ),
                 sources=[],
                 warnings=[],
                 mode="route-repo_search",
-                trace=[],
+                trace=[
+                    ToolInvocationTrace(
+                        tool_name="repo_search_terms",
+                        args_summary=terms_label,
+                        duration_ms=0.0,
+                        status="empty",
+                        output_preview=terms_decision.reason[:300],
+                    )
+                ],
             )
         try:
             answer = self.qna_chain.run(question=context.question, context=_render_project_context(result.matches))
@@ -171,7 +209,15 @@ class RouteExecutor:
             sources=sources,
             warnings=[],
             mode="route-repo_search",
-            trace=[],
+            trace=[
+                ToolInvocationTrace(
+                    tool_name="repo_search_terms",
+                    args_summary=terms_label,
+                    duration_ms=0.0,
+                    status="ok",
+                    output_preview=terms_decision.reason[:300],
+                )
+            ],
         )
 
     def _tool_execution(self, decision: RouteDecision, context: RouteExecutionContext) -> AskResponseWithTrace:

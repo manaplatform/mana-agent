@@ -528,7 +528,15 @@ def compute_fingerprint(*, kind: str, tool_name: str, tool_args: dict[str, Any],
         path = _norm_path(args.get("path") or args.get("file") or args.get("file_path"))
         payload = f"read_file:{path}" if path else f"read_file:{_normalize_text(question)[:160]}"
     elif tool in {"repo_search", "repo_batch_search", "semantic_search", "list_files"}:
-        query = _normalize_text(args.get("query") or args.get("q") or args.get("pattern") or question)
+        # Fingerprint only model-selected search args. Never substitute the full
+        # user question as the search needle when query/terms are missing.
+        terms = args.get("terms") if isinstance(args.get("terms"), list) else []
+        query = _normalize_text(
+            args.get("query")
+            or args.get("q")
+            or args.get("pattern")
+            or " ".join(str(item).strip() for item in terms if str(item).strip())
+        )
         payload = f"{tool}:{query}"
     elif tool in _MUTATION_TOOLS:
         path = _norm_path(args.get("path") or args.get("file") or args.get("target_file"))
@@ -1093,7 +1101,7 @@ class QueueManager:
         repository_id: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        _ = (api_key, model, base_url, decision_provider)
+        _ = (api_key, model, base_url)
         self.worker_client = worker_client
         self.repo_root = Path(repo_root).resolve()
         self.workspace_id = workspace_id
@@ -1819,11 +1827,49 @@ class QueueManager:
                 )
             )
         elif scope_decision.max_search_operations > 0:
+            from mana_agent.multi_agent.routing.repo_search_terms import (
+                RepoSearchTermsDecisionError,
+                resolve_repo_search_terms,
+                validate_repo_search_terms_decision,
+            )
+
+            scope_terms = [str(item).strip() for item in (scope_decision.search_terms or []) if str(item).strip()]
+            if scope_terms:
+                try:
+                    terms_decision = validate_repo_search_terms_decision(
+                        {
+                            "terms": scope_terms,
+                            "confidence": float(scope_decision.confidence),
+                            "reason": "execution_scope.search_terms",
+                        },
+                        user_request=request,
+                        source="execution_scope",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        "Model decision failed: repo_search_terms. No action executed. "
+                        f"Reason: invalid execution_scope.search_terms ({exc})"
+                    ) from exc
+            else:
+                terms_llm = None
+                if self._decision_provider is not None and hasattr(self._decision_provider, "llm"):
+                    terms_llm = getattr(self._decision_provider, "llm", None)
+                try:
+                    terms_decision = resolve_repo_search_terms(
+                        user_request=request,
+                        llm=terms_llm,
+                    )
+                except RepoSearchTermsDecisionError as exc:
+                    raise RuntimeError(str(exc)) from exc
+            primary = terms_decision.terms[0]
             queue.submit(
                 WorkItem(
                     kind="discover",
                     tool_name="repo_search",
-                    tool_args={"query": request},
+                    tool_args={
+                        "query": primary,
+                        "terms": list(terms_decision.terms),
+                    },
                     question=f"Run planner-selected repository discovery for: {request}",
                     gate="locate_candidates",
                     priority=10,

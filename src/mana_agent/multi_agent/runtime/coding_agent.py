@@ -694,11 +694,27 @@ class CodingAgent:
             ]
 
         if self._checklist_requests_discovery(checklist):
+            from mana_agent.multi_agent.routing.repo_search_terms import (
+                RepoSearchTermsDecisionError,
+                resolve_repo_search_terms,
+            )
+
+            try:
+                terms_decision = resolve_repo_search_terms(
+                    user_request=request,
+                    llm=getattr(self, "planner_llm", None),
+                )
+            except RepoSearchTermsDecisionError as exc:
+                raise RuntimeError(str(exc)) from exc
+            primary = terms_decision.terms[0]
             return [
                 WorkItem(
                     kind="discover",
                     tool_name="repo_search",
-                    tool_args={"query": request},
+                    tool_args={
+                        "query": primary,
+                        "terms": list(terms_decision.terms),
+                    },
                     question=f"Run planner-selected repository discovery for: {request}",
                     gate="locate_candidates",
                     priority=10,

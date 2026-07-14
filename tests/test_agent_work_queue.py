@@ -46,8 +46,9 @@ _AGENTIC_EDIT_TOOLS = [
 
 
 def _broad_execution_scope(target: str, related_files: list[str]) -> dict[str, Any]:
+    stem = Path(target).stem
     return {
-        "decision_id": f"scope_broad_{Path(target).stem}",
+        "decision_id": f"scope_broad_{stem}",
         "task_type": "edit",
         "scope_level": 3,
         "complexity": "large",
@@ -59,6 +60,7 @@ def _broad_execution_scope(target: str, related_files: list[str]) -> dict[str, A
         "search_scope": "repository",
         "max_search_operations": 1,
         "max_unique_file_reads": len(related_files) + 1,
+        "search_terms": [stem, "architecture"],
         "mutation_strategy": "multi_file_patch",
         "verification_strategy": "artifact",
         "verification_commands": [],
@@ -69,6 +71,61 @@ def _broad_execution_scope(target: str, related_files: list[str]) -> dict[str, A
         "unresolved_questions": [],
         "out_of_bounds": ["files not selected by the scope decision"],
     }
+
+
+@pytest.fixture(autouse=True)
+def _stub_repo_search_terms_for_queue_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide compact discovery terms when QueueManager seeds without a live LLM."""
+
+    import re
+
+    from mana_agent.multi_agent.routing import repo_search_terms as rst
+
+    def _stub(
+        *,
+        user_request: str = "",
+        llm: Any = None,
+        tool_inputs: dict[str, Any] | None = None,
+        tool_name: str = "repo_search",
+        engine: Any = None,
+    ):
+        _ = (llm, engine)
+        from_inputs = rst.decision_from_tool_inputs(
+            tool_inputs,
+            user_request=user_request,
+            tool_name=tool_name,
+        )
+        if from_inputs is not None:
+            return from_inputs
+        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_.-]{1,40}", str(user_request or ""))
+        stop = {
+            "update",
+            "the",
+            "with",
+            "new",
+            "and",
+            "for",
+            "this",
+            "that",
+            "from",
+            "into",
+            "when",
+            "project",
+            "because",
+            "structure",
+            "changed",
+            "requested",
+            "change",
+        }
+        terms = [token for token in tokens if token.lower() not in stop][:4] or ["repo"]
+        return rst.RepoSearchTermsDecision(
+            terms=terms,
+            confidence=1.0,
+            reason="test stub for QueueManager discovery seed",
+            source="test",
+        )
+
+    monkeypatch.setattr(rst, "resolve_repo_search_terms", _stub)
 
 
 def _substantive(title: str) -> str:

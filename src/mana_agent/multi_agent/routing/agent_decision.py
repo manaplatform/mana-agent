@@ -163,6 +163,11 @@ Browser/search boundary: web_search cannot inspect a rendered target page or int
 Use github_search for public GitHub project/repository/code research.
 Use both web_search and github_search when the user asks for internet/web plus GitHub.
 Use repo_search/read_file for local repository inspection.
+When selecting repo_search or repo_batch_search, tool_inputs MUST include compact search terms only:
+- Prefer tool_inputs.repo_search.terms as a short list of code/search needles, or a single compact query string.
+- Never put the full user sentence, question, or chat message into query/terms.
+- Good: {"repo_search": {"terms": ["socket", "websocket"]}} or {"repo_search": {"query": "ToolManager"}}.
+- Bad: {"repo_search": {"query": "does this project use socket?"}}.
 Use browser tools for interactive website tasks that require navigation, page inspection, forms, clicks, uploads, downloads, tabs, account creation, sign-up, login, or authenticated browser state. Website actions do not edit repository code: set intent="tool", repo_context_needed=false, and code_editing_needed=false. Words such as create, change, submit, delete, or edit refer to the website when their target is a page, account, form, or URL; they must not select repository mutation tools. Select browser_open and browser_inspect plus the browser interaction capabilities the browser operator may need. Choose each concrete action later from current page evidence; do not assume a website-specific workflow.
 Never select browser actions intended to bypass CAPTCHA, MFA, access restrictions, or website security controls. Sensitive or irreversible final actions require explicit user approval before execution.
 Use apply_patch or edit/write tools only when the user wants code or files changed.
@@ -171,7 +176,7 @@ Return JSON only with this schema:
   "intent": "answer|repo_search|web_research|analyze|plan|edit|verify|review|tool|high_risk_tool",
   "confidence": 0.0,
   "selected_tools": ["tool_name"],
-  "tool_inputs": {"tool_name": {"query": "compact query"}},
+  "tool_inputs": {"tool_name": {"query": "compact query", "terms": ["optional", "needles"]}},
   "repo_context_needed": true,
   "web_search_needed": false,
   "code_editing_needed": false,
@@ -403,6 +408,24 @@ def verify_agent_decision(
         warnings.append("web_research intent must set web_search_needed=true")
     if decision.intent in {"repo_search", "analyze", "edit", "review"} and not decision.repo_context_needed:
         warnings.append(f"{decision.intent} intent should request repository context")
+    for search_tool in ("repo_search", "repo_batch_search"):
+        if search_tool not in decision.selected_tools:
+            continue
+        try:
+            from mana_agent.multi_agent.routing.repo_search_terms import decision_from_tool_inputs
+
+            term_decision = decision_from_tool_inputs(
+                decision.tool_inputs,
+                user_request=user_request,
+                tool_name=search_tool,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface invalid term payloads as decision warnings
+            warnings.append(f"{search_tool} tool_inputs are invalid: {exc}")
+            continue
+        if term_decision is None:
+            warnings.append(
+                f"{search_tool} requires compact model-selected query/terms; do not omit tool_inputs or use the full user message"
+            )
     if (
         require_flow_action
         and (decision.intent == "edit" or decision.code_editing_needed)

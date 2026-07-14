@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed repository search to use a validated model decision for compact search
+  terms instead of the full natural-language user message. Added
+  `RepoSearchTermsDecisionEngine` and patched `RouteExecutor._repo_search`,
+  chat `repo_search` handling, agent-decision validation, coding-agent discovery
+  seeds, and work-queue discovery seeds so missing/invalid term decisions stop
+  safely with no keyword or whole-message fallback. Execution-scope contracts may
+  also carry model-selected `search_terms`.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_repo_search_terms.py tests/test_ask_entry_router.py tests/test_coding_agent.py tests/test_agent_decision_routing.py tests/test_agent_work_queue.py tests/test_project_search.py tests/test_adaptive_coding_runtime.py -q` passed with 162 tests.
+
 - Demoted memory operational traces (`duplicate_task_hit`, `scoped_bundle_created`,
   `queue_duplicate_rejected`, `tool_cache_hit`) from INFO to DEBUG so they appear
   only with `--verbose` / `--debug`, not in normal mode console or file logs.

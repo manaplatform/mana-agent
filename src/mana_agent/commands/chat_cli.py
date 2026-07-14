@@ -28,6 +28,11 @@ from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
 from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
 from mana_agent.multi_agent.runtime.tools_executor import build_tools_executor_with_fallback
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine
+from mana_agent.multi_agent.routing.repo_search_terms import (
+    RepoSearchTermsDecisionError,
+    project_search_with_terms,
+    resolve_repo_search_terms,
+)
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
@@ -2580,10 +2585,42 @@ def chat(
                 and coding_agent_instance is None
                 and not required_mcp_server
             ):
-                tool_query = str((agent_decision.tool_inputs.get("repo_search") or {}).get("query") or question).strip()
+                try:
+                    terms_decision = resolve_repo_search_terms(
+                        user_request=question,
+                        llm=_agent_decision_llm(ask_service),
+                        tool_inputs=agent_decision.tool_inputs,
+                        tool_name="repo_search",
+                    )
+                except RepoSearchTermsDecisionError as exc:
+                    answer_text = str(exc)
+                    console.print(f"\n[bold red]{answer_text}[/bold red]")
+                    turn_record = ChatTurnTelemetry(
+                        turn_index=len(session_turns) + 1,
+                        timestamp=_now_iso(),
+                        question=question,
+                        answer_text=answer_text,
+                        sources=[],
+                        warnings=["repo_search_terms decision failed; no repository search was executed"],
+                        trace=[],
+                        tool_steps_total=0,
+                        decisions=[agent_decision.to_dict()],
+                        changed_files=[],
+                        has_diff=False,
+                        coding_state={"flow_id": active_flow_id},
+                    )
+                    session_turns.append(turn_record)
+                    chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
+                    _finish_ui_turn(current_turn_id)
+                    continue
+                terms_label = ", ".join(f"'{term}'" for term in terms_decision.terms)
                 search_result = _run_chat_event_step(
                     "Repository search...",
-                    lambda: project_search(tool_query, root),
+                    lambda: project_search_with_terms(
+                        terms_decision.terms,
+                        root,
+                        fixed_strings=terms_decision.fixed_strings,
+                    ),
                     event_type="ToolStarted",
                     tool_name="repo_search",
                 )
@@ -2593,10 +2630,10 @@ def chat(
                         body += "\n… (results truncated)"
                     answer_text = (
                         f"Found {len(search_result.matches)} match(es) "
-                        f"for '{tool_query}' via {search_result.backend}:\n\n{body}"
+                        f"for [{terms_label}] via {search_result.backend}:\n\n{body}"
                     )
                 else:
-                    answer_text = f"No matches for '{tool_query}' in {root}."
+                    answer_text = f"No matches for [{terms_label}] in {root}."
                 console.print("\n[bold]Search results[/bold]")
                 console.print(answer_text)
                 chat_ui_state.record_event(
@@ -2616,9 +2653,10 @@ def chat(
                         ),
                         metadata={
                             "tool_name": "project_search",
-                            "args_summary": tool_query,
+                            "args_summary": terms_label,
                             "result_summary": f"{len(search_result.matches)} match(es)",
                             "agent_decision": agent_decision.to_dict(),
+                            "repo_search_terms": terms_decision.to_dict(),
                         },
                     ).finish(status="success")
                 )

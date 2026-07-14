@@ -536,6 +536,7 @@ Schema:
     "search_scope": "none|named_files|bounded|dependency|repository",
     "max_search_operations": 0,
     "max_unique_file_reads": 2,
+    "search_terms": ["compact needles only; never the full user sentence"],
     "mutation_strategy": "none|single_patch|bounded_patch|multi_file_patch",
     "verification_strategy": "none|artifact|targeted|related|full",
     "verification_commands": [["python", "-m", "pytest", "-q", "tests/test_nearest.py"]],

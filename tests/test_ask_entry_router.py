@@ -146,17 +146,38 @@ def test_missing_faiss_index_does_not_automatically_project_search(tmp_path: Pat
 
 
 def test_missing_faiss_index_can_re_route_once_to_repo_search(tmp_path: Path) -> None:
+    from mana_agent.multi_agent.routing.repo_search_terms import RepoSearchTermsDecision
+    from mana_agent.multi_agent.runtime.route_executor import RouteExecutor
+
     project = _make_project(tmp_path)
     router = _StaticRouter(
         RouteDecision(kind="semantic_qa", confidence=0.9, reason="model selected index"),
         RouteDecision(kind="repo_search", confidence=0.8, reason="index unavailable; inspect repo"),
     )
     qna = _FakeQnA()
+
+    class _TermsEngine:
+        def decide(self, *, user_request: str):
+            assert user_request == "add"
+            return RepoSearchTermsDecision(
+                terms=["add"],
+                confidence=0.9,
+                reason="compact identifier term",
+                source="test",
+            )
+
     service = AskService(
         store=FaissStore(embeddings=object()),
         qna_chain=qna,
         project_root=project,
         entry_router=router,
+        route_executor=RouteExecutor(
+            router=router,
+            store=FaissStore(embeddings=object()),
+            qna_chain=qna,
+            project_root=project,
+            repo_search_terms_engine=_TermsEngine(),  # type: ignore[arg-type]
+        ),
     )
 
     response = service.ask(index_dir=project / ".mana" / "index", question="add", k=5)

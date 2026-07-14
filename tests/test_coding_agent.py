@@ -176,6 +176,7 @@ def _fixed_checklist() -> FlowChecklist:
             "allowed_tool_families": ["search", "read", "mutation", "verification"],
             "search_scope": "bounded",
             "max_search_operations": 1,
+            "search_terms": ["target"],
             "max_unique_file_reads": 4,
             "mutation_strategy": "bounded_patch",
             "verification_strategy": "artifact",
@@ -401,17 +402,31 @@ def test_work_queue_seed_git_add_commit_push_starts_with_git_context(tmp_path: P
 
 
 def test_work_queue_seed_broad_code_request_can_use_repo_search(tmp_path: Path, monkeypatch) -> None:
+    from mana_agent.multi_agent.routing.repo_search_terms import RepoSearchTermsDecision
+
     agent = _build_agent(tmp_path, monkeypatch, payload={"answer": "ok", "trace": [], "warnings": []})
     monkeypatch.setattr(
         agent,
         "_plan_checklist",
         lambda request, flow_context=None: (_tool_checklist(tools=["repo_search"]), []),
     )
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.routing.repo_search_terms.resolve_repo_search_terms",
+        lambda **_kwargs: RepoSearchTermsDecision(
+            terms=["router", "bug"],
+            confidence=0.9,
+            reason="model-selected compact discovery terms",
+            source="test",
+        ),
+    )
 
     seeds = agent._seed_items_for_request("fix bug in router")
 
     assert seeds
     assert seeds[0].tool_name == "repo_search"
+    assert seeds[0].tool_args.get("query") == "router"
+    assert seeds[0].tool_args.get("terms") == ["router", "bug"]
+    assert seeds[0].tool_args.get("query") != "fix bug in router"
     assert "Run planner-selected repository discovery for" in seeds[0].question
 
 

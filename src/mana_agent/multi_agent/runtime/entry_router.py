@@ -92,7 +92,9 @@ Route kinds:
 - tool_execution: execute a named tool/action from available_tools, such as command_inventory.
 - browser_task: run a multi-step interactive website session using only advertised browser_* tools.
 - semantic_qa: answer from the semantic index; requires_index must be true.
-- repo_search: search/read local repository files directly.
+- repo_search: search/read local repository files directly. A later model
+  decision selects compact search terms; never treat the full user message as
+  the literal search needle.
 - web_search: use public web search when enabled.
 - github_search: use public GitHub search when enabled.
 - gitops: execute explicit Git operations such as status, diff, add/stage, commit,
