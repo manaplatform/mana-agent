@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Made `default_ui_mode` selection robust for test/capture consoles (`record=True`) and varying rich terminal detection (is_terminal/width can be surprising on record consoles even with explicit width). Record and CI now force "plain" early; non-tty falls back to original is_terminal check. Updated fragile substring assert in `test_tool_activity_keeps_nested_subagent_events_with_shared_step_id` (subagent ID truncation in narrow table under test console width) to a stable prefix.
+  - Also fixed `test_default_ui_mode_keeps_non_tty_plain` and `test_env_ui_mode_rejects_fullscreen`.
+  - Verification: `python -m pytest -q tests/test_chat_ui_events_tokens.py` now passes fully (22 tests); targeted original failures re-confirmed green.
+
 - Updated stale test expectations in `test_inline_renderer_renders_tool_and_subagent_events_compactly` and `test_chat_full_auto_pass_cap_auto_resumes_until_completion` to match current InlineChatRenderer and full-auto transcript behavior (running tool events are suppressed in the main transcript; tool names surface via both the "tools" panel and terminal decoration lines).
   - Verification: `python -m pytest -q tests/test_chat_ui_events_tokens.py::test_inline_renderer_renders_tool_and_subagent_events_compactly tests/test_cli_smoke.py::test_chat_full_auto_pass_cap_auto_resumes_until_completion` passed.
 

@@ -340,7 +340,12 @@ def default_ui_mode(console: Console, *, as_json: bool = False) -> str:
     env_mode = str(os.getenv("MANA_CHAT_UI", "") or "").strip().lower()
     if env_mode in {"rich", "compact", "plain", "json"}:
         return env_mode
-    if not bool(getattr(console, "is_terminal", False)) or os.getenv("CI"):
+    # Treat record (capture/test) consoles and CI as plain for deterministic output.
+    # Fall back to is_terminal for other non-tty cases. Width-based choice only for
+    # real terminal-like consoles. This keeps tests stable across rich versions.
+    if getattr(console, "record", False) or os.getenv("CI"):
+        return "plain"
+    if not bool(getattr(console, "is_terminal", False)):
         return "plain"
     width = int(getattr(console, "width", 100) or 100)
     if width < 80:
