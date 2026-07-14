@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed `test_automation_cli_lists_empty_schedule_store` (and clean output for other subcommands) under Python 3.14. The 3.14 compatibility warning panel is now only visually emitted for the root interactive case (`ctx.invoked_subcommand is None`). Subcommands such as `automation list` now produce clean JSON output again. The `warnings.warn` is still issued on every path so existing warning tests and user visibility are preserved. Chat planning mode tests and behavior were not modified.
+  - Verification: targeted pytest on the two files now reports all green.
 - ToolCard: when Collapsible ("menu"/details) is collapsed, the full key data of the card (call + result summary) is still shown via an always-visible header line above the collapsible. Details (raw args + full result) are inside the collapsible. Fixes "collapse the menu dont show full data".
 - Updated to latest langchain (0.3.50+), langchain-community, langchain-openai pins and extended Python support to 3.14.6 (requires-python <=3.14.6).
 - Fixed TUI tool events not appearing and "flashing then immediately gone" on tool calls:
