@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed core CI collection for dashboard navigation tests by lazy-loading
+  Streamlit in timeline render helpers and making Streamlit-dependent dashboard
+  page/app assertions skip when the optional dashboard extra is not installed.
+  Pure timeline ordering and page-module discovery still run without Streamlit.
+  - Verification: `./venv/bin/python -m pytest -q tests/test_dashboard_navigation.py tests/test_conversation_service.py tests/test_api_conversations.py tests/test_chat_websocket.py tests/test_api_repository_analyze.py tests/test_dashboard_helpers.py` passed.
+
 - Upgraded the Streamlit dashboard into a multipage application with real
   sidebar route navigation (`st.navigation` / `st.Page`), persistent multi-
   conversation chat (stored under `~/.mana/repositories/<id>/dashboard/conversations/`),

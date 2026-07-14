@@ -1,15 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
-from mana_agent.dashboard.components.chat_timeline import merge_timeline, render_event, render_message
-from mana_agent.dashboard.pages import analyze, chat, overview
+import pytest
 
-
-def test_dashboard_pages_export_render_callables() -> None:
-    assert callable(overview.render)
-    assert callable(chat.render)
-    assert callable(analyze.render)
+from mana_agent.dashboard.components.chat_timeline import merge_timeline
 
 
 def test_timeline_merge_orders_messages_and_events() -> None:
@@ -26,6 +22,30 @@ def test_timeline_merge_orders_messages_and_events() -> None:
     assert timeline[0]["payload"]["type"] == "turn.started"
 
 
+def test_dashboard_page_modules_are_discoverable() -> None:
+    """Page modules exist on the package path without importing Streamlit."""
+    for name in ("overview", "chat", "analyze", "reports", "taskboard", "observability", "metrics", "automations", "cron"):
+        spec = importlib.util.find_spec(f"mana_agent.dashboard.pages.{name}")
+        assert spec is not None and spec.origin
+        assert Path(spec.origin).name == f"{name}.py"
+
+
+def test_packaged_dashboard_app_module_is_discoverable() -> None:
+    spec = importlib.util.find_spec("mana_agent.dashboard.app")
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).name == "app.py"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("streamlit") is None, reason="streamlit optional extra not installed")
+def test_dashboard_pages_export_render_callables() -> None:
+    from mana_agent.dashboard.pages import analyze, chat, overview
+
+    assert callable(overview.render)
+    assert callable(chat.render)
+    assert callable(analyze.render)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("streamlit") is None, reason="streamlit optional extra not installed")
 def test_packaged_dashboard_app_is_importable() -> None:
     import mana_agent.dashboard.app as app_module
 

@@ -1,10 +1,12 @@
-"""Structured chat timeline rendering for messages and runtime events."""
+"""Structured chat timeline rendering for messages and runtime events.
+
+Pure helpers (``merge_timeline``) import without Streamlit so core CI can test
+timeline ordering. Streamlit is imported lazily only inside render functions.
+"""
 
 from __future__ import annotations
 
 from typing import Any
-
-import streamlit as st
 
 
 _ROLE_AVATAR = {
@@ -28,7 +30,19 @@ _EVENT_ICONS = {
 }
 
 
+def _streamlit():
+    try:
+        import streamlit as st
+    except ImportError as exc:  # pragma: no cover - optional dashboard extra
+        raise ImportError(
+            "streamlit is required for dashboard timeline rendering. "
+            "Install with: pip install 'mana-agent[dashboard]'"
+        ) from exc
+    return st
+
+
 def render_message(message: dict[str, Any]) -> None:
+    st = _streamlit()
     role = str(message.get("role") or "system").lower()
     avatar = _ROLE_AVATAR.get(role, "💬")
     with st.chat_message(role if role in {"user", "assistant"} else "assistant", avatar=avatar):
@@ -47,6 +61,7 @@ def render_message(message: dict[str, Any]) -> None:
 
 
 def render_event(event: dict[str, Any], *, compact: bool = True) -> None:
+    st = _streamlit()
     kind = str(event.get("kind") or "reasoning")
     status = str(event.get("status") or "running")
     icon = _EVENT_ICONS.get(kind, "•")
@@ -108,6 +123,7 @@ def merge_timeline(
 
 
 def render_timeline(messages: list[dict[str, Any]], events: list[dict[str, Any]]) -> None:
+    st = _streamlit()
     timeline = merge_timeline(messages, events)
     if not timeline:
         st.info("No messages yet. Start a conversation.")
