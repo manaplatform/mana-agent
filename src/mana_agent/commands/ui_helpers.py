@@ -30,7 +30,7 @@ from rich.table import Table
 from rich.text import Text
 
 from mana_agent.cli.chat_ui import ChatUIState, render_status
-from mana_agent.cli.events import ChatEvent, make_event
+from mana_agent.cli.events import ChatEvent, make_event, make_tool_event, derive_tool_action_summary
 from mana_agent.cli.renderers import EventRenderer
 from mana_agent.config.settings import default_diagrams_dir
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
@@ -455,24 +455,24 @@ class LiveToolActivity:
                 "resolved_model": resolved_model,
             }
             self.log.start_tool(tool, tool_args=args, tool_call_id=event_id or "", agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role)
-            self.events.append(
-                make_event(
-                    "tool.started",
-                    title=tool,
-                    message="Tool started.",
-                    status="running",
-                    step_id="07",
-                    agent_id=agent_id or None,
-                    subagent_id=subagent_id or None,
-                    metadata={
-                        "tool_name": tool,
-                        "args_summary": _compact_display_text(args, 160),
-                        "agent_role": agent_role,
-                        "model_level": model_level,
-                        "resolved_model": resolved_model,
-                    },
-                )
+            summary = action_summary if (action_summary := _compact_display_text(args, 160)) else derive_tool_action_summary(tool, args)
+            start_evt = make_tool_event(
+                "start",
+                tool,
+                action_summary=summary,
+                args=args,
+                status="running",
+                step_id="07",
+                agent_id=agent_id or None,
+                subagent_id=subagent_id or None,
+                event_id=event_id,
+                metadata={
+                    "agent_role": agent_role,
+                    "model_level": model_level,
+                    "resolved_model": resolved_model,
+                },
             )
+            self.events.append(start_evt)
         elif kind == "end":
             key = self._matching_running_key(key, tool, args, event_id)
             self._finish(key, tool, duration=duration, ok=True, event_id=event_id, agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role)
@@ -528,33 +528,37 @@ class LiveToolActivity:
             self._ok += 1
             self.log.finish_tool(tool, duration=duration, tool_call_id=event_id or key, tool_args=args, agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role)
             status = "success"
-            message = "Tool finished."
-            event_type = "tool.finished"
+            message = error or "Tool finished."
+            phase = "end"
         else:
             self._failed += 1
             self.log.fail_tool(tool, error=error, duration=duration, tool_call_id=event_id or key, tool_args=args, agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role)
             status = "failed"
             message = error or "Tool failed."
-            event_type = "tool.failed"
-        event = make_event(
-            event_type,
-            title=tool,
-            message=message,
+            phase = "error"
+        term_evt = make_tool_event(
+            phase,
+            tool,
+            action_summary=_compact_display_text(args, 160),
             status=status,
             step_id="07",
             agent_id=agent_id or None,
             subagent_id=subagent_id or None,
+            event_id=event_id or key,
+            result_summary=message,
             metadata={
                 "tool_name": tool,
                 "args_summary": _compact_display_text(args, 160),
-                "result_summary": _compact_display_text(message, 160),
                 "agent_role": agent_role,
                 "model_level": model_level,
                 "resolved_model": resolved_model,
             },
-        ).finish(status=status, message=message)
-        event.duration_ms = max(0.0, float(duration or 0.0) * 1000)
-        self.events.append(event)
+            duration_ms=int(max(0.0, float(duration or 0.0) * 1000)) if duration is not None else None,
+        )
+        # ensure duration is carried even if make_tool_event path differs
+        if duration is not None:
+            term_evt.duration_ms = int(max(0.0, float(duration) * 1000))
+        self.events.append(term_evt)
 
     def add_log_line(self, line: str) -> None:
         text = str(line or "").strip()

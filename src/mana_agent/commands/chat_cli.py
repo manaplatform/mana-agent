@@ -38,7 +38,7 @@ from mana_agent.cli.chat_ui import (
     render_startup_header,
     render_status,
 )
-from mana_agent.cli.events import make_event
+from mana_agent.cli.events import make_event, normalize_event_status
 from mana_agent.cli.renderers import InlineChatRenderer
 from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup
@@ -2599,6 +2599,23 @@ def chat(
                     answer_text = f"No matches for '{tool_query}' in {root}."
                 console.print("\n[bold]Search results[/bold]")
                 console.print(answer_text)
+                tool_ev_id = f"{current_turn_id}-project-search"
+                chat_ui_state.record_event(
+                    make_event(
+                        "tool.started",
+                        title="project_search",
+                        message=f"Exact search for '{tool_query}'",
+                        status="running",
+                        session_id=chat_ui_state.session_id,
+                        turn_id=current_turn_id,
+                        step_id="08",
+                        event_id=tool_ev_id,
+                        metadata={
+                            "tool_name": "project_search",
+                            "args_summary": tool_query,
+                        },
+                    )
+                )
                 chat_ui_state.record_event(
                     make_event(
                         "tool.finished",
@@ -2608,8 +2625,9 @@ def chat(
                         session_id=chat_ui_state.session_id,
                         turn_id=current_turn_id,
                         step_id="08",
+                        event_id=tool_ev_id,
                         token_usage=chat_ui_state.tracker.record_tool_result(
-                            f"{current_turn_id}-exact-search",
+                            tool_ev_id,
                             answer_text,
                             step_id="08",
                             turn_id=current_turn_id,
@@ -3223,6 +3241,15 @@ def chat(
                     finally:
                         set_active_tool_activity(None)
                         console.print(activity)
+                        # Emit compact terminal tool lines (if any) into the main conversation
+                        # transcript. InlineChatRenderer now suppresses running states and uses
+                        # event_id to avoid re-duplicating the same tool activity.
+                        try:
+                            for ev in list(chat_ui_state.tool_runs)[-30:]:
+                                if ev.turn_id == current_turn_id and normalize_event_status(ev.status) in {"success", "failed"}:
+                                    inline_renderer.render_event(ev)
+                        except Exception:
+                            pass  # non-fatal transcript decoration
 
                 except ToolWorkerProcessError as exc:
                     _log_exception("coding_agent.generate.worker", exc)

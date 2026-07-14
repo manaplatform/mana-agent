@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed hard crash on `mana-agent` startup (and any CLI command) under Python 3.14. Root cause was an unconditional top-level import of the deprecated `langchain.agents.initialize_agent` + legacy `langchain_community` file tools inside `cli_internal.py`. These were only used by a dead, unused `build_file_agent()` helper (no callers anywhere in src/ or tests/). The legacy code triggered Pydantic model construction + Python 3.14 `annotationlib`/`typing._eval_type` failure on `Optional[dict[str, Any]]` inside langchain's `Chain` class.
+  - Removed the two problematic top-level imports and the entire dead `build_file_agent` function.
+  - `mana-agent` (and `mana-agent --help`) now starts cleanly on Python 3.14.
+  - Verification: direct import test + `./venv/bin/mana-agent --help` succeeds without traceback. No remaining references to the removed symbols.
+  - Note: Python 3.14 support remains experimental (Typer now emits a compatibility warning recommending 3.12/3.13). Core langchain_core / langchain-openai paths are still reached only when models are actually used.
+
+- Improved chat tool execution display to show live compact in-progress activity (spinner, tool name, concise action summary) inside the conversation transcript and dashboard timeline. Tool start immediately emits a `tool.started` ChatEvent; completion emits an update for the *same* `event_id` (status, duration, result_summary). Renderers and history merge by event_id to avoid noisy duplicate messages while keeping full ordered lifecycle events. Works for CLI (InlineChatRenderer + LiveToolActivity) and dashboard (WS + timeline) via the shared ExecutionEventHub / ChatEvent architecture.
+  - Added `make_tool_event` + `derive_tool_action_summary` helpers.
+  - Updated emission paths and id-aware dedup in renderers + timeline grouping.
+  - Verification: direct execution checks for renderer suppression + hub merge-by-id passed; `./venv/bin/python -m py_compile` on edited modules and related tests passed. Relevant tests: test_cli_ux_helpers (collection pre-existing env issue unrelated), test_chat_ui_events_tokens, test_chat_websocket, test_api_conversations.
+
 - Demoted memory operational traces (`duplicate_task_hit`, `scoped_bundle_created`,
   `queue_duplicate_rejected`, `tool_cache_hit`) from INFO to DEBUG so they appear
   only with `--verbose` / `--debug`, not in normal mode console or file logs.

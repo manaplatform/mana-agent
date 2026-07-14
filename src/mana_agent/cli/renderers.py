@@ -395,6 +395,10 @@ class InlineChatRenderer:
         self.console = console
         self.mode = EventRenderer.normalize_mode(mode)
         self._rendered_signatures: set[tuple[str, str, str, str, str, str]] = set()
+        # Track tool lifecycle by stable event_id so start/finish for the *same* activity
+        # do not produce noisy duplicate transcript lines. Running tools are primarily
+        # displayed via the LiveToolActivity region; only terminal state yields a line here.
+        self._tool_event_ids: dict[str, str] = {}  # event_id -> last_status seen
 
     def render_event(self, event: ChatEvent) -> None:
         line = self.format_event(event)
@@ -415,17 +419,33 @@ class InlineChatRenderer:
         self.console.print(Markdown(text))
 
     def format_event(self, event: ChatEvent) -> str | None:
-        signature = _inline_signature(event)
-        if signature in self._rendered_signatures:
-            return None
-        self._rendered_signatures.add(signature)
         kind = normalize_event_kind(event.kind)
         if kind == "session":
             return None
         if kind == "response" and event.type in {"turn.finished", "assistant.delta"}:
             return None
+
         if kind == "tool":
+            eid = str(event.event_id or event.id or "")
+            st = normalize_event_status(event.status)
+            prev = self._tool_event_ids.get(eid)
+            if prev == st:
+                # identical status update for same id; skip duplicate
+                return None
+            self._tool_event_ids[eid] = st
+            # In main chat transcript, only emit a line for *terminal* tool states.
+            # In-progress is shown live via LiveToolActivity (spinner + summary).
+            # This prevents noisy "→ running" followed by "✓ " duplicates for the same activity.
+            if st == "running":
+                return None
+            # fallthrough to produce the final compact line for the (updated) item
             return _inline_tool_line(event)
+
+        signature = _inline_signature(event)
+        if signature in self._rendered_signatures:
+            return None
+        self._rendered_signatures.add(signature)
+
         if kind == "subagent":
             return _inline_subagent_line(event)
         if kind == "routing":
@@ -477,17 +497,33 @@ def _short_args(event: ChatEvent) -> str:
 
 
 def _inline_tool_line(event: ChatEvent) -> str:
+    """Compact final-state line for a tool (used in transcript for terminal events).
+
+    Prefers human-readable action summary from summary/metadata.
+    Start (running) lines are suppressed in InlineChatRenderer to avoid noise;
+    live in-progress uses LiveToolActivity which updates the same logical item.
+    """
     tool = _tool_name(event)
     status = normalize_event_status(event.status)
-    args = _short_args(event)
-    if status == "running":
-        return f"→ tool {tool}{(' ' + args) if args else ''}"
+    # Prefer explicit action summary or result summary for human readable display
+    meta = event.metadata or {}
+    summary_src = event.summary or meta.get("result_summary") or meta.get("args_summary") or event.message or ""
+    detail = _clip_summary(str(summary_src).strip(), 80) if summary_src else _short_args(event)
+
     if status == "success":
-        summary = str((event.metadata or {}).get("result_summary") or event.message or "completed").strip()
-        return f"✓ tool {tool} {_clip_summary(summary, 88)}"
+        dur = _duration_label(event)
+        base = f"✓ {tool}"
+        if detail and detail.lower() != tool.lower():
+            base += f" {detail}"
+        if dur:
+            base += f" ({dur})"
+        return base
     if status == "failed":
-        return f"✕ tool {tool} {_clip_summary(event.message or 'failed', 88)}"
-    return f"{_status_icon(status)} tool {tool}{(' ' + args) if args else ''}"
+        err = _clip_summary(event.message or meta.get("result_summary") or "failed", 80)
+        return f"✕ {tool} {err}"
+    # Fallback for any other non-running terminal-ish state
+    icon = _status_icon(status)
+    return f"{icon} {tool}{(' ' + detail) if detail else ''}"
 
 
 def _inline_subagent_line(event: ChatEvent) -> str:

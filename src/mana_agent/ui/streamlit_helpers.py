@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os  # used for MANA_DASHBOARD_ROOT env and safe paths
+import uuid
 from pathlib import Path
 from typing import Any
 from mana_agent.workspaces.paths import (
@@ -488,15 +489,46 @@ def run_dashboard_chat(
         service = build_ask_service(settings, None, project_root=root)
         idx_dir = repository_index_dir(repository_id_for_path(root))
         _emit("agent.planning", "Planning", message="Preparing repository answer", status="running")
-        _emit("tool.started", "repo_search", message=f"Gathering evidence for: {prompt[:80]}", status="running", metadata={"tool_name": "repo_search"})
+        tool_exec_id = f"dash-tool-{uuid.uuid4().hex[:12]}"
+        _emit(
+            "tool.started",
+            "repo_search",
+            message=f"Gathering evidence for: {prompt[:80]}",
+            status="running",
+            metadata={"tool_name": "repo_search", "args_summary": prompt[:80]},
+            execution_id=execution_id,
+            step_id="tool-01",
+            # pass through id so WS + history can correlate start/update
+            event_id=tool_exec_id,
+        )
 
         try:
             resp = service.ask_with_tools(str(idx_dir), prompt, k=k, max_steps=5, timeout_seconds=45)
-            _emit("tool.finished", "ask_with_tools", message="Tool-assisted answer complete", status="success", metadata={"tool_name": "ask_with_tools"})
+            _emit(
+                "tool.finished",
+                "ask_with_tools",
+                message="Tool-assisted answer complete",
+                status="success",
+                metadata={"tool_name": "ask_with_tools", "result_summary": "tool-assisted"},
+                event_id=tool_exec_id,
+            )
         except Exception as tool_exc:
-            _emit("tool.failed", "ask_with_tools", message=str(tool_exc)[:200], status="failed", metadata={"tool_name": "ask_with_tools"})
+            _emit(
+                "tool.failed",
+                "ask_with_tools",
+                message=str(tool_exc)[:200],
+                status="failed",
+                metadata={"tool_name": "ask_with_tools"},
+                event_id=tool_exec_id,
+            )
             resp = service.ask(str(idx_dir), prompt, k=k)
-            _emit("tool.finished", "ask", message="Classic ask complete", status="success", metadata={"tool_name": "ask"})
+            _emit(
+                "tool.finished",
+                "ask",
+                message="Classic ask complete",
+                status="success",
+                metadata={"tool_name": "ask"},
+            )
 
         answer = ""
         sources = []

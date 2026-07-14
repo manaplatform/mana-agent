@@ -16,12 +16,6 @@ from datetime import datetime, timezone
 import typer
 import asyncio
 from asyncio.subprocess import PIPE
-from langchain.agents import initialize_agent, AgentType
-from langchain_community.tools.file_management import (
-    ReadFileTool,
-    WriteFileTool,
-    ListDirectoryTool,
-)
 from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 from mana_agent.config.settings import (
     Settings,
@@ -1456,27 +1450,6 @@ def _resolve_out_path(user_out: str | None, default: Path, suffix: str) -> Path:
             return p / default.name
         return p.with_suffix(suffix) if p.suffix == "" else p
     return default
-
-
-# ---------------------------------------------------------------------------
-# File agent (safe LangChain tools)
-# ---------------------------------------------------------------------------
-
-def build_file_agent(llm: Any, *, root_dir: Path | str = ".") -> Any:
-    root = Path(root_dir).resolve()
-
-    tools = [
-        ReadFileTool(root_dir=str(root)),
-        WriteFileTool(root_dir=str(root)),
-        ListDirectoryTool(root_dir=str(root)),
-    ]
-
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=False,
-    )
 
 
 # ---------------------------------------------------------------------------

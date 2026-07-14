@@ -63,20 +63,44 @@ def render_message(message: dict[str, Any]) -> None:
 def render_event(event: dict[str, Any], *, compact: bool = True) -> None:
     st = _streamlit()
     kind = str(event.get("kind") or "reasoning")
-    status = str(event.get("status") or "running")
+    raw_status = str(event.get("status") or "running")
+    status = raw_status
     icon = _EVENT_ICONS.get(kind, "•")
     title = str(event.get("title") or event.get("type") or kind)
     summary = str(event.get("summary") or event.get("message") or "")
+    meta = event.get("metadata") or event.get("details") or {}
     duration = event.get("duration_ms")
     duration_txt = f" · {duration}ms" if duration not in (None, "") else ""
+
+    # Special compact live-style rendering for tool activity items.
+    # Uses the same event_id correlation as CLI so start updates to finished in place.
+    if kind == "tool" or str(event.get("type") or "").startswith("tool."):
+        tool_name = str(meta.get("tool_name") or title or "tool")
+        action = str(meta.get("args_summary") or meta.get("result_summary") or summary or "").strip()
+        if raw_status == "running":
+            spinner = "⏳"
+            label = f"{spinner} **{tool_name}** · running"
+            if action:
+                label += f" — {action[:80]}"
+            st.markdown(label)
+            return
+        fin_icon = "✅" if raw_status in {"success", "done"} else "❌"
+        dur = f" ({duration}ms)" if duration else ""
+        label = f"{fin_icon} **{tool_name}**{dur}"
+        if action:
+            label += f" — {action[:100]}"
+        st.markdown(label)
+        if summary and summary != action:
+            st.caption(summary[:120])
+        return
+
     label = f"{icon} **{title}** · `{status}`{duration_txt}"
-    if compact and not summary and not (event.get("metadata") or {}):
+    if compact and not summary and not meta:
         st.markdown(label)
         return
     with st.expander(f"{icon} {title} · {status}{duration_txt}", expanded=False):
         if summary:
             st.write(summary)
-        meta = event.get("metadata") or event.get("details") or {}
         technical = {
             "type": event.get("type"),
             "kind": kind,
@@ -95,7 +119,11 @@ def merge_timeline(
     messages: list[dict[str, Any]],
     events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Interleave messages and events by timestamp for ordered rendering."""
+    """Interleave messages and events by timestamp for ordered rendering.
+
+    For tool.* events, collapse by event_id keeping the latest status (supports
+    start + in-place terminal update over the shared event/socket architecture).
+    """
     rows: list[dict[str, Any]] = []
     for message in messages:
         rows.append(
@@ -105,11 +133,29 @@ def merge_timeline(
                 "payload": message,
             }
         )
+
+    # Collapse tool events by event_id (latest wins) while preserving first-seen ts order.
+    tool_latest: dict[str, dict[str, Any]] = {}
+    tool_first_ts: dict[str, str] = {}
+    other_events: list[dict[str, Any]] = []
+
     for event in events:
-        # Keep final assistant text as messages; show tool/agent activity as events.
+        et = str(event.get("type") or "")
+        if et.startswith("tool."):
+            eid = str(event.get("event_id") or event.get("id") or "").strip()
+            ts = str(event.get("started_at") or event.get("timestamp") or "")
+            if eid:
+                if eid not in tool_first_ts:
+                    tool_first_ts[eid] = ts
+                tool_latest[eid] = event  # overwrite with later (terminal) version
+            else:
+                other_events.append(event)
+        else:
+            other_events.append(event)
+
+    for event in other_events:
         event_type = str(event.get("type") or "")
         if event_type in {"turn.finished", "assistant.delta"} and str(event.get("status")) == "success":
-            # Still show completion as compact event; message holds full answer.
             pass
         rows.append(
             {
@@ -118,6 +164,11 @@ def merge_timeline(
                 "payload": event,
             }
         )
+
+    for eid, ev in tool_latest.items():
+        ts = tool_first_ts.get(eid, str(ev.get("started_at") or ev.get("timestamp") or ""))
+        rows.append({"kind": "event", "ts": ts, "payload": ev})
+
     rows.sort(key=lambda item: item["ts"])
     return rows
 

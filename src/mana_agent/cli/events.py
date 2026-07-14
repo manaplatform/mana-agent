@@ -304,3 +304,153 @@ def make_event(
         token_usage=token_usage,
         metadata=event_metadata,
     )
+
+
+def derive_tool_action_summary(
+    tool_name: str,
+    args: Any = None,
+    *,
+    result: Any = None,
+    max_len: int = 96,
+) -> str:
+    """Return a concise, human-readable action summary for a tool invocation.
+
+    Pure function. Inspects common arg shapes (dict or JSON str) for path/query/command etc.
+    Falls back to a compact tool + arg preview. Used for immediate live display.
+    """
+    name = str(tool_name or "tool").strip() or "tool"
+    text_parts: list[str] = []
+
+    def _add_candidate(val: Any) -> None:
+        if val is None:
+            return
+        s = str(val).strip()
+        if not s:
+            return
+        # Redact obvious secrets quickly (best effort, non-crypto)
+        low = s.lower()
+        if any(k in low for k in ("password", "secret", "token", "apikey", "api_key")) and len(s) > 8:
+            s = s[:4] + "…[redacted]"
+        text_parts.append(s)
+
+    if isinstance(args, dict):
+        for key in ("path", "file_path", "file", "target", "query", "q", "command", "cmd", "pattern", "url", "glob", "name"):
+            if key in args:
+                _add_candidate(args[key])
+                break
+        else:
+            # fallback to short json of first few items
+            try:
+                import json as _json
+                short = _json.dumps({k: args[k] for k in list(args)[:2]}, ensure_ascii=False, separators=(",", ":"))
+                _add_candidate(short)
+            except Exception:
+                pass
+    elif isinstance(args, str):
+        s = args.strip().replace("\n", " ")
+        if s:
+            # try parse json for structured
+            parsed = None
+            try:
+                import json as _json
+                parsed = _json.loads(s)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                for key in ("path", "file_path", "query", "command", "url"):
+                    if key in parsed:
+                        _add_candidate(parsed[key])
+                        break
+                else:
+                    _add_candidate(s[:72])
+            else:
+                _add_candidate(s[:72])
+    else:
+        # try to pull from result or generic
+        pass
+
+    if not text_parts and result is not None:
+        try:
+            r = str(result).strip()[:60]
+            if r:
+                text_parts.append(r)
+        except Exception:
+            pass
+
+    summary = (name + (": " + " ".join(text_parts) if text_parts else "")).strip()
+    if len(summary) > max_len:
+        summary = summary[: max_len - 1].rstrip() + "…"
+    return summary or name
+
+
+def make_tool_event(
+    phase: str,
+    tool_name: str,
+    *,
+    action_summary: str = "",
+    args: Any = None,
+    status: str = "running",
+    session_id: str = "",
+    turn_id: str = "",
+    agent_id: str | None = "main",
+    subagent_id: str | None = None,
+    step_id: str | None = None,
+    parent_event_id: str | None = None,
+    event_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    duration_ms: int | None = None,
+    result_summary: str = "",
+) -> ChatEvent:
+    """Create a normalized tool ChatEvent with stable id for start + update.
+
+    phase: "start" | "end" | "error" (maps to tool.started / tool.finished / tool.failed)
+    The caller is responsible for supplying the same event_id for start and its terminal update.
+    A concise action_summary (or auto-derived) is placed in summary and metadata.
+    """
+    phase = str(phase or "").strip().lower()
+    if phase in {"start", "started"}:
+        etype = "tool.started"
+        default_status = "running"
+        default_msg = action_summary or "Tool started."
+    elif phase in {"end", "finished", "complete", "success"}:
+        etype = "tool.finished"
+        default_status = "success"
+        default_msg = result_summary or action_summary or "Tool finished."
+    else:
+        etype = "tool.failed"
+        default_status = "failed"
+        default_msg = result_summary or action_summary or "Tool failed."
+
+    base_meta: dict[str, Any] = {
+        "tool_name": str(tool_name or "tool"),
+        "args_summary": action_summary or (derive_tool_action_summary(tool_name, args) if args is not None else ""),
+    }
+    if result_summary:
+        base_meta["result_summary"] = result_summary
+    if metadata:
+        base_meta.update(metadata)
+
+    ev = make_event(
+        etype,
+        title=str(tool_name or "tool"),
+        message=default_msg,
+        status=status or default_status,
+        session_id=session_id,
+        turn_id=turn_id,
+        agent_id=agent_id,
+        subagent_id=subagent_id,
+        step_id=step_id,
+        parent_event_id=parent_event_id,
+        metadata=base_meta,
+    )
+    if event_id:
+        ev.event_id = event_id
+        ev.id = event_id
+    if duration_ms is not None:
+        ev.duration_ms = int(duration_ms)
+        if ev.status in {"success", "failed"} and not ev.ended_at:
+            ev.ended_at = utc_now_iso()
+    # ensure summary carries the human action for renderers
+    if action_summary and not ev.summary:
+        ev.summary = action_summary
+    return ev
