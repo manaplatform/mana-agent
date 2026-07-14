@@ -7,13 +7,14 @@ name = "mana-agent"
 version = "0.0.14"
 description = "LLM-powered static analysis and repository understanding tool"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"  # Python 3.14 has known annotation evaluation incompatibilities with current langchain/pydantic stacks (see CHANGELOG)
+requires-python = ">=3.10,<=3.14.6"  # Support up to Python 3.14.6; some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
 license = { text = "MIT" }
 
 dependencies = [
   # CLI / UX
   "typer>=0.6.0,<1.0.0",
   "rich>=12.0,<15.0",
+  "textual>=0.80.0,<1.0.0",
   "prompt_toolkit>=3.0,<4.0",
   "fastapi>=0.110,<1.0",
   "uvicorn>=0.27,<1.0",
@@ -26,9 +27,9 @@ dependencies = [
   "mcp>=1.0,<2.0",
 
   # ✅ LangChain (modern, supported)
-  "langchain>=0.3.27,<1.0.0",
-  "langchain-community>=0.0.10,<1.0.0",
-  "langchain-openai>=0.3.27,<1.0.0",
+  "langchain>=0.3.50,<1.0.0",
+  "langchain-community>=0.0.20,<1.0.0",
+  "langchain-openai>=0.3.50,<1.0.0",
 
   # OpenAI SDK (still required by langchain-openai)
   "openai>=0.27.0,<2.0.0",
@@ -92,4 +93,4 @@ full = [
 mana-agent = "mana_agent.commands.cli:app"
 
 [tool.setuptools.package-data]
-mana_agent = ["default_skills/*.md"]
+mana_agent = ["default_skills/*.md", "tui/app.tcss"]

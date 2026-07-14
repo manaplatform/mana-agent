@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+import sys
 import uuid
 
 from .cli_internal import *
@@ -51,6 +52,20 @@ _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
 
 def _is_new_topic_command(text: str) -> bool:
     return str(text or "").strip().lower() in _NEW_TOPIC_COMMANDS
+
+
+def _is_interactive_terminal() -> bool:
+    """Return True only for real TTYs.
+
+    Returns False under CliRunner tests, pipes, CI, and redirected IO so that
+    the plain console loop (with input() + console) is used instead of the
+    Textual TUI. This keeps --planning-max-questions tests and non-interactive
+    usage from freezing.
+    """
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
 
 
 def _load_analysis_context(root) -> str | None:
@@ -389,6 +404,9 @@ def _render_auto_execute_pass_status(
 
 def chat(
     prompt: str | None = typer.Argument(None, help="Optional first chat prompt."),
+    # --tui/--no-tui: TUI is used only in real interactive terminals by default.
+    # --no-tui forces the plain console loop (useful for tests, scripts, and CI).
+    use_tui: bool = typer.Option(True, "--tui/--no-tui", hidden=True),
     model: str | None = typer.Option(None, "--model"),
     index_dir: str | None = typer.Option(None, "--index-dir"),
     k: int | None = typer.Option(None, "--k"),
@@ -1929,6 +1947,37 @@ def chat(
 
         queued_questions = [prompt] if prompt else []
 
+        # TUI for interactive terminals (the enhanced experience).
+        # For non-TTY (tests/CliRunner, pipes, CI, or explicit --no-tui) fall back
+        # to the plain console loop below. This restores working behavior for
+        # planning-mode tests and prevents app.run() from freezing.
+        if bool(use_tui) and _is_interactive_terminal():
+            from mana_agent.tui.app import run_chat_tui
+            from mana_agent.chat.history import reset_global_history
+
+            reset_global_history()
+
+            effective_model_for_tui = model or getattr(settings, "openai_chat_model", None)
+            api_key = getattr(settings, "openai_api_key", None)
+            base_url = getattr(settings, "openai_base_url", None) or os.getenv("OPENAI_BASE_URL")
+
+            # Pass the prepared multi-agent objects so the TUI can drive the real flow
+            # (routing, tool execution via orchestrator, memory, auto-execute, etc.)
+            run_chat_tui(
+                repo_root=root,
+                model=effective_model_for_tui,
+                initial_prompt=prompt,
+                api_key=api_key,
+                base_url=base_url,
+                # These enable full multi-agent behavior inside the TUI handler
+                chat_service=chat_service,
+                coding_agent=coding_agent_instance,
+                tools_orchestrator=tools_manager_orchestrator,
+            )
+            return
+
+        # --- Plain console loop (used by tests, non-tty sessions, --no-tui) ---
+        # Contains the full planning Q&A, auto-execute, slash commands, etc.
         while True:
             try:
                 if queued_questions:

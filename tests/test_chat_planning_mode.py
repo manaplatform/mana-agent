@@ -94,13 +94,13 @@ def test_chat_planning_mode_asks_questions_and_resets(monkeypatch, tmp_path: Pat
     calls: list[str] = []
     RecordingCodingAgent.calls = []
 
-    monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
-        "mana_agent.commands.chat_cli.build_ask_service",
+        "mana_agent.commands.cli.build_ask_service",
         lambda _s, model_override=None: RecordingAskService(calls),
     )
-    monkeypatch.setattr("mana_agent.commands.chat_cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.CodingAgent", RecordingCodingAgent)
+    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
+    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
 
     user_input = "\n".join(
         [
@@ -147,9 +147,9 @@ def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: 
     calls: list[str] = []
     generated_args: list[dict] = []
 
-    monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
-        "mana_agent.commands.chat_cli.build_ask_service",
+        "mana_agent.commands.cli.build_ask_service",
         lambda _s, model_override=None: RecordingAskService(calls),
     )
 
@@ -173,8 +173,8 @@ def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: 
         return f"LLM question {asked_count + 1}?"
 
     monkeypatch.setattr("mana_agent.commands.chat_cli._generate_planning_question_llm", _fake_llm_question)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.CodingAgent", RecordingCodingAgent)
+    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
+    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
 
     user_input = "\n".join(
         [
@@ -203,17 +203,17 @@ def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: 
 def test_chat_planning_mode_falls_back_to_static_on_llm_question_failure(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
-        "mana_agent.commands.chat_cli.build_ask_service",
+        "mana_agent.commands.cli.build_ask_service",
         lambda _s, model_override=None: RecordingAskService(calls),
     )
     monkeypatch.setattr(
         "mana_agent.commands.chat_cli._generate_planning_question_llm",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("llm question failed")),
     )
-    monkeypatch.setattr("mana_agent.commands.chat_cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.CodingAgent", RecordingCodingAgent)
+    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
+    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
 
     user_input = "\n".join(
         [
@@ -239,9 +239,9 @@ def test_planning_question_auth_failure_logs_once_and_uses_static_fallback(monke
     calls: list[str] = []
     llm_calls = 0
 
-    monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
-        "mana_agent.commands.chat_cli.build_ask_service",
+        "mana_agent.commands.cli.build_ask_service",
         lambda _s, model_override=None: RecordingAskService(calls),
     )
 
@@ -251,8 +251,8 @@ def test_planning_question_auth_failure_logs_once_and_uses_static_fallback(monke
         raise RuntimeError("Error code: 401 - Incorrect API key provided: test")
 
     monkeypatch.setattr("mana_agent.commands.chat_cli._generate_planning_question_llm", _raise_auth)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.CodingAgent", RecordingCodingAgent)
+    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
+    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
 
     user_input = "\n".join(
         [

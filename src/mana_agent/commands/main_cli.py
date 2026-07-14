@@ -53,8 +53,12 @@ def main(
             "Recommended runtime: Python 3.12 or 3.13."
         )
         warnings.warn(warning_msg, UserWarning, stacklevel=2)
-        sink = build_output_sink(command_name="main", json_mode=False, console=console)
-        sink.emit_warning(warning_msg)
+        # Only emit the visual panel at the interactive root (no subcommand).
+        # Subcommands (e.g. `automation list`) must keep clean/JSON output.
+        # The warnings.warn still fires for all paths (used by tests and visible to users).
+        if ctx.invoked_subcommand is None:
+            sink = build_output_sink(command_name="main", json_mode=False, console=console)
+            sink.emit_warning(warning_msg)
     if ctx.invoked_subcommand is None:
         root = Path(repo).expanduser().resolve() if repo else Path.cwd().resolve()
         if root.is_file():

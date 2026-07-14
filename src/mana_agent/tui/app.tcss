@@ -1,0 +1,125 @@
+/* 
+ * app.tcss — Premium dark theme for ManaChatApp
+ * Inspired by modern AI coding tools (Aider, Claude, Cursor, etc.)
+ */
+
+Screen {
+    background: #0f1117;
+    color: #e6e6e6;
+}
+
+Header {
+    background: #1a1d27;
+    color: #a5b4fc;
+    text-style: bold;
+}
+
+Footer {
+    background: #1a1d27;
+    color: #94a3b8;
+    dock: bottom;
+}
+
+#input-bar {
+    height: 3;
+    background: #161923;
+    border-top: thick #334155;
+    padding: 0 1;
+}
+
+#chat-input {
+    width: 100%;
+    border: round #475569;
+    background: #0f1117;
+    color: #e2e8f0;
+    padding: 0 1;
+}
+
+#chat-input:focus {
+    border: round #6366f1;
+}
+
+#chat-log {
+    height: 1fr;
+    border: round #334155;
+    background: #0f1117;
+    padding: 1;
+}
+
+#main {
+    height: 1fr;
+}
+
+/* User message cards */
+.user-message {
+    margin: 1 2 1 0;
+    padding: 1;
+    background: #1e2937;
+    border-left: thick #3b82f6;
+}
+
+/* Assistant message cards */
+.assistant-message {
+    margin: 1 0 1 2;
+    padding: 1;
+    background: #0f172a;
+    border-left: thick #22c55e;
+    color: #e2e8f0;
+}
+
+/* Tool cards styling is also in the Python DEFAULT_CSS of ToolCard */
+ToolCard {
+    margin: 0 2 1 2;
+    min-height: 4;   /* at least the header is always visible */
+    max-height: 18;  /* fixed-ish max height on all terminal sizes; the #chat-log scrolls when needed */
+}
+
+ToolCard Collapsible {
+    background: #161923;
+    border: round #64748b;
+}
+
+ToolCard .tool-call-header {
+    color: #facc15;
+}
+
+.tool-result-success {
+    color: #4ade80;
+}
+
+.tool-result-error {
+    color: #f87171;
+}
+
+.tool-result-body {
+    max-height: 12;
+}
+
+.tool-card-header {
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* Scrollbar */
+VerticalScroll > Scrollbar {
+    background: #1f2937;
+}
+
+VerticalScroll > Scrollbar:hover {
+    background: #334155;
+}
+
+/* General polish */
+Static, Markdown {
+    background: transparent;
+}
+
+Markdown {
+    margin: 0;
+}
+
+/* Subtle dividers and notes */
+.system-note {
+    color: #64748b;
+    text-style: italic;
+}

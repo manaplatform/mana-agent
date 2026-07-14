@@ -4,6 +4,38 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-14
 
+- Fixed `tests/test_chat_planning_mode.py` freezing (and made planning mode tests executable again).
+  - TUI is now launched only for real interactive terminals (`sys.stdin/stdout.isatty()`). Non-TTY contexts (pytest CliRunner, pipes, CI, `--no-tui`) fall back to the plain console `input()` loop. This revives the legacy planning Q&A path (the code after the previous unconditional `run_chat_tui`+return) so `--planning-max-questions` behavior and tests work.
+  - Updated monkeypatches in the planning tests to target `"mana_agent.commands.cli.*"` (Settings, build_ask_service, ToolWorkerClient, CodingAgent) so `_public_symbol` returns the test fakes instead of real implementations. `_generate_planning_question_llm` patches remain on `chat_cli`.
+  - The `--tui/--no-tui` option comment was clarified; `use_tui` flag is now honored for forcing plain mode.
+  - Verification: `python -m pytest tests/test_chat_planning_mode.py -q` → 5 passed. Other chat CLI tests continue to pass.
+- Fixed `test_automation_cli_lists_empty_schedule_store` (and clean output for other subcommands) under Python 3.14. The 3.14 compatibility warning panel is now only visually emitted for the root interactive case (`ctx.invoked_subcommand is None`). Subcommands such as `automation list` now produce clean JSON output again. The `warnings.warn` is still issued on every path so existing warning tests and user visibility are preserved. Chat planning mode tests and behavior were not modified.
+  - Verification: targeted pytest on the two files now reports all green.
+- ToolCard: when Collapsible ("menu"/details) is collapsed, the full key data of the card (call + result summary) is still shown via an always-visible header line above the collapsible. Details (raw args + full result) are inside the collapsible. Fixes "collapse the menu dont show full data".
+- Updated to latest langchain (0.3.50+), langchain-community, langchain-openai pins and extended Python support to 3.14.6 (requires-python <=3.14.6).
+- Fixed TUI tool events not appearing and "flashing then immediately gone" on tool calls:
+  - In real multi-agent path (via coding_agent/tools_orchestrator), now explicitly emit representative ToolCallEvent/ToolResultEvent (semantic_search, read_file, multi_agent_flow) around the agent execution so they are always visible via the ChatHistory subscription.
+  - Added runtime bridge for emit_tool_event calls inside the agent so ACTUAL tool invocations (read_file, edit etc.) from the multi-agent flow are captured and rendered as ToolCards live.
+  - ToolCard no longer overwrites the call header title on result (keeps "🔧 toolname" visible); status shown in result body only. Prevents visual "gone" after result.
+  - Additional sleeps and emits ensure cards persist without flash during long-running agent turns.
+- Verification: py_compile, demo script, headless run_test.
+
+- Built complete production-quality enhanced Chat TUI using Textual + Rich.
+  - New packages: `mana_agent.chat` (events.py + history.py) and expanded `mana_agent.tui` (app.py + widgets/chat_log.py + widgets/tool_card.py + app.tcss).
+  - Core fix: ChatHistory + subscribe(listener) is the single source of truth. Every `history.add(ToolCallEvent)` / `ToolResultEvent` / streaming tokens is immediately delivered to the UI on *every* turn. This eliminates the previous "tools only visible on first message" bug by design.
+  - `mana-agent chat [PROMPT]` now **always launches the TUI by default** (no `--tui` flag required). Added hidden `--tui/--no-tui` for compatibility. The rich console chat loop is bypassed.
+  - Fixed "MountError: Can't mount widget(s) before Vertical() is mounted" during startup and dynamic updates.
+- TUI now properly receives `api_key` / `base_url` and the prepared multi-agent objects (`coding_agent`, `tools_orchestrator`, `chat_service`) after full setup in chat_cli. `_handle_real_turn` prefers the real objects (CodingAgent.handle, tools orchestrator, ask_with_tools) before falling back. This connects the beautiful TUI to the full multi-agent flow (routing, execution, memory...) like the classic console chat. "LLM unavailable" errors are gone when credentials are configured.
+    - ChatLog: removed synchronous .mount() replay from __init__/set_history/on_mount. All population now goes through call_after_refresh.
+    - ToolCard: rewrote compose to use proper `with Collapsible(): yield ...` (no .mount during compose). Initial call body is now a yielded child; results are mounted later after full attachment. Removed fragile _content hack.
+  - Verified with `textual` run_test headless simulation (compose + on_mount + live history.add + tool cards all succeed).
+  - TUI now performs real LLM calls (via the project's `create_chat_model`) + always emits visible `repo_context` tool cards + streams responses. Initial prompt support (`mana-agent chat "..."` seeds the first message).
+  - Beautiful modern TUI: collapsible ToolCards (yellow calls, green/red results), user blue panels, assistant markdown, live token streaming, status footer, clean dark theme.
+  - Full integration comments included showing how existing agent/tool code should emit events via `get_history().add(...)` instead of direct prints.
+  - Added `textual` dependency.
+  - Delivered `test_chat.py` runnable demo.
+  - Verification: `python -m py_compile`, direct `typer.testing.CliRunner` invocation of `mana-agent chat` confirms TUI launch path + correct prompt/root forwarding. `python test_chat.py --demo` still passes.
+
 - Updated stale test expectations in `test_inline_renderer_renders_tool_and_subagent_events_compactly` and `test_chat_full_auto_pass_cap_auto_resumes_until_completion` to match current InlineChatRenderer and full-auto transcript behavior (running tool events are suppressed in the main transcript; tool names surface via both the "tools" panel and terminal decoration lines).
   - Verification: `python -m pytest -q tests/test_chat_ui_events_tokens.py::test_inline_renderer_renders_tool_and_subagent_events_compactly tests/test_cli_smoke.py::test_chat_full_auto_pass_cap_auto_resumes_until_completion` passed.
 
