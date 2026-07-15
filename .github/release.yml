@@ -1,0 +1,54 @@
+# GitHub automatic release notes configuration.
+# Used by the GitHub Releases "generate notes" API and by
+# .github/scripts/build_release_notes.py when publishing version tags.
+#
+# Label names should match labels used on pull requests when available.
+# Unlabeled PRs still appear under "Other Changes".
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - skip-changelog
+    authors:
+      - dependabot[bot]
+      - github-actions[bot]
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking-change
+        - breaking
+        - semver-major
+    - title: New Features
+      labels:
+        - enhancement
+        - feature
+        - feat
+    - title: Improvements
+      labels:
+        - improvement
+        - refactor
+        - performance
+        - ux
+    - title: Bug Fixes
+      labels:
+        - bug
+        - fix
+        - bugfix
+    - title: Documentation
+      labels:
+        - documentation
+        - docs
+    - title: CI / Tooling / Release
+      labels:
+        - ci
+        - tooling
+        - release
+        - infrastructure
+    - title: Dependencies
+      labels:
+        - dependencies
+        - deps
+    - title: Other Changes
+      labels:
+        - "*"

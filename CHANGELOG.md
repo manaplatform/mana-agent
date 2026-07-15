@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-15
 
+- Added professional GitHub contribution and release templates under `.github/`.
+  - New PRs automatically load `.github/pull_request_template.md` (summary, motivation, changes, type of change, testing, screenshots/CLI, breaking changes, related issues, author checklist).
+  - `.github/release.yml` configures categorized auto-generated release notes by PR label.
+  - `.github/scripts/build_release_notes.py` builds polished GitHub Release bodies from tags, GitHub generate-notes API output, CHANGELOG highlights, install instructions, docs links, and contributors.
+  - `.github/workflows/release.yml` now uses the standardized notes for `v*.*.*` tags, a structured `latest-dev` prerelease body on `main`, least-privilege permissions (`contents: write` only on the publish job), and safe re-runs that update an existing tag release instead of creating a duplicate.
+  - Documented the flow in `docs/14-release.md` and `CONTRIBUTING.md`.
+  - Verification: Python compile of release-notes script; local dry-run body generation with mocked notes; `python -c` YAML parse of workflows; path and trigger checks.
 - Single-sourced package version from `pyproject.toml` `[project].version`.
   - Added `mana_agent._version.get_version()` (pyproject first, then `importlib.metadata`, else `"dev"`).
   - `mana_agent.__version__`, FastAPI app version, report/analyze tool version, and optional `dashboard` / `automations` packages all use the shared value.
