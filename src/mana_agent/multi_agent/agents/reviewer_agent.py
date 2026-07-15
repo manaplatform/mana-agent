@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from mana_agent.multi_agent.agents.base_agent import BaseAgent
 
 
@@ -8,6 +12,36 @@ class ReviewerAgent(BaseAgent):
     def reject_weak_evidence(self, task_id: str, reason: str) -> None:
         self.taskboard.add_blocker(task_id, f"Reviewer rejected weak evidence: {reason}")
         self.record_evidence(task_id, f"Reviewer rejection: {reason}")
+
+    def review_managed_branch(
+        self,
+        task_id: str,
+        *,
+        workspace_manager: Any,
+        verification_passed: bool | None = None,
+    ) -> dict[str, Any]:
+        """Review the managed task branch against its recorded base revision.
+
+        Successful reviews produce a merge candidate only; they never merge.
+        """
+
+        from mana_agent.multi_agent.worktrees.review import review_task_branch
+
+        task = self.taskboard.get_task(task_id)
+        result = review_task_branch(
+            workspace_manager,
+            task_id,
+            reviewer_agent_id=self.agent_id,
+            verification_passed=verification_passed,
+            hierarchy_ok=not bool(task.hierarchy_violations),
+            extra_blockers=list(task.blockers),
+        )
+        if result.get("approved"):
+            task.reviewed_by_agent_id = self.agent_id
+            self.record_evidence(task_id, result.get("summary") or "Managed branch review approved.")
+        else:
+            self.reject_weak_evidence(task_id, result.get("summary") or "Managed branch review rejected.")
+        return result
 
     def review_evidence(self, task_id: str, *, route_name: str, requires_verification: bool) -> bool:
         task = self.taskboard.get_task(task_id)

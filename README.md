@@ -65,6 +65,7 @@ Use Mana-Agent to:
 | Repository intelligence | Static analysis, dependency discovery, semantic indexing, symbol-aware retrieval, reports, and architecture diagrams. |
 | Interactive chat | Repository-grounded Q&A, planning, coding workflows, tool execution, and verification loops. |
 | Multi-agent runtime | Decision agent, planner, taskboard, work queue, tool manager, workers, reviewer, verifier, traces, and summaries. |
+| Managed worktrees | Isolated Git worktrees per coding task under `~/.mana/repositories/.../worktrees/`, recoverable after restart, reviewed as merge candidates (never silent merges). |
 | Safe mutation | Explicit plans, constrained file tools, reviewable patches, command gates, and verification after changes. |
 | Git operations | Status, diff, log, branch, switch, commit, push, pull, fetch, merge, rebase, reset, clean, and generic Git help through one policy layer. |
 | Adaptive skills | Repository-specific procedures stored outside the checkout, reviewed before activation, and loaded only when selected. |
@@ -85,7 +86,9 @@ flowchart LR
     U["CLI / Dashboard / Telegram / Gmail"] --> D["Decision + routing"]
     D --> P["Planner"]
     P --> Q["Taskboard + work queue"]
-    Q --> T["Tool manager"]
+    Q --> W["WorkspaceManager"]
+    W --> WT["Isolated Git worktree"]
+    WT --> T["Tool manager"]
 
     T --> R["Repository tools"]
     T --> G["Git tools"]
@@ -101,7 +104,8 @@ flowchart LR
     S --> V
     C --> V
 
-    V --> O["Answer, patch, artifact, or remote reply"]
+    V --> MC["Merge candidate"]
+    MC --> O["Answer, artifact, or explicit merge"]
     O --> U
 ```
 

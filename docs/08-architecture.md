@@ -47,6 +47,36 @@ results; they should not rebuild CodingAgent independently.
   (per-call task context, retrieved snippets, recent summaries).
   See: `src/mana_agent/prompting/builder.py:1-353`.
 
+### Managed agent worktrees (isolated coding checkouts)
+
+Parallel coding work must not silently mutate the user's primary checkout.
+Mana-Agent therefore allocates a **managed Git worktree** for eligible multi-agent
+coding/tool routes:
+
+```text
+Taskboard → QueueManager → WorkspaceManager → isolated Git worktree
+  → CodingAgent → Verifier → Reviewer → merge_candidate
+```
+
+- **`src/mana_agent/multi_agent/worktrees/manager.py`** (`WorkspaceManager`) owns the full lifecycle:
+  create/reuse/resume, status transitions, branch naming (`mana/<task-slug>`), dirty detection,
+  reconciliation against `git worktree list --porcelain`, safe remove, and explicit merge.
+- Worktree checkouts live outside the source tree under
+  `~/.mana/repositories/<repository-id>/worktrees/`.
+- Metadata (task, agent, branch, base revision, path, status) is persisted under
+  `~/.mana/repositories/<repository-id>/managed_worktrees/`.
+- Execution roots are passed explicitly via `TaskBoardItem.execution_repo_root`,
+  `QueueJob.execution_repo_root`, and `ExecutionContext.execution_repo_root`. Tools never rely on
+  mutating process `cwd`.
+- Successful work becomes a **merge candidate** only. Merge requires validated user intent
+  (`mana-agent worktree merge <task-id> --yes`) and the existing Git safety policy.
+- Dirty, failed, interrupted, or review-rejected workspaces are retained for inspection;
+  destructive cleanup requires explicit force intent.
+
+CLI: `mana-agent worktree list|create|status|resume|diff|merge|remove`.
+
+Disable with `MANA_MANAGED_WORKTREES_ENABLED=false` when the existing non-worktree coding path is required.
+
 ### Coding orchestration (work queue + decision lifecycle)
 
 The adaptive scope, evidence, delegation, communication, and stop contracts are

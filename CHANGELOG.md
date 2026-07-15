@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-15
 
+- Added **Managed Agent Worktrees** for safe parallel coding.
+  - New `WorkspaceManager` (`src/mana_agent/multi_agent/worktrees/`) allocates isolated Git worktrees under `~/.mana/repositories/<repository-id>/worktrees/` with Mana-managed branches (`mana/<task-slug>`).
+  - Integrated into the multi-agent flow: Taskboard → QueueManager → WorkspaceManager → worktree → CodingAgent → Verifier → Reviewer → merge candidate (no silent merge into the default branch).
+  - Execution roots are passed explicitly via task/job/context fields; tools do not mutate process `cwd`. Write locks are per-worktree so parallel coding tasks do not share a checkout.
+  - Lifecycle statuses: `creating → ready → running → verifying → reviewing → merge_candidate → merged`, plus `failed`, `interrupted`, `dirty`, `conflicted`, `stale`, `retained`.
+  - Recovery reconciles metadata with `git worktree list --porcelain`; dirty/unmerged work is retained; destructive remove/merge require explicit validated intent.
+  - CLI: `mana-agent worktree list|create|status|resume|diff|merge|remove|reconcile`.
+  - Config: `MANA_MANAGED_WORKTREES_ENABLED` (default `true`).
+  - Structured workspace events publish through the shared execution event hub.
+  - Docs: architecture, commands, configuration, README capability table and diagram.
+  - Verification: `./venv/bin/python -m pytest tests/test_managed_worktrees.py -q` (19 passed); `./venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_git_tools.py tests/test_cli_smoke.py -q` (131 passed).
 - PR descriptions are auto-filled from branch commits and changed files when a PR is opened.
   - GitHub PR templates are static only; `.github/workflows/pr-autofill.yml` runs `fill_pr_body.py` to replace empty/template bodies with summary, changes, files, commits, inferred type checkboxes, related issues, and checklist.
   - Customized PR bodies are not overwritten on later events.

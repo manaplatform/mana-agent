@@ -86,7 +86,18 @@ MODEL_LEVEL_2_CODING="gpt-4.1"
 MODEL_LEVEL_1_FAST_TOOL="gpt-4.1-mini"
 DEFAULT_TOP_K=8
 MANA_LLM_LOG_FILE=
+MANA_MANAGED_WORKTREES_ENABLED=true
 ```
+
+### Managed agent worktrees
+
+`MANA_MANAGED_WORKTREES_ENABLED` (default `true`) controls whether multi-agent
+coding/tool routes allocate an isolated Git worktree under
+`~/.mana/repositories/<repository-id>/worktrees/` instead of mutating the primary
+checkout. Explicit merge intent is still required after review
+(`mana-agent worktree merge <task-id> --yes`).
+
+Set `MANA_MANAGED_WORKTREES_ENABLED=false` to preserve the legacy in-checkout coding path.
 
 ## OpenAI-Compatible LLM Capabilities
 

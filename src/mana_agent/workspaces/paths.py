@@ -50,6 +50,16 @@ def repository_analysis_dir(repository_id: str) -> Path:
     return repository_dir(repository_id) / "analysis"
 
 
+def repository_worktrees_dir(repository_id: str) -> Path:
+    """Checkout root for Mana-managed agent worktrees (outside the source tree)."""
+
+    return repository_dir(repository_id) / "worktrees"
+
+
+def repository_managed_worktrees_metadata_dir(repository_id: str) -> Path:
+    return repository_dir(repository_id) / "managed_worktrees"
+
+
 def session_dir(session_id: str) -> Path:
     return mana_home() / "sessions" / str(session_id)
 

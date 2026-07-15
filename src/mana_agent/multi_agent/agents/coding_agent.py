@@ -45,6 +45,8 @@ class CodingAgent(BaseAgent):
         if self.queue_manager is None:
             self.taskboard.add_blocker(task_id, "QueueManager unavailable for coding agent patch request")
             return None
+        # Write locks are scoped per managed worktree when the task has one;
+        # QueueManager derives lock_key from execution_repo_root for parallel safety.
         return self.queue_manager.enqueue(
             task_id=task_id,
             requested_by_agent_id=self.agent_id,
@@ -53,6 +55,5 @@ class CodingAgent(BaseAgent):
             payload={"patch": patch},
             purpose="Apply an approved repository mutation after reading exact current content.",
             priority=10,
-            lock_key="repo",
             requires_write_lock=True,
         )

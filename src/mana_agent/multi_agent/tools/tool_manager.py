@@ -23,9 +23,35 @@ class ToolsManager:
         self.memory_service = memory_service
         self._result_cache: dict[str, dict[str, Any]] = {}
 
+    def execution_root_for_job(self, job: QueueJob) -> Path:
+        """Resolve the repository root for one job without mutating process cwd.
+
+        Preference order:
+        1. job.execution_repo_root (managed worktree)
+        2. payload execution_repo_root / repo_root / worktree_path
+        3. manager default root (primary checkout)
+        """
+
+        candidates = [
+            getattr(job, "execution_repo_root", None),
+            (job.payload or {}).get("execution_repo_root"),
+            (job.payload or {}).get("repo_root"),
+            (job.payload or {}).get("worktree_path"),
+            (job.payload or {}).get("workspace_root"),
+        ]
+        for raw in candidates:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            path = Path(text).expanduser().resolve()
+            if path.is_dir():
+                return path
+        return self.root
+
     def execute_job(self, job: QueueJob) -> ToolResult:
         try:
-            cache_key = self._cache_key(job)
+            root = self.execution_root_for_job(job)
+            cache_key = self._cache_key(job, root=root)
             if cache_key and self.memory_service is not None:
                 cached_tool = self.memory_service.get_reusable_tool_result(
                     tool_name=job.job_type.value,
@@ -36,6 +62,7 @@ class ToolsManager:
                     result["cache_hit"] = True
                     result["source"] = "memory"
                     result["cache_source"] = "memory"
+                    result["execution_repo_root"] = str(root)
                     return ToolResult(new_message_id(), job.task_id, True, result)
             if cache_key:
                 cached = self._result_cache.get(cache_key)
@@ -43,10 +70,12 @@ class ToolsManager:
                     result = copy.deepcopy(cached)
                     result["cache_hit"] = True
                     result["cache_source"] = "tool_result_cache"
+                    result["execution_repo_root"] = str(root)
                     return ToolResult(new_message_id(), job.task_id, True, result)
 
             if job.job_type == QueueJobType.GIT_STATUS:
-                result = git_tools.status(repo_path=self.root)
+                result = git_tools.status(repo_path=root)
+                result = {**result, "execution_repo_root": str(root)}
                 return self._cache_result(
                     job,
                     ToolResult(
@@ -60,10 +89,11 @@ class ToolsManager:
                 )
             if job.job_type == QueueJobType.GIT_DIFF:
                 result = git_tools.diff(
-                    repo_path=self.root,
+                    repo_path=root,
                     path=str(job.payload.get("path") or ""),
                     staged=bool(job.payload.get("staged", False)),
                 )
+                result = {**result, "execution_repo_root": str(root)}
                 return self._cache_result(
                     job,
                     ToolResult(
@@ -78,7 +108,9 @@ class ToolsManager:
             if job.job_type == QueueJobType.GIT:
                 tool_name = str(job.payload.get("tool") or job.payload.get("tool_name") or "git.generic")
                 tool_args = job.payload.get("args") if isinstance(job.payload.get("args"), dict) else dict(job.payload)
-                result = git_tools.execute_tool(tool_name, tool_args, repo_path=self.root)
+                result = git_tools.execute_tool(tool_name, tool_args, repo_path=root)
+                if isinstance(result, dict):
+                    result = {**result, "execution_repo_root": str(root)}
                 return ToolResult(
                     new_message_id(),
                     job.task_id,
@@ -87,7 +119,9 @@ class ToolsManager:
                     None if result.get("ok") else str(result.get("stderr") or result.get("error") or "git tool failed"),
                 )
             if job.job_type == QueueJobType.DOCUMENT:
-                result = self._execute_document_tool(job.payload)
+                result = self._execute_document_tool(job.payload, root=root)
+                if isinstance(result, dict):
+                    result = {**result, "execution_repo_root": str(root)}
                 return ToolResult(
                     new_message_id(),
                     job.task_id,
@@ -122,12 +156,17 @@ class ToolsManager:
                 result = client.read_resource(str(job.payload.get("server_id") or ""), str(job.payload.get("uri") or ""))
                 return ToolResult(new_message_id(), job.task_id, bool(result.get("ok")), result, None if result.get("ok") else "MCP resource read failed")
             if job.job_type in {QueueJobType.SHELL, QueueJobType.RUN_TESTS, QueueJobType.RUN_LINT}:
-                return self._shell(job, str(job.payload.get("command", "")))
+                return self._shell(job, str(job.payload.get("command", "")), root=root)
             if job.job_type == QueueJobType.REPO_READ:
-                path = self._resolve_path(str(job.payload.get("path", "")))
+                path = self._resolve_path(str(job.payload.get("path", "")), root=root)
                 return self._cache_result(
                     job,
-                    ToolResult(new_message_id(), job.task_id, True, {"content": path.read_text(encoding="utf-8"), "path": str(path)}),
+                    ToolResult(
+                        new_message_id(),
+                        job.task_id,
+                        True,
+                        {"content": path.read_text(encoding="utf-8"), "path": str(path), "execution_repo_root": str(root)},
+                    ),
                     cache_key,
                 )
             if job.job_type == QueueJobType.REPO_BATCH_READ:
@@ -156,11 +195,19 @@ class ToolsManager:
                             files.append({"path": str(raw), "ok": False, "error": str(exc)})
                     return self._cache_result(
                         job,
-                        ToolResult(new_message_id(), job.task_id, ok, {"ok": ok, "files": files}, None if ok else "one or more batch reads failed"),
+                        ToolResult(
+                            new_message_id(),
+                            job.task_id,
+                            ok,
+                            {"ok": ok, "files": files, "execution_repo_root": str(root)},
+                            None if ok else "one or more batch reads failed",
+                        ),
                         cache_key,
                     )
-                result = repo_batch_read(self.root, files=[str(item) for item in paths])
+                result = repo_batch_read(root, files=[str(item) for item in paths])
                 ok = bool(result.get("ok"))
+                if isinstance(result, dict):
+                    result = {**result, "execution_repo_root": str(root)}
                 return self._cache_result(
                     job,
                     ToolResult(new_message_id(), job.task_id, ok, result, None if ok else "one or more batch reads failed"),
@@ -168,7 +215,7 @@ class ToolsManager:
                 )
             if job.job_type == QueueJobType.APPLY_PATCH:
                 patch = str(job.payload.get("patch", ""))
-                result = safe_apply_patch(repo_root=self.root, patch=patch, check_only=False)
+                result = safe_apply_patch(repo_root=root, patch=patch, check_only=False)
                 ok = bool(result.get("ok"))
                 error = None if ok else str(result.get("error") or result.get("message") or "patch failed")
                 if not ok and result.get("error_code") == "patch_context_not_found":
@@ -177,7 +224,7 @@ class ToolsManager:
                     touched = list(result.get("touched_files") or [])
                     reread_files: list[dict[str, Any]] = []
                     for rel in touched:
-                        target = self.root / str(rel)
+                        target = root / str(rel)
                         try:
                             content = target.read_text(encoding="utf-8")
                             reread_files.append(
@@ -204,11 +251,13 @@ class ToolsManager:
                         f"strategy={result.get('strategy') or 'none'} "
                         f"candidates={result.get('candidate_count') or 0}"
                     )
+                if isinstance(result, dict):
+                    result = {**result, "execution_repo_root": str(root)}
                 return ToolResult(new_message_id(), job.task_id, ok, result, error)
             if job.job_type == QueueJobType.REPO_SEARCH:
                 query = str(job.payload.get("query", ""))
                 result = repo_search(
-                    self.root,
+                    root,
                     query=query,
                     glob=str(job.payload.get("glob") or "**/*"),
                     regex=bool(job.payload.get("regex", False)),
@@ -230,6 +279,7 @@ class ToolsManager:
                             "stdout": stdout,
                             "stderr": str(result.get("error") or ""),
                             "returncode": 0 if bool(result.get("ok")) else 1,
+                            "execution_repo_root": str(root),
                         },
                     ),
                     cache_key,
@@ -238,18 +288,35 @@ class ToolsManager:
         except Exception as exc:
             return ToolResult(new_message_id(), job.task_id, False, error=str(exc))
 
-    def _shell(self, job: QueueJob, command: str) -> ToolResult:
+    def _shell(self, job: QueueJob, command: str, *, root: Path | None = None) -> ToolResult:
         assert_shell_allowed(command)
-        result = subprocess.run(command, cwd=self.root, text=True, capture_output=True, shell=True, timeout=120)
-        return ToolResult(new_message_id(), job.task_id, result.returncode == 0, {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}, None if result.returncode == 0 else result.stderr)
+        cwd = Path(root or self.execution_root_for_job(job)).resolve()
+        result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, shell=True, timeout=120)
+        return ToolResult(
+            new_message_id(),
+            job.task_id,
+            result.returncode == 0,
+            {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode,
+                "execution_repo_root": str(cwd),
+            },
+            None if result.returncode == 0 else result.stderr,
+        )
 
-    def _resolve_path(self, path: str) -> Path:
-        resolved = (self.root / path).resolve()
-        if self.root not in resolved.parents and resolved != self.root:
-            raise ValueError("path escapes repository root")
+    def _resolve_path(self, path: str, *, root: Path | None = None) -> Path:
+        base = Path(root or self.root).resolve()
+        # Reject absolute paths that escape; relative paths resolve under base.
+        candidate = Path(path)
+        resolved = candidate.resolve() if candidate.is_absolute() else (base / path).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError as exc:
+            raise ValueError("path escapes repository root") from exc
         return resolved
 
-    def _cache_key(self, job: QueueJob) -> str:
+    def _cache_key(self, job: QueueJob, *, root: Path | None = None) -> str:
         if job.job_type not in {
             QueueJobType.GIT,
             QueueJobType.GIT_STATUS,
@@ -263,7 +330,8 @@ class ToolsManager:
         }:
             return ""
         payload = json.dumps(job.payload, ensure_ascii=False, sort_keys=True, default=str)
-        return f"{job.job_type.value}:{payload}"
+        root_key = str(root or self.execution_root_for_job(job))
+        return f"{job.job_type.value}:{root_key}:{payload}"
 
     def _cache_result(self, job: QueueJob, result: ToolResult, cache_key: str) -> ToolResult:
         if cache_key and result.ok:
@@ -285,8 +353,8 @@ class ToolsManager:
             result.result = payload
         return result
 
-    def _execute_document_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
-        service = DocumentService(self.root)
+    def _execute_document_tool(self, payload: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
+        service = DocumentService(Path(root or self.root).resolve())
         tool_name = str(payload.get("tool") or payload.get("tool_name") or "")
         args = payload.get("args") if isinstance(payload.get("args"), dict) else dict(payload)
         if tool_name == "document_detect":

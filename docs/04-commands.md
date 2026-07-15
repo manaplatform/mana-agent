@@ -10,6 +10,7 @@ From the CLI implementation, the commands available to users are:
 
 - `mana-agent chat`
 - `mana-agent continue`
+- `mana-agent worktree` (managed agent Git worktrees for isolated coding)
 
 The README’s CLI section only highlights `chat`, but the code shows `continue` is also a first-class command. [README.md:1-337](../README.md#L1-L337) [src/mana_agent/commands/cli_internal.py:191-262](../src/mana_agent/commands/cli_internal.py#L191-L262) [src/mana_agent/commands/chat_cli.py:196-196](../src/mana_agent/commands/chat_cli.py#L196-L196)
 
@@ -77,6 +78,37 @@ The chat implementation uses a read-only answer path when coding-agent features 
 ### `mana-agent continue`
 
 `continue` resumes a saved auto-execute run from `.mana/runs/<run_id>`. It requires `--run-id` and can be constrained with pass, tool-call, runtime, cost, and progress caps. [src/mana_agent/commands/cli_internal.py:191-262](../src/mana_agent/commands/cli_internal.py#L191-L262)
+
+### `mana-agent worktree`
+
+Manage isolated Git worktrees used by coding agents. Worktrees are stored under
+`~/.mana/repositories/<repository-id>/worktrees/` with metadata in
+`~/.mana/repositories/<repository-id>/managed_worktrees/`.
+
+```bash
+mana-agent worktree list --root-dir .
+mana-agent worktree create <task-id> --root-dir . --title "Fix auth"
+mana-agent worktree status <task-id> --root-dir .
+mana-agent worktree resume <task-id> --root-dir .
+mana-agent worktree diff <task-id> --root-dir .
+mana-agent worktree merge <task-id> --root-dir . --yes
+mana-agent worktree remove <task-id> --root-dir .
+mana-agent worktree remove <task-id> --root-dir . --force --yes
+mana-agent worktree reconcile --root-dir .
+```
+
+| Command | Behavior |
+| --- | --- |
+| `list` | Task ID, branch, status, worktree path, assigned agent, dirty state |
+| `create` | Deterministic worktree + `mana/<task-slug>` branch for a task |
+| `status` | Repository identity, base revision, HEAD, Git state, recovery notes |
+| `resume` | Reconnect interrupted task workspaces when safe |
+| `diff` | Diff against the recorded task base revision |
+| `merge` | Merge into the source checkout only with `--yes`; never force-push |
+| `remove` | Refuses dirty/unmerged cleanup unless `--force --yes` |
+| `reconcile` | Match metadata to `git worktree list --porcelain` (never auto-deletes user worktrees) |
+
+Implementation: [src/mana_agent/commands/worktree_cli.py](../src/mana_agent/commands/worktree_cli.py), [src/mana_agent/multi_agent/worktrees/](../src/mana_agent/multi_agent/worktrees/).
 
 Example:
 

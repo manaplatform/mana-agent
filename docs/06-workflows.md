@@ -32,7 +32,28 @@ While inside a chat session you can generate analysis artifacts without leaving 
 
 This writes the selected reports under the project `.mana/` directory (for example `.mana/analyze.json`, `.mana/analyze.md`, `.mana/diagram.mmd`) and runs before the message reaches the model, so it is fast and read-only apart from those artifacts. [docs/04-commands.md:1-171](docs/04-commands.md:1-171)
 
-## 2. Resume an automated run
+## 2. Parallel coding with managed worktrees
+
+When the multi-agent runtime routes a coding/tool task, Mana-Agent can allocate an
+isolated Git worktree instead of editing the primary checkout:
+
+```bash
+# Inspect managed workspaces for the current repository
+mana-agent worktree list --root-dir .
+
+# After a coding task finishes review, inspect the candidate
+mana-agent worktree status <task-id> --root-dir .
+mana-agent worktree diff <task-id> --root-dir .
+
+# Explicitly merge only when you intend to integrate the task branch
+mana-agent worktree merge <task-id> --root-dir . --yes
+```
+
+Interrupted work can be reconnected with `worktree resume`. Dirty or unmerged
+workspaces are retained until you merge or remove them with explicit intent.
+See [docs/04-commands.md](04-commands.md) and [docs/08-architecture.md](08-architecture.md).
+
+## 3. Resume an automated run
 
 Use `continue` to pick up a persisted auto-execute session:
 

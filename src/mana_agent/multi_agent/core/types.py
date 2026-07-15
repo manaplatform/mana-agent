@@ -201,6 +201,13 @@ class TaskBoardItem:
     session_id: str = ""
     primary_repository_id: str = ""
     repository_ids: list[str] = field(default_factory=list)
+    # Managed agent worktree identity (isolated coding checkout).
+    managed_workspace_id: str = ""
+    managed_branch: str = ""
+    managed_worktree_path: str = ""
+    workspace_status: str = ""
+    base_revision: str = ""
+    execution_repo_root: str = ""
     owner_agent_id: str | None = None
     supervisor_agent_id: str | None = None
     assigned_agent_ids: list[str] = field(default_factory=list)
@@ -257,6 +264,9 @@ class QueueJob:
     session_id: str = ""
     primary_repository_id: str = ""
     repository_ids: list[str] = field(default_factory=list)
+    # Explicit execution root for managed worktrees (never rely on process cwd).
+    execution_repo_root: str = ""
+    managed_workspace_id: str = ""
     root_task_id: str | None = None
     parent_task_id: str | None = None
     assigned_worker_agent_id: str | None = None
@@ -409,6 +419,10 @@ class ExecutionContext:
     workspace_id: str | None = None
     session_id: str | None = None
     repository_id: str | None = None
+    managed_workspace_id: str | None = None
+    execution_repo_root: str | None = None
+    managed_branch: str | None = None
+    base_revision: str | None = None
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "ExecutionContext":
@@ -428,6 +442,10 @@ class ExecutionContext:
             workspace_id=_clean_optional(data.get("workspace_id")),
             session_id=_clean_optional(data.get("session_id")),
             repository_id=_clean_optional(data.get("repository_id")),
+            managed_workspace_id=_clean_optional(data.get("managed_workspace_id")),
+            execution_repo_root=_clean_optional(data.get("execution_repo_root")),
+            managed_branch=_clean_optional(data.get("managed_branch")),
+            base_revision=_clean_optional(data.get("base_revision")),
         ).normalized()
 
     def normalized(self) -> "ExecutionContext":
@@ -451,6 +469,10 @@ class ExecutionContext:
             workspace_id=self.workspace_id,
             session_id=self.session_id,
             repository_id=self.repository_id,
+            managed_workspace_id=self.managed_workspace_id,
+            execution_repo_root=self.execution_repo_root,
+            managed_branch=self.managed_branch,
+            base_revision=self.base_revision,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -470,6 +492,10 @@ class ExecutionContext:
             "workspace_id": ctx.workspace_id,
             "session_id": ctx.session_id,
             "repository_id": ctx.repository_id,
+            "managed_workspace_id": ctx.managed_workspace_id,
+            "execution_repo_root": ctx.execution_repo_root,
+            "managed_branch": ctx.managed_branch,
+            "base_revision": ctx.base_revision,
         }
 
 

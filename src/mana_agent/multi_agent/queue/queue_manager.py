@@ -55,6 +55,8 @@ class QueueManager:
             kwargs.setdefault("session_id", task_scope["session_id"])
             kwargs.setdefault("primary_repository_id", task_scope["primary_repository_id"])
             kwargs.setdefault("repository_ids", task_scope["repository_ids"])
+            kwargs.setdefault("execution_repo_root", task_scope["execution_repo_root"])
+            kwargs.setdefault("managed_workspace_id", task_scope["managed_workspace_id"])
             kwargs.setdefault("parent_agent_id", kwargs.get("requested_by_agent_id"))
             kwargs.setdefault("agent_role", "tool_worker")
             kwargs.setdefault("args_summary", self._args_summary(kwargs.get("payload") or {}))
@@ -62,6 +64,11 @@ class QueueManager:
             kwargs.setdefault("budget_reserved_ms", 30_000)
             kwargs.setdefault("fingerprint", self._fingerprint_from_kwargs(kwargs))
             kwargs.setdefault("related_files", self._related_files_from_kwargs(kwargs))
+            # Parallel coding tasks lock per managed worktree, never share one checkout lock.
+            if kwargs.get("requires_write_lock") and not kwargs.get("lock_key"):
+                execution_root = str(kwargs.get("execution_repo_root") or "").strip()
+                if execution_root:
+                    kwargs["lock_key"] = f"worktree:{execution_root}"
             if self.memory_service is not None and not kwargs.get("memory_bundle_id"):
                 bundle = self.memory_service.build_bundle(
                     agent_id=str(kwargs.get("requested_by_agent_id") or "agent_queue"),
@@ -70,6 +77,12 @@ class QueueManager:
                     target_files=list(kwargs.get("related_files") or []),
                 )
                 kwargs["memory_bundle_id"] = bundle.bundle_id
+            # Stamp execution root into payload for workers that only read payload.
+            payload = dict(kwargs.get("payload") or {})
+            if kwargs.get("execution_repo_root") and not payload.get("repo_root") and not payload.get("execution_repo_root"):
+                payload["execution_repo_root"] = kwargs["execution_repo_root"]
+                payload["repo_root"] = kwargs["execution_repo_root"]
+                kwargs["payload"] = payload
             job = QueueJob(job_id=new_queue_job_id(), **kwargs)
         elif not job.fingerprint:
             self.hierarchy_policy.assert_can_create_queue_job(job.requested_by_agent_id, task_id=job.task_id)
@@ -146,9 +159,13 @@ class QueueManager:
             queue_job_id=job.job_id,
             assigned_worker_agent_id=job.assigned_worker_agent_id,
         )
-        lock_key = job.lock_key or (
-            f"repository:{job.primary_repository_id}" if job.requires_write_lock else f"job:{job.job_id}"
-        )
+        if job.lock_key:
+            lock_key = job.lock_key
+        elif job.requires_write_lock:
+            execution_root = str(job.execution_repo_root or "").strip()
+            lock_key = f"worktree:{execution_root}" if execution_root else f"repository:{job.primary_repository_id}"
+        else:
+            lock_key = f"job:{job.job_id}"
         lock = self.locks.lock_for(lock_key)
         with lock:
             job.status = QueueJobStatus.RUNNING
@@ -241,12 +258,13 @@ class QueueManager:
 
     def _related_files_for_payload(self, job_type: Any, payload: dict[str, Any]) -> list[str]:
         kind = job_type.value if hasattr(job_type, "value") else str(job_type or "")
+        root = Path(str(payload.get("execution_repo_root") or payload.get("repo_root") or self.root)).resolve()
         if kind == QueueJobType.REPO_READ.value and payload.get("path"):
-            return [normalize_file_path(payload.get("path"), root=self.root)]
+            return [normalize_file_path(payload.get("path"), root=root)]
         if kind == QueueJobType.REPO_BATCH_READ.value:
-            return [normalize_file_path(item, root=self.root) for item in payload.get("files") or payload.get("paths") or []]
+            return [normalize_file_path(item, root=root) for item in payload.get("files") or payload.get("paths") or []]
         if kind == QueueJobType.APPLY_PATCH.value:
-            return [normalize_file_path(payload.get("path"), root=self.root)] if payload.get("path") else []
+            return [normalize_file_path(payload.get("path"), root=root)] if payload.get("path") else []
         return []
 
     def _bump_memory_status(
@@ -289,12 +307,22 @@ class QueueManager:
         try:
             task = self.taskboard.get_task(task_id)
         except KeyError:
-            return {"workspace_id": "", "session_id": "", "primary_repository_id": "", "repository_ids": []}
+            return {
+                "workspace_id": "",
+                "session_id": "",
+                "primary_repository_id": "",
+                "repository_ids": [],
+                "execution_repo_root": "",
+                "managed_workspace_id": "",
+            }
+        execution_root = str(getattr(task, "execution_repo_root", "") or getattr(task, "managed_worktree_path", "") or "").strip()
         return {
             "workspace_id": task.workspace_id,
             "session_id": task.session_id,
             "primary_repository_id": task.primary_repository_id,
             "repository_ids": list(task.repository_ids),
+            "execution_repo_root": execution_root,
+            "managed_workspace_id": str(getattr(task, "managed_workspace_id", "") or ""),
         }
 
     def _approver_for_task(self, task_id: str) -> str | None:
@@ -348,6 +376,8 @@ class QueueManager:
             workspace_id=job.workspace_id or None,
             session_id=job.session_id or None,
             repository_id=job.primary_repository_id or None,
+            managed_workspace_id=job.managed_workspace_id or None,
+            execution_repo_root=job.execution_repo_root or None,
         )
         event = self.hierarchy_policy.approve_tool_event(
             enrich_event_identity(
