@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-16
 
+- Added a production PyPI release workflow using GitHub Release publication, PyPI Trusted Publishing/OIDC, immutable action pins, once-built verified artifacts, version/PyPI availability gates, and serialized non-cancelling deployment concurrency.
+  - Manual dispatches can validate and rebuild an existing tag but cannot reach the production publish job; push and pull-request CI now tests, builds, and checks distributions without publishing.
+  - Added automated workflow safety and release-version validation coverage plus one-time Trusted Publisher and release documentation.
+  - Verification: Pending.
+
 - Added the Experience-to-Skill Workshop and trusted built-in `skill-creator` capability.
   - Completed, verified task experience now passes deterministic eligibility gates and evidence-weighted confidence scoring before any model generation occurs.
   - Typed proposal drafts are redacted, structurally and safely validated, checked for supported permissions and duplicates, and stored outside active skill loading under configurable `skill-proposals` or `skill-quarantine` roots.
