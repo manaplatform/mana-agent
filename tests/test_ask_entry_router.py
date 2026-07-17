@@ -31,6 +31,36 @@ class _FakeQnA:
         self.last_context = context
         return "synthesized answer"
 
+    def chat(self, question: str) -> str:
+        self.last_context = question
+        return "a is test"
+
+
+def test_model_selected_conversation_route_answers_from_session_history(tmp_path: Path) -> None:
+    qna = _FakeQnA()
+    service = AskService(
+        store=_EmptyStore(),
+        qna_chain=qna,
+        project_root=tmp_path,
+        entry_router=_StaticRouter(
+            RouteDecision(
+                kind="conversation",
+                confidence=0.98,
+                reason="answer from active session history",
+            )
+        ),
+    )
+    transcript = (
+        "Active conversation history (chronological):\n"
+        "User: memory-test a=test\n\nCurrent user message:\nwhat is a?"
+    )
+
+    response = service.ask(index_dir=tmp_path, question=transcript, k=3)
+
+    assert response.answer == "a is test"
+    assert response.mode == "route-conversation"
+    assert qna.last_context == transcript
+
 
 class _StaticRouter:
     def __init__(self, *decisions: RouteDecision) -> None:

@@ -30,6 +30,10 @@ class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
     ask_agent = SimpleNamespace(llm=None, update_model=lambda m: None, model="dummy")
+    qna_chain = SimpleNamespace(
+        llm=None,
+        chat=lambda question: "(dummy conversational response)",
+    )
 
     def ask(self, *args, **kwargs):
         return type("Resp", (), {"answer": "(dummy response)"})()
@@ -591,11 +595,11 @@ def test_gateway_decision_failure_no_fallback(tmp_path: Path, monkeypatch) -> No
     assert result.answer == ""
 
 
-def _answer_decision() -> AgentDecision:
+def _answer_decision(*, selected_tools: list[str] | None = None) -> AgentDecision:
     return AgentDecision(
         intent="answer",
         confidence=0.99,
-        selected_tools=[],
+        selected_tools=list(selected_tools or []),
         code_editing_needed=False,
         reasoning_summary="answer conversationally",
         verifier_passed=True,
@@ -614,6 +618,9 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
             prompts.append(question)
             answer = "Understood." if len(prompts) == 1 else "One is b."
             return SimpleNamespace(answer=answer, sources=[], warnings=[], trace=[])
+
+        def ask_conversation(self, question: str):
+            return self.ask(question).answer
 
     monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
     monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
@@ -637,6 +644,39 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
     assert {message["conversation_id"] for message in messages} == {session_id}
 
 
+def test_answer_only_conversation_uses_validated_route_without_second_router(
+    tmp_path: Path, monkeypatch
+) -> None:
+    prompts: list[str] = []
+
+    class ConversationChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            raise AssertionError("entry router must not run after an answer-only decision")
+
+        def ask_conversation(self, question: str) -> str:
+            prompts.append(question)
+            return "a is test"
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        chat_service=ConversationChatService(),
+    )
+    session_id = gateway.create_session(frontend="test")
+    gateway.process_turn(session_id, "memory-test a=test")
+    result = gateway.process_turn(session_id, "what is a?")
+
+    assert result.answer == "a is test"
+    assert result.mode == "route-conversation"
+    assert "User: memory-test a=test" in prompts[-1]
+    assert prompts[-1].count("what is a?") == 1
+
+
 def test_gateway_new_conversation_isolates_history(tmp_path: Path, monkeypatch) -> None:
     prompts: list[str] = []
 
@@ -646,6 +686,9 @@ def test_gateway_new_conversation_isolates_history(tmp_path: Path, monkeypatch) 
         def ask(self, question: str, **kwargs: Any):
             prompts.append(question)
             return SimpleNamespace(answer="ok", sources=[], warnings=[], trace=[])
+
+        def ask_conversation(self, question: str):
+            return self.ask(question).answer
 
     monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
     monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
@@ -668,6 +711,9 @@ def test_gateway_failed_turn_keeps_session_and_records_failure(tmp_path: Path, m
 
         def ask(self, question: str, **kwargs: Any):
             raise RuntimeError("provider unavailable")
+
+        def ask_conversation(self, question: str):
+            return self.ask(question)
 
     monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
     monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
@@ -694,7 +740,13 @@ def test_gateway_persists_tool_summary_for_followup_context(tmp_path: Path, monk
             trace = [] if len(prompts) > 1 else [{"tool_name": "read_file", "output_preview": "one=b", "status": "ok"}]
             return SimpleNamespace(answer="tool answer", sources=[], warnings=[], trace=trace)
 
-    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+        def ask_conversation(self, question: str):
+            return self.ask(question).answer
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.decide_chat_route",
+        lambda **kwargs: _answer_decision(selected_tools=["read_file"]),
+    )
     monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
     gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=ToolChatService())
     session_id = gateway.create_session(frontend="test")
@@ -711,6 +763,9 @@ def test_gateway_does_not_create_sessions_per_message(tmp_path: Path, monkeypatc
 
         def ask(self, question: str, **kwargs: Any):
             return SimpleNamespace(answer="ok", sources=[], warnings=[], trace=[])
+
+        def ask_conversation(self, question: str):
+            return self.ask(question).answer
 
     monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
     monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))

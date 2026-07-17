@@ -91,6 +91,8 @@ class RouteExecutor:
             return self._external_search(decision, context)
         if decision.kind == "command":
             return self._command(decision)
+        if decision.kind == "conversation":
+            return self._conversation(context)
         if decision.kind in {"clarification", "unsupported"}:
             return AskResponseWithTrace(
                 answer=decision.user_visible_message or decision.reason,
@@ -106,6 +108,21 @@ class RouteExecutor:
             sources=[],
             warnings=[f"Route cannot run: {decision.kind}"],
             mode="route-error",
+            trace=[],
+        )
+
+    def _conversation(self, context: RouteExecutionContext) -> AskResponseWithTrace:
+        chat = getattr(self.qna_chain, "chat", None)
+        if not callable(chat):
+            return self._plain_error(
+                "Conversation route selected, but the conversational model is not configured."
+            )
+        answer = str(chat(question=context.question) or "").strip()
+        return AskResponseWithTrace(
+            answer=answer,
+            sources=[],
+            warnings=[],
+            mode="route-conversation",
             trace=[],
         )
 

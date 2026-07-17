@@ -96,6 +96,16 @@ class ChatService:
     def index_dirs(self) -> list[Path]:
         return list(self._index_dirs)
 
+    def ask_conversation(self, question: str) -> Any:
+        """Execute a model-selected conversational turn without a second router."""
+        qna_chain = getattr(self._ask_service, "qna_chain", None)
+        chat = getattr(qna_chain, "chat", None)
+        if not callable(chat):
+            raise RuntimeError(
+                "Conversation route selected, but the conversational model is not configured."
+            )
+        return chat(str(question or "").strip())
+
     def ask(
         self,
         question: str,

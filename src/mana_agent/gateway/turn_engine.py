@@ -497,8 +497,6 @@ def process_chat_turn(
     auto_continue = bool(getattr(config, "auto_continue", True))
     dir_mode = bool(getattr(config, "dir_mode", False))
     agent_timeout_seconds = int(getattr(config, "agent_timeout_seconds", 30) or 30)
-    coding_enabled = bool(getattr(config, "coding_agent", True))
-
     # Flow routing context for decision
     flow_routing_context = ""
     if active_flow_id and coding_agent is not None and hasattr(coding_agent, "flow_summary"):
@@ -664,7 +662,21 @@ def process_chat_turn(
     if not use_coding or coding_agent is None:
         ask_callbacks = list(callbacks or [])
         try:
-            if ask_callbacks:
+            conversation_only = bool(
+                agent_decision.intent == "answer"
+                and not list(agent_decision.selected_tools or [])
+                and not agent_decision.code_editing_needed
+            )
+            if conversation_only:
+                answer_text = chat_service.ask_conversation(model_question)
+                resp = {
+                    "answer": str(answer_text or ""),
+                    "sources": [],
+                    "warnings": [],
+                    "mode": "route-conversation",
+                    "trace": [],
+                }
+            elif ask_callbacks:
                 resp = chat_service.ask(model_question, k=resolved_k, callbacks=ask_callbacks)
             else:
                 resp = chat_service.ask(model_question, k=resolved_k)
@@ -680,10 +692,12 @@ def process_chat_turn(
                 decision=agent_decision,
                 auto_chat_mode=auto_chat_mode.value,
             )
-        answer = str(getattr(resp, "answer", resp) or "").strip()
-        sources = list(getattr(resp, "sources", []) or [])
-        warnings = [str(w).strip() for w in (getattr(resp, "warnings", []) or []) if str(w).strip()]
-        mode_name = str(getattr(resp, "mode", "") or "").strip() or (
+        answer = str((resp.get("answer") if isinstance(resp, dict) else getattr(resp, "answer", resp)) or "").strip()
+        sources = list((resp.get("sources") if isinstance(resp, dict) else getattr(resp, "sources", [])) or [])
+        raw_warnings = resp.get("warnings") if isinstance(resp, dict) else getattr(resp, "warnings", [])
+        warnings = [str(w).strip() for w in (raw_warnings or []) if str(w).strip()]
+        raw_mode = resp.get("mode") if isinstance(resp, dict) else getattr(resp, "mode", "")
+        mode_name = str(raw_mode or "").strip() or (
             "agent-tools" if agent_tools else "classic"
         )
         tool_traces = _serialize_tool_traces(resp)

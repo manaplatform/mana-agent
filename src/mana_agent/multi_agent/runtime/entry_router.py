@@ -23,6 +23,7 @@ RouteKind = Literal[
     "gitops",
     "coding_task",
     "analysis_task",
+    "conversation",
     "clarification",
     "unsupported",
 ]
@@ -38,6 +39,7 @@ ROUTE_KINDS: set[str] = {
     "gitops",
     "coding_task",
     "analysis_task",
+    "conversation",
     "clarification",
     "unsupported",
 }
@@ -100,6 +102,8 @@ Route kinds:
   branch names and words like commit/push are not repository search queries.
 - coding_task: user wants repository files changed.
 - analysis_task: user wants repository analysis.
+- conversation: answer ordinary chat, conversational recall, or a follow-up from
+  the active session history without repository search, external search, or tools.
 - clarification: ask the user a concise clarifying question.
 - unsupported: explain that no safe valid route is available.
 
@@ -113,7 +117,7 @@ describes Mana-Agent's own CLI and must never be used to inspect a target URL.
 
 Return JSON only with this schema:
 {
-  "kind": "command|tool_execution|browser_task|semantic_qa|repo_search|web_search|github_search|gitops|coding_task|analysis_task|clarification|unsupported",
+  "kind": "command|tool_execution|browser_task|semantic_qa|repo_search|web_search|github_search|gitops|coding_task|analysis_task|conversation|clarification|unsupported",
   "confidence": 0.0,
   "reason": "short reason",
   "command_name": null,

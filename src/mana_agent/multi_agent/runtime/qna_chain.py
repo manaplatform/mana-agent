@@ -4,6 +4,7 @@ import logging
 from time import perf_counter
 
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage, SystemMessage
 from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 
 from mana_agent.multi_agent.runtime.prompts import HUMAN_TEMPLATE, SYSTEM_PROMPT
@@ -48,3 +49,21 @@ class QnAChain:
             )
         logger.info("QnA chain completed in %.2fms", elapsed_ms)
         return str(response.content)
+
+    def chat(self, question: str) -> str:
+        """Answer directly from the exact active-session transcript in ``question``."""
+        response = self.llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Answer the user's current conversational request using the active "
+                        "session history included in the message. Treat that transcript as "
+                        "available context, preserve stated values exactly, and never claim "
+                        "that session history is unavailable when it is present. Do not turn "
+                        "session facts into long-term repository memory."
+                    )
+                ),
+                HumanMessage(content=question),
+            ]
+        )
+        return str(getattr(response, "content", response) or "").strip()
