@@ -192,10 +192,6 @@ class ManaChatApp(App):
                 )
             )
             self.history.add(welcome)
-            # Always surface the auto-chat catalog on TUI open (no /tools required).
-            self.history.add(
-                AssistantMessageEvent(content=self._format_welcome_tools())
-            )
 
         # Schedule the first status update safely after the widget tree is ready.
         # Calling update_status() synchronously in on_mount can trigger watchers
@@ -208,26 +204,6 @@ class ManaChatApp(App):
         # send it automatically as the first user message.
         if self.initial_prompt:
             self.run_worker(self._send_initial_prompt(), exclusive=True)
-
-    def _format_welcome_tools(self) -> str:
-        """Full auto-chat tool catalog for default TUI display (name + description)."""
-        try:
-            from mana_agent.tools.catalog import (
-                format_tool_catalog_plain,
-                format_tool_catalog_summary,
-                list_auto_chat_tools,
-            )
-
-            tools = list_auto_chat_tools(include_mcp_discovery=False)
-            summary = format_tool_catalog_summary(tools)
-            # Full catalog by default so users see every tool without /tools.
-            body = format_tool_catalog_plain(tools, max_per_category=None)
-            return (
-                f"**Available auto-chat tools** ({summary})\n\n"
-                f"```\n{body}\n```"
-            )
-        except Exception as exc:
-            return f"Auto-chat tools catalog unavailable: {exc}"
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""

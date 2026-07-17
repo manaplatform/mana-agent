@@ -4,6 +4,22 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-17
 
+- Fixed Codex turns being rejected by the current app-server because Mana's internal `readOnly` / `workspaceWrite` sandbox values were sent without protocol translation.
+  - The Codex boundary now emits `read-only` / `workspace-write`, with regression coverage for both modes; failed turn summaries also retain the first backend error instead of only reporting `Codex task did not complete.`
+  - Verification: `MANA_HOME=/tmp/mana-agent-codex-sandbox-tests .venv/bin/python -m pytest -q tests/test_codex_integration.py tests/gateway/test_chat_gateway.py` passed (30 tests); a live read-only turn using the configured `gpt-5.6-luna` model completed successfully and returned the repository title; Ruff, Python compilation, and `git diff --check` passed.
+
+- Hid the available auto-chat tools catalog from the Textual TUI welcome screen while preserving live tool-call/result cards and the explicit `/tools` command.
+  - Verification: `MANA_HOME=/tmp/mana-agent-tui-hidden-tools-tests .venv/bin/python -m pytest -q tests/test_auto_chat_tools_catalog.py tests/test_tui_auto_chat_tool_events.py tests/test_tui_live_tools_scroll.py` passed (12 tests); Ruff passed for the changed test, and Python compilation plus `git diff --check` passed.
+
+- Fixed Codex startup diagnostics and preflight validation when another executable named `codex` shadows the official OpenAI CLI.
+  - `codex doctor` now requires an official `codex-cli` version response and a usable `app-server` command instead of treating any zero-exit `codex --version` process as healthy.
+  - Production coding turns now run the same validation before starting JSON-RPC and stop with an actionable `MANA_CODEX_BIN` error; no fallback coding backend is executed.
+  - Verification: `MANA_HOME=/tmp/mana-agent-codex-preflight-tests .venv/bin/python -m pytest -q tests/test_codex_integration.py tests/gateway/test_chat_gateway.py` passed (28 tests); Ruff, Python compilation, and `git diff --check` passed; live `mana-agent codex doctor --repo .` and an app-server initialize handshake passed with `codex-cli 0.145.0-alpha.18`.
+
+- Added an explicit chat runtime model summary to the normal file log after model-role resolution.
+  - The record includes the resolved main and router models, coding backend/model, planner model ownership, and tool-worker model or disabled state; these values are part of the message so the existing log formatter no longer drops them.
+  - Verification: `MANA_HOME=/tmp/mana-agent-model-log-tests .venv/bin/python -m pytest -q tests/test_codex_integration.py tests/gateway/test_chat_gateway.py` passed (25 tests); Ruff and Python compilation checks passed for the changed Python files.
+
 - Made Codex the authoritative coding runtime across the shared CLI, TUI, and dashboard stack.
   - Replaced the production legacy `CodingAgent` construction with a compatibility shim that delegates repository inspection, coding decisions, planning, editing, review, and verification to one Codex app-server turn.
   - Removed the separate preflight checklist/planner from the Codex path, retained isolated write worktrees and explicit merge candidates, and made missing or disabled Codex fail without a native coding fallback.

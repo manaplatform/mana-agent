@@ -270,8 +270,11 @@ class CodexCodingAgentShim:
             "failed": "codex_failed",
             "cancelled": "codex_cancelled",
         }[result.status]
+        answer = result.summary
+        if result.status == "failed" and result.errors:
+            answer = f"{result.summary} Reason: {result.errors[0]}".strip()
         return {
-            "answer": result.summary,
+            "answer": answer,
             "backend": result.backend,
             "status": result.status,
             "run_status": result.status,
