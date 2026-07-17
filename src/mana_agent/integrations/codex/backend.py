@@ -20,6 +20,11 @@ from mana_agent.integrations.codex.result_parser import parse_codex_result
 
 ClientFactory = Callable[[tuple[str, ...]], AsyncCodexAppServer]
 
+_CODEX_SANDBOX_VALUES = {
+    "readOnly": "read-only",
+    "workspaceWrite": "workspace-write",
+}
+
 
 class CodexCodingBackend:
     name = "codex"
@@ -33,18 +38,33 @@ class CodexCodingBackend:
     ) -> None:
         self.settings = settings
         self.worker_id = worker_id or f"codex-{uuid.uuid4().hex[:8]}"
+        self._uses_default_client = client_factory is None
         self._client_factory = client_factory or (lambda command: AsyncCodexAppServer(command))
         self._client: AsyncCodexAppServer | None = None
         self._active: dict[str, tuple[str, str]] = {}
         self._results: dict[str, CodingTaskResult] = {}
         self._run_lock = asyncio.Lock()
 
-    async def start(self) -> None:
+    async def start(self, repository_path: str | Path | None = None) -> None:
         if self._client is not None and self._client.running:
             return
         if not self.settings.enabled:
             raise CodexUnavailableError("Codex integration is disabled. No fallback backend was executed.")
-        command = (self.settings.codex_bin, "app-server")
+        executable = self.settings.codex_bin
+        if self._uses_default_client:
+            report = await asyncio.to_thread(
+                check_codex_health,
+                self.settings,
+                repository_path or Path.cwd(),
+            )
+            if not report.healthy or report.executable is None:
+                detail = "; ".join(report.errors) or "unknown health-check failure"
+                raise CodexUnavailableError(
+                    "Codex preflight failed. No fallback backend was executed. "
+                    f"Reason: {detail}"
+                )
+            executable = report.executable
+        command = (executable, "app-server")
         self._client = self._client_factory(command)
         await self._client.start()
 
@@ -63,7 +83,7 @@ class CodexCodingBackend:
         return result
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
-        await self.start()
+        await self.start(workspace.repository_path)
         if self._client is None:
             raise CodexUnavailableError("Codex app-server did not start")
         async with self._run_lock:
@@ -95,7 +115,7 @@ class CodexCodingBackend:
                         "input": [{"type": "text", "text": build_codex_prompt(task, workspace)}],
                         "cwd": str(workspace.worktree_path.resolve()),
                         "approvalPolicy": self.settings.approval_policy,
-                        "sandbox": workspace.sandbox,
+                        "sandbox": _codex_sandbox(workspace),
                         **({"model": self.settings.model} if self.settings.model else {}),
                     },
                 )
@@ -182,7 +202,7 @@ class CodexCodingBackend:
         return {
             "cwd": str(workspace.worktree_path.resolve()),
             "approvalPolicy": self.settings.approval_policy,
-            "sandbox": workspace.sandbox,
+            "sandbox": _codex_sandbox(workspace),
             **({"model": self.settings.model} if self.settings.model else {}),
         }
 
@@ -212,6 +232,17 @@ def _response_id(response: dict[str, Any], key: str) -> str:
         return str(value["id"])
     direct = response.get(f"{key}Id") or response.get("id")
     return str(direct or "")
+
+
+def _codex_sandbox(workspace: WorkspaceContext) -> str:
+    """Translate Mana's typed sandbox value to the Codex app-server protocol."""
+
+    try:
+        return _CODEX_SANDBOX_VALUES[workspace.sandbox]
+    except KeyError as exc:
+        raise CodexExecutionError(
+            f"Unsupported Codex sandbox value: {workspace.sandbox}"
+        ) from exc
 
 
 def _git_changed_files(worktree: Path) -> list[str]:

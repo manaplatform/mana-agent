@@ -7,6 +7,8 @@ from pathlib import Path
 
 from rich.console import Console
 
+from mana_agent.chat.events import AssistantMessageEvent
+from mana_agent.chat.history import ChatHistory
 from mana_agent.cli.chat_ui import ChatUIState, render_startup_header
 from mana_agent.cli.events import make_event
 from mana_agent.commands.ui_helpers import _render_direct_command
@@ -95,15 +97,25 @@ def test_startup_header_emits_auto_tools(tmp_path: Path) -> None:
     assert any(event.type == "session.tools" for event in state.events)
 
 
-def test_tui_welcome_tools_show_full_catalog_by_default() -> None:
+def test_tui_welcome_hides_available_tools_catalog(monkeypatch) -> None:
     from mana_agent.tui.app import ManaChatApp
 
-    app = ManaChatApp(repo_root=Path.cwd(), model="gpt-test")
-    body = app._format_welcome_tools()
-    assert "Available auto-chat tools" in body
-    assert "web_search" in body
-    assert "email_read" in body
-    assert "mcp" in body.lower()
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=Path.cwd(), model="gpt-test")
+    monkeypatch.setattr(app, "call_after_refresh", lambda callback: None)
+
+    app.on_mount()
+
+    messages = [
+        event.content
+        for event in history.get_events()
+        if isinstance(event, AssistantMessageEvent)
+    ]
+    assert len(messages) == 1
+    assert "mana-agent" in messages[0]
+    assert "Available auto-chat tools" not in messages[0]
+    assert "web_search" not in messages[0]
+    assert "email_read" not in messages[0]
 
 
 def test_tools_command_lists_available_catalog(tmp_path: Path) -> None:

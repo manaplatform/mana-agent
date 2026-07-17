@@ -15,6 +15,7 @@ from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.event_adapter import adapt_codex_event
+from mana_agent.integrations.codex.exceptions import CodexUnavailableError
 from mana_agent.integrations.codex.health import check_codex_health
 from mana_agent.integrations.codex.result_parser import parse_codex_result
 from mana_agent.multi_agent.codex_pool import _scopes_overlap
@@ -175,8 +176,35 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path:
     assert [method for method, _params in fake.requests] == ["thread/start", "turn/start"]
     turn_payload = fake.requests[1][1]
     assert turn_payload["cwd"].endswith("worktree")
-    assert turn_payload["sandbox"] == "workspaceWrite"
+    assert fake.requests[0][1]["sandbox"] == "workspace-write"
+    assert turn_payload["sandbox"] == "workspace-write"
     assert "Do not commit, push, publish" in turn_payload["input"][0]["text"]
+
+
+def test_codex_backend_translates_read_only_sandbox_for_protocol(tmp_path: Path) -> None:
+    fake: _FakeClient | None = None
+
+    def factory(command: tuple[str, ...]) -> _FakeClient:
+        nonlocal fake
+        fake = _FakeClient(command)
+        return fake
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workspace = WorkspaceContext(
+        repository_path=repository,
+        worktree_path=repository,
+        sandbox="readOnly",
+    )
+    task = _task().model_copy(update={"requires_repository_write": False})
+    backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
+
+    result = asyncio.run(backend.execute(task, workspace))
+
+    assert result.status == "completed"
+    assert fake is not None
+    assert fake.requests[0][1]["sandbox"] == "read-only"
+    assert fake.requests[1][1]["sandbox"] == "read-only"
 
 
 class _ShimBackend:
@@ -322,6 +350,75 @@ def test_disabled_codex_health_is_explicit(tmp_path: Path) -> None:
     report = check_codex_health(CodexSettings(enabled=False), tmp_path)
     assert report.healthy is False
     assert "Codex integration is disabled" in report.errors
+
+
+def test_codex_health_rejects_unrelated_codex_package(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.health.shutil.which",
+        lambda _command: "/fake/bin/codex",
+    )
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.health.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="0.2.3\n",
+            stderr="circular dependency warning\n",
+        ),
+    )
+
+    report = check_codex_health(CodexSettings(enabled=True), tmp_path)
+
+    assert report.healthy is False
+    assert report.app_server_available is False
+    assert any("not the official OpenAI Codex CLI" in error for error in report.errors)
+
+
+def test_codex_health_requires_app_server_capability(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.health.shutil.which",
+        lambda _command: "/fake/bin/codex",
+    )
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="codex-cli 1.2.3\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="Usage: codex app-server [OPTIONS]\n", stderr=""),
+        ]
+    )
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.health.subprocess.run",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    report = check_codex_health(CodexSettings(enabled=True), tmp_path)
+
+    assert report.healthy is True
+    assert report.app_server_available is True
+
+
+def test_production_backend_stops_when_codex_preflight_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend.check_codex_health",
+        lambda settings, repository: SimpleNamespace(
+            healthy=False,
+            executable="/fake/bin/codex",
+            errors=["configured executable is incompatible"],
+        ),
+    )
+    backend = CodexCodingBackend(CodexSettings(enabled=True))
+
+    with pytest.raises(
+        CodexUnavailableError,
+        match="Codex preflight failed.*No fallback backend was executed",
+    ):
+        asyncio.run(backend.start(tmp_path))
+
+    assert backend._client is None
 
 
 def test_failed_test_command_is_not_reported_as_passing(tmp_path: Path) -> None:
