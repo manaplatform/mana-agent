@@ -142,6 +142,14 @@ class ManaChatApp(App):
         # Gateway connection (optional, preferred path going forward)
         self.gateway = gateway
         self._gateway_session_id: str | None = None
+        if self.gateway is not None and hasattr(self.gateway, "create_session"):
+            configured_session = getattr(getattr(self.gateway, "config", None), "session_id", None)
+            if not configured_session and hasattr(self.gateway, "get_stack"):
+                configured_session = getattr(self.gateway.get_stack(), "session_id", None)
+            self._gateway_session_id = self.gateway.create_session(
+                frontend="tui",
+                session_id=configured_session,
+            )
 
         # Minimal per-session state to support full flows (updated from generate results)
         self.active_flow_id: str | None = None
@@ -355,6 +363,26 @@ class ManaChatApp(App):
                 self.input.value = ""
             return
 
+        if text == "/new":
+            if self._turn_in_progress:
+                self.notify("Wait for the current turn to finish before starting a new conversation.", severity="warning")
+                return
+            if self.gateway is None or not hasattr(self.gateway, "start_new_conversation"):
+                self.history.add(AssistantMessageEvent(content="A gateway session is required to start a new conversation."))
+                return
+            if not self._gateway_session_id:
+                self._gateway_session_id = self.gateway.create_session(frontend="tui")
+            self._gateway_session_id = self.gateway.start_new_conversation(
+                self._gateway_session_id, frontend="tui"
+            )
+            self.active_flow_id = None
+            self.history.clear()
+            self.history.add(AssistantMessageEvent(content="Started a new conversation."))
+            if self.input:
+                self.input.value = ""
+            self.update_status("Ready")
+            return
+
         # Clear input immediately (premium feel)
         if self.input:
             self.input.value = ""
@@ -395,9 +423,16 @@ class ManaChatApp(App):
                 worker = getattr(old_stack, "tool_worker_client", None)
                 if worker is not None and hasattr(worker, "stop"):
                     worker.stop()
-                config = replace(old_gateway.config, model=selection.model_id, session_id=None)
+                # Rebuilding model clients must preserve the active conversation identity.
+                config = replace(
+                    old_gateway.config,
+                    model=selection.model_id,
+                    session_id=self._gateway_session_id,
+                )
                 self.gateway = AgentChatGateway(self.repo_root, config=config, settings=old_gateway.settings)
-                self._gateway_session_id = self.gateway.create_session(frontend="tui")
+                self._gateway_session_id = self.gateway.create_session(
+                    frontend="tui", session_id=self._gateway_session_id
+                )
                 rich = self.gateway.get_rich_context(self._gateway_session_id)
                 self.chat_service = rich.chat_service
                 self.coding_agent = rich.coding_agent

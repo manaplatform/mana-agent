@@ -19,6 +19,7 @@ from mana_agent.cli.renderers import EventRenderer
 from mana_agent.telemetry.session_trace import SessionTrace
 from mana_agent.telemetry.tokens import TokenUsageTracker
 from mana_agent.observability import ObservabilityStore
+from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.tools.catalog import (
     ToolCatalogEntry,
     format_tool_catalog_summary,
@@ -85,6 +86,8 @@ class ChatUIState:
     test_runs: list[ChatEvent] = field(default_factory=list)
     log_events: list[ChatEvent] = field(default_factory=list)
     conversation: list[dict[str, str]] = field(default_factory=list)
+    pending_conversation_turns: dict[str, str] = field(default_factory=dict)
+    conversation_history_store: ChatSessionHistory = field(default_factory=ChatSessionHistory)
     # Auto-chat tool catalog (name + description) for TUI visibility.
     available_tools: list[ToolCatalogEntry] = field(default_factory=list)
     active_panel: str = "chat"
@@ -109,6 +112,12 @@ class ChatUIState:
             session = service.create_session(self.repo_root, session_id=self.session_id)
         self.workspace_id = session.workspace_id
         self.repository_id = session.primary_repository_id
+        if not self.conversation:
+            self.conversation = [
+                {"role": item.role, "content": item.content}
+                for item in self.conversation_history_store.list(self.session_id)
+                if item.role in {"user", "assistant", "tool"}
+            ][-40:]
         self.ui_mode = EventRenderer.normalize_mode(self.ui_mode)
         self.trace_mode = EventRenderer.normalize_trace_mode(self.trace_mode)
         if self.trace_path is None:
@@ -166,6 +175,45 @@ class ChatUIState:
         self.test_runs.clear()
         self.log_events.clear()
         self.conversation.clear()
+        self.pending_conversation_turns.clear()
+        self.conversation.extend(
+            {"role": item.role, "content": item.content}
+            for item in self.conversation_history_store.list(self.session_id)
+            if item.role in {"user", "assistant", "tool"}
+        )
+
+    def begin_conversation_turn(self, question: str, turn_id: str) -> None:
+        """Persist user input before model execution without adding it twice to prompts."""
+        question_text = str(question or "").strip()
+        if not question_text:
+            return
+        self.conversation_history_store.append(
+            self.session_id,
+            role="user",
+            content=question_text,
+            turn_id=turn_id,
+        )
+        self.pending_conversation_turns[question_text] = turn_id
+
+    def conversation_prompt(self, question: str) -> str:
+        question_text = str(question or "").strip()
+        durable = self.conversation_history_store.list(self.session_id)
+        if durable and durable[-1].role == "user" and durable[-1].content == question_text:
+            durable = durable[:-1]
+        prior = [
+            {"role": item.role, "content": item.content}
+            for item in durable
+            if item.role in {"user", "assistant", "tool"}
+        ][-40:]
+        if not prior:
+            return question_text
+        labels = {"user": "User", "assistant": "Assistant", "tool": "Tool result"}
+        lines = ["Active conversation history (chronological):"]
+        for item in prior:
+            role = item.get("role", "user")
+            lines.append(f"{labels.get(role, role.title())}: {item.get('content', '')}")
+        lines.extend(["", "Current user message:", question_text])
+        return "\n".join(lines)[-40000:]
 
     @property
     def normalized_events(self) -> list[ChatEvent]:
@@ -300,6 +348,17 @@ class ChatUIState:
             self.conversation.append({"role": "user", "content": question_text})
         if answer_text:
             self.conversation.append({"role": "assistant", "content": answer_text})
+            turn_id = self.pending_conversation_turns.pop(question_text, "")
+            if not turn_id and self.pending_conversation_turns:
+                pending_question = next(reversed(self.pending_conversation_turns))
+                turn_id = self.pending_conversation_turns.pop(pending_question)
+            self.conversation_history_store.append(
+                self.session_id,
+                role="assistant",
+                content=answer_text,
+                turn_id=turn_id,
+                metadata={"model": self.model, "provider": self.provider},
+            )
         if len(self.conversation) > 40:
             self.conversation = self.conversation[-40:]
 

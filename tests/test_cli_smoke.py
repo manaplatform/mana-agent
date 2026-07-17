@@ -2965,10 +2965,14 @@ def test_chat_new_topic_resets_flow_but_keeps_history(monkeypatch, tmp_path: Pat
     assert result.exit_code == 0
     assert "Started new chat topic; flow reset: flow-1" in result.stdout
     assert _FakeCodingAgent.reset_ids == ["flow-1"]
-    assert _FakeCodingAgent.calls == [
-        {"question": "change README title", "flow_id": "flow-existing"},
-        {"question": "change pyproject description", "flow_id": None},
-    ]
+    assert _FakeCodingAgent.calls[0] == {
+        "question": "change README title",
+        "flow_id": "flow-existing",
+    }
+    assert _FakeCodingAgent.calls[1]["flow_id"] is None
+    assert "User: change README title" in str(_FakeCodingAgent.calls[1]["question"])
+    assert "Assistant: updated 1" in str(_FakeCodingAgent.calls[1]["question"])
+    assert str(_FakeCodingAgent.calls[1]["question"]).endswith("change pyproject description")
     assert rendered_history_lengths == [1, 2]
 
 

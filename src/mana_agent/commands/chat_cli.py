@@ -2048,11 +2048,22 @@ def chat(
                     console.print("[green]Browser action approved for this exact page and target. Ask Mana-Agent to continue.[/green]")
                 continue
             if _is_new_topic_command(question):
-                reset_id = _start_new_topic()
-                if reset_id:
-                    console.print(f"[green]Started new chat topic; flow reset: {reset_id}[/green]")
+                if question.strip().lower() == "/new":
+                    from mana_agent.connectors.browser.session import default_browser_manager
+
+                    old_session_id = chat_ui_state.session_id
+                    default_browser_manager().close(old_session_id)
+                    new_session_id = gateway.start_new_conversation(old_session_id, frontend="cli")
+                    chat_ui_state.activate_session(new_session_id)
+                    session_turns.clear()
+                    active_flow_id = None
+                    console.print("[green]Started a new conversation.[/green]")
                 else:
-                    console.print("[green]Started new chat topic.[/green]")
+                    reset_id = _start_new_topic()
+                    if reset_id:
+                        console.print(f"[green]Started new chat topic; flow reset: {reset_id}[/green]")
+                    else:
+                        console.print("[green]Started new chat topic.[/green]")
                 continue
             if question.strip() == "/models" or question.strip().startswith("/models "):
                 from mana_agent.tui.model_management import plain_models_command
@@ -2111,6 +2122,7 @@ def chat(
                     default_browser_manager().close(chat_ui_state.session_id)
                     created = service.create_session(root)
                     chat_ui_state.activate_session(created.session_id)
+                    gateway.create_session(frontend="cli", session_id=created.session_id)
                     session_turns.clear()
                     active_flow_id = None
                     console.print(f"[green]New isolated session:[/green] {created.session_id}")
@@ -2123,6 +2135,7 @@ def chat(
                     except (FileNotFoundError, ValueError) as exc:
                         console.print(f"[red]{exc}[/red]")
                         continue
+                    gateway.create_session(frontend="cli", session_id=chat_ui_state.session_id)
                     session_turns.clear()
                     active_flow_id = None
                     console.print(f"[green]Switched session:[/green] {chat_ui_state.session_id}")
@@ -2162,6 +2175,7 @@ def chat(
             if question.strip().startswith("/plan"):
                 plan_args = question.strip()[len("/plan"):].strip()
                 question = f"plan {plan_args}" if plan_args else "plan the next repository change"
+            chat_ui_state.begin_conversation_turn(question, current_turn_id)
 
             if recorded_initial_prompt and question == prompt:
                 recorded_initial_prompt = False
@@ -2777,6 +2791,7 @@ def chat(
                 )
                 continue
 
+            synthetic_selection_followup = False
             if pending_ui_selection is not None:
                 if execution_profile == "full-auto":
                     option = _auto_select_ui_option(pending_ui_selection)
@@ -2788,6 +2803,7 @@ def chat(
                             f'User selected "{option_id}" for selection "{selection_id}" '
                             f'(value="{value}") in full-auto mode. Continue accordingly.'
                         )
+                        synthetic_selection_followup = True
                         logger.info(
                             "Full-auto selection resolution",
                             extra={"selection_id": selection_id, "option_id": option_id},
@@ -2816,6 +2832,7 @@ def chat(
                             f'User provided free-text response "{raw_text}" '
                             f'for selection "{selection_id}". Continue accordingly.'
                         )
+                        synthetic_selection_followup = True
                         pending_ui_selection = None
                     else:
                         option = selection_payload or {}
@@ -2825,6 +2842,7 @@ def chat(
                             f'User selected "{option_id}" for selection "{selection_id}" '
                             f'(value="{value}"). Continue accordingly.'
                         )
+                        synthetic_selection_followup = True
                         pending_ui_selection = None
 
             if coding_agent_instance is not None and question.startswith("/flow"):
@@ -3074,7 +3092,9 @@ def chat(
 
             if not use_coding_agent_turn:
                 try:
-                    response = chat_service.ask(question)
+                    response = chat_service.ask(
+                        question if synthetic_selection_followup else chat_ui_state.conversation_prompt(question)
+                    )
                 except Exception as exc:
                     _log_exception("chat_service.ask", exc)
                     console.print("[red]Chat request failed.[/red]")
@@ -3181,9 +3201,11 @@ def chat(
                     and (plan_trigger_request or force_auto_execute_edit)
                 )
                 auto_execute_available = bool(execute_plan_now and hasattr(coding_agent_instance, "generate_auto_execute"))
-                request_for_generation = question
+                request_for_generation = (
+                    question if synthetic_selection_followup else chat_ui_state.conversation_prompt(question)
+                )
                 if selected_skill_text:
-                    request_for_generation = f"{question}\n\nSelected adaptive procedures (advisory; existing policy still applies):\n{selected_skill_text}"
+                    request_for_generation = f"{request_for_generation}\n\nSelected adaptive procedures (advisory; existing policy still applies):\n{selected_skill_text}"
                 turn_full_auto_resume_cycles = 0
                 turn_full_auto_passes_total = 0
                 turn_full_auto_pass_checkpoints_emitted = 0

@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +24,7 @@ from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.turn_engine import ChatTurnResult, load_analysis_context, process_chat_turn
 from mana_agent.services.chat_service import ChatService
+from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.workspaces.service import WorkspaceService
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,7 @@ class AgentChatGateway:
 
         self._sessions: dict[str, dict[str, Any]] = {}
         self._active: set[str] = set()
+        self._history_store = ChatSessionHistory()
 
         # Build stack (full coding stack when coding_agent=True)
         self._stack: ChatStack = build_chat_stack(
@@ -224,18 +227,29 @@ class AgentChatGateway:
                 sid = f"gw-{frontend}-{id(self)}-{len(self._sessions)}"
 
         if sid not in self._sessions:
-            self._sessions[sid] = self._new_session_state(frontend=frontend)
+            self._sessions[sid] = self._new_session_state(sid, frontend=frontend)
         return sid
 
-    def _new_session_state(self, *, frontend: str = "cli") -> dict[str, Any]:
+    def _new_session_state(self, session_id: str, *, frontend: str = "cli") -> dict[str, Any]:
         analysis = None
         try:
             analysis = load_analysis_context(self.root)
         except Exception:
             analysis = None
+        messages = self._history_store.list(session_id)
+        completed: dict[str, dict[str, str]] = {}
+        for message in messages:
+            if message.role in {"user", "assistant"}:
+                completed.setdefault(message.turn_id, {})[message.role] = message.content
+        history = [
+            (turn["user"], turn["assistant"])
+            for turn in completed.values()
+            if turn.get("user") and turn.get("assistant")
+        ]
         return {
             "frontend": frontend,
-            "history": [],
+            "history": history[-40:],
+            "messages": [message.to_dict() for message in messages],
             "root": str(self.root),
             "active_flow_id": self._default_flow_id,
             "auto_chat_state": None,
@@ -247,8 +261,46 @@ class AgentChatGateway:
 
     def _session(self, session_id: str) -> dict[str, Any]:
         if session_id not in self._sessions:
-            self._sessions[session_id] = self._new_session_state()
+            # An explicitly supplied/restored workspace session owns its persisted history.
+            self._sessions[session_id] = self._new_session_state(session_id)
         return self._sessions[session_id]
+
+    def start_new_conversation(self, session_id: str, *, frontend: str | None = None) -> str:
+        """Archive the current conversation and return a fresh isolated session."""
+        state = self._session(session_id)
+        self.start_new_topic(session_id)
+        try:
+            self._workspaces.archive_session(session_id)
+        except (FileNotFoundError, ValueError):
+            pass
+        created = self._workspaces.create_session(self.root)
+        sid = created.session_id
+        self._sessions[sid] = self._new_session_state(
+            sid, frontend=frontend or str(state.get("frontend") or "cli")
+        )
+        return sid
+
+    def session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """Return the durable chronological message log for diagnostics and UIs."""
+        return [message.to_dict() for message in self._history_store.list(session_id)]
+
+    def _append_session_message(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        turn_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        message = self._history_store.append(
+            session_id,
+            role=role,
+            content=content,
+            turn_id=turn_id,
+            metadata=metadata,
+        )
+        self._session(session_id).setdefault("messages", []).append(message.to_dict())
 
     def start_new_topic(self, session_id: str) -> str | None:
         """Reset coding flow for a session (keeps conversation history)."""
@@ -321,7 +373,9 @@ class AgentChatGateway:
 
             # Minimal ChatService-only path
             state = self._session(session_id)
-            hist = state.get("history", [])[-12:]
+            turn_id = f"turn_{uuid.uuid4().hex[:20]}"
+            self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
+            hist = state.get("history", [])[-20:]
             question = text
             if hist:
                 transcript = "\n\n".join(
@@ -331,13 +385,24 @@ class AgentChatGateway:
                     f"Conversation history for continuity:\n{transcript[-20000:]}\n\n"
                     f"Current user message:\n{text}"
                 )
-            resp = self._chat_service.ask(question, k=getattr(self._chat_service, "_k", 6))
+            try:
+                resp = self._chat_service.ask(question, k=getattr(self._chat_service, "_k", 6))
+            except Exception as exc:
+                self._append_session_message(
+                    session_id,
+                    role="system",
+                    content=f"Turn failed: {exc}",
+                    turn_id=turn_id,
+                    metadata={"state": "failed", "error_type": type(exc).__name__},
+                )
+                raise
             answer = getattr(resp, "answer", resp)
             if not isinstance(answer, str):
                 answer = str(answer or "").strip()
             result = (answer or "").strip() or "(No response from agent)"
             state.setdefault("history", []).append((text, result))
-            state["history"] = state["history"][-12:]
+            state["history"] = state["history"][-40:]
+            self._append_session_message(session_id, role="assistant", content=result, turn_id=turn_id)
             return result
         finally:
             self._active.discard(session_id)
@@ -363,6 +428,8 @@ class AgentChatGateway:
     ) -> ChatTurnResult:
         """Run one full chat turn through the gateway-owned engine."""
         self._active.add(session_id)
+        turn_id = str(options.pop("turn_id", "") or f"turn_{uuid.uuid4().hex[:20]}")
+        self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
         try:
             state = self._session(session_id)
             sink = event_sink or self._event_sink
@@ -388,7 +455,51 @@ class AgentChatGateway:
             # Sync flow id back if coding agent advanced it
             if result.flow_id:
                 state["active_flow_id"] = result.flow_id
+            for index, trace in enumerate(result.trace or []):
+                if not isinstance(trace, dict):
+                    continue
+                summary = str(
+                    trace.get("result_summary")
+                    or trace.get("output_preview")
+                    or trace.get("status")
+                    or ""
+                ).strip()
+                self._append_session_message(
+                    session_id,
+                    role="tool",
+                    content=summary[:4000],
+                    turn_id=turn_id,
+                    metadata={
+                        "tool_name": str(trace.get("tool_name") or "tool"),
+                        "sequence": index,
+                    },
+                )
+            if result.answer:
+                self._append_session_message(
+                    session_id,
+                    role="assistant",
+                    content=result.answer,
+                    turn_id=turn_id,
+                    metadata={"model": self.config.model, "mode": result.mode},
+                )
+            else:
+                self._append_session_message(
+                    session_id,
+                    role="system",
+                    content=result.error or "Turn interrupted before an assistant response.",
+                    turn_id=turn_id,
+                    metadata={"state": "failed" if result.error else "interrupted"},
+                )
             return result
+        except BaseException as exc:
+            self._append_session_message(
+                session_id,
+                role="system",
+                content=f"Turn failed: {exc}",
+                turn_id=turn_id,
+                metadata={"state": "failed", "error_type": type(exc).__name__},
+            )
+            raise
         finally:
             self._active.discard(session_id)
 

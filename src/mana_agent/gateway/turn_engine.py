@@ -31,6 +31,21 @@ from mana_agent.search.router import SearchRouter
 logger = logging.getLogger(__name__)
 
 
+def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
+    """Build one chronological conversation prompt with the current message once."""
+    messages = list(session_state.get("messages") or [])
+    prior = messages[:-1] if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == current_message else messages
+    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}][-40:]
+    if not prior:
+        return current_message
+    lines = ["Active conversation history (chronological):"]
+    labels = {"user": "User", "assistant": "Assistant", "tool": "Tool result"}
+    for item in prior:
+        lines.append(f"{labels[str(item.get('role'))]}: {str(item.get('content') or '')}")
+    lines.extend(["", "Current user message:", current_message])
+    return "\n".join(lines)[-40000:]
+
+
 @dataclass
 class ChatTurnResult:
     """Structured result of one gateway-owned chat turn."""
@@ -469,6 +484,7 @@ def process_chat_turn(
         session_state["auto_chat_state"] = auto_chat_state
 
     question = resolve_auto_followup(original_question, auto_chat_state)
+    model_question = _conversation_prompt(session_state, question)
     active_flow_id = session_state.get("active_flow_id")
     if isinstance(active_flow_id, str):
         active_flow_id = active_flow_id.strip() or None
@@ -507,7 +523,9 @@ def process_chat_turn(
             ask_service=ask_service,
             question=question,
             root=root,
-            memory_context=flow_routing_context,
+            memory_context="\n\n".join(
+                part for part in (flow_routing_context, _conversation_prompt(session_state, question)) if part
+            ),
         )
     except Exception as exc:
         logger.exception("gateway process_turn decision failed")
@@ -647,14 +665,14 @@ def process_chat_turn(
         ask_callbacks = list(callbacks or [])
         try:
             if ask_callbacks:
-                resp = chat_service.ask(question, k=resolved_k, callbacks=ask_callbacks)
+                resp = chat_service.ask(model_question, k=resolved_k, callbacks=ask_callbacks)
             else:
-                resp = chat_service.ask(question, k=resolved_k)
+                resp = chat_service.ask(model_question, k=resolved_k)
         except TypeError:
             try:
-                resp = chat_service.ask(question, callbacks=ask_callbacks) if ask_callbacks else chat_service.ask(question)
+                resp = chat_service.ask(model_question, callbacks=ask_callbacks) if ask_callbacks else chat_service.ask(model_question)
             except TypeError:
-                resp = chat_service.ask(question)
+                resp = chat_service.ask(model_question)
         except Exception as exc:
             return ChatTurnResult(
                 answer="",
@@ -710,7 +728,7 @@ def process_chat_turn(
     auto_execute_available = bool(
         execute_plan_now and hasattr(coding_agent, "generate_auto_execute")
     )
-    request_for_generation = question
+    request_for_generation = model_question
     if analysis_context:
         request_for_generation = f"{analysis_context}\n\n{request_for_generation}"
 

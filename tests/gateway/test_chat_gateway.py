@@ -23,6 +23,7 @@ from mana_agent.gateway import (
 )
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
+from mana_agent.services.chat_session_history import ChatSessionHistory
 
 
 class _DummyAskService:
@@ -588,3 +589,164 @@ def test_gateway_decision_failure_no_fallback(tmp_path: Path, monkeypatch) -> No
     assert result.error is not None
     assert "No fallback" in result.error or "decision" in result.error.lower()
     assert result.answer == ""
+
+
+def _answer_decision() -> AgentDecision:
+    return AgentDecision(
+        intent="answer",
+        confidence=0.99,
+        selected_tools=[],
+        code_editing_needed=False,
+        reasoning_summary="answer conversationally",
+        verifier_passed=True,
+    )
+
+
+def test_gateway_persists_same_session_history_without_duplicate_current_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    prompts: list[str] = []
+
+    class TrackingChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            prompts.append(question)
+            answer = "Understood." if len(prompts) == 1 else "One is b."
+            return SimpleNamespace(answer=answer, sources=[], warnings=[], trace=[])
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        chat_service=TrackingChatService(),
+    )
+    session_id = gateway.create_session(frontend="test")
+
+    gateway.process_turn(session_id, "Remember one = b.")
+    gateway.process_turn(session_id, "What is one?")
+
+    assert "Remember one = b." in prompts[1]
+    assert "Understood." in prompts[1]
+    assert prompts[1].count("What is one?") == 1
+    messages = gateway.session_messages(session_id)
+    assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
+    assert {message["session_id"] for message in messages} == {session_id}
+    assert {message["conversation_id"] for message in messages} == {session_id}
+
+
+def test_gateway_new_conversation_isolates_history(tmp_path: Path, monkeypatch) -> None:
+    prompts: list[str] = []
+
+    class TrackingChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            prompts.append(question)
+            return SimpleNamespace(answer="ok", sources=[], warnings=[], trace=[])
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=TrackingChatService())
+    old_session = gateway.create_session(frontend="test")
+    gateway.process_turn(old_session, "Remember one = b.")
+
+    new_session = gateway.start_new_conversation(old_session, frontend="test")
+    gateway.process_turn(new_session, "What is one?")
+
+    assert new_session != old_session
+    assert "Remember one = b." not in prompts[-1]
+    assert gateway.session_messages(old_session)
+    assert [row["content"] for row in gateway.session_messages(new_session) if row["role"] == "user"] == ["What is one?"]
+
+
+def test_gateway_failed_turn_keeps_session_and_records_failure(tmp_path: Path, monkeypatch) -> None:
+    class FailingChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=FailingChatService())
+    session_id = gateway.create_session(frontend="test")
+    result = gateway.process_turn(session_id, "Remember this even if the model fails.")
+
+    assert result.error and "provider unavailable" in result.error
+    messages = gateway.session_messages(session_id)
+    assert messages[0]["role"] == "user"
+    assert messages[-1]["role"] == "system"
+    assert messages[-1]["metadata"]["state"] == "failed"
+    assert gateway.create_session(frontend="test", session_id=session_id) == session_id
+
+
+def test_gateway_persists_tool_summary_for_followup_context(tmp_path: Path, monkeypatch) -> None:
+    prompts: list[str] = []
+
+    class ToolChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            prompts.append(question)
+            trace = [] if len(prompts) > 1 else [{"tool_name": "read_file", "output_preview": "one=b", "status": "ok"}]
+            return SimpleNamespace(answer="tool answer", sources=[], warnings=[], trace=trace)
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=ToolChatService())
+    session_id = gateway.create_session(frontend="test")
+    gateway.process_turn(session_id, "Read the value.")
+    gateway.process_turn(session_id, "What did the tool return?")
+
+    assert "Tool result: one=b" in prompts[-1]
+    assert [row["role"] for row in gateway.session_messages(session_id)][:3] == ["user", "tool", "assistant"]
+
+
+def test_gateway_does_not_create_sessions_per_message(tmp_path: Path, monkeypatch) -> None:
+    class ChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            return SimpleNamespace(answer="ok", sources=[], warnings=[], trace=[])
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _answer_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=ChatService())
+    create_calls = 0
+    original_create = gateway._workspaces.create_session
+
+    def counted_create(*args: Any, **kwargs: Any):
+        nonlocal create_calls
+        create_calls += 1
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(gateway._workspaces, "create_session", counted_create)
+    session_id = gateway.create_session(frontend="test")
+    for message in ("one", "two", "three"):
+        gateway.process_turn(session_id, message)
+
+    assert create_calls == 1
+    assert {row["session_id"] for row in gateway.session_messages(session_id)} == {session_id}
+
+
+def test_chat_session_history_redacts_secrets(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "mana_agent.services.chat_session_history.session_dir",
+        lambda session_id: tmp_path / session_id,
+    )
+    history = ChatSessionHistory()
+    history.append(
+        "session_test",
+        role="tool",
+        content="Authorization: Bearer private-token and sk-private-key",
+        turn_id="turn_test",
+        metadata={"api_key": "private", "tool_name": "example"},
+    )
+
+    stored = history.list("session_test")[0]
+    assert "private-token" not in stored.content
+    assert "sk-private-key" not in stored.content
+    assert stored.metadata["api_key"] == "***REDACTED***"
