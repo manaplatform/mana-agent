@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from mana_agent.config.settings import Settings
 from mana_agent.gateway import (
     AgentChatGateway,
     ChatGatewayConfig,
@@ -197,25 +198,38 @@ def test_gateway_builds_coding_stack_when_enabled(tmp_path: Path, monkeypatch) -
 
 
 def test_gateway_uses_codex_shim_without_legacy_coding_workers(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     monkeypatch.setattr(
         "mana_agent.commands.cli_internal.build_ask_service",
         lambda *a, **k: _DummyAskService(),
     )
 
-    gw = AgentChatGateway(
-        tmp_path,
-        coding_agent=True,
-        agent_tools=True,
-        tool_worker_process=True,
-        auto_execute_plan=True,
-    )
+    with caplog.at_level("INFO", logger="mana_agent.gateway.stack"):
+        gw = AgentChatGateway(
+            tmp_path,
+            coding_agent=True,
+            agent_tools=True,
+            tool_worker_process=True,
+            auto_execute_plan=True,
+            settings=Settings(MANA_CODEX_MODEL="codex-test-model"),
+        )
 
     ctx = gw.get_rich_context()
     assert isinstance(ctx.coding_agent, CodexCodingAgentShim)
     assert ctx.tool_worker_client is None
     assert ctx.tools_orchestrator is None
+    model_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Resolved chat runtime models:")
+    )
+    assert "main=" in model_log
+    assert "router=" in model_log
+    assert "coding_backend=codex" in model_log
+    assert "coding=codex-test-model" in model_log
+    assert "planner=codex-owned" in model_log
+    assert "tool_worker=disabled" in model_log
 
 
 def test_gateway_process_turn_ask_path(tmp_path: Path, monkeypatch) -> None:

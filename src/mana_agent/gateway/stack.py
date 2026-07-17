@@ -274,6 +274,10 @@ def build_chat_stack(
         AgentRole.MAIN,
         global_model=cfg.model or settings.openai_chat_model,
     ).resolved_model
+    router_model_assignment = resolve_model_for_role(
+        AgentRole.HEAD_DECISION,
+        global_model=effective_model,
+    )
     coding_model_assignment = resolve_model_for_role(AgentRole.CODING, global_model=effective_model)
     planner_model_assignment = resolve_model_for_role(
         AgentRole.PLANNER,
@@ -402,6 +406,34 @@ def build_chat_stack(
     elif coding_agent_instance is not None:
         coding_memory_service = getattr(coding_agent_instance, "coding_memory_service", None)
         tool_worker_client = getattr(coding_agent_instance, "tool_worker_client", None)
+
+    if isinstance(coding_agent_instance, CodexCodingAgentShim):
+        coding_backend = "codex"
+        coding_model = coding_agent_instance.codex_settings.model or "app-server-default"
+        planner_model = "codex-owned"
+    elif coding_agent_instance is not None:
+        coding_backend = type(coding_agent_instance).__name__
+        coding_model = coding_model_assignment.resolved_model
+        planner_model = planner_model_assignment.resolved_model
+    else:
+        coding_backend = "disabled"
+        coding_model = "disabled"
+        planner_model = "disabled"
+    tool_worker_model = (
+        tool_worker_model_assignment.resolved_model
+        if tool_worker_client is not None
+        else "disabled"
+    )
+    logger.info(
+        "Resolved chat runtime models: main=%s; router=%s; coding_backend=%s; "
+        "coding=%s; planner=%s; tool_worker=%s",
+        effective_model,
+        router_model_assignment.resolved_model,
+        coding_backend,
+        coding_model,
+        planner_model,
+        tool_worker_model,
+    )
 
     return ChatStack(
         settings=settings,

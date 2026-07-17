@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-17
 
+- Added an explicit chat runtime model summary to the normal file log after model-role resolution.
+  - The record includes the resolved main and router models, coding backend/model, planner model ownership, and tool-worker model or disabled state; these values are part of the message so the existing log formatter no longer drops them.
+  - Verification: `MANA_HOME=/tmp/mana-agent-model-log-tests .venv/bin/python -m pytest -q tests/test_codex_integration.py tests/gateway/test_chat_gateway.py` passed (25 tests); Ruff and Python compilation checks passed for the changed Python files.
+
 - Made Codex the authoritative coding runtime across the shared CLI, TUI, and dashboard stack.
   - Replaced the production legacy `CodingAgent` construction with a compatibility shim that delegates repository inspection, coding decisions, planning, editing, review, and verification to one Codex app-server turn.
   - Removed the separate preflight checklist/planner from the Codex path, retained isolated write worktrees and explicit merge candidates, and made missing or disabled Codex fail without a native coding fallback.
