@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-18
 
+- Fixed Textual chat tool cards to retain a single result widget and explicitly invalidate card and timeline layout after result, expand/collapse, and live-output updates. Collapsed cards now use content-driven height, while expanded cards remeasure their complete output without stale sizing. Documented Shift-drag native terminal text selection while preserving mouse controls.
+  - Added read-only Textual selection widgets for chat and tool output, with mouse drag selection and `Ctrl+C` clipboard copying while retaining `Ctrl+C` quit when no text is selected.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_tui_tool_card_layout.py tests/test_tui_live_tools_scroll.py tests/test_tui_auto_chat_tool_events.py` passed (9 tests); targeted Ruff and `git diff --check` passed. Repository-wide Ruff remains blocked by 806 pre-existing violations outside this change; full pytest was started separately.
+
 - Fixed transient Windows CI failures while replacing workspace, repository, and chat-session JSON state files.
   - The shared workspace atomic writer now retries Windows sharing violations without changing validation or persistence behavior, and cleans up its collision-safe temporary file on failure.
   - Added regression coverage for `PermissionError(13, "Access is denied")` during an existing session-state replacement.

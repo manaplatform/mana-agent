@@ -75,9 +75,7 @@ Footer {
 /* Tool cards styling is also in the Python DEFAULT_CSS of ToolCard */
 ToolCard {
     margin: 0 2 1 2;
-    min-height: 3;   /* at least the always-visible header line */
-    /* Dynamic sizing: remove max-height so the tools box can grow when the "details" Collapsible is opened.
-       Size changes on expand/collapse. ChatLog VerticalScroll manages overflow. */
+    height: auto;
 }
 
 ToolCard Collapsible {
@@ -98,7 +96,11 @@ ToolCard .tool-call-header {
 }
 
 .tool-result-body {
-    /* No max-height: content is fully visible and card height adjusts when opened */
+    height: auto;
+}
+
+.tool-result-body.-empty {
+    display: none;
 }
 
 .tool-card-header {

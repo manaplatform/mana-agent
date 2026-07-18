@@ -8,7 +8,7 @@ Reactive beautiful chat log widget for ManaChatApp.
 - Supports live streaming: incoming StreamTokenEvent appends to the current
   assistant message (and also updates the on-screen widget).
 - Uses Textual compose + dynamic mounting for message "cards".
-- Leverages Rich for syntax / markdown inside Static or Markdown widgets.
+- Renders read-only selectable text for messages and Markdown source.
 
 This widget + ChatHistory subscription is the core fix for the
 "tool events only on first message" bug.
@@ -19,14 +19,10 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
-from rich.console import Console, RenderableType
-from rich.markdown import Markdown as RichMarkdown
-from rich.panel import Panel
-from rich.text import Text
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 
 from mana_agent.chat.events import (
     AssistantMessageEvent,
@@ -38,6 +34,7 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.history import ChatHistory
 from mana_agent.tui.widgets.tool_card import ToolCard
+from mana_agent.tui.widgets.selectable_text import SelectableText
 
 
 class ChatHistoryMessage(Message):
@@ -100,7 +97,7 @@ class ChatLog(VerticalScroll):
         super().__init__(**kwargs)
         self._history: ChatHistory | None = None
         self._unsubscribe: Callable[[], None] | None = None
-        self._assistant_widgets: dict[str, Static | Markdown] = {}  # event_id -> widget
+        self._assistant_widgets: dict[str, SelectableText] = {}  # event_id -> widget
         self._tool_cards: dict[str, ToolCard] = {}  # call_id -> card
         self._current_turn_id: str | None = None
         # Deduplicate live + replay so the same event_id is only painted once
@@ -205,7 +202,7 @@ class ChatLog(VerticalScroll):
         # Always pin the viewport to the newest content (user requirement).
         self._scroll_to_latest(focus_widget)
 
-    def _scroll_to_latest(self, focus_widget: Static | Markdown | ToolCard | None = None) -> None:
+    def _scroll_to_latest(self, focus_widget: Static | SelectableText | ToolCard | None = None) -> None:
         """Keep chat history pinned to the latest message / tool card.
 
         Uses Textual ``anchor`` so size growth (streaming tokens, tool results)
@@ -233,25 +230,15 @@ class ChatLog(VerticalScroll):
     # Individual renderers
     # ------------------------------------------------------------------
 
-    def _add_user_message(self, event: UserMessageEvent) -> Static:
-        panel_content = Text(event.content, style="bold blue")
-        widget = Static(
-            Panel(panel_content, title="You", border_style="blue", padding=(0, 1)),
-            classes="user-message",
-        )
+    def _add_user_message(self, event: UserMessageEvent) -> SelectableText:
+        widget = SelectableText(event.content, classes="user-message")
         self.mount(widget)
         return widget
 
-    def _add_or_update_assistant(self, event: AssistantMessageEvent) -> Static | Markdown:
+    def _add_or_update_assistant(self, event: AssistantMessageEvent) -> SelectableText:
         """Create or replace the assistant message widget."""
         content = event.content or ""
-        md = RichMarkdown(content) if content else Text("(thinking...)", style="dim")
-
-        # Use Textual's Markdown widget for nice rendering when possible
-        try:
-            widget: Static | Markdown = Markdown(content or "*…*", classes="assistant-message")
-        except Exception:
-            widget = Static(Panel(md, title="Assistant", border_style="green"), classes="assistant-message")
+        widget = SelectableText(content or "…", language="markdown", classes="assistant-message")
 
         # store for streaming updates
         self._assistant_widgets[event.event_id] = widget
@@ -289,7 +276,7 @@ class ChatLog(VerticalScroll):
         self.mount(fallback)
         return fallback
 
-    def _handle_stream_token(self, event: StreamTokenEvent) -> Static | Markdown | None:
+    def _handle_stream_token(self, event: StreamTokenEvent) -> SelectableText | None:
         """Append token to the live assistant message widget if we can find it."""
         # Prefer explicit assistant_event_id
         target_id = event.assistant_event_id
@@ -305,31 +292,11 @@ class ChatLog(VerticalScroll):
             return last
         return None
 
-    def _append_to_assistant_widget(self, widget: Static | Markdown, token: str) -> None:
-        """Best-effort live update of an assistant message."""
+    def _append_to_assistant_widget(self, widget: SelectableText, token: str) -> None:
+        """Append streaming content without invalidating an active selection."""
         try:
-            if isinstance(widget, Markdown):
-                # Markdown widget content update
-                current = getattr(widget, "update", None)
-                if callable(current):
-                    # Rebuild markdown with appended content
-                    # Note: we rely on history to have already mutated the event.content
-                    # so we can re-render from the authoritative source if needed.
-                    # For pure token append we do a simple approach:
-                    widget.update(getattr(widget, "markdown", "") + token)
-                    return
-            # Static fallback
-            if isinstance(widget, Static):
-                # crude but effective for many cases
-                renderable = widget.renderable
-                if hasattr(renderable, "renderable"):  # inside Panel?
-                    inner = renderable.renderable
-                    if isinstance(inner, (Text, RichMarkdown)):
-                        inner.append(token)
-                    widget.refresh()
-                    return
-                # last resort
-                widget.update(str(widget.renderable or "") + token)
+            widget.load_text(widget.text + token)
+            widget.refresh(layout=True)
         except Exception:
             # If live update fails, the final AssistantMessageEvent will still render correctly
             pass
