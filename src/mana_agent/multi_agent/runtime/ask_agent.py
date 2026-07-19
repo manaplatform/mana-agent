@@ -25,8 +25,7 @@ from mana_agent.analysis.chunker import CodeChunker
 from mana_agent.services.structure_service import StructureService
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 from mana_agent.config.settings import default_index_dir
-from mana_agent.services.coding_memory_service import CodingMemoryService
-from mana_agent.services.memory_service import EvidenceMemory
+from mana_agent.memory import CodingMemoryService, EvidenceMemory
 from mana_agent.services.search_service import SearchService
 from mana_agent.documents.service import DocumentService
 from mana_agent.search.config import SearchConfig

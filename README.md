@@ -444,6 +444,33 @@ Coding memory is repository-scoped:
 <project>/.mana/index/chat_memory.sqlite3
 ```
 
+Mana-Agent now exposes memory through one provider-neutral `MemoryService`.
+`internal` / `mana` remains the default and continues to read the existing
+SQLite and JSON stores without migrating or uploading them. To use hosted Mem0:
+
+```bash
+pip install "mana-agent[mem0]"
+export MANA_MEMORY_MODE=external
+export MANA_MEMORY_PROVIDER=mem0
+export MEM0_API_KEY="m0-..."
+```
+
+The `mana-agent --configure` Memory tab can store the Mem0 key in the operating
+system keyring; normal configuration contains only `MANA_MEMORY_SECRET_REF`.
+Optional `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, and `MEM0_BASE_URL` values are passed
+only when supported by the installed SDK. External memory sends selected
+content and scope metadata to Mem0, so review provider privacy and retention
+policies first. Failures never silently switch to internal memory and existing
+local records are never uploaded. Return to local memory with
+`MANA_MEMORY_MODE=internal` and `MANA_MEMORY_PROVIDER=mana`.
+
+The chat gateway owns one shared memory service for its lifetime. Completed
+user/assistant turns are recorded with conversation scope and relevant records
+are recalled for follow-up turns; `/new` uses a new session/conversation scope.
+If follow-up memory is unavailable, the existing session transcript continues
+to work and the turn reports a degraded-memory warning—no alternate backend is
+written.
+
 ### Multi-agent orchestration
 
 The runtime coordinates:

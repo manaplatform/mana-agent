@@ -31,7 +31,7 @@ from mana_agent.multi_agent.runtime.tools_executor import (
 )
 from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 from mana_agent.services.chat_service import ChatService
-from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.memory import CodingMemoryService, MemoryService
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,7 @@ class ChatStack:
     settings: Settings
     ask_service: Any
     chat_service: ChatService | Any
+    memory_service: MemoryService | Any
     coding_agent: Any | None = None
     coding_memory_service: Any | None = None
     tool_worker_client: Any | None = None
@@ -435,10 +436,19 @@ def build_chat_stack(
         tool_worker_model,
     )
 
+    memory_service = MemoryService(
+        root=root,
+        session_id=cfg.session_id or "",
+        workspace_id=workspace_id,
+        repository_id=repository_id,
+        enable_compatibility=False,
+    )
+
     return ChatStack(
         settings=settings,
         ask_service=ask_service,
         chat_service=chat_service,
+        memory_service=memory_service,
         coding_agent=coding_agent_instance,
         coding_memory_service=coding_memory_service,
         tool_worker_client=tool_worker_client,

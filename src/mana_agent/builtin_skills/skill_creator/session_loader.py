@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
-from mana_agent.workspaces.paths import session_dir
+from mana_agent.memory import MemoryConfigurationError, MemoryService
 
 from .schema import ExperienceRecord
 
@@ -16,12 +15,9 @@ class SessionEvidenceError(RuntimeError):
 
 def load_session_experience(session_id: str) -> ExperienceRecord:
     """Build checked workshop evidence from Mana's recorded session memory."""
-    memory_path = session_dir(session_id) / "memory.json"
-    if not memory_path.is_file():
-        raise SessionEvidenceError(f"No recorded memory exists for session: {session_id}")
     try:
-        payload = json.loads(memory_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = MemoryService(session_id=session_id).session_payload()
+    except (OSError, ValueError, MemoryConfigurationError) as exc:
         raise SessionEvidenceError(f"Session evidence is malformed: {exc}") from exc
     tasks = [item for item in payload.get("tasks", []) if item.get("status") == "completed"]
     if not tasks:

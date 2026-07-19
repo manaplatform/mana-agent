@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import os
+import asyncio
 from typing import Any
 
 from textual.app import App, ComposeResult
@@ -17,6 +18,23 @@ from mana_agent.config.provider_registry import PROVIDERS
 from mana_agent.config.session import ConfigurationDraft
 from mana_agent.config.user_config import migrate_legacy_config
 from mana_agent.search.registry import SEARCH_PROVIDERS
+
+
+def validate_memory_connection(values: dict[str, Any]) -> None:
+    from mana_agent.memory import MemoryConfig, MemoryService
+
+    config = MemoryConfig.load(values)
+
+    async def check() -> None:
+        service = MemoryService(config=config)
+        try:
+            health = await service.healthcheck()
+            if not health.healthy:
+                raise ValueError(health.detail or health.status.value)
+        finally:
+            await service.close()
+
+    asyncio.run(check())
 
 
 def validate_search_connection(values: dict[str, Any]) -> None:
@@ -113,6 +131,7 @@ class ManaConfigurationApp(App[bool]):
             not self.draft.original.get("MANA_SEARCH_ENABLE_GITHUB")
             or self.draft.original.get("MANA_GITHUB_CREDENTIAL_SOURCE") not in (None, "", "disabled")
         )
+        self._memory_validated = str(self.draft.original.get("MANA_MEMORY_MODE") or "internal") == "internal"
 
     def compose(self) -> ComposeResult:
         values = self.draft.values
@@ -156,6 +175,22 @@ class ManaConfigurationApp(App[bool]):
                 yield Label("Embedding model", classes="section-title")
                 yield Static("Only embedding-capable models are offered after catalog refresh.", classes="hint")
                 yield Select(self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True), id="embedding-model", allow_blank=False)
+            with TabPane("Memory", id="memory"):
+                yield Label("Memory mode", classes="section-title")
+                yield Select(
+                    [("Internal", "internal"), ("External", "external")],
+                    value=str(values.get("MANA_MEMORY_MODE") or "internal"),
+                    id="memory-mode",
+                    allow_blank=False,
+                )
+                yield Static("Internal memory is locally managed by Mana-Agent and remains the default.", id="memory-hint", classes="hint")
+                yield Select([("Mem0", "mem0")], value="mem0", id="memory-provider", allow_blank=False)
+                yield Input(password=True, placeholder="Mem0 API key (stored in the OS keyring)", id="mem0-api-key")
+                yield Input(value=str(values.get("MEM0_ORG_ID") or ""), placeholder="Organization ID (optional)", id="mem0-org-id")
+                yield Input(value=str(values.get("MEM0_PROJECT_ID") or ""), placeholder="Project ID (optional)", id="mem0-project-id")
+                yield Input(value=str(values.get("MEM0_BASE_URL") or ""), placeholder="Custom base URL (optional)", id="mem0-base-url")
+                yield Button("Test memory", id="test-memory", variant="primary")
+                yield Static("Local memory ready", id="memory-status", classes="status")
             with TabPane("Web search", id="search"):
                 yield Switch(value=bool(values.get("MANA_SEARCH_ENABLE_WEB", False)), id="search-enabled")
                 yield Label("Enable web search", classes="hint")
@@ -197,6 +232,7 @@ class ManaConfigurationApp(App[bool]):
 
     def on_mount(self) -> None:
         self.query_one("#provider-select", Select).focus()
+        self._update_memory_fields()
 
     def _secret_placeholder(self, key: str) -> str:
         return "Configured •••••••• (leave blank to preserve)" if self.draft.values.get(key) else "Not configured"
@@ -223,12 +259,14 @@ class ManaConfigurationApp(App[bool]):
         key_status = "Configured" if v.get("OPENAI_API_KEY") else "Not configured"
         search = str(v.get("MANA_WEB_SEARCH_PROVIDER") or "Disabled") if v.get("MANA_SEARCH_ENABLE_WEB") else "Disabled"
         github = str(v.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "Disabled")
+        memory = f"{v.get('MANA_MEMORY_MODE', 'internal')} / {v.get('MANA_MEMORY_PROVIDER', 'mana')}"
         return (
             f"AI provider       {v.get('MANA_AI_PROVIDER', 'openai')} ({key_status})\n"
             f"Primary model     {v.get('MANA_PRIMARY_MODEL') or v.get('OPENAI_CHAT_MODEL', 'Not selected')}\n"
             f"Embedding model   {v.get('MANA_EMBEDDING_MODEL') or v.get('OPENAI_EMBED_MODEL', 'Not selected')}\n"
             f"Web search        {search}\n"
-            f"GitHub            {github}"
+            f"GitHub            {github}\n"
+            f"Memory            {memory}"
         )
 
     def _role_mapping_text(self) -> str:
@@ -238,7 +276,16 @@ class ManaConfigurationApp(App[bool]):
     def _github_cli_status() -> str:
         if shutil.which("gh") is None:
             return "GitHub CLI not installed"
-        completed = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=5, check=False)
+        try:
+            completed = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "GitHub CLI status unavailable"
         return "GitHub CLI authenticated" if completed.returncode == 0 else "GitHub CLI installed but not authenticated"
 
     def _collect(self) -> None:
@@ -256,6 +303,12 @@ class ManaConfigurationApp(App[bool]):
                 "MANA_GITHUB_METADATA_ENABLED": self.query_one("#github-metadata-enabled", Switch).value,
                 "MANA_GITHUB_CREDENTIAL_SOURCE": str(self.query_one("#github-source", Select).value),
                 "MANA_GITHUB_SECRET_REF": self.query_one("#github-secret-ref", Input).value.strip(),
+                "MANA_MEMORY_MODE": str(self.query_one("#memory-mode", Select).value),
+                "MANA_MEMORY_PROVIDER": "mana" if str(self.query_one("#memory-mode", Select).value) == "internal" else str(self.query_one("#memory-provider", Select).value),
+                "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
+                "MEM0_ORG_ID": self.query_one("#mem0-org-id", Input).value.strip(),
+                "MEM0_PROJECT_ID": self.query_one("#mem0-project-id", Input).value.strip(),
+                "MEM0_BASE_URL": self.query_one("#mem0-base-url", Input).value.strip(),
                 "MANA_MODEL_MAIN": str(self.query_one("#role-main", Select).value),
                 "MANA_MODEL_HEAD_DECISION": str(self.query_one("#role-head", Select).value),
                 "MANA_MODEL_PLANNER": str(self.query_one("#role-planner", Select).value),
@@ -269,6 +322,9 @@ class ManaConfigurationApp(App[bool]):
         self.draft.set_secret("OPENAI_API_KEY", self.query_one("#provider-api-key", Input).value)
         self.draft.set_secret("MANA_WEB_SEARCH_API_KEY", self.query_one("#search-api-key", Input).value)
         self.draft.set_secret("MANA_GITHUB_TOKEN", self.query_one("#github-token", Input).value)
+        mem0_key = self.query_one("#mem0-api-key", Input).value.strip()
+        if mem0_key:
+            self.draft.values["MEM0_API_KEY"] = mem0_key
         self.draft.set_models(
             provider=provider,
             high=str(self.query_one("#high-model", Select).value),
@@ -318,6 +374,23 @@ class ManaConfigurationApp(App[bool]):
             embed.value = current_embed if current_embed in {value for _, value in embed_options} else (embed_options[0][1] if embed_options else Select.BLANK)
             status.update(f"Connected · {len(text_models)} agent model(s), {len(embedding_models)} embedding model(s)")
             return
+        if button_id == "test-memory":
+            self._collect()
+            status = self.query_one("#memory-status", Static)
+            if self.draft.values.get("MANA_MEMORY_MODE") == "internal":
+                self._memory_validated = True
+                status.update("Healthy · locally managed by Mana-Agent")
+                return
+            status.update("Testing…")
+            try:
+                await self.run_worker(lambda: validate_memory_connection(self.draft.values), thread=True, exclusive=True).wait()
+            except Exception as exc:
+                self._memory_validated = False
+                status.update(f"Validation failed: {exc}")
+                return
+            self._memory_validated = True
+            status.update("Connected to Mem0")
+            return
         if button_id in {"remove-provider-secret", "remove-search-secret", "remove-github-secret"}:
             key = {
                 "remove-provider-secret": "OPENAI_API_KEY",
@@ -359,7 +432,7 @@ class ManaConfigurationApp(App[bool]):
             self.action_cancel()
         elif button_id in {"continue", "back"}:
             tabs = self.query_one(TabbedContent)
-            order = ["overview", "providers", "models", "embeddings", "search", "github", "review"]
+            order = ["overview", "providers", "models", "embeddings", "memory", "search", "github", "review"]
             current = order.index(tabs.active)
             tabs.active = order[min(len(order) - 1, current + (1 if button_id == "continue" else -1))]
 
@@ -377,6 +450,8 @@ class ManaConfigurationApp(App[bool]):
                 raise ValueError("Test the selected web search provider before saving.")
             if self.draft.values.get("MANA_SEARCH_ENABLE_GITHUB") and not self._github_validated:
                 raise ValueError("Test the selected GitHub authentication before saving.")
+            if not self._memory_validated:
+                raise ValueError("Test the selected external memory provider before saving.")
             self.draft.save()
         except Exception as exc:
             self.notify(str(exc), title="Configuration not saved", severity="error")
@@ -401,6 +476,9 @@ class ManaConfigurationApp(App[bool]):
             self._search_validated = False
         elif event.select.id == "github-source":
             self._github_validated = False
+        elif event.select.id in {"memory-mode", "memory-provider"}:
+            self._memory_validated = str(self.query_one("#memory-mode", Select).value) == "internal"
+            self._update_memory_fields()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id in {"provider-api-key", "provider-base-url"} and event.value:
@@ -409,6 +487,17 @@ class ManaConfigurationApp(App[bool]):
             self._search_validated = False
         elif event.input.id in {"github-token", "github-secret-ref"} and event.value:
             self._github_validated = False
+        elif event.input.id in {"mem0-api-key", "mem0-org-id", "mem0-project-id", "mem0-base-url"} and event.value:
+            self._memory_validated = False
+
+    def _update_memory_fields(self) -> None:
+        external = str(self.query_one("#memory-mode", Select).value) == "external"
+        for selector in ("#memory-provider", "#mem0-api-key", "#mem0-org-id", "#mem0-project-id", "#mem0-base-url", "#test-memory"):
+            self.query_one(selector).display = external
+        self.query_one("#memory-hint", Static).update(
+            "Mem0 stores selected memory with an external provider. Review its privacy policy before enabling."
+            if external else "Internal memory is locally managed by Mana-Agent and remains the default."
+        )
 
 
 def run_configuration_tui() -> bool:

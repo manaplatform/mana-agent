@@ -1,7 +1,7 @@
 from mana_agent.multi_agent.memory.agent_memory import AgentMemory
 from mana_agent.multi_agent.memory.memory_bundle import AgentMemoryBundle
 from mana_agent.multi_agent.memory.repo_context import RepoContext
-from mana_agent.services.memory_service import (
+from mana_agent.memory import (
     AgentDecisionMemoryRecord,
     FileReadMemoryRecord,
     MultiAgentMemoryService,

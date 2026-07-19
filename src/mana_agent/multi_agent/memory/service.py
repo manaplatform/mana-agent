@@ -1,4 +1,4 @@
-from mana_agent.services.memory_service import (
+from mana_agent.memory import (
     AgentDecisionMemoryRecord,
     EvidenceMemory,
     FileReadMemoryRecord,

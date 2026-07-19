@@ -14,6 +14,34 @@ them while a sniffer steers follow-up reads/edits/verification.
 
 ## Major Components
 
+### Pluggable memory boundary
+
+All application consumers import `mana_agent.memory.MemoryService`. The service
+owns one validated backend selected centrally by `memory/factory.py`; callers do
+not import internal or Mem0 implementations. Canonical asynchronous add, search,
+get, update, delete, clear, health, and close operations use provider-neutral
+models and a structured scope containing user, agent, session, workspace,
+repository, conversation, and task identities.
+
+The `internal/mana` adapter remains the default and wraps the existing SQLite
+coding-flow and JSON multi-agent stores without rewriting them. The optional
+`external/mem0` adapter is lazy, normalizes provider responses and failures,
+maps scope fields in one mapper, applies timeouts, and reuses its client for the
+service lifecycle. Invalid configuration stops before execution; external
+failure never selects an internal backend implicitly.
+
+`ChatStack` owns one canonical service instance and rebinds its identity scope
+when the frontend opens a session; this does not construct a backend or create a
+session. Successful chat turns are written with session/workspace/repository/
+conversation scope, and follow-up turns recall relevant records into the
+ephemeral conversation prompt. Session history remains authoritative and a
+reported degraded-memory path may continue without recall, but never writes to
+a different provider.
+
+New providers implement `MemoryBackend`, add an isolated provider package, and
+register one validated mode/provider branch in the factory. Provider-specific
+types must not escape the adapter.
+
 ### CLI / command surface
 
 - **`src/mana_agent/commands/`**: command entry points and “chat command” helpers.

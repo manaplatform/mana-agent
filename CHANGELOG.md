@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-19
 
+- Added a pluggable, provider-neutral memory architecture with `internal/mana` as the compatibility-preserving default and lazy optional `external/mem0` support.
+  - Added canonical async models and backend contract, centralized scope mapping, typed configuration/dependency/authentication/network/provider/storage errors, backend lifecycle and health checks, timeout-bound Mem0 calls, normalized responses, and explicit no-fallback behavior.
+  - Existing SQLite coding-flow and JSON multi-agent records remain in place and production consumers now import the shared memory package. External-mode orchestration operations write canonical Mem0 records with turn-local indexes instead of falling back to local persistence; asynchronous add acknowledgements and V3 nested metadata filters are normalized.
+  - Chat follow-ups now use one gateway-owned shared service: successful turn pairs are stored with conversation scope, relevant records are recalled into subsequent prompts, `/new` remains isolated, and explicitly degraded recall/write failures surface as turn warnings without cross-provider fallback.
+  - The configuration TUI adds conditional Memory fields and stores Mem0 keys in the OS keyring while headless deployments may inject `MEM0_API_KEY`; a stalled GitHub CLI status probe can no longer prevent the configuration screen from mounting.
+  - Verification: `PATH="$PWD/venv/bin:$PATH" MANA_HOME=<isolated> PYTHONPATH=src venv/bin/python -m pytest -q` passed (1063 passed, 1 skipped); focused memory, configuration, coding-memory, gateway, session, workspace, prompt, experience, and multi-agent tests passed; Python compilation, direct-legacy-import/storage scans, and `git diff --check` passed. A read-only live Mem0 health check and active workspace/session V3 metadata-filter search passed without exposing content or credentials. Ruff and mypy were unavailable in the repository environment.
+
 - Added multiline Textual chat input: Enter sends, Shift+Enter inserts a line, and Ctrl+J / Alt+Enter provide portable terminal fallbacks. The composer grows with wrapped or explicit lines up to a scrollable maximum, then shrinks after edits or submission.
   - User messages retain internal newlines through rendering, gateway requests, and restored session history; only trailing newline characters are removed on submission.
   - Verification: targeted multiline/TUI/gateway tests passed (34 tests), including the model-command shortcut regression; Python compilation, focused Ruff, and `git diff --check` passed.

@@ -17,7 +17,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from langchain_core.callbacks.base import BaseCallbackHandler
 from pydantic import BaseModel, Field, ValidationError
 
-from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.memory import CodingMemoryService
 from mana_agent.services.search_service import SearchService
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.multi_agent.core.types import ExecutionContext, enrich_event_identity

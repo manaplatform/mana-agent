@@ -42,6 +42,9 @@ def _conversation_prompt(session_state: dict[str, Any], current_message: str) ->
     labels = {"user": "User", "assistant": "Assistant", "tool": "Tool result"}
     for item in prior:
         lines.append(f"{labels[str(item.get('role'))]}: {str(item.get('content') or '')}")
+    followup_memory = str(session_state.get("followup_memory_context") or "").strip()
+    if followup_memory:
+        lines.extend(["", "Relevant shared memory:", followup_memory])
     lines.extend(["", "Current user message:", current_message])
     return "\n".join(lines)[-40000:]
 

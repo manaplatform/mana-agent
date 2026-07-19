@@ -1,0 +1,26 @@
+"""Backend contract implemented by every memory provider."""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from mana_agent.memory.models import (
+    MemoryHealth,
+    MemoryRecord,
+    MemoryScope,
+    MemorySearchRequest,
+    MemoryUpdateRequest,
+    MemoryWriteRequest,
+)
+
+
+@runtime_checkable
+class MemoryBackend(Protocol):
+    async def add(self, request: MemoryWriteRequest) -> MemoryRecord: ...
+    async def search(self, request: MemorySearchRequest) -> list[MemoryRecord]: ...
+    async def get(self, memory_id: str, scope: MemoryScope) -> MemoryRecord | None: ...
+    async def update(self, memory_id: str, request: MemoryUpdateRequest) -> MemoryRecord: ...
+    async def delete(self, memory_id: str, scope: MemoryScope) -> None: ...
+    async def clear(self, scope: MemoryScope) -> None: ...
+    async def healthcheck(self) -> MemoryHealth: ...
+    async def close(self) -> None: ...

@@ -54,6 +54,11 @@ Saved files:
 - `~/.mana/secrets.toml` for API keys and tokens.
 - `~/.mana/model_cache.json` for fetched model IDs keyed by provider/base URL.
 
+Mem0 credentials are an exception to the legacy secrets file: the Memory tab
+stores the API key in the operating-system keyring and writes only a
+`MANA_MEMORY_SECRET_REF` reference to `config.toml`. Headless deployments should
+inject `MEM0_API_KEY` directly through their secret manager/environment.
+
 The config directory is created with private permissions where the OS allows it. Secret values are masked in display output.
 
 ## Settings Menu
@@ -94,6 +99,46 @@ mana-agent --no-interactive chat --root-dir .
 ```
 
 In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if required values such as `OPENAI_API_KEY` are missing.
+
+## Memory providers
+
+Exactly two modes are supported:
+
+- `internal` with provider `mana` keeps memory locally managed and remains the
+  compatibility-preserving default.
+- `external` with provider `mem0` uses the optional hosted provider adapter.
+
+Install external support with `pip install "mana-agent[mem0]"`. Configure it in
+the Memory tab or set:
+
+```bash
+MANA_MEMORY_MODE=external
+MANA_MEMORY_PROVIDER=mem0
+MEM0_API_KEY="m0-..."
+MEM0_ORG_ID=
+MEM0_PROJECT_ID=
+MEM0_BASE_URL=
+MANA_MEMORY_TIMEOUT_SECONDS=15
+MANA_MEMORY_FALLBACK_TO_INTERNAL=false
+```
+
+Invalid mode/provider pairs, missing credentials, missing optional dependencies,
+authentication failures, connectivity failures, and provider failures stop with
+typed errors. There is no silent fallback or automatic upload of existing local
+memory. If a runtime explicitly permits degraded memory, it may continue the
+turn without memory, but it must report that state. Switch back with
+`MANA_MEMORY_MODE=internal` and `MANA_MEMORY_PROVIDER=mana`.
+
+External memory has different privacy and retention implications because
+selected content, identity scopes, and metadata leave the local machine. Review
+the provider policy before enabling it.
+
+Chat follow-ups use the gateway-owned shared memory service in addition to the
+durable session transcript. The service records successful user/assistant turn
+pairs and recalls relevant records only within the active conversation scope.
+A new conversation receives a new scope. The gateway explicitly permits
+degraded follow-up memory: provider failures are included in turn warnings while
+the transcript remains usable, and no internal fallback write occurs.
 
 ## Core configuration keys
 

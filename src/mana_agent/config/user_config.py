@@ -26,6 +26,7 @@ SECRET_KEYS = {
     "MANA_API_TOKEN",
     "MANA_MCP_SERVER_TOKEN",
 }
+NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY"}
 
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
@@ -70,6 +71,14 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_SEARCH_MAX_RESULTS": 8,
     "MANA_SEARCH_TIMEOUT_SECONDS": 15,
     "MANA_SEARCH_MEMORY_TTL_DAYS": 14,
+    "MANA_MEMORY_MODE": "internal",
+    "MANA_MEMORY_PROVIDER": "mana",
+    "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
+    "MANA_MEMORY_SECRET_REF": "",
+    "MEM0_ORG_ID": "",
+    "MEM0_PROJECT_ID": "",
+    "MEM0_BASE_URL": "",
+    "MANA_MEMORY_TIMEOUT_SECONDS": 15,
     "MANA_WEB_SEARCH_PROVIDER": "",
     "MANA_WEB_SEARCH_API_KEY": "",
     "MANA_WEB_SEARCH_MAX_RESULTS": 8,
@@ -141,6 +150,14 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_SEARCH_MAX_RESULTS": "mana_search_max_results",
     "MANA_SEARCH_TIMEOUT_SECONDS": "mana_search_timeout_seconds",
     "MANA_SEARCH_MEMORY_TTL_DAYS": "mana_search_memory_ttl_days",
+    "MANA_MEMORY_MODE": "mana_memory_mode",
+    "MANA_MEMORY_PROVIDER": "mana_memory_provider",
+    "MANA_MEMORY_FALLBACK_TO_INTERNAL": "mana_memory_fallback_to_internal",
+    "MANA_MEMORY_SECRET_REF": "mana_memory_secret_ref",
+    "MEM0_ORG_ID": "mem0_org_id",
+    "MEM0_PROJECT_ID": "mem0_project_id",
+    "MEM0_BASE_URL": "mem0_base_url",
+    "MANA_MEMORY_TIMEOUT_SECONDS": "mana_memory_timeout_seconds",
     "MANA_WEB_SEARCH_PROVIDER": "mana_web_search_provider",
     "MANA_WEB_SEARCH_API_KEY": "mana_web_search_api_key",
     "MANA_WEB_SEARCH_MAX_RESULTS": "mana_web_search_max_results",
@@ -218,6 +235,14 @@ CONFIG_WRITE_ORDER = [
     "MANA_SEARCH_MAX_RESULTS",
     "MANA_SEARCH_TIMEOUT_SECONDS",
     "MANA_SEARCH_MEMORY_TTL_DAYS",
+    "MANA_MEMORY_MODE",
+    "MANA_MEMORY_PROVIDER",
+    "MANA_MEMORY_FALLBACK_TO_INTERNAL",
+    "MANA_MEMORY_SECRET_REF",
+    "MEM0_ORG_ID",
+    "MEM0_PROJECT_ID",
+    "MEM0_BASE_URL",
+    "MANA_MEMORY_TIMEOUT_SECONDS",
     "MANA_WEB_SEARCH_PROVIDER",
     "MANA_WEB_SEARCH_MAX_RESULTS",
     "MANA_WEB_SEARCH_ENGINE_ID",
@@ -337,7 +362,13 @@ def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> Non
 
 def save_user_config(values: dict[str, Any], *, merge: bool = True) -> None:
     current = load_user_config() if merge else {}
-    current.update({key: value for key, value in values.items() if key not in SECRET_KEYS})
+    current.update(
+        {
+            key: value
+            for key, value in values.items()
+            if key not in SECRET_KEYS and key not in NON_PERSISTED_SECRET_KEYS
+        }
+    )
     _write_toml(CONFIG_FILE, current, mode=0o600)
 
 
@@ -471,6 +502,7 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         "MANA_SEARCH_MAX_RESULTS",
         "MANA_SEARCH_TIMEOUT_SECONDS",
         "MANA_SEARCH_MEMORY_TTL_DAYS",
+        "MANA_MEMORY_TIMEOUT_SECONDS",
         "MANA_WEB_SEARCH_MAX_RESULTS",
         "MANA_LANE_GLOBAL_WORKER_LIMIT",
     ):
@@ -490,10 +522,25 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         "MANA_LLM_SUPPORTS_TOOLS",
         "MANA_LLM_SUPPORTS_REASONING",
         "MANA_LLM_SUPPORTS_TOOLS_WITH_CHAT_REASONING",
+        "MANA_MEMORY_FALLBACK_TO_INTERNAL",
     ):
         if name in cleaned:
             if str(cleaned[name] or "").strip():
                 cleaned[name] = validate_bool(cleaned[name])
+    if "MANA_MEMORY_MODE" in cleaned or "MANA_MEMORY_PROVIDER" in cleaned:
+        from mana_agent.memory.config import MemoryConfig
+
+        MemoryConfig(
+            mode=str(cleaned.get("MANA_MEMORY_MODE") or "internal").lower(),
+            provider=str(cleaned.get("MANA_MEMORY_PROVIDER") or "mana").lower(),
+            fallback_to_internal=bool(cleaned.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", False)),
+            api_key=str(cleaned.get("MEM0_API_KEY") or ""),
+            secret_ref=str(cleaned.get("MANA_MEMORY_SECRET_REF") or ""),
+            org_id=str(cleaned.get("MEM0_ORG_ID") or ""),
+            project_id=str(cleaned.get("MEM0_PROJECT_ID") or ""),
+            base_url=str(cleaned.get("MEM0_BASE_URL") or ""),
+            timeout_seconds=float(cleaned.get("MANA_MEMORY_TIMEOUT_SECONDS") or 15),
+        ).validate()
     for name in (
         "MANA_MODEL_MAIN",
         "MANA_MODEL_HEAD_DECISION",

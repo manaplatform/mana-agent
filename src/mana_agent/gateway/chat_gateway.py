@@ -44,6 +44,13 @@ from mana_agent.gateway.turn_engine import (
     process_chat_turn,
 )
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
+from mana_agent.memory import (
+    MemoryContent,
+    MemoryScope,
+    MemorySearchRequest,
+    MemoryWriteRequest,
+)
+from mana_agent.memory.errors import MemoryError
 from mana_agent.services.chat_service import ChatService
 from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.workspaces.service import WorkspaceService
@@ -351,11 +358,24 @@ class AgentChatGateway:
         """Bind already-constructed agents/memory to the one frontend session."""
         self.config.session_id = session_id
         self._stack.session_id = session_id
+        try:
+            session_record = self._workspaces.store.get_session(session_id)
+        except FileNotFoundError:
+            session_record = None
+        if session_record is not None:
+            self._stack.workspace_id = session_record.workspace_id
+            self._stack.repository_id = session_record.primary_repository_id
+        self._stack.memory_service.bind_scope(
+            session_id=session_id,
+            workspace_id=self._stack.workspace_id,
+            repository_id=self._stack.repository_id,
+            conversation_id=session_id,
+        )
         if self._coding_agent is not None and hasattr(self._coding_agent, "session_id"):
             self._coding_agent.session_id = session_id
         memory = self._stack.coding_memory_service
         if memory is not None and str(getattr(memory, "session_id", "")) != session_id:
-            from mana_agent.services.coding_memory_service import CodingMemoryService
+            from mana_agent.memory import CodingMemoryService
 
             rebound = CodingMemoryService(
                 project_root=self.root,
@@ -434,6 +454,10 @@ class AgentChatGateway:
         self._active.discard(sid)
         if sid in self._sessions:
             self._sessions[sid]["session_status"] = status
+        try:
+            self._stack.memory_service.close_blocking()
+        except MemoryError as exc:
+            logger.warning("Memory backend close failed: %s", exc)
         return sid
 
     close = close_session
@@ -459,6 +483,81 @@ class AgentChatGateway:
             metadata=metadata,
         )
         self._session(session_id).setdefault("messages", []).append(message.to_dict())
+
+    def _followup_memory_scope(
+        self,
+        *,
+        session_id: str,
+        conversation_id: str,
+    ) -> MemoryScope:
+        return MemoryScope(
+            session_id=session_id,
+            workspace_id=str(self._stack.workspace_id or ""),
+            repository_id=str(self._stack.repository_id or ""),
+            conversation_id=conversation_id,
+        )
+
+    def _recall_followup_memory(
+        self,
+        *,
+        session_id: str,
+        conversation_id: str,
+        query: str,
+    ) -> tuple[str, str]:
+        try:
+            records = self._stack.memory_service.search_blocking(
+                MemorySearchRequest(
+                    query=query,
+                    scope=self._followup_memory_scope(
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                    ),
+                    limit=3,
+                    metadata={"mana_kind": "chat_turn"},
+                )
+            )
+        except MemoryError as exc:
+            logger.warning("Chat follow-up memory recall degraded: %s", exc)
+            return "", f"Chat follow-up memory recall unavailable: {exc}"
+        context = "\n\n".join(
+            record.content.text for record in records if record.content.text.strip()
+        )
+        return context[-12000:], ""
+
+    def _record_followup_memory(
+        self,
+        *,
+        session_id: str,
+        conversation_id: str,
+        turn_id: str,
+        user_text: str,
+        result: ChatTurnResult,
+    ) -> str:
+        if not result.answer:
+            return ""
+        content = (
+            f"User: {user_text[:8000]}\n"
+            f"Assistant: {str(result.answer)[:12000]}"
+        )
+        try:
+            self._stack.memory_service.add_blocking(
+                MemoryWriteRequest(
+                    content=MemoryContent(content),
+                    scope=self._followup_memory_scope(
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                    ),
+                    metadata={
+                        "mana_kind": "chat_turn",
+                        "turn_id": turn_id,
+                        "route": str((result.payload or {}).get("entry_route") or ""),
+                    },
+                )
+            )
+        except MemoryError as exc:
+            logger.warning("Chat follow-up memory write degraded: %s", exc)
+            return f"Chat follow-up memory write unavailable: {exc}"
+        return ""
 
     def start_new_topic(self, session_id: str) -> str | None:
         """Reset coding flow for a session (keeps conversation history)."""
@@ -591,6 +690,20 @@ class AgentChatGateway:
         try:
             state = self._session(session_id)
             conversation_id = str(state.get("conversation_id") or session_id)
+            has_prior_assistant = any(
+                message.get("role") == "assistant"
+                for message in list(state.get("messages") or [])[:-1]
+            )
+            memory_warning = ""
+            if has_prior_assistant:
+                memory_context, memory_warning = self._recall_followup_memory(
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    query=text,
+                )
+                state["followup_memory_context"] = memory_context
+            else:
+                state["followup_memory_context"] = ""
             sink = event_sink or self._event_sink
             ask_service = self.get_ask_service()
             route_context = EntryRouteContext(
@@ -703,6 +816,8 @@ class AgentChatGateway:
                     "entry_route": str((result.payload or {}).get("route") or state.get("active_route") or "unsupported"),
                 }
             )
+            if memory_warning:
+                result.warnings.append(memory_warning)
             # Sync flow id back if coding agent advanced it
             if result.flow_id:
                 state["active_flow_id"] = result.flow_id
@@ -741,6 +856,15 @@ class AgentChatGateway:
                     turn_id=turn_id,
                     metadata={"state": "failed" if result.error else "interrupted"},
                 )
+            write_warning = self._record_followup_memory(
+                session_id=session_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                user_text=text,
+                result=result,
+            )
+            if write_warning:
+                result.warnings.append(write_warning)
             return result
         except BaseException as exc:
             self._append_session_message(

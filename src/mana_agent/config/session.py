@@ -74,7 +74,18 @@ class ConfigurationDraft:
             self.original.get("OPENAI_BASE_URL"),
             self.original.get("OPENAI_API_KEY"),
         )
-        cleaned = validate_config_values(self.values)
+        transient_mem0_key = str(self.values.get("MEM0_API_KEY") or "")
+        values = {key: value for key, value in self.values.items() if key != "MEM0_API_KEY"}
+        if transient_mem0_key:
+            from mana_agent.memory.config import MemorySecretStore
+
+            values["MANA_MEMORY_SECRET_REF"] = MemorySecretStore().set(
+                transient_mem0_key,
+                str(values.get("MANA_MEMORY_SECRET_REF") or ""),
+            )
+        if str(values.get("MANA_MEMORY_MODE") or "internal") == "internal":
+            values["MANA_MEMORY_PROVIDER"] = "mana"
+        cleaned = validate_config_values(values)
         save_effective_user_config(cleaned, merge=False)
         new_identity = (
             cleaned.get("MANA_AI_PROVIDER"),

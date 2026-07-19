@@ -56,6 +56,7 @@ dev = [
   "pytest>=8.0,<9.0",
 ]
 browser = ["playwright>=1.45,<2.0"]
+mem0 = ["mem0ai>=2.0,<3.0", "keyring>=24.0,<26.0"]
 
 # Grok Build: optional dashboard + automations extras (Phase 1)
 # These keep the core CLI + multi-agent runtime dependency-free.
@@ -86,7 +87,8 @@ full = [
   "opentelemetry-exporter-otlp-proto-http>=1.27,<2",
   "google-api-python-client>=2.0,<3.0",
   "google-auth-oauthlib>=1.2,<2.0",
-  "keyring>=24.0,<26.0"
+  "keyring>=24.0,<26.0",
+  "mem0ai>=2.0,<3.0"
 ]
 
 [project.scripts]

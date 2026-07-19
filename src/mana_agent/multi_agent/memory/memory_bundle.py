@@ -6,7 +6,7 @@ from typing import Any
 from mana_agent.multi_agent.memory.agent_memory import AgentMemory
 from mana_agent.multi_agent.memory.repo_context import RepoContext
 from mana_agent.multi_agent.memory.task_memory import TaskMemory
-from mana_agent.services.memory_service import MultiAgentMemoryService, ScopedMemoryBundle
+from mana_agent.memory import MultiAgentMemoryService, ScopedMemoryBundle
 
 
 def _clean(text: object, *, max_chars: int = 1200) -> str:

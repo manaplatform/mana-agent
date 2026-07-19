@@ -35,7 +35,7 @@ from mana_agent.parsers.multi_parser import MultiLanguageParser
 from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.services.ask_service import AskService
 from mana_agent.services.chat_service import ChatService  # noqa: F401 - consumed by chat_cli through wildcard command wiring
-from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.memory import CodingMemoryService
 from mana_agent.services.index_service import IndexService
 from mana_agent.services.search_service import SearchService
 from mana_agent.services.dependency_service import DependencyService

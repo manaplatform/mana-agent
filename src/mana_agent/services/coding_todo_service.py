@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.memory import CodingMemoryService
 
 # Tools whose presence in a step means the step performs a real mutation. A
 # step requiring any of these is an "edit" step and is only ``done`` once a

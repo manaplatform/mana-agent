@@ -35,7 +35,7 @@ from mana_agent.cli.renderers import EventRenderer
 from mana_agent.config.settings import default_diagrams_dir
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
-from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.memory import CodingMemoryService
 from mana_agent.utils.tool_results import structured_tool_error_detail
 
 logger = logging.getLogger('mana_agent.commands.cli')

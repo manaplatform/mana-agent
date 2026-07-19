@@ -23,6 +23,7 @@ from mana_agent.gateway import (
     RichChatContext,
 )
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+from mana_agent.memory import MemoryContent, MemoryRecord
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.services.chat_session_history import ChatSessionHistory
 
@@ -597,6 +598,62 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
     assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
     assert {message["session_id"] for message in messages} == {session_id}
     assert {message["conversation_id"] for message in messages} == {session_id}
+
+
+def test_gateway_followup_uses_stack_owned_shared_memory(tmp_path: Path, monkeypatch) -> None:
+    prompts: list[str] = []
+
+    class TrackingChatService:
+        _ask_service = _DummyAskService()
+
+        def ask_conversation(self, question: str) -> str:
+            prompts.append(question)
+            return "ok"
+
+    class TrackingMemoryService:
+        def __init__(self) -> None:
+            self.searches: list[Any] = []
+            self.writes: list[Any] = []
+
+        def search_blocking(self, request):
+            self.searches.append(request)
+            return [
+                MemoryRecord(
+                    id="memory-1",
+                    content=MemoryContent("User: remembered detail\nAssistant: acknowledged"),
+                    scope=request.scope,
+                    provider="test",
+                )
+            ]
+
+        def add_blocking(self, request):
+            self.writes.append(request)
+            return MemoryRecord(
+                id=f"memory-{len(self.writes)}",
+                content=request.content,
+                scope=request.scope,
+                provider="test",
+            )
+
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        chat_service=TrackingChatService(),
+    )
+    session_id = gateway.create_session(frontend="test")
+    memory = TrackingMemoryService()
+    gateway._stack.memory_service = memory
+
+    gateway.process_turn(session_id, "first turn")
+    gateway.process_turn(session_id, "follow up")
+
+    assert len(memory.writes) == 2
+    assert len(memory.searches) == 1
+    assert memory.searches[0].scope.session_id == session_id
+    assert memory.writes[1].metadata["mana_kind"] == "chat_turn"
+    assert "Relevant shared memory:" in prompts[-1]
+    assert "remembered detail" in prompts[-1]
 
 
 def test_gateway_preserves_multiline_message_through_request_and_restored_history(

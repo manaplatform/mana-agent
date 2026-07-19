@@ -13,7 +13,7 @@ from mana_agent.multi_agent.core.types import (
     VerificationResult,
     utc_now,
 )
-from mana_agent.services.memory_service import MultiAgentMemoryService, task_fingerprint
+from mana_agent.memory import MultiAgentMemoryService, task_fingerprint
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
 from mana_agent.multi_agent.taskboard.validators import validate_transition
 

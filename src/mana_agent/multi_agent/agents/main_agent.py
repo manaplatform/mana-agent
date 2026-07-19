@@ -25,7 +25,7 @@ from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.memory.memory_bundle import AgentMemoryBundle
 from mana_agent.multi_agent.memory.repo_context import RepoContext
 from mana_agent.multi_agent.memory.task_memory import TaskMemory
-from mana_agent.services.memory_service import MultiAgentMemoryService
+from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.workspaces.routing import RepositoryScopeDecisionEngine, ScopeDecisionError
 from mana_agent.workspaces.service import WorkspaceService
 from mana_agent.multi_agent.worktrees import (

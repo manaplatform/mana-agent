@@ -49,7 +49,7 @@ from mana_agent.multi_agent.runtime.tool_worker_process import (
     ToolWorkerProcessError,
 )
 
-from mana_agent.services.coding_memory_service import CodingMemoryService
+from mana_agent.memory import CodingMemoryService
 from mana_agent.config.user_config import get_setting
 from mana_agent.tools import (
     build_apply_patch_tool,

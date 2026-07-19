@@ -8,7 +8,7 @@ from typing import Any
 
 from mana_agent.multi_agent.core.ids import new_message_id
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType, ToolResult
-from mana_agent.services.memory_service import MultiAgentMemoryService
+from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.documents.service import DocumentService
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.multi_agent.tools.permissions import assert_shell_allowed

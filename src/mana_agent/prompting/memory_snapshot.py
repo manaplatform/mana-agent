@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
+from mana_agent.memory import MemoryConfigurationError, MemoryService
 
 
 _MEMORY_CANDIDATES = (
@@ -25,12 +25,12 @@ def _compact_text(text: str, *, max_chars: int) -> str:
 
 def render_memory_snapshot(*, repo_root: str | Path | None = None, max_chars: int = 1200) -> str:
     root = Path(repo_root or Path.cwd()).expanduser().resolve()
-    global_memory = repository_dir(repository_id_for_path(root))
-    for name in ("memory.md", "project_memory.md"):
-        path = global_memory / name
-        if path.is_file():
-            compact = _compact_text(path.read_text(encoding="utf-8"), max_chars=max_chars)
-            return f"Project Memory Snapshot\n- source: {path}\n{compact}"
+    try:
+        compact = _compact_text(MemoryService(root=root).project_snapshot(max_chars=max_chars), max_chars=max_chars)
+    except MemoryConfigurationError:
+        compact = ""
+    if compact:
+        return f"Project Memory Snapshot\n- source: configured memory service\n{compact}"
     for relative in _MEMORY_CANDIDATES:
         path = root / relative
         if path.is_file():
