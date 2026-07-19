@@ -21,7 +21,7 @@ Footer {
 }
 
 #input-bar {
-    height: 4;
+    height: 5;
     background: #161923;
     border-top: thick #334155;
     /* Fixed at bottom of #body (above #footer-gap). ChatLog is 1fr and shrinks. */
@@ -29,9 +29,18 @@ Footer {
 
 #chat-input {
     width: 100%;
+    height: 3;
+    min-height: 3;
+    max-height: 8;
     border: round #475569;
     background: #161923;  /* consistent with bar so bottom of message box isn't black */
     color: #e2e8f0;
+}
+
+#input-help {
+    height: 1;
+    color: #94a3b8;
+    padding: 0 1;
 }
 
 #chat-input:focus {

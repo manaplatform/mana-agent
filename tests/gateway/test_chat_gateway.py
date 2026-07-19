@@ -599,6 +599,32 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
     assert {message["conversation_id"] for message in messages} == {session_id}
 
 
+def test_gateway_preserves_multiline_message_through_request_and_restored_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    prompts: list[str] = []
+
+    class TrackingChatService:
+        _ask_service = _DummyAskService()
+
+        def ask(self, question: str, **kwargs: Any):
+            prompts.append(question)
+            return SimpleNamespace(answer="Understood.", sources=[], warnings=[], trace=[])
+
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=TrackingChatService())
+    session_id = gateway.create_session(frontend="test")
+    message = "first line\nsecond line\nthird line"
+
+    gateway.send(session_id, message)
+
+    assert prompts == [message]
+    assert [row["content"] for row in gateway.session_messages(session_id) if row["role"] == "user"] == [message]
+
+    restored = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=TrackingChatService())
+    restored.create_session(frontend="test", session_id=session_id)
+    assert [row["content"] for row in restored.session_messages(session_id) if row["role"] == "user"] == [message]
+
+
 def test_answer_only_conversation_uses_validated_route_without_second_router(
     tmp_path: Path, monkeypatch
 ) -> None:

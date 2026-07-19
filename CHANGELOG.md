@@ -2,6 +2,12 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-19
+
+- Added multiline Textual chat input: Enter sends, Shift+Enter inserts a line, and Ctrl+J / Alt+Enter provide portable terminal fallbacks. The composer grows with wrapped or explicit lines up to a scrollable maximum, then shrinks after edits or submission.
+  - User messages retain internal newlines through rendering, gateway requests, and restored session history; only trailing newline characters are removed on submission.
+  - Verification: targeted multiline/TUI/gateway tests passed (34 tests), including the model-command shortcut regression; Python compilation, focused Ruff, and `git diff --check` passed.
+
 ## 2026-07-18
 
 - Fixed Textual chat tool cards to retain a single result widget and explicitly invalidate card and timeline layout after result, expand/collapse, and live-output updates. Collapsed cards now use content-driven height, while expanded cards remeasure their complete output without stale sizing. Documented Shift-drag native terminal text selection while preserving mouse controls.

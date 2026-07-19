@@ -49,9 +49,10 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, Static
+from textual.widgets import Footer, Header, Static
 
 from mana_agent.chat.events import (
     AssistantMessageEvent,
@@ -62,6 +63,7 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.history import ChatHistory, get_history
 from mana_agent.tui.widgets.chat_log import ChatLog
+from mana_agent.tui.widgets.message_input import MessageInput
 
 
 class ManaChatApp(App):
@@ -113,7 +115,7 @@ class ManaChatApp(App):
         # Use `is not None` — empty ChatHistory is falsy (__len__==0) and must still be kept.
         self.history = history if history is not None else get_history()
         self.chat_log: ChatLog | None = None
-        self.input: Input | None = None
+        self.input: MessageInput | None = None
         self._turn_counter = 0
         self._tool_cid_map: dict[str, str] = {}  # key -> call_id for reliable start/end pairing in bridge
 
@@ -168,12 +170,15 @@ class ManaChatApp(App):
             yield self.chat_log
 
             # Bottom input bar (message box)
-            with Horizontal(id="input-bar"):
-                self.input = Input(
-                    placeholder="Type a message and press Enter...  (Ctrl+R for demo tool flow)",
+            with Vertical(id="input-bar"):
+                self.input = MessageInput(
                     id="chat-input",
                 )
                 yield self.input
+                yield Static(
+                    "Enter sends · Shift+Enter adds a line · Ctrl+J / Alt+Enter also add a line",
+                    id="input-help",
+                )
 
 
         yield Footer()
@@ -330,10 +335,22 @@ class ManaChatApp(App):
         self.token_count += 42
         self.update_status("Agent response complete")
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_message_input_height_changed(self, event: MessageInput.HeightChanged) -> None:
+        """Keep the input bar and chat timeline in sync with the composer."""
+        if event.message_input is not self.input:
+            return
+        try:
+            self.query_one("#input-bar").styles.height = event.height + 2
+        except NoMatches:
+            # A queued resize can arrive after a modal replaces the chat screen.
+            return
+
+    async def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
         """Handle user pressing Enter in the input box. Always uses the real turn handler."""
-        text = event.value.strip()
-        if not text:
+        # Preserve message whitespace and explicit line breaks. A final newline is
+        # an editing artifact from the composer, not part of the submitted turn.
+        text = event.value.rstrip("\r\n")
+        if not text.strip():
             return
 
         if text == "/models" or text.startswith("/models "):
@@ -358,7 +375,7 @@ class ManaChatApp(App):
                 self.history.add(AssistantMessageEvent(content=message))
                 self._apply_model_selection(selection)
             if self.input:
-                self.input.value = ""
+                self.input.reset()
             return
 
         if text == "/new":
@@ -372,13 +389,13 @@ class ManaChatApp(App):
                 self._gateway_session_id = self.gateway.create_session(frontend="tui")
             self._start_new_conversation()
             if self.input:
-                self.input.value = ""
+                self.input.reset()
             self.update_status("Ready")
             return
 
         # Clear input immediately (premium feel)
         if self.input:
-            self.input.value = ""
+            self.input.reset()
 
         self.update_status("Thinking...")
         self.token_count += len(text.split())
