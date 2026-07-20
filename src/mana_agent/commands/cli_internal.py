@@ -67,6 +67,7 @@ from .workspace_cli import impact_command, repo_app, search_command, session_app
 from .worktree_cli import worktree_app
 from .codex_cli import codex_app
 from .email_cli import connector_app
+from .protocols_cli import a2a_app, acp_app
 from mana_agent.workspaces.paths import repository_analysis_dir, repository_dir, repository_id_for_path
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,8 @@ skill_app.add_typer(skill_proposal_app, name="proposal")
 app.add_typer(automation_app, name="automation")
 app.add_typer(automation_app, name="cron")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(acp_app, name="acp")
+app.add_typer(a2a_app, name="a2a")
 app.add_typer(connector_app, name="connector")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(worktree_app, name="worktree")

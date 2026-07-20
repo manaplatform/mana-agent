@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.doctor.checks import codex, configuration, filesystem, runtime
+from mana_agent.doctor.checks import codex, configuration, filesystem, protocols, runtime
 from mana_agent.doctor.models import DoctorCheck
 
 
@@ -15,6 +15,9 @@ CHECKS: tuple[DoctorCheck, ...] = (
     DoctorCheck("persistence/state-path", "Persistence", "Validate Mana state path.", filesystem.state_path, filesystem.repair_state_path),
     DoctorCheck("integrations/codex-binary", "Codex", "Locate configured Codex.", codex.binary),
     DoctorCheck("integrations/codex-protocol", "Codex", "Run Codex app-server preflight.", codex.protocol, deep=True),
+    DoctorCheck("protocols/acp-sdk", "Protocols", "Validate the optional ACP SDK.", protocols.acp_sdk),
+    DoctorCheck("protocols/a2a-sdk", "Protocols", "Validate the optional A2A SDK.", protocols.a2a_sdk),
+    DoctorCheck("protocols/security-config", "Protocols", "Validate protocol authentication and network safety.", protocols.configuration),
 )
 
 _BY_ID = {check.check_id: check for check in CHECKS}

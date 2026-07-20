@@ -58,6 +58,12 @@ dev = [
 ]
 browser = ["playwright>=1.45,<2.0"]
 mem0 = ["mem0ai>=2.0,<3.0", "keyring>=24.0,<26.0"]
+acp = ["agent-client-protocol>=0.11,<0.12"]
+a2a = ["a2a-sdk[http-server]>=1.1,<2.0"]
+protocols = [
+  "agent-client-protocol>=0.11,<0.12",
+  "a2a-sdk[http-server]>=1.1,<2.0",
+]
 
 # Grok Build: optional dashboard + automations extras (Phase 1)
 # These keep the core CLI + multi-agent runtime dependency-free.
@@ -89,7 +95,9 @@ full = [
   "google-api-python-client>=2.0,<3.0",
   "google-auth-oauthlib>=1.2,<2.0",
   "keyring>=24.0,<26.0",
-  "mem0ai>=2.0,<3.0"
+  "mem0ai>=2.0,<3.0",
+  "agent-client-protocol>=0.11,<0.12",
+  "a2a-sdk[http-server]>=1.1,<2.0"
 ]
 
 [project.scripts]

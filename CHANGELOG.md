@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-20
 
+- Added optional ACP v1 and A2A 1.0 protocol gateway adapters around the shared `AgentChatGateway`, durable workspace sessions/history, task board, lane coordinator, memory, and tool policy.
+  - Added ACP stdio initialization, durable new/load/list session mapping and replay, prompts, cancellation, modes/configuration, resource links, per-session MCP forwarding, safe event conversion, editor documentation, and `mana-agent acp serve|doctor|info`.
+  - Added an authenticated A2A server with runtime Agent Cards, JSON-RPC/HTTP+JSON routes, caller-scoped durable task storage, gateway executor, state/artifact streaming, cancellation, remote registry/discovery/invocation, explicit delegation policy, SSRF/path/size controls, and loop protection through `mana-agent a2a` commands.
+  - Added bounded stable SDK extras (`acp`, `a2a`, and `protocols`) and included both in `full`. Push notifications, extended Agent Cards, embedded ACP media, client terminal/filesystem delegation, and unrestricted file artifacts are intentionally not advertised.
+  - Verification: the full repository suite passed (1,112 passed, 1 skipped); the final focused protocol/gateway/MCP/doctor/config/task-board suite passed (156 tests); official ACP/A2A SDK model and authenticated route smoke checks, focused Ruff, Python compilation, and `git diff --check` passed.
+
 - Added Mana Eval Lab for reproducible multi-variant gateway evaluations, immutable redacted run artifacts, isolated Git worktrees, task and trajectory replay, configurable objective scoring, leaderboards, baselines, paired regression reports, and fail-closed CI gates.
   - Instrumented the existing gateway, routing-model, lane, tool, Codex, reviewer, and verifier boundaries through an optional context-propagated recorder; normal chat continues through the no-op recorder with no evaluation configuration.
   - Added the `mana-agent eval` command group, protected routing suite, evaluation CI workflow, security and architecture documentation, and stable exit codes. Docker and remote evaluation workspaces remain explicit unsupported backends; P0 fully implements `local-worktree`.

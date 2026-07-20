@@ -76,6 +76,7 @@ Use Mana-Agent to:
 | Browser automation | Model-selected navigation, clicking, typing, forms, tabs, uploads, downloads, screenshots, and guarded submissions. |
 | External search | Optional model-selected web and GitHub search with repository-local result caching. |
 | Remote connectors | Gmail access and Telegram bot interaction through the same tool-aware chat runtime. |
+| Protocol gateway | ACP v1 editor access and A2A 1.0 server/client delegation through the shared gateway, sessions, task board, memory, lanes, and tool policy. |
 | Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automations, cron jobs, and settings. |
 | Automations | Persistent scheduled actions deployed to local cron, GitHub Actions, or both. |
 | Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and repository-local runtime data. |
@@ -1004,6 +1005,8 @@ docs/             User and developer documentation
 ```
 
 Optional packages are lazy-loaded. Install only the extras required by the active deployment.
+
+Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip install "mana-agent[a2a]"`, or `pip install "mana-agent[protocols]"`. ACP connects editors to Mana-Agent, A2A connects autonomous agents, and MCP connects Mana-Agent to tools/resources. See [the protocol gateway](docs/protocol-gateway.md), [ACP setup](docs/acp.md), and [A2A deployment/delegation](docs/a2a.md).
 
 ---
 

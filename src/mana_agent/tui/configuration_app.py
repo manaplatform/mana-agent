@@ -219,6 +219,25 @@ class ManaConfigurationApp(App[bool]):
                     yield Button("Test", id="test-github", variant="primary")
                     yield Button("Remove credential", id="remove-github-secret", variant="warning")
                 yield Static(self._github_cli_status(), id="github-status", classes="status")
+            with TabPane("Protocols", id="protocols"):
+                yield Label("Agent Client Protocol", classes="section-title")
+                yield Switch(value=bool(values.get("MANA_ACP_ENABLED", True)), id="acp-enabled")
+                yield Label("Enable ACP stdio support", classes="hint")
+                yield Input(value=str(values.get("MANA_ACP_ALLOWED_ROOTS") or ""), placeholder="Additional allowed roots (comma-separated)", id="acp-roots")
+                yield Switch(value=bool(values.get("MANA_ACP_MCP_FORWARDING", True)), id="acp-mcp-forwarding")
+                yield Label("Allow per-session MCP forwarding", classes="hint")
+                yield Label("Agent2Agent 1.0", classes="section-title")
+                yield Switch(value=bool(values.get("MANA_A2A_SERVER_ENABLED", False)), id="a2a-server-enabled")
+                yield Label("Enable authenticated A2A server", classes="hint")
+                yield Input(value=str(values.get("MANA_A2A_HOST") or "127.0.0.1"), placeholder="Bind host", id="a2a-host")
+                yield Input(value=str(values.get("MANA_A2A_PORT") or 8766), placeholder="Port", id="a2a-port")
+                yield Input(value=str(values.get("MANA_A2A_PUBLIC_BASE_URL") or ""), placeholder="https://agent.example", id="a2a-public-url")
+                yield Input(password=True, placeholder=self._secret_placeholder("MANA_A2A_SERVER_TOKEN"), id="a2a-token")
+                yield Input(value=str(values.get("MANA_A2A_ENABLED_SKILLS") or ""), placeholder="Enabled skill IDs (comma-separated)", id="a2a-skills")
+                yield Input(value=str(values.get("MANA_A2A_MAX_CONCURRENT_TASKS") or 4), placeholder="Maximum concurrent tasks", id="a2a-concurrency")
+                yield Switch(value=bool(values.get("MANA_A2A_DELEGATION_ENABLED", False)), id="a2a-delegation-enabled")
+                yield Label("Enable explicitly authorized remote delegation", classes="hint")
+                yield Input(value=str(values.get("MANA_A2A_MAX_DELEGATION_DEPTH") or 3), placeholder="Maximum delegation depth", id="a2a-depth")
             with TabPane("Review and save", id="review"):
                 yield Label("Review", classes="section-title")
                 yield Static(self._overview_text(), id="review-summary")
@@ -317,11 +336,23 @@ class ManaConfigurationApp(App[bool]):
                 "MANA_MODEL_REVIEWER": str(self.query_one("#role-reviewer", Select).value),
                 "MANA_MODEL_TOOL": str(self.query_one("#role-tool", Select).value),
                 "MANA_MODEL_SUMMARIZER": str(self.query_one("#role-summarizer", Select).value),
+                "MANA_ACP_ENABLED": self.query_one("#acp-enabled", Switch).value,
+                "MANA_ACP_ALLOWED_ROOTS": self.query_one("#acp-roots", Input).value.strip(),
+                "MANA_ACP_MCP_FORWARDING": self.query_one("#acp-mcp-forwarding", Switch).value,
+                "MANA_A2A_SERVER_ENABLED": self.query_one("#a2a-server-enabled", Switch).value,
+                "MANA_A2A_HOST": self.query_one("#a2a-host", Input).value.strip(),
+                "MANA_A2A_PORT": int(self.query_one("#a2a-port", Input).value),
+                "MANA_A2A_PUBLIC_BASE_URL": self.query_one("#a2a-public-url", Input).value.strip(),
+                "MANA_A2A_ENABLED_SKILLS": self.query_one("#a2a-skills", Input).value.strip(),
+                "MANA_A2A_MAX_CONCURRENT_TASKS": int(self.query_one("#a2a-concurrency", Input).value),
+                "MANA_A2A_DELEGATION_ENABLED": self.query_one("#a2a-delegation-enabled", Switch).value,
+                "MANA_A2A_MAX_DELEGATION_DEPTH": int(self.query_one("#a2a-depth", Input).value),
             }
         )
         self.draft.set_secret("OPENAI_API_KEY", self.query_one("#provider-api-key", Input).value)
         self.draft.set_secret("MANA_WEB_SEARCH_API_KEY", self.query_one("#search-api-key", Input).value)
         self.draft.set_secret("MANA_GITHUB_TOKEN", self.query_one("#github-token", Input).value)
+        self.draft.set_secret("MANA_A2A_SERVER_TOKEN", self.query_one("#a2a-token", Input).value)
         mem0_key = self.query_one("#mem0-api-key", Input).value.strip()
         if mem0_key:
             self.draft.values["MEM0_API_KEY"] = mem0_key
@@ -432,7 +463,7 @@ class ManaConfigurationApp(App[bool]):
             self.action_cancel()
         elif button_id in {"continue", "back"}:
             tabs = self.query_one(TabbedContent)
-            order = ["overview", "providers", "models", "embeddings", "memory", "search", "github", "review"]
+            order = ["overview", "providers", "models", "embeddings", "memory", "search", "github", "protocols", "review"]
             current = order.index(tabs.active)
             tabs.active = order[min(len(order) - 1, current + (1 if button_id == "continue" else -1))]
 
@@ -452,6 +483,9 @@ class ManaConfigurationApp(App[bool]):
                 raise ValueError("Test the selected GitHub authentication before saving.")
             if not self._memory_validated:
                 raise ValueError("Test the selected external memory provider before saving.")
+            from mana_agent.protocols.common.config import validate_protocol_configuration
+
+            validate_protocol_configuration(self.draft.values)
             self.draft.save()
         except Exception as exc:
             self.notify(str(exc), title="Configuration not saved", severity="error")

@@ -58,6 +58,9 @@ def test_deep_check_is_skipped_in_normal_mode() -> None:
     assert not unknown
     assert "integrations/codex-protocol" not in {check.check_id for check in normal}
     assert "integrations/codex-protocol" in {check.check_id for check in deep}
+    assert "protocols/acp-sdk" in {check.check_id for check in normal}
+    assert "protocols/a2a-sdk" in {check.check_id for check in normal}
+    assert "protocols/security-config" in {check.check_id for check in normal}
 
 
 def test_doctor_redaction_removes_credentials() -> None:

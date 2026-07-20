@@ -238,6 +238,7 @@ class AgentChatGateway:
 
         self._sessions: dict[str, dict[str, Any]] = {}
         self._active: set[str] = set()
+        self._async_turn_lock = asyncio.Lock()
         self._chat_session_id: str | None = None
         self._history_store = ChatSessionHistory()
 
@@ -404,12 +405,13 @@ class AgentChatGateway:
         if session_record is not None:
             self._stack.workspace_id = session_record.workspace_id
             self._stack.repository_id = session_record.primary_repository_id
-        self._stack.memory_service.bind_scope(
-            session_id=session_id,
-            workspace_id=self._stack.workspace_id,
-            repository_id=self._stack.repository_id,
-            conversation_id=session_id,
-        )
+        if hasattr(self._stack.memory_service, "bind_scope"):
+            self._stack.memory_service.bind_scope(
+                session_id=session_id,
+                workspace_id=self._stack.workspace_id,
+                repository_id=self._stack.repository_id,
+                conversation_id=session_id,
+            )
         if self._coding_agent is not None and hasattr(self._coding_agent, "session_id"):
             self._coding_agent.session_id = session_id
         memory = self._stack.coding_memory_service
@@ -723,6 +725,7 @@ class AgentChatGateway:
         **options: Any,
     ) -> ChatTurnResult:
         """Run one full chat turn through the gateway-owned engine."""
+        self._bind_runtime_session(session_id)
         self._active.add(session_id)
         turn_id = str(options.pop("turn_id", "") or f"turn_{uuid.uuid4().hex[:20]}")
         record_current("gateway.turn.started", {"session_id": session_id, "turn_id": turn_id, "original_task": text})
@@ -947,6 +950,19 @@ class AgentChatGateway:
         options: dict[str, Any],
     ) -> ChatTurnResult:
         lane_task_id = str(options.get("_lane_task_id") or "")
+        if bool(options.get("protocol_read_only")) and decision.route in {
+            "coding",
+            "automation",
+            "gmail",
+            "calendar",
+        }:
+            return ChatTurnResult(
+                answer="The model-selected route requires mutation, but this protocol session is read-only.",
+                error="protocol_read_only_denied",
+                mode="route-policy-denied",
+                decision=decision,
+                payload={"route": decision.route, "policy": "read_only"},
+            )
         registration = self._entry_route_registry.get(decision.route)
         availability = registration.availability()
         if decision.route == "capability_error":
@@ -1287,7 +1303,10 @@ class AgentChatGateway:
         text: str,
         **kwargs: Any,
     ) -> ChatTurnResult:
-        return await asyncio.to_thread(self.process_turn, session_id, text, **kwargs)
+        # The gateway owns mutable session-bound memory and tool state. Serialize
+        # cross-frontend turns while preserving concurrent protocol connections.
+        async with self._async_turn_lock:
+            return await asyncio.to_thread(self.process_turn, session_id, text, **kwargs)
 
     # ------------------------------------------------------------------
     # Rich path (TUI + full console chat from chat_cli)
