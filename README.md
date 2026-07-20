@@ -24,6 +24,7 @@
 - [Quick start](#quick-start)
 - [Core capabilities](#core-capabilities)
 - [CLI reference](#cli-reference)
+- [Troubleshooting](#troubleshooting)
 - [Configuration](#configuration)
 - [Telegram connector](#telegram-connector)
 - [Web dashboard](#web-dashboard)
@@ -129,6 +130,19 @@ Every chat turn first passes through the gateway's typed entry router. It select
 - optional extras for dashboard, automations, browser, observability, connectors, and document features.
 
 The default dependency set uses CPU FAISS for local vector search. Redis/RQ can be used by optional worker-process execution paths.
+
+## Troubleshooting
+
+Use the deterministic doctor command when a local installation, configuration, state directory, or Codex integration is not behaving as expected. It does not require a configured model and normal mode does not perform network probes.
+
+```bash
+mana-agent doctor
+mana-agent doctor --deep
+mana-agent doctor --fix
+mana-agent doctor --json
+```
+
+`--fix` only runs registered, safe and idempotent repairs (currently Mana state-directory creation and restrictive configuration permissions). It asks before changing user state unless `--yes` is supplied. JSON output is redacted and requires `--yes` for repairs.
 
 ---
 

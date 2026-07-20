@@ -86,7 +86,12 @@ class MessageInput(TextArea):
     def _report_height(self, *, force: bool = False) -> None:
         # ``virtual_size.height`` accounts for both explicit newlines and
         # Textual's soft wrapping. TextArea handles scrolling once constrained.
-        wrapped_lines = max(1, self.virtual_size.height)
+        # Windows' event loop may dispatch ``Changed`` before Textual refreshes
+        # the virtual document.  Explicit newlines are already authoritative,
+        # so include them rather than briefly retaining the previous one-line
+        # virtual height. Soft-wrapped lines are still supplied by Textual.
+        explicit_lines = self.text.count("\n") + 1
+        wrapped_lines = max(1, explicit_lines, self.virtual_size.height)
         height = min(self.MAX_HEIGHT, max(self.MIN_HEIGHT, wrapped_lines + 2))
         if force or height != self._reported_height:
             self._reported_height = height

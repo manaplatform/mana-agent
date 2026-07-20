@@ -39,6 +39,21 @@ class SelectableText(TextArea):
     def __init__(self, text: str = "", **kwargs: object) -> None:
         super().__init__(text, read_only=True, show_line_numbers=False, **kwargs)
 
+    def on_mount(self) -> None:
+        """Rewrap dynamically mounted cards after their parent has laid out.
+
+        On Windows a child can be queried before the first paint, so relying on
+        ``render_line`` alone leaves the initial one-column document observable
+        to callers. ``call_after_refresh`` runs after the mount/layout cycle on
+        every supported Textual backend and retains the render-time guard below.
+        """
+        self.call_after_refresh(self._rewrap_after_layout)
+
+    def _rewrap_after_layout(self) -> None:
+        wrap_width = self.wrap_width
+        if wrap_width > 0 and self.wrapped_document._width != wrap_width:
+            self._rewrap_and_refresh_virtual_size()
+
     def render_line(self, y: int):  # noqa: ANN201
         """Ensure TextArea wraps only after this card has a real content width.
 
