@@ -1049,12 +1049,19 @@ class AskAgent:
         ephemeral_read_cache: dict[str, list[dict[str, Any]]] | None = None,
         read_telemetry: dict[str, int] | None = None,
         required_mcp_server: str | None = None,
+        enable_run_evidence: bool = True,
     ) -> tuple[list[BaseTool], list[ToolInvocationTrace], list[SearchHit], list[str]]:
         traces: list[ToolInvocationTrace] = []
         sources: list[SearchHit] = []
         warnings: list[str] = []
         safe_read_line_window = max(200, min(int(read_line_window or 400), 2000))
-        evidence_memory = EvidenceMemory(repo_root=self.project_root, run_id=run_id)
+        # Run evidence is repository-file state. Do not initialize that
+        # compatibility store for connector-only turns.
+        evidence_memory = (
+            EvidenceMemory(repo_root=self.project_root, run_id=run_id)
+            if enable_run_evidence
+            else None
+        )
         resolved_indexes = list(getattr(self, "_resolved_indexes", []) or [])
         if not resolved_indexes:
             fallback_index = Path(getattr(self, "_resolved_index", default_index_dir(self.project_root))).resolve()
@@ -1120,11 +1127,15 @@ class AskAgent:
                     ephemeral_read_cache=ephemeral_read_cache,
                     invalidate_stale=True,
                 )
-                run_cached_payload, run_invalidated = evidence_memory.lookup(
-                    resolved=resolved,
-                    mode=requested_mode,
-                    start_line=start,
-                    end_line=end,
+                run_cached_payload, run_invalidated = (
+                    evidence_memory.lookup(
+                        resolved=resolved,
+                        mode=requested_mode,
+                        start_line=start,
+                        end_line=end,
+                    )
+                    if evidence_memory is not None
+                    else (None, False)
                 )
                 if run_invalidated:
                     invalidated = True
@@ -1189,16 +1200,17 @@ class AskAgent:
                         ephemeral_read_cache=ephemeral_read_cache,
                         persist_flow_cache=read_telemetry is not None or ephemeral_read_cache is not None,
                     )
-                    evidence_memory.store(
-                        original_path=path,
-                        resolved=resolved,
-                        mode="full",
-                        start_line=1,
-                        end_line=line_count,
-                        line_count=line_count,
-                        content=content_text,
-                        summary=f"full file read, {line_count} lines",
-                    )
+                    if evidence_memory is not None:
+                        evidence_memory.store(
+                            original_path=path,
+                            resolved=resolved,
+                            mode="full",
+                            start_line=1,
+                            end_line=line_count,
+                            line_count=line_count,
+                            content=content_text,
+                            summary=f"full file read, {line_count} lines",
+                        )
                     if read_telemetry is not None:
                         read_telemetry["read_full_mode_used"] = int(read_telemetry.get("read_full_mode_used", 0)) + 1
                     result = {
@@ -1239,16 +1251,17 @@ class AskAgent:
                     persist_flow_cache=read_telemetry is not None or ephemeral_read_cache is not None,
                 )
                 segment_text = "\n".join(segment)
-                evidence_memory.store(
-                    original_path=path,
-                    resolved=resolved,
-                    mode="line",
-                    start_line=start,
-                    end_line=actual_end,
-                    line_count=line_count,
-                    content=segment_text,
-                    summary=f"line range read, lines {start}-{actual_end}",
-                )
+                if evidence_memory is not None:
+                    evidence_memory.store(
+                        original_path=path,
+                        resolved=resolved,
+                        mode="line",
+                        start_line=start,
+                        end_line=actual_end,
+                        line_count=line_count,
+                        content=segment_text,
+                        summary=f"line range read, lines {start}-{actual_end}",
+                    )
                 result = {
                     "file_path": str(resolved),
                     "normalized_path": str(resolved),
@@ -1828,7 +1841,16 @@ class AskAgent:
             "read_cache_invalidations": 0,
         }
         ephemeral_read_cache: dict[str, list[dict[str, Any]]] = {}
-        evidence_memory = EvidenceMemory(repo_root=self.project_root, run_id=run_id)
+        # An empty allow-list permits all built-in tools. Otherwise, initialize
+        # run evidence only if the validated policy exposes file reading.  Email
+        # tools are registered after this policy normalization, so retain the
+        # raw decision as the source of truth here.
+        use_run_evidence = not raw_allowed or "read_file" in allowed_tools or "read_file" in raw_allowed
+        evidence_memory = (
+            EvidenceMemory(repo_root=self.project_root, run_id=run_id)
+            if use_run_evidence
+            else None
+        )
 
         tools, traces, sources, warnings = self._build_tools(
             k_default=k,
@@ -1839,6 +1861,7 @@ class AskAgent:
             ephemeral_read_cache=ephemeral_read_cache,
             read_telemetry=read_telemetry,
             required_mcp_server=required_mcp_server,
+            enable_run_evidence=use_run_evidence,
         )
         pending_external_traces = list(getattr(self, "_pending_external_search_traces", []) or [])
         if pending_external_traces:
@@ -1904,7 +1927,8 @@ class AskAgent:
         seen_tool_args: dict[tuple[str, str], int] = defaultdict(int)
         tool_counts: dict[str, int] = defaultdict(int)
         unique_read_files: set[str] = set()
-        unique_read_files.update(evidence_memory.read_files())
+        if evidence_memory is not None:
+            unique_read_files.update(evidence_memory.read_files())
         disk_read_count = 0
 
         # Loop-progress guards.
@@ -2278,7 +2302,8 @@ class AskAgent:
                         content=content,
                     )
                     if changed_paths:
-                        evidence_memory.invalidate_many(set(changed_paths))
+                        if evidence_memory is not None:
+                            evidence_memory.invalidate_many(set(changed_paths))
                         mutation_succeeded = True
                 messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
 

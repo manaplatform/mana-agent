@@ -142,6 +142,44 @@ def test_ask_agent_blocks_exact_duplicate_tool_call(tmp_path: Path) -> None:
     assert any("Duplicate tool call blocked: external_lookup" in str(w) for w in result.warnings)
 
 
+def test_ask_agent_email_only_turn_does_not_initialize_run_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Connector-only turns must not touch repository evidence storage."""
+    agent = _build_agent(tmp_path)
+    calls = _CountingTool({"ok": True, "messages": []}, "email_search")
+    _register_tool(agent, "email_search", lambda query: calls(query=query))
+    agent.llm = _FakeLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "email_search", "args": {"query": "newer"}}]),
+            _FakeAIMessage("No new messages.", tool_calls=[]),
+        ]
+    )
+
+    class _UnexpectedEvidenceMemory:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("connector-only turn must not initialize run evidence")
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.EvidenceMemory",
+        _UnexpectedEvidenceMemory,
+    )
+
+    result = agent.run(
+        "Check my latest Gmail",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=3,
+        timeout_seconds=2,
+        tool_policy={"allowed_tools": ["email_search"]},
+        run_id="gmail-turn",
+    )
+
+    assert result.answer == "No new messages."
+    assert len(calls.calls) == 1
+
+
 def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:
     counter = _CountingTool({"ok": True, "result": "readme-hit"}, "repo_search")
     agent = _build_agent(tmp_path)

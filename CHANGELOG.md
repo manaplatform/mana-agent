@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-20
+
+- Fixed connector-only chat turns such as “Check my latest Gmail” so they do not initialize repository run-evidence memory when external memory is selected.
+  - Verification: `python -m pytest tests/test_ask_agent.py -q`.
+
 ## 2026-07-19
 
 - Added a pluggable, provider-neutral memory architecture with `internal/mana` as the compatibility-preserving default and lazy optional `external/mem0` support.
