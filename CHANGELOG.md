@@ -6,7 +6,7 @@ All notable repository changes should be recorded here.
 
 - Clarified the gateway entry-router decision contract so tool-free prompts such as `ping` must emit `required_sources: ["none"]` instead of an omitted or empty source list.
   - Strict validation remains intact: missing model-selected sources stop safely and never trigger a fallback route.
-  - Verification: pending.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py -k 'ping or missing_required_sources'` passed (3 tests); Python compilation and `git diff --check` passed.
 
 - Fixed Textual chat-message wrapping to measure read-only message cards against their full available content width instead of reserving an invisible editing-cursor cell.
   - Existing and newly mounted messages now reflow correctly for terminal resizes and surrounding-panel width changes without stale per-widget wrap widths.
