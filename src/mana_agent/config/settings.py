@@ -134,7 +134,7 @@ class Settings(BaseSettings):
     mana_codex_enabled: bool = Field(default=True, alias="MANA_CODEX_ENABLED")
     mana_codex_max_workers: int = Field(default=2, alias="MANA_CODEX_MAX_WORKERS")
     mana_codex_stream_events: bool = Field(default=True, alias="MANA_CODEX_STREAM_EVENTS")
-    mana_codex_worktree_isolation: bool = Field(default=True, alias="MANA_CODEX_WORKTREE_ISOLATION")
+    mana_codex_worktree_isolation: bool = Field(default=False, alias="MANA_CODEX_WORKTREE_ISOLATION")
     mana_codex_task_timeout_seconds: int = Field(default=1800, alias="MANA_CODEX_TASK_TIMEOUT_SECONDS")
     mana_codex_allow_network: bool = Field(default=False, alias="MANA_CODEX_ALLOW_NETWORK")
     mana_codex_model: str | None = Field(default=None, alias="MANA_CODEX_MODEL")

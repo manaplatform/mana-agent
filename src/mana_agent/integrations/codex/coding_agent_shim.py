@@ -186,7 +186,7 @@ class CodexCodingAgentShim:
 
         manager: WorkspaceManager | None = None
         managed_workspace: Any = None
-        if requires_repository_write:
+        if requires_repository_write and self.codex_settings.worktree_isolation:
             manager = self._workspace_manager_factory()
             workspace_task_id = self.workspace_task_id or task_id
             managed_workspace = manager.create_for_task(
@@ -208,6 +208,14 @@ class CodexCodingAgentShim:
                 branch_name=managed_workspace.branch_name,
                 sandbox="workspaceWrite",
                 approval_policy=self.codex_settings.approval_policy,
+            )
+        elif requires_repository_write:
+            workspace = WorkspaceContext(
+                repository_path=self.repo_root,
+                worktree_path=self.repo_root,
+                sandbox="workspaceWrite",
+                approval_policy=self.codex_settings.approval_policy,
+                allow_in_place_write=True,
             )
         else:
             workspace = WorkspaceContext(

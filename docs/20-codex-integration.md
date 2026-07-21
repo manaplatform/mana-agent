@@ -63,7 +63,7 @@ MANA_CODEX_ENABLED = true
 MANA_CODEX_BIN = "codex"
 MANA_CODEX_MAX_WORKERS = 2
 MANA_CODEX_STREAM_EVENTS = true
-MANA_CODEX_WORKTREE_ISOLATION = true
+MANA_CODEX_WORKTREE_ISOLATION = false
 MANA_CODEX_TASK_TIMEOUT_SECONDS = 1800
 MANA_CODEX_ALLOW_NETWORK = false
 MANA_CODEX_MODEL = ""
@@ -73,6 +73,11 @@ Codex is enabled by default. Setting `MANA_CODEX_ENABLED = false` disables
 coding turns rather than switching to the legacy coding agent. Network access remains disabled by policy unless
 a future validated execution decision and sandbox implementation explicitly
 support it.
+
+Codex write turns run in the selected repository root by default, so edits are
+made directly in the checkout opened by Mana-Agent. Set
+`MANA_CODEX_WORKTREE_ISOLATION = true` only when a workflow requires an
+isolated managed worktree under Mana's state directory.
 
 ## Runtime contracts
 

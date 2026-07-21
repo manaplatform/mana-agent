@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.0.17-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.0.18-purple" />
 </p>
 
 `mana-agent` is an installable Python CLI and optional web dashboard for understanding, operating, and safely changing software repositories. It combines repository indexing, static analysis, semantic retrieval, multi-agent orchestration, constrained tool execution, Git operations, document processing, browser automation, external search, and remote connectors in one traceable workflow.
 
-> **Current documented version:** `v0.0.17`
+> **Current documented version:** `v0.0.18`
 
 ## Quick links
 

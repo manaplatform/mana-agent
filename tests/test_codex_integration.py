@@ -342,7 +342,7 @@ def test_coding_agent_shim_delegates_planning_editing_and_verification_to_codex_
     manager = _ShimWorkspaceManager(tmp_path / "worktree")
     shim = CodexCodingAgentShim(
         repo_root=repository,
-        codex_settings=CodexSettings(enabled=True),
+        codex_settings=CodexSettings(enabled=True, worktree_isolation=True),
         backend_factory=lambda: backend,
         workspace_manager_factory=lambda: manager,
     )
@@ -357,6 +357,23 @@ def test_coding_agent_shim_delegates_planning_editing_and_verification_to_codex_
     assert result["changed_files"] == ["README.md"]
     assert result["workspace_path"] == str(manager.worktree)
     assert manager.transitions == ["running", "merge_candidate"]
+
+
+def test_coding_agent_shim_writes_directly_in_the_repository_root_by_default(tmp_path: Path) -> None:
+    backend = _ShimBackend()
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        backend_factory=lambda: backend,
+        workspace_manager_factory=lambda: pytest.fail("direct Codex turns must not create a worktree"),
+    )
+
+    result = shim.generate_auto_execute("fix the login bug", auto_chat_mode="edit")
+
+    assert backend.workspaces[0].repository_path == tmp_path.resolve()
+    assert backend.workspaces[0].worktree_path == tmp_path.resolve()
+    assert backend.workspaces[0].allow_in_place_write is True
+    assert result["workspace_path"] == str(tmp_path.resolve())
 
 
 def test_codex_backend_does_not_self_approve(tmp_path: Path) -> None:

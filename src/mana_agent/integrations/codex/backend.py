@@ -217,22 +217,24 @@ class CodexCodingBackend:
         }
 
     def _validate_workspace(self, task: CodingTask, workspace: WorkspaceContext) -> None:
-        if task.requires_repository_write and not self.settings.worktree_isolation:
-            raise CodexExecutionError("Codex writing tasks require worktree isolation")
-        if task.requires_repository_write and workspace.repository_path.resolve() == workspace.worktree_path.resolve():
-            raise CodexExecutionError("Codex writing task was not assigned an isolated worktree")
         if not task.requires_repository_write:
             return
+        repository_root = workspace.repository_path.resolve()
+        execution_root = workspace.worktree_path.resolve()
+        if self.settings.worktree_isolation and repository_root == execution_root:
+            raise CodexExecutionError("Codex writing task was not assigned an isolated worktree")
+        if not self.settings.worktree_isolation and repository_root == execution_root and not workspace.allow_in_place_write:
+            raise CodexExecutionError("Codex in-place writing was not explicitly authorized")
         completed = subprocess.run(
             ["git", "status", "--short"],
-            cwd=workspace.worktree_path,
+            cwd=execution_root,
             capture_output=True,
             text=True,
             check=False,
         )
         if completed.returncode != 0:
             raise CodexExecutionError("Codex worktree is not a readable Git checkout")
-        if completed.stdout.strip():
+        if self.settings.worktree_isolation and completed.stdout.strip():
             raise CodexExecutionError("Codex worktree must be clean before execution")
 
 

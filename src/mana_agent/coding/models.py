@@ -43,6 +43,7 @@ class WorkspaceContext(BaseModel):
     repository_instructions: str = ""
     sandbox: Literal["readOnly", "workspaceWrite"] = "workspaceWrite"
     approval_policy: Literal["untrusted", "on-request", "never"] = "never"
+    allow_in_place_write: bool = False
 
     @model_validator(mode="after")
     def _validate_paths(self) -> "WorkspaceContext":
@@ -54,7 +55,7 @@ class WorkspaceContext(BaseModel):
             raise ValueError(f"worktree path does not exist: {worktree}")
         if self.sandbox == "readOnly":
             return self
-        if repository == worktree:
+        if repository == worktree and not self.allow_in_place_write:
             raise ValueError("writing coding tasks require an isolated worktree")
         return self
 

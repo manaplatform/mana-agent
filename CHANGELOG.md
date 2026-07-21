@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-21
 
+- Bumped the package and documented release version to `v0.0.18`.
+  - Verification: Project metadata and source runtime version checks passed; `tests/test_package_version.py` (2 passed) and `git diff --check` passed.
+
+- Changed Codex write turns to use the selected repository root by default instead of creating a managed worktree under Mana state. Worktree isolation remains available through `MANA_CODEX_WORKTREE_ISOLATION=true`; direct-root turns can operate on an existing dirty checkout.
+  - Verification: `MANA_HOME=/tmp/mana-codex-root-tests PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_codex_integration.py tests/test_tui_user_config.py tests/gateway/test_chat_gateway.py` passed (57 tests); focused Ruff and `git diff --check` passed.
+
 - Added a provider-neutral Remote Execution Fabric with typed sandbox, routing, resource, network, secret, artifact, snapshot, health, and lifecycle contracts; atomic handle/lease persistence; restart cleanup; sanitized lifecycle events; bounded concurrency; and fail-closed capability enforcement.
   - Registered `local-process`, `local-docker`, `remote-ssh`, `kubernetes`, `modal`, and `custom-http-runtime` behind one asynchronous provider interface. Existing trusted local queued shell execution now runs through the gateway-owned `ExecutionManager` and preserves managed-worktree identity, while Docker/SSH use safe argv construction and Kubernetes/Modal/HTTP dependencies remain optional with actionable configuration errors.
   - Added the reusable provider contract/security tests, provider doctor diagnostics, optional SDK extras, architecture and lifecycle mapping, provider configuration/setup/troubleshooting guidance, the versioned custom HTTP contract, and security enforcement limitations. Real Docker, SSH, Kubernetes, Modal, and HTTP integration tests were not run because corresponding external infrastructure and credentials were not configured.
