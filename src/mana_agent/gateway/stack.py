@@ -292,7 +292,7 @@ def build_chat_stack(
     )
     coding_model_assignment = resolve_model_for_role(
         AgentRole.CODING,
-        global_model=settings.mana_codex_model or effective_model,
+        global_model=getattr(settings, "mana_codex_model", None) or effective_model,
         repository=routing_repository,
     )
     planner_model_assignment = resolve_model_for_role(
