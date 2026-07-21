@@ -22,6 +22,7 @@ from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
+from mana_agent.model_routing.repository import RepositoryMetadataInspector
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient
 from mana_agent.multi_agent.runtime.tools_executor import (
     LocalToolsExecutor,
@@ -278,22 +279,31 @@ def build_chat_stack(
     if gateway_ask_agent is not None and hasattr(gateway_ask_agent, "execution_manager"):
         gateway_ask_agent.execution_manager = execution_manager
 
+    routing_repository = RepositoryMetadataInspector().inspect(root)
     effective_model = resolve_model_for_role(
         AgentRole.MAIN,
         global_model=cfg.model or settings.openai_chat_model,
+        repository=routing_repository,
     ).resolved_model
     router_model_assignment = resolve_model_for_role(
         AgentRole.HEAD_DECISION,
         global_model=effective_model,
+        repository=routing_repository,
     )
-    coding_model_assignment = resolve_model_for_role(AgentRole.CODING, global_model=effective_model)
+    coding_model_assignment = resolve_model_for_role(
+        AgentRole.CODING,
+        global_model=settings.mana_codex_model or effective_model,
+        repository=routing_repository,
+    )
     planner_model_assignment = resolve_model_for_role(
         AgentRole.PLANNER,
         global_model=settings.openai_coding_planner_model or effective_model,
+        repository=routing_repository,
     )
     tool_worker_model_assignment = resolve_model_for_role(
         AgentRole.TOOL_WORKER,
         global_model=settings.openai_tool_worker_model or effective_model,
+        repository=routing_repository,
     )
     effective_tool_worker_model = tool_worker_model_assignment.resolved_model
     effective_base_url = settings.openai_base_url
@@ -325,9 +335,12 @@ def build_chat_stack(
 
     if coding_agent_instance is None and cfg.coding_agent:
         if coding_agent_cls is CodexCodingAgentShim:
+            codex_settings = CodexSettings.from_mana_settings(settings).model_copy(
+                update={"model": coding_model_assignment.resolved_model}
+            )
             coding_agent_instance = coding_agent_cls(
                 repo_root=root,
-                codex_settings=CodexSettings.from_mana_settings(settings),
+                codex_settings=codex_settings,
                 repository_id=repository_id,
                 session_id=session_id,
                 event_sink=cfg.event_sink,

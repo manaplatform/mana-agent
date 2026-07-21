@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-21
 
+- Replaced fixed role-to-model resolution with a centralized evidence-based adaptive router using typed requests/profiles/decisions, deterministic capability/quality/history/language/cost/latency scoring, cached repository metadata, verification-reserved budgets, decaying provider reliability penalties and circuit breakers, persistent redacted outcome history, independent verifier selection, and fail-closed routing errors.
+  - Added policy-gated two-candidate competition contracts that require isolated roots, normalized diff/test evidence, complete quality criteria, winner-only promotion, and losing-workspace cleanup; legacy `MODEL_LEVEL_*` configuration now migrates into profile hints instead of making the final choice.
+  - Extended `mana-agent doctor` and configuration/architecture/provider documentation with candidate, metadata, evidence-store, circuit, budget, verifier-independence, and isolation diagnostics.
+  - Verification: `MANA_HOME=/tmp/mana-agent-router-final-full PYTHONPATH=src .venv/bin/python -m pytest -q` passed (1,140 passed, 2 skipped); the focused gateway/Codex/config/worktree/doctor compatibility run passed (176 tests); focused Ruff, Python compilation, and `git diff --check` passed. A configured type checker was unavailable.
+
 - Fixed local-process execution output to normalize Windows CRLF line endings to the provider's cross-platform LF text contract.
   - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/execution/test_execution_fabric.py` passed.
 

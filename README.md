@@ -66,6 +66,7 @@ Use Mana-Agent to:
 | --- | --- |
 | Repository intelligence | Static analysis, dependency discovery, semantic indexing, symbol-aware retrieval, reports, and architecture diagrams. |
 | Interactive chat | Repository-grounded Q&A, planning, coding workflows, tool execution, and verification loops. |
+| Adaptive model routing | Deterministic evidence, repository, capability, reliability, latency, and budget-aware model selection with fail-closed decisions and optional isolated candidate competition. |
 | Multi-agent runtime | Decision agent, planner, taskboard, work queue, tool manager, workers, reviewer, verifier, traces, and summaries. |
 | Managed worktrees | Isolated Git worktrees per coding task under `~/.mana/repositories/.../worktrees/`, recoverable after restart, reviewed as merge candidates (never silent merges). |
 | Safe mutation | Explicit plans, constrained file tools, reviewable patches, command gates, and verification after changes. |
@@ -282,9 +283,9 @@ models. Unknown models are not assumed compatible and remain available only as
 an explicit Advanced manual entry. Canonical selections use provider-qualified
 IDs such as `openai/gpt-4.1`.
 
-### Model-level routing
+### Adaptive model routing
 
-Map runtime roles to model levels rather than hardcoding a provider model throughout the application:
+Mana-Agent centrally scores configured models from task requirements, repository metadata, outcome history, provider health, latency, and reserved budgets. Existing role levels remain migration hints:
 
 ```text
 MODEL_LEVEL_3_HIGH_REASONING=gpt-4.1
@@ -301,6 +302,8 @@ MANA_MODEL_TOOL=MODEL_LEVEL_1_FAST_TOOL
 MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
 ```
 
+See [Evidence-based model routing](docs/model-routing.md) for profile configuration, scoring, budget controls, candidate competition, verifier independence, history, and diagnostics.
+
 ### Common configuration keys
 
 | Key | Purpose |
@@ -314,7 +317,9 @@ MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
 | `DEFAULT_TOP_K` | Default number of retrieval results. |
 | `MUTATION_MAX_STEPS` | Maximum work items in an approved mutation run. |
 | `MUTATION_VERIFY_ON_CHANGE` | Enables verification after repository changes. |
-| `MANA_MODEL_*` | Maps each runtime role to a model level. |
+| `MANA_MODEL_*` | Legacy role-level mappings migrated into adaptive profile hints. |
+| `MANA_MODEL_PROFILES` | Explicit adaptive provider/model capability and evidence profiles. |
+| `MANA_ROUTING_*` | Scoring thresholds, budgets, competition, reliability decay, language preferences, and evidence retention. |
 | `MANA_SEARCH_*` | Controls optional web/GitHub search behavior. |
 | `MANA_OBSERVABILITY_*` | Controls telemetry retention and OTLP export. |
 
