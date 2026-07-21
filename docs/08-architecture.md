@@ -64,6 +64,12 @@ All chat frontends connect through **`src/mana_agent/gateway/`**:
 Frontends (CLI flags/I/O, TUI, Telegram, dashboard) collect config and render
 results; they should not rebuild CodingAgent independently.
 
+### Adaptive model-routing boundary
+
+All inference lanes resolve through `mana_agent.model_routing.ModelRouter`. The gateway inventories repository language/framework/build and changed-scope metadata once per fingerprint, then the router validates profile capabilities, context, availability, latency, budget and verification reserve before applying its deterministic evidence score. Legacy logical levels seed profiles but never bypass the router. Invalid or missing decisions stop execution.
+
+High-demand coding decisions may select two author configurations when isolation, latency, and budget policy allow. Candidate executors must use separate managed worktrees or patch roots; normalized diffs and executed check evidence go to an independently routed verifier when available. The winner alone may be promoted. See [Evidence-based model routing](model-routing.md).
+
 ### Prompting and flow context
 
 - **`src/mana_agent/agent/flow.py`** builds an `AgentFlow` (goal + phase + verification
