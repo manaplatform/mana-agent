@@ -249,6 +249,7 @@ class AgentChatGateway:
         self._chat_service = self._stack.chat_service
         self._coding_agent = self._stack.coding_agent
         self._tools_orchestrator = self._stack.tools_orchestrator
+        self.execution_manager = self._stack.execution_manager
         self._coding_agent_max_steps = self._stack.coding_agent_max_steps
         self._resolved_k = self._stack.resolved_k
         self._coding_agent_is_custom = self._stack.coding_agent_is_custom

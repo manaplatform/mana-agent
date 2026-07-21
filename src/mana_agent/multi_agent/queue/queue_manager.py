@@ -11,6 +11,7 @@ from mana_agent.multi_agent.queue.locks import LockTable
 from mana_agent.multi_agent.queue.scheduler import next_job
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
+from mana_agent.execution.manager import ExecutionManager
 
 
 class QueueManager:
@@ -23,11 +24,14 @@ class QueueManager:
         memory_service: MultiAgentMemoryService | None = None,
         hierarchy_policy: HierarchyPolicy | None = None,
         default_worker_agent_id: str = "agent_tool_worker_0001",
+        execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.memory_service = memory_service
         self.taskboard = taskboard or TaskBoard(root, memory_service=memory_service)
-        self.tools_manager = tools_manager or ToolsManager(root, memory_service=memory_service)
+        self.tools_manager = tools_manager or ToolsManager(
+            root, memory_service=memory_service, execution_manager=execution_manager
+        )
         self.hierarchy_policy = hierarchy_policy or HierarchyPolicy(taskboard=self.taskboard)
         self.default_worker_agent_id = default_worker_agent_id
         self.jobs: dict[str, QueueJob] = {}

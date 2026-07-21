@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.doctor.checks import codex, configuration, filesystem, protocols, runtime
+from mana_agent.doctor.checks import codex, configuration, execution, filesystem, protocols, runtime
 from mana_agent.doctor.models import DoctorCheck
 
 
@@ -9,6 +9,7 @@ CHECKS: tuple[DoctorCheck, ...] = (
     DoctorCheck("runtime/package-version", "Runtime", "Compare package versions.", runtime.version_consistency),
     DoctorCheck("installation/executable-path", "Installation", "Locate console script.", runtime.installation),
     DoctorCheck("tools/requirements", "Tools", "Locate Git.", runtime.git_available),
+    DoctorCheck("execution/providers", "Execution", "Validate sandbox providers.", execution.providers),
     DoctorCheck("config/parse", "Configuration", "Parse managed configuration.", configuration.parse),
     DoctorCheck("config/schema", "Configuration", "Validate managed configuration.", configuration.schema),
     DoctorCheck("config/file-permissions", "Configuration", "Validate sensitive file modes.", configuration.permissions, configuration.repair_permissions),

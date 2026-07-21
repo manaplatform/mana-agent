@@ -32,6 +32,7 @@ from mana_agent.multi_agent.runtime.tools_executor import (
 from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 from mana_agent.services.chat_service import ChatService
 from mana_agent.memory import CodingMemoryService, MemoryService
+from mana_agent.execution import ExecutionManager, build_execution_manager
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ class ChatStack:
     workspace_id: str | None = None
     repository_id: str | None = None
     log_path: Path | None = None
+    execution_manager: ExecutionManager | None = None
 
 
 def build_chat_stack(
@@ -212,6 +214,7 @@ def build_chat_stack(
         ttl_seconds=resolved_redis_ttl_seconds,
     )
     tools_execution_boot_warnings: list[str] = []
+    execution_manager = build_execution_manager(settings, event_sink=cfg.event_sink)
 
     session_id = cfg.session_id or f"sess-{uuid.uuid4().hex}"
     log_path = default_logs_dir(root) / f"mana_agent_{__import__('datetime').datetime.now().strftime('%Y%m%d')}.log"
@@ -270,6 +273,10 @@ def build_chat_stack(
             max_indexes=cfg.max_indexes,
             auto_index_missing=cfg.auto_index_missing,
         )
+
+    gateway_ask_agent = getattr(ask_service, "ask_agent", None)
+    if gateway_ask_agent is not None and hasattr(gateway_ask_agent, "execution_manager"):
+        gateway_ask_agent.execution_manager = execution_manager
 
     effective_model = resolve_model_for_role(
         AgentRole.MAIN,
@@ -456,6 +463,7 @@ def build_chat_stack(
         tools_executor=tools_executor_instance,
         tools_execution_config=tools_execution_config,
         tools_execution_boot_warnings=tools_execution_boot_warnings,
+        execution_manager=execution_manager,
         coding_agent_is_custom=coding_agent_is_custom,
         effective_model=effective_model,
         chat_agent_max_steps=chat_agent_max_steps,

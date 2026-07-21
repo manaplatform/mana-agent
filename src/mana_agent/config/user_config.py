@@ -134,6 +134,14 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_LANE_PROVIDER_LIMITS": {},
     "MANA_LANE_SESSION_TOKEN_BUDGET": 0,
     "MANA_LANE_GLOBAL_TOKEN_BUDGET": 0,
+    "MANA_EXECUTION_DEFAULT_PROVIDER": "local-process",
+    "MANA_EXECUTION_ALLOWED_PROVIDERS": ["local-process", "local-docker", "remote-ssh", "kubernetes", "modal", "custom-http-runtime"],
+    "MANA_EXECUTION_CLEANUP_ON_EXIT": True,
+    "MANA_EXECUTION_IDLE_TIMEOUT_SECONDS": 900,
+    "MANA_EXECUTION_MAX_LIFETIME_SECONDS": 7200,
+    "MANA_EXECUTION_GLOBAL_CONCURRENCY": 16,
+    "MANA_EXECUTION_ROUTING": {},
+    "MANA_EXECUTION_PROVIDERS": {},
     "experience_to_skill": {
         "enabled": True,
         "auto_propose": True,
@@ -232,6 +240,14 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_LANE_PROVIDER_LIMITS": "mana_lane_provider_limits",
     "MANA_LANE_SESSION_TOKEN_BUDGET": "mana_lane_session_token_budget",
     "MANA_LANE_GLOBAL_TOKEN_BUDGET": "mana_lane_global_token_budget",
+    "MANA_EXECUTION_DEFAULT_PROVIDER": "mana_execution_default_provider",
+    "MANA_EXECUTION_ALLOWED_PROVIDERS": "mana_execution_allowed_providers",
+    "MANA_EXECUTION_CLEANUP_ON_EXIT": "mana_execution_cleanup_on_exit",
+    "MANA_EXECUTION_IDLE_TIMEOUT_SECONDS": "mana_execution_idle_timeout_seconds",
+    "MANA_EXECUTION_MAX_LIFETIME_SECONDS": "mana_execution_max_lifetime_seconds",
+    "MANA_EXECUTION_GLOBAL_CONCURRENCY": "mana_execution_global_concurrency",
+    "MANA_EXECUTION_ROUTING": "mana_execution_routing",
+    "MANA_EXECUTION_PROVIDERS": "mana_execution_providers",
 }
 
 CONFIG_WRITE_ORDER = [

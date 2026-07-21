@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-21
+
+- Added a provider-neutral Remote Execution Fabric with typed sandbox, routing, resource, network, secret, artifact, snapshot, health, and lifecycle contracts; atomic handle/lease persistence; restart cleanup; sanitized lifecycle events; bounded concurrency; and fail-closed capability enforcement.
+  - Registered `local-process`, `local-docker`, `remote-ssh`, `kubernetes`, `modal`, and `custom-http-runtime` behind one asynchronous provider interface. Existing trusted local queued shell execution now runs through the gateway-owned `ExecutionManager` and preserves managed-worktree identity, while Docker/SSH use safe argv construction and Kubernetes/Modal/HTTP dependencies remain optional with actionable configuration errors.
+  - Added the reusable provider contract/security tests, provider doctor diagnostics, optional SDK extras, architecture and lifecycle mapping, provider configuration/setup/troubleshooting guidance, the versioned custom HTTP contract, and security enforcement limitations. Real Docker, SSH, Kubernetes, Modal, and HTTP integration tests were not run because corresponding external infrastructure and credentials were not configured.
+  - Verification: `MANA_HOME=/tmp/mana-remote-execution-test-home PYTHONPATH=src .venv/bin/pytest -q` passed (1,129 passed, 1 skipped); the final execution/AskAgent/gateway/tool suite passed (112 tests), and the worktree/doctor compatibility suite passed in the earlier 97-test focused run; focused Ruff, Python compilation, and `git diff --check` passed. The non-isolated full suite was also attempted and exposed the existing external-memory `MemoryConfigurationError`; the isolated full suite above passed.
+
 ## 2026-07-20
 
 - Added webhook-driven GitHub App Autopilot with signed raw-body ingress, durable delivery/job persistence, deterministic validated event routing, actor authorization, installation-scoped authentication, persistent task sessions, isolated worktrees, Codex-only execution, verification gates, deterministic branches, and draft pull-request lifecycle support.

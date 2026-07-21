@@ -1,5 +1,17 @@
 # Security Policy
 
+## Remote execution fabric
+
+Task commands execute through a capability-checked sandbox provider. The local
+provider explicitly reports that it cannot isolate networks; requests requiring
+isolation fail closed. Routing decisions and persisted sandbox specifications
+contain secret references only. Values are resolved at the provider boundary,
+redacted from captured output where known, and excluded from events, snapshots,
+artifacts, and errors. SSH host-key verification is enabled by default, artifact
+paths are workspace-confined and symlink-safe, and cleanup failures never erase
+the original task failure. See `docs/execution-providers.md` for enforcement
+limitations that must be considered when enabling remote providers.
+
 Mana-Agent takes security seriously. We appreciate responsible disclosure of security issues and will work to investigate, validate, and resolve legitimate vulnerabilities as quickly as possible.
 
 This document describes how to report vulnerabilities, how reports are handled, and the security principles followed by Mana-Agent.

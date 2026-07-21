@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-import subprocess
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +15,29 @@ from mana_agent.multi_agent.tools.permissions import assert_shell_allowed
 from mana_agent.tools.apply_patch import safe_apply_patch
 from mana_agent.tools.repository import repo_batch_read, repo_search
 from mana_agent.mcp import McpClient, load_mcp_servers
+from mana_agent.execution import build_execution_manager
+from mana_agent.execution.manager import ExecutionManager
+from mana_agent.execution.models import (
+    ExecutionRequest,
+    NetworkPolicy,
+    ResourceLimits,
+    RoutingRequest,
+    SandboxSpec,
+)
+from mana_agent.config.settings import Settings
 
 
 class ToolsManager:
-    def __init__(self, root: str | Path = ".", *, memory_service: MultiAgentMemoryService | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path = ".",
+        *,
+        memory_service: MultiAgentMemoryService | None = None,
+        execution_manager: ExecutionManager | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         self.memory_service = memory_service
+        self.execution_manager = execution_manager or build_execution_manager(Settings())
         self._result_cache: dict[str, dict[str, Any]] = {}
 
     def execution_root_for_job(self, job: QueueJob) -> Path:
@@ -291,18 +308,51 @@ class ToolsManager:
     def _shell(self, job: QueueJob, command: str, *, root: Path | None = None) -> ToolResult:
         assert_shell_allowed(command)
         cwd = Path(root or self.execution_root_for_job(job)).resolve()
-        result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, shell=True, timeout=120)
+        routing_payload = (job.payload or {}).get("sandbox_routing")
+        if isinstance(routing_payload, dict):
+            routing = RoutingRequest.model_validate(routing_payload)
+        else:
+            # Queue jobs are created only after a validated agent decision. This
+            # explicit compatibility decision preserves trusted local execution;
+            # it is persisted by the fabric and never chosen from command text.
+            routing = RoutingRequest(
+                decision_id=f"queue:{job.job_id}",
+                explicit_provider=self.execution_manager.config.default_provider,
+                trust_level="trusted",
+                risk_level="low",
+                resources=ResourceLimits(),
+                network=NetworkPolicy(),
+            )
+        shell_argv = ["cmd.exe", "/d", "/s", "/c", command] if os.name == "nt" else ["/bin/sh", "-lc", command]
+        spec = SandboxSpec(
+            provider_override=routing.explicit_provider,
+            repository_source=cwd,
+            task_id=job.task_id,
+            session_id=str(getattr(job, "session_id", "") or ""),
+            workspace_id=str(getattr(job, "workspace_id", "") or ""),
+            execution_timeout_seconds=int((job.payload or {}).get("timeout_seconds") or 120),
+        )
+        result = self.execution_manager.execute_once_sync(
+            spec,
+            routing,
+            ExecutionRequest(
+                argv=shell_argv,
+                timeout_seconds=spec.execution_timeout_seconds,
+            ),
+        )
         return ToolResult(
             new_message_id(),
             job.task_id,
-            result.returncode == 0,
+            result.exit_code == 0,
             {
                 "stdout": result.stdout,
                 "stderr": result.stderr,
-                "returncode": result.returncode,
+                "returncode": result.exit_code,
                 "execution_repo_root": str(cwd),
+                "sandbox_id": result.sandbox_id,
+                "execution_provider": result.provider,
             },
-            None if result.returncode == 0 else result.stderr,
+            None if result.exit_code == 0 else result.stderr,
         )
 
     def _resolve_path(self, path: str, *, root: Path | None = None) -> Path:

@@ -50,6 +50,9 @@ from mana_agent.tools.repository import (
 from mana_agent.skills.manager import SkillManager
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.mcp.tools import discovered_mcp_langchain_tools
+from mana_agent.execution.manager import ExecutionManager
+from mana_agent.execution.models import ExecutionRequest, RoutingRequest, SandboxSpec
+from mana_agent.execution.errors import ExecutionTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +258,7 @@ class AskAgent:
         project_root: str | Path,
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
+        execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
         self.model = model
@@ -263,6 +267,7 @@ class AskAgent:
         self.search_service = search_service
         self.project_root = Path(project_root).resolve()
         self.coding_memory_service = coding_memory_service
+        self.execution_manager = execution_manager
         self._resolved_index = default_index_dir(self.project_root)
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
@@ -1311,35 +1316,65 @@ class AskAgent:
                 if self._is_blocked_command(executed_cmd):
                     raise PermissionError("command blocked by safety policy")
                 shlex.split(executed_cmd)
-                completed = subprocess.run(
-                    executed_cmd,
-                    cwd=self.project_root,
-                    shell=True,
-                    check=False,
-                    timeout=timeout_seconds,
-                    capture_output=True,
-                    text=True,
-                )
+                execution_manager = getattr(self, "execution_manager", None)
+                if execution_manager is None:
+                    completed = subprocess.run(
+                        executed_cmd,
+                        cwd=self.project_root,
+                        shell=True,
+                        check=False,
+                        timeout=timeout_seconds,
+                        capture_output=True,
+                        text=True,
+                    )
+                    returncode = completed.returncode
+                    stdout = completed.stdout
+                    stderr = completed.stderr
+                    sandbox_id = ""
+                    provider = "legacy-test-injection"
+                else:
+                    shell_argv = ["cmd.exe", "/d", "/s", "/c", executed_cmd] if os.name == "nt" else ["/bin/sh", "-lc", executed_cmd]
+                    execution = execution_manager.execute_once_sync(
+                        SandboxSpec(
+                            provider_override=execution_manager.config.default_provider,
+                            repository_source=self.project_root,
+                            execution_timeout_seconds=timeout_seconds,
+                        ),
+                        RoutingRequest(
+                            decision_id=f"ask:{run_id}",
+                            explicit_provider=execution_manager.config.default_provider,
+                            trust_level="trusted",
+                            risk_level="low",
+                        ),
+                        ExecutionRequest(argv=shell_argv, timeout_seconds=timeout_seconds),
+                    )
+                    returncode = execution.exit_code
+                    stdout = execution.stdout
+                    stderr = execution.stderr
+                    sandbox_id = execution.sandbox_id
+                    provider = execution.provider
                 payload = {
-                    "returncode": completed.returncode,
-                    "stdout": completed.stdout[:4000],
-                    "stderr": completed.stderr[:4000],
+                    "returncode": returncode,
+                    "stdout": stdout[:4000],
+                    "stderr": stderr[:4000],
                     "original_cmd": str(cmd or ""),
                     "executed_cmd": executed_cmd,
                     "interpreter_rewritten": bool(rewritten),
+                    "sandbox_id": sandbox_id,
+                    "execution_provider": provider,
                 }
                 encoded = json.dumps(payload)
                 output_preview = json.dumps(
                     {
-                        "returncode": completed.returncode,
-                        "stdout": completed.stdout,
-                        "stderr": completed.stderr,
+                        "returncode": returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
                         "executed_cmd": executed_cmd,
                         "interpreter_rewritten": bool(rewritten),
                     }
                 )
                 return encoded
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, ExecutionTimeoutError):
                 status = "timeout"
                 output_preview = "command timed out"
                 return json.dumps({"error": f"command timed out after {timeout_seconds}s"})

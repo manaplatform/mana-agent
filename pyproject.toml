@@ -65,6 +65,9 @@ protocols = [
   "agent-client-protocol>=0.11,<0.12",
   "a2a-sdk[http-server]>=1.1,<2.0",
 ]
+execution-kubernetes = ["kubernetes>=30,<35"]
+execution-modal = ["modal>=0.64,<2"]
+execution = ["kubernetes>=30,<35", "modal>=0.64,<2"]
 
 # Grok Build: optional dashboard + automations extras (Phase 1)
 # These keep the core CLI + multi-agent runtime dependency-free.

@@ -165,6 +165,21 @@ class Settings(BaseSettings):
     mana_lane_provider_limits: dict[str, int] | str = Field(default_factory=dict, alias="MANA_LANE_PROVIDER_LIMITS")
     mana_lane_session_token_budget: int | None = Field(default=None, alias="MANA_LANE_SESSION_TOKEN_BUDGET")
     mana_lane_global_token_budget: int | None = Field(default=None, alias="MANA_LANE_GLOBAL_TOKEN_BUDGET")
+    # Provider-neutral task execution. Provider details are structured JSON in
+    # user config and contain references to secrets, never secret values.
+    mana_execution_default_provider: str = Field(default="local-process", alias="MANA_EXECUTION_DEFAULT_PROVIDER")
+    mana_execution_allowed_providers: list[str] | str = Field(
+        default_factory=lambda: [
+            "local-process", "local-docker", "remote-ssh", "kubernetes", "modal", "custom-http-runtime",
+        ],
+        alias="MANA_EXECUTION_ALLOWED_PROVIDERS",
+    )
+    mana_execution_cleanup_on_exit: bool = Field(default=True, alias="MANA_EXECUTION_CLEANUP_ON_EXIT")
+    mana_execution_idle_timeout_seconds: int = Field(default=900, alias="MANA_EXECUTION_IDLE_TIMEOUT_SECONDS")
+    mana_execution_max_lifetime_seconds: int = Field(default=7200, alias="MANA_EXECUTION_MAX_LIFETIME_SECONDS")
+    mana_execution_global_concurrency: int = Field(default=16, alias="MANA_EXECUTION_GLOBAL_CONCURRENCY")
+    mana_execution_routing: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_EXECUTION_ROUTING")
+    mana_execution_providers: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_EXECUTION_PROVIDERS")
 
     # Mana-managed settings are intentionally repository-independent.  Loading
     # a project's ``.env`` here can silently replace the API key selected in
