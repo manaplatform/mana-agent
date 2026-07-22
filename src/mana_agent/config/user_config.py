@@ -164,6 +164,9 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_BROWSER_UPLOAD_ROOTS": "",
     "MANA_BROWSER_ARTIFACT_DIR": "",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": 30,
+    # Empty is the compatibility sentinel; the configuration TUI persists an
+    # explicit value when the user saves its coding-runtime screen.
+    "MANA_CODING_BACKEND": "",
     "MANA_CODEX_ENABLED": True,
     "MANA_CODEX_MAX_WORKERS": 2,
     "MANA_CODEX_STREAM_EVENTS": True,
@@ -296,6 +299,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_BROWSER_UPLOAD_ROOTS": "mana_browser_upload_roots",
     "MANA_BROWSER_ARTIFACT_DIR": "mana_browser_artifact_dir",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": "mana_browser_profile_max_age_days",
+    "MANA_CODING_BACKEND": "mana_coding_backend",
     "MANA_CODEX_ENABLED": "mana_codex_enabled",
     "MANA_CODEX_MAX_WORKERS": "mana_codex_max_workers",
     "MANA_CODEX_STREAM_EVENTS": "mana_codex_stream_events",
@@ -403,6 +407,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_UPLOAD_ROOTS",
     "MANA_BROWSER_ARTIFACT_DIR",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
+    "MANA_CODING_BACKEND",
     "MANA_CODEX_ENABLED",
     "MANA_CODEX_MAX_WORKERS",
     "MANA_CODEX_STREAM_EVENTS",

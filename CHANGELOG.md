@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-22
 
+- Added explicit, shared `codex`/`internal` coding-backend selection across the gateway-owned CLI, TUI, API, and dashboard stack. Disabling Codex now activates Mana-Agent's existing model-driven internal coding tools without starting or authenticating Codex, while a selected Codex turn remains fail-closed with no runtime fallback.
+  - Added a backend-neutral, ordered live coding event contract with Codex notification normalization, internal tool lifecycle emission, duplicate suppression, bounded/redacted output, durable session events, turn-scoped delivery, and a responsive Textual execution panel for backend/model, activity, output, timing, and token usage.
+  - Added the coding-runtime configuration controls and documented the backward-compatible default rule: missing backend settings select Codex when enabled and internal when disabled; contradictory explicit Codex settings fail validation.
+  - Verification: the affected backend-selection, internal-agent, Codex, gateway, TUI layout/live-tool, user-config, conversation persistence, WebSocket, and API suite passed (220 tests); the isolated full suite passed (1,201 passed, 2 skipped); touched-file Ruff, Python source/test compilation, and `git diff --check` passed with the repository Python 3.12 environment.
+
 - Fixed the tool-backed chat rendering smoke test to use its isolated temporary workspace instead of the CI checkout, preventing Windows checkout-permission failures while preserving its telemetry assertion.
   - Verification: targeted CLI smoke regression passed locally.
 

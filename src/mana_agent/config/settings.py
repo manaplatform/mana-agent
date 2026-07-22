@@ -169,6 +169,8 @@ class Settings(BaseSettings):
     # under ~/.mana/repositories/<repository-id>/worktrees/ instead of mutating the
     # primary checkout. Explicit merge intent is still required after review.
     mana_managed_worktrees_enabled: bool = Field(default=True, alias="MANA_MANAGED_WORKTREES_ENABLED")
+    # Empty preserves pre-0.0.19 configurations: Codex when enabled, internal otherwise.
+    mana_coding_backend: str = Field(default="", alias="MANA_CODING_BACKEND")
     mana_codex_enabled: bool = Field(default=True, alias="MANA_CODEX_ENABLED")
     mana_codex_max_workers: int = Field(default=2, alias="MANA_CODEX_MAX_WORKERS")
     mana_codex_stream_events: bool = Field(default=True, alias="MANA_CODEX_STREAM_EVENTS")

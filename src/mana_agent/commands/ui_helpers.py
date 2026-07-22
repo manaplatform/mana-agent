@@ -637,6 +637,16 @@ def emit_tool_event(
     resolved_model: str = "",
 ) -> None:
     """Send a tool start/end/error event to the active chat log, if any."""
+    from mana_agent.coding.live_events import publish_internal_tool_event
+
+    publish_internal_tool_event(
+        kind,
+        tool,
+        args=args,
+        duration=duration,
+        error=error,
+        event_id=event_id,
+    )
     activity = _ACTIVE_TOOL_ACTIVITY
     if activity is None:
         return

@@ -119,13 +119,19 @@ class CodexCodingBackend:
             raise CodexUnavailableError("Codex app-server did not start")
         async with self._run_lock:
             notifications: list[dict[str, Any]] = []
+            seen_event_ids: set[str] = set()
+            sequence = 0
             thread_id = ""
             turn_id = ""
+            sequence += 1
             yield AgentEvent(
-                event_type="codex.worker.created",
+                event_type="backend.selected",
                 task_id=task.task_id,
-                title="Codex worker created",
+                backend="codex",
+                sequence=sequence,
+                title="Codex backend selected",
                 summary=self.worker_id,
+                model=self.settings.model or "",
             )
             try:
                 if self.resume_thread_id:
@@ -140,11 +146,15 @@ class CodexCodingBackend:
                     thread_id = self.resume_thread_id
                 if not thread_id:
                     raise CodexExecutionError("Codex thread/start returned no thread id")
+                sequence += 1
                 yield AgentEvent(
-                    event_type="codex.thread.started",
+                    event_type="turn.started",
                     task_id=task.task_id,
-                    title="Codex thread started",
+                    backend="codex",
+                    sequence=sequence,
+                    title="Codex turn started",
                     thread_id=thread_id,
+                    model=self.settings.model or "",
                 )
                 turn_response = await self._client.request(
                     "turn/start",
@@ -171,9 +181,18 @@ class CodexCodingBackend:
                         notification = await asyncio.wait_for(anext(iterator), timeout=remaining)
                     except StopAsyncIteration:
                         break
+                    event = adapt_codex_event(
+                        task.task_id,
+                        notification,
+                        sequence=sequence + 1,
+                        model=self.settings.model or "",
+                    )
+                    if event.event_id in seen_event_ids:
+                        continue
+                    seen_event_ids.add(event.event_id)
+                    sequence += 1
                     notifications.append(notification)
-                    event = adapt_codex_event(task.task_id, notification)
-                    if event.event_type == "codex.approval.required":
+                    if event.event_type == "warning" and "approval" in str(notification.get("method") or "").lower():
                         await self._client.deny_server_request(notification)
                         raise CodexExecutionError(
                             "Codex requested approval. Mana-Agent denied the request and did not elevate permissions."
@@ -186,21 +205,27 @@ class CodexCodingBackend:
                     {"method": "turn/failed", "params": {"message": "Codex task timed out"}}
                 )
                 yield AgentEvent(
-                    event_type="codex.worker.failed",
+                    event_type="error",
                     task_id=task.task_id,
+                    backend="codex",
+                    sequence=sequence + 1,
                     status="failed",
                     title="Codex task timed out",
+                    error="Codex task timed out",
                     thread_id=thread_id,
                     turn_id=turn_id,
                 )
             except CodexError as exc:
                 notifications.append({"method": "turn/failed", "params": {"message": str(exc)}})
                 yield AgentEvent(
-                    event_type="codex.worker.failed",
+                    event_type="error",
                     task_id=task.task_id,
+                    backend="codex",
+                    sequence=sequence + 1,
                     status="failed",
                     title="Codex task failed",
                     summary=str(exc),
+                    error=str(exc),
                     thread_id=thread_id,
                     turn_id=turn_id,
                 )

@@ -175,6 +175,20 @@ class ManaConfigurationApp(App[bool]):
                 yield Label("Embedding model", classes="section-title")
                 yield Static("Only embedding-capable models are offered after catalog refresh.", classes="hint")
                 yield Select(self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True), id="embedding-model", allow_blank=False)
+            with TabPane("Coding runtime", id="coding-runtime"):
+                yield Label("Coding backend", classes="section-title")
+                yield Select(
+                    [("Codex app-server", "codex"), ("Mana-Agent internal", "internal")],
+                    value=str(values.get("MANA_CODING_BACKEND") or ("codex" if values.get("MANA_CODEX_ENABLED", True) else "internal")),
+                    id="coding-backend",
+                    allow_blank=False,
+                )
+                yield Switch(value=bool(values.get("MANA_CODEX_ENABLED", True)), id="codex-enabled")
+                yield Label("Enable the Codex integration", classes="hint")
+                yield Static(
+                    "Backend selection is fixed before each coding turn. Codex failures are never retried through the internal backend.",
+                    classes="hint",
+                )
             with TabPane("Memory", id="memory"):
                 yield Label("Memory mode", classes="section-title")
                 yield Select(
@@ -301,6 +315,7 @@ class ManaConfigurationApp(App[bool]):
             f"Web search        {search}\n"
             f"GitHub            {github}\n"
             f"Memory            {memory}"
+            f"\nCoding backend    {v.get('MANA_CODING_BACKEND') or ('codex' if v.get('MANA_CODEX_ENABLED', True) else 'internal')}"
         )
 
     def _role_mapping_text(self) -> str:
@@ -341,6 +356,8 @@ class ManaConfigurationApp(App[bool]):
                 "MANA_MEMORY_MODE": str(self.query_one("#memory-mode", Select).value),
                 "MANA_MEMORY_PROVIDER": "mana" if str(self.query_one("#memory-mode", Select).value) == "internal" else str(self.query_one("#memory-provider", Select).value),
                 "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
+                "MANA_CODING_BACKEND": str(self.query_one("#coding-backend", Select).value),
+                "MANA_CODEX_ENABLED": self.query_one("#codex-enabled", Switch).value,
                 "MEM0_ORG_ID": self.query_one("#mem0-org-id", Input).value.strip(),
                 "MEM0_PROJECT_ID": self.query_one("#mem0-project-id", Input).value.strip(),
                 "MEM0_BASE_URL": self.query_one("#mem0-base-url", Input).value.strip(),
@@ -479,7 +496,7 @@ class ManaConfigurationApp(App[bool]):
             self.action_cancel()
         elif button_id in {"continue", "back"}:
             tabs = self.query_one(TabbedContent)
-            order = ["overview", "providers", "models", "embeddings", "memory", "search", "github", "protocols", "review"]
+            order = ["overview", "providers", "models", "embeddings", "coding-runtime", "memory", "search", "github", "protocols", "review"]
             current = order.index(tabs.active)
             tabs.active = order[min(len(order) - 1, current + (1 if button_id == "continue" else -1))]
 
@@ -500,8 +517,14 @@ class ManaConfigurationApp(App[bool]):
             if not self._memory_validated:
                 raise ValueError("Test the selected external memory provider before saving.")
             from mana_agent.protocols.common.config import validate_protocol_configuration
+            from types import SimpleNamespace
+            from mana_agent.coding.selection import resolve_coding_backend
 
             validate_protocol_configuration(self.draft.values)
+            resolve_coding_backend(SimpleNamespace(
+                mana_coding_backend=self.draft.values.get("MANA_CODING_BACKEND"),
+                mana_codex_enabled=self.draft.values.get("MANA_CODEX_ENABLED"),
+            ))
             self.draft.save()
         except Exception as exc:
             self.notify(str(exc), title="Configuration not saved", severity="error")

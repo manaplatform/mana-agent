@@ -458,7 +458,7 @@ def test_codex_events_are_mapped_to_mana_event_contract() -> None:
         "task-1",
         {"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "turn-1"}}},
     )
-    assert event.event_type == "codex.turn.completed"
+    assert event.event_type == "turn.completed"
     assert event.status == "success"
     assert event.thread_id == "thread-1"
     assert event.turn_id == "turn-1"

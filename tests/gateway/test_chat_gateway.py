@@ -23,6 +23,7 @@ from mana_agent.gateway import (
     RichChatContext,
 )
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.memory import MemoryContent, MemoryRecord
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.services.chat_session_history import ChatSessionHistory
@@ -270,6 +271,26 @@ def test_gateway_uses_codex_shim_without_legacy_coding_workers(
     assert "coding=codex-test-model" in model_log
     assert "planner=codex-owned" in model_log
     assert "tool_worker=disabled" in model_log
+
+
+def test_gateway_uses_internal_runtime_when_codex_is_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+        tool_worker_process=False,
+        auto_execute_plan=False,
+        settings=Settings(MANA_CODEX_ENABLED=False, OPENAI_API_KEY="test-key"),
+    )
+    context = gateway.get_rich_context()
+    assert isinstance(context.coding_agent, InternalCodingAgentShim)
+    assert not isinstance(context.coding_agent, CodexCodingAgentShim)
 
 
 def test_gateway_process_turn_ask_path(tmp_path: Path, monkeypatch) -> None:

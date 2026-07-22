@@ -10,6 +10,11 @@ from mana_agent.coding.models import (
 )
 from mana_agent.coding.orchestrator import CodingBackendOrchestrator
 from mana_agent.coding.registry import CodingBackendRegistry
+from mana_agent.coding.selection import (
+    CodingBackendConfigurationError,
+    CodingBackendSelection,
+    resolve_coding_backend,
+)
 
 __all__ = [
     "AgentEvent",
@@ -17,6 +22,9 @@ __all__ = [
     "CodingBackendDecision",
     "CodingBackendOrchestrator",
     "CodingBackendRegistry",
+    "CodingBackendConfigurationError",
+    "CodingBackendSelection",
+    "resolve_coding_backend",
     "CodingTask",
     "CodingTaskResult",
     "WorkspaceContext",

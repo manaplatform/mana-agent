@@ -21,6 +21,8 @@ from mana_agent.config.inference_provider import resolve_inference_connection
 from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
+from mana_agent.coding.selection import resolve_coding_backend
+from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
 from mana_agent.model_routing.repository import RepositoryMetadataInspector
@@ -351,8 +353,14 @@ def build_chat_stack(
     tool_worker_client = None
     tools_manager_orchestrator = cfg.tools_orchestrator
     tools_executor_instance = None
-    coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
-    coding_agent_is_custom = coding_agent_cls is not CodexCodingAgentShim
+    public_coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
+    coding_selection = resolve_coding_backend(settings)
+    coding_agent_cls = (
+        public_coding_agent_cls
+        if public_coding_agent_cls is not CodexCodingAgentShim
+        else (CodexCodingAgentShim if coding_selection.backend == "codex" else InternalCodingAgentShim)
+    )
+    coding_agent_is_custom = public_coding_agent_cls is not CodexCodingAgentShim
 
     def _build_tools_executor(worker_client: Any) -> Any:
         helper = _public_symbol("build_tools_executor_with_fallback", build_tools_executor_with_fallback)
@@ -401,7 +409,7 @@ def build_chat_stack(
             )
         else:
             if not cfg.agent_tools:
-                raise ValueError("custom coding_agent requires agent_tools (needs tool loop).")
+                raise ValueError("internal/custom coding_agent requires agent_tools (needs tool loop).")
             if ask_service is None or getattr(ask_service, "ask_agent", None) is None:
                 raise ValueError("custom coding_agent requires AskService.ask_agent to be configured.")
 
@@ -489,7 +497,7 @@ def build_chat_stack(
         routed_coding_model = coding_agent_instance.codex_settings.model or "app-server-default"
         planner_model = "codex-owned"
     elif coding_agent_instance is not None:
-        coding_backend = type(coding_agent_instance).__name__
+        coding_backend = "internal" if isinstance(coding_agent_instance, InternalCodingAgentShim) else type(coding_agent_instance).__name__
         coding_model = coding_model_assignment.resolved_model
         routed_coding_model = coding_model
         planner_model = planner_model_assignment.resolved_model

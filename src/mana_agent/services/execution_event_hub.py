@@ -18,7 +18,6 @@ from typing import Any, Callable
 
 from mana_agent.cli.events import ChatEvent, make_event, utc_now_iso
 from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
-from mana_agent.workspaces.store import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +94,7 @@ class ExecutionEventHub:
     keep_memory: int = 4000
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _memory: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _seen_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _subscribers: dict[str, list[Subscriber]] = field(
         default_factory=lambda: defaultdict(list), init=False, repr=False
     )
@@ -117,11 +117,19 @@ class ExecutionEventHub:
         )
         conversation = str(payload.get("conversation_id") or "").strip()
         repository = str(payload.get("repository_id") or "").strip()
+        event_id = str(payload.get("event_id") or payload.get("id") or "")
 
         with self._lock:
+            if event_id and event_id in self._seen_ids:
+                return payload
+            if event_id:
+                self._seen_ids.add(event_id)
             self._memory.append(payload)
             if len(self._memory) > self.keep_memory:
+                removed = self._memory[: len(self._memory) - self.keep_memory]
                 del self._memory[: len(self._memory) - self.keep_memory]
+                for row in removed:
+                    self._seen_ids.discard(str(row.get("event_id") or row.get("id") or ""))
             subscribers = list(self._global_subscribers)
             if conversation:
                 subscribers.extend(self._subscribers.get(conversation, []))
@@ -240,7 +248,10 @@ class ExecutionEventHub:
             merged[event_id] = row
         ordered = sorted(
             merged.values(),
-            key=lambda item: str(item.get("started_at") or item.get("timestamp") or ""),
+            key=lambda item: (
+                str(item.get("started_at") or item.get("timestamp") or ""),
+                int(item.get("sequence") or 0),
+            ),
         )
         return ordered[-limit:]
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.coding.live_events import publish_coding_event
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
@@ -360,6 +361,21 @@ class CodexCodingAgentShim:
 
     def _emit_event(self, event: AgentEvent) -> None:
         record_current(event.event_type, event.model_dump(mode="json"))
+        publish_coding_event(event)
+        if self.session_id and self.repository_id:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            get_execution_event_hub().publish(
+                {
+                    **event.model_dump(mode="json"),
+                    "type": event.event_type,
+                    "event_id": event.event_id,
+                    "metadata": event.payload,
+                },
+                conversation_id=self.session_id,
+                execution_id=event.task_id,
+                repository_id=self.repository_id,
+            )
         if self.event_sink is None:
             return
         payload = event.model_dump(mode="json")

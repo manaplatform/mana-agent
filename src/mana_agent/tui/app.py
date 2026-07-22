@@ -42,8 +42,6 @@ This guarantees tool visibility on *every* turn, not just the first message.
 from __future__ import annotations
 
 import asyncio
-import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +54,7 @@ from textual.widgets import Footer, Header, Static
 
 from mana_agent.chat.events import (
     AssistantMessageEvent,
+    CodingActivityEvent,
     StreamTokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -613,6 +612,9 @@ class ManaChatApp(App):
                     row = None
             if not isinstance(row, dict):
                 continue
+            if row.get("backend") in {"codex", "internal"} and row.get("event_type"):
+                # Already rendered live in the backend-neutral execution panel.
+                continue
             tname = str(row.get("tool_name") or row.get("tool") or "tool")
             args_summary = str(row.get("args_summary") or row.get("args") or tname)[:120]
             cid = str(row.get("call_id") or row.get("event_id") or f"gw-{tname}-{turn_id}-{idx}")
@@ -658,6 +660,12 @@ class ManaChatApp(App):
         """
         question = user_event.content
         turn_id = user_event.turn_id
+
+        def _on_coding_event(event: Any) -> None:
+            payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else dict(event)
+            # The frontend turn is authoritative for presentation. Provider turn
+            # IDs remain available inside the normalized activity payload.
+            self.history.add(CodingActivityEvent(activity=payload, turn_id=turn_id))
 
         # --- Planning collection state machine (mirrors console pre-generate logic) ---
         if self._in_planning_collection and self._planning_request:
@@ -734,7 +742,10 @@ class ManaChatApp(App):
 
                     tools_before = self._count_tool_events_for_turn(turn_id)
                     self.update_status("Routing via gateway (auto-chat / coding)…")
-                    result = await asyncio.to_thread(_run_gateway_turn)
+                    from mana_agent.coding.live_events import coding_event_scope
+
+                    with coding_event_scope(_on_coding_event):
+                        result = await asyncio.to_thread(_run_gateway_turn)
                     answer = str(getattr(result, "answer", "") or "")
                     if getattr(result, "error", None) and not answer:
                         answer = f"(Gateway error: {result.error})"
@@ -824,7 +835,6 @@ class ManaChatApp(App):
                     self.coding_agent is not None
                     and self.auto_execute_plan
                 )
-                auto_planning_turn = False  # extend with planning_request detection if full Q loop desired
                 execute_plan_now = bool(
                     self.auto_execute_plan
                     and not force_plan_only_response
@@ -838,9 +848,6 @@ class ManaChatApp(App):
 
                 # State for full-auto resume cycles (mirrors console)
                 turn_full_auto_resume_cycles = 0
-                turn_full_auto_passes_total = 0
-                turn_full_auto_pass_checkpoints_emitted = 0
-                turn_resumed_from_pass_cap = False
                 turn_resume_run_id: str | None = None
                 active_flow_id = self.active_flow_id
 
@@ -976,7 +983,10 @@ class ManaChatApp(App):
                 # and worker errors do not crash the TUI worker with traceback.
                 while True:
                     try:
-                        payload = await asyncio.to_thread(_run_coding_generation)
+                        from mana_agent.coding.live_events import coding_event_scope
+
+                        with coding_event_scope(_on_coding_event):
+                            payload = await asyncio.to_thread(_run_coding_generation)
                     except Exception as gen_exc:  # includes ExecutionScopeDecisionError, ToolWorkerProcessError etc.
                         # Surface gracefully (mirrors console except blocks).
                         # The emit bridge may have emitted ToolCards for work done before the decision failure.
@@ -1005,7 +1015,6 @@ class ManaChatApp(App):
                         turn_resume_run_id = r.strip()
                     if term != "pass_cap_reached":
                         break
-                    turn_resumed_from_pass_cap = True
                     turn_full_auto_resume_cycles += 1
                     # In real console a new resume request is built; here we simply loop once more
                     # with the same request (the agent itself manages state via flow_id/run_id).
@@ -1062,6 +1071,8 @@ class ManaChatApp(App):
                 if isinstance(result, dict):
                     for row in (result.get("actions_taken") or []):
                         if not isinstance(row, dict):
+                            continue
+                        if row.get("backend") in {"codex", "internal"} and row.get("event_type"):
                             continue
                         tname = str(row.get("tool_name") or row.get("tool") or row.get("name") or "tool")
                         args_val = row.get("args") or row.get("input") or row.get("tool_args") or {}

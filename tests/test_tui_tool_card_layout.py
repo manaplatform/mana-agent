@@ -8,6 +8,7 @@ from textual.widgets import Collapsible
 
 from mana_agent.chat.events import (
     AssistantMessageEvent,
+    CodingActivityEvent,
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
@@ -15,6 +16,7 @@ from mana_agent.chat.events import (
 from mana_agent.chat.history import ChatHistory
 from mana_agent.tui.app import ManaChatApp
 from mana_agent.tui.widgets.selectable_text import SelectableText
+from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.tool_card import ToolCard
 
 
@@ -53,6 +55,61 @@ def test_message_widgets_support_textual_mouse_selection_and_copy() -> None:
             user_message.focus()
             await pilot.press("ctrl+c")
             assert copied == ["copy"]
+
+    _run(run())
+
+
+def test_coding_activity_updates_one_turn_scoped_panel_live() -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history)
+
+    async def run() -> None:
+        async with app.run_test(size=(60, 24)) as pilot:
+            history.add(CodingActivityEvent(
+                turn_id="frontend-turn",
+                activity={
+                    "event_id": "coding-start",
+                    "event_type": "tool.call.started",
+                    "backend": "codex",
+                    "model": "gpt-test",
+                    "status": "running",
+                    "title": "pytest -q",
+                },
+            ))
+            await pilot.pause()
+            panel = app.query_one(ExecutionPanel)
+            assert panel.activity_log is not None and "pytest -q" in panel.activity_log.text
+
+            history.add(CodingActivityEvent(
+                turn_id="frontend-turn",
+                activity={
+                    "event_id": "coding-done",
+                    "event_type": "tool.call.completed",
+                    "backend": "codex",
+                    "status": "success",
+                    "title": "pytest -q",
+                    "duration_ms": 12,
+                    "token_usage": {"total_tokens": 25},
+                },
+            ))
+            await pilot.pause()
+            assert len(app.query(ExecutionPanel)) == 1
+            assert panel.footer is not None and "25 tokens" in str(panel.footer.render())
+            history.add(CodingActivityEvent(
+                turn_id="frontend-turn",
+                activity={
+                    "event_id": "turn-done",
+                    "event_type": "turn.completed",
+                    "backend": "codex",
+                    "status": "success",
+                    "title": "Coding turn completed",
+                },
+            ))
+            await pilot.pause()
+            assert panel.details is not None and panel.details.collapsed
+            await pilot.resize_terminal(42, 24)
+            await pilot.pause()
+            assert panel.size.width > 1
 
     _run(run())
 
