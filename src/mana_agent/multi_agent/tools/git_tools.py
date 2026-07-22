@@ -127,6 +127,8 @@ def _run_raw_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess
         ["git", *args],
         cwd=cwd,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         capture_output=True,
         timeout=timeout,
         check=False,
@@ -262,13 +264,10 @@ def run_git(
         ).to_dict()
     started = time.perf_counter()
     try:
-        completed = subprocess.run(
-            ["git", *normalized],
+        completed = _run_raw_git(
+            normalized,
             cwd=repo_root,
-            text=True,
-            capture_output=True,
             timeout=max(1, min(int(timeout or _DEFAULT_TIMEOUT_SECONDS), 900)),
-            check=False,
         )
         duration = round((time.perf_counter() - started) * 1000.0, 3)
         observation = observe_git_state(repo_root)

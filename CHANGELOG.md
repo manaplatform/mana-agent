@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-22
 
+- Made Git subprocess output decoding deterministic with UTF-8 and lossless surrogate handling, preventing Windows code-page corruption of Unicode filenames during repository preparation and Git inspection.
+  - Verification: Pending targeted repository-preparation and full-suite checks.
+
 - Fixed coding runs for valid user-selected directories that have not yet been initialized as Git repositories. The gateway and multi-agent runtimes now use one locked workspace/repository preparation boundary that preserves existing files, initializes new repositories on `main` without staging or committing, reconciles canonical persistence records, recognizes Git worktrees, and avoids nested repositories when a valid parent repository owns the selected subdirectory. Bare, corrupt, stale, unsafe, unavailable-Git, permission, initialization, and persistence failures now stop before Codex with phase-specific errors.
   - Verification: focused repository-preparation, gateway, Codex, workspace, and multi-agent tests passed (129 tests); the required repository/workspace/gateway/Codex selection passed (170 tests, 1,023 deselected); the full suite passed (1,192 passed, 2 skipped); touched-file Ruff, `python -m compileall src tests`, `git diff --check`, and manual non-Git/repeated-run/parent-repository coding-start checks passed. Repository-wide Ruff still reports 807 unrelated pre-existing findings outside this change.
 

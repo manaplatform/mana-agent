@@ -101,6 +101,8 @@ def _run_git(
         [git_executable, *args],
         cwd=cwd,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         capture_output=True,
         timeout=timeout,
         check=False,

@@ -35,7 +35,14 @@ def _now() -> str:
 def _git(path: Path, *args: str) -> str:
     try:
         result = subprocess.run(
-            ["git", *args], cwd=path, text=True, capture_output=True, timeout=10, check=False
+            ["git", *args],
+            cwd=path,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            capture_output=True,
+            timeout=10,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

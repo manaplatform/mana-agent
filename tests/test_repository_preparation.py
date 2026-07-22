@@ -22,9 +22,33 @@ def _git(path: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         ["git", *args],
         cwd=path,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         capture_output=True,
         check=check,
     )
+
+
+def test_git_helper_uses_lossless_utf8_decoding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, "?? existing-π.txt\x00", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = _git(tmp_path, "status", "--short", "-z")
+
+    assert result.stdout == "?? existing-π.txt\x00"
+    assert calls == [{
+        "cwd": tmp_path,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "surrogateescape",
+        "capture_output": True,
+        "check": True,
+    }]
 
 
 def _init(path: Path, *, commit: bool = False) -> None:
