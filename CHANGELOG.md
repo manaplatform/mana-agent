@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-22
 
+- Fixed the tool-backed chat rendering smoke test to use its isolated temporary workspace instead of the CI checkout, preventing Windows checkout-permission failures while preserving its telemetry assertion.
+  - Verification: targeted CLI smoke regression passed locally.
+
 - Made Git subprocess output decoding deterministic with UTF-8 and lossless surrogate handling, preventing Windows code-page corruption of Unicode filenames during repository preparation and Git inspection.
   - Verification: repository-preparation and Git-tool regression tests, touched-file Ruff, and Python compilation passed; the isolated full suite is running.
 
