@@ -8,7 +8,10 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from mana_agent.workspaces.preparation import PreparedRepository
 
 from mana_agent.utils.project_discovery import MANIFEST_FILENAMES, MANIFEST_GLOBS
 from mana_agent.workspaces.context import WorkspaceContext
@@ -185,6 +188,28 @@ class WorkspaceService:
         self._import_legacy_state(record)
         return record
 
+    def prepare_repository(
+        self,
+        workspace_path: str | Path,
+        *,
+        allow_create: bool,
+        initialize_if_missing: bool,
+        expected_workspace_id: str | None = None,
+        entry_point: str = "coding",
+    ) -> "PreparedRepository":
+        """Prepare the shared repository boundary used by every coding runtime."""
+
+        from mana_agent.workspaces.preparation import prepare_repository
+
+        return prepare_repository(
+            self,
+            workspace_path,
+            allow_create=allow_create,
+            initialize_if_missing=initialize_if_missing,
+            expected_workspace_id=expected_workspace_id,
+            entry_point=entry_point,
+        )
+
     def _components(self, root: Path) -> list[RepositoryComponent]:
         ignored = {".git", ".mana", ".venv", "venv", "node_modules", "dist", "build", "vendor", "__pycache__"}
         manifests_by_root: dict[Path, list[Path]] = {}
@@ -358,7 +383,8 @@ class WorkspaceService:
         workspace_id: str | None = None,
         session_id: str | None = None,
     ) -> SessionRecord:
-        repo = self.register_repository(cwd)
+        requested_cwd = Path(cwd).expanduser().resolve()
+        repo = self.register_repository(requested_cwd)
         workspace = self.store.get_workspace(workspace_id) if workspace_id else self.workspace_for_repository(repo.repository_id)
         if repo.repository_id not in workspace.repository_ids:
             raise ValueError("session repository is not a member of selected workspace")
@@ -367,7 +393,7 @@ class WorkspaceService:
             workspace_id=workspace.workspace_id,
             primary_repository_id=repo.repository_id,
             attached_repository_ids=list(workspace.repository_ids),
-            cwd=repo.canonical_path,
+            cwd=str(requested_cwd),
             owner_pid=os.getpid(),
         )
         return self.store.save_session(record)

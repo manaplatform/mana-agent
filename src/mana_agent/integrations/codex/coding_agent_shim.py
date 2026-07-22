@@ -9,6 +9,7 @@ permission enforcement, and result normalization.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -20,6 +21,7 @@ from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
 from mana_agent.evals.recorder import record_current
 from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
+from mana_agent.workspaces.preparation import validate_prepared_repository
 
 if TYPE_CHECKING:
     from mana_agent.gateway.routing import GatewayRoutingAuthority
@@ -35,6 +37,7 @@ class CodexCodingAgentShim:
         self,
         *,
         repo_root: str | Path,
+        working_directory: str | Path | None = None,
         codex_settings: CodexSettings,
         repository_id: str | None = None,
         session_id: str = "",
@@ -48,6 +51,9 @@ class CodexCodingAgentShim:
         **_legacy_kwargs: Any,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
+        self.working_directory = Path(
+            working_directory if working_directory is not None else self.repo_root
+        ).expanduser().resolve()
         self.codex_settings = codex_settings
         self.repository_id = str(repository_id or "").strip() or None
         self.session_id = str(session_id or "").strip()
@@ -160,6 +166,7 @@ class CodexCodingAgentShim:
         goal = str(request or "").strip()
         if not goal:
             raise ValueError("Codex coding request is required")
+        validate_prepared_repository(self.repo_root, self.working_directory)
         task_id = f"codex_task_{uuid.uuid4().hex[:16]}"
         routing_decision = self.routing_authority.route(RoutingRequest(
             role="coding",
@@ -241,7 +248,8 @@ class CodexCodingAgentShim:
 
         manager: WorkspaceManager | None = None
         managed_workspace: Any = None
-        if requires_repository_write and self.codex_settings.worktree_isolation:
+        has_head = self._repository_has_head()
+        if requires_repository_write and self.codex_settings.worktree_isolation and has_head:
             manager = self._workspace_manager_factory()
             workspace_task_id = self.workspace_task_id or task_id
             managed_workspace = manager.create_for_task(
@@ -257,9 +265,12 @@ class CodexCodingAgentShim:
                 agent_id="codex",
                 force=bool(self.workspace_task_id),
             )
+            selected_relative = self.working_directory.relative_to(self.repo_root)
+            selected_worktree = Path(managed_workspace.worktree_path) / selected_relative
             workspace = WorkspaceContext(
                 repository_path=self.repo_root,
                 worktree_path=Path(managed_workspace.worktree_path),
+                working_directory=(selected_worktree if selected_worktree.is_dir() else None),
                 branch_name=managed_workspace.branch_name,
                 sandbox="workspaceWrite",
                 approval_policy=self.codex_settings.approval_policy,
@@ -268,6 +279,7 @@ class CodexCodingAgentShim:
             workspace = WorkspaceContext(
                 repository_path=self.repo_root,
                 worktree_path=self.repo_root,
+                working_directory=self.working_directory,
                 sandbox="workspaceWrite",
                 approval_policy=self.codex_settings.approval_policy,
                 allow_in_place_write=True,
@@ -276,6 +288,7 @@ class CodexCodingAgentShim:
             workspace = WorkspaceContext(
                 repository_path=self.repo_root,
                 worktree_path=self.repo_root,
+                working_directory=self.working_directory,
                 sandbox="readOnly",
                 approval_policy=self.codex_settings.approval_policy,
             )
@@ -334,6 +347,16 @@ class CodexCodingAgentShim:
         self._flow_results[selected_flow_id] = dict(payload)
         record_current("codex.turn.finished", {"task_id": task_id, "result": result.model_dump(mode="json"), "workspace_path": str(workspace.worktree_path)})
         return payload
+
+    def _repository_has_head(self) -> bool:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return completed.returncode == 0
 
     def _emit_event(self, event: AgentEvent) -> None:
         record_current(event.event_type, event.model_dump(mode="json"))

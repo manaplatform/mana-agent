@@ -24,6 +24,7 @@ from mana_agent.integrations.codex.exceptions import CodexUnavailableError
 from mana_agent.integrations.codex.health import check_codex_health
 from mana_agent.integrations.codex.result_parser import parse_codex_result
 from mana_agent.multi_agent.codex_pool import _scopes_overlap
+from mana_agent.workspaces.preparation import RepositoryValidationError
 
 
 class _Backend:
@@ -95,7 +96,7 @@ class _FakeClient:
 
 
 def _git_repo(path: Path) -> None:
-    path.mkdir(parents=True)
+    path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
 
 
@@ -311,6 +312,7 @@ class _ShimWorkspaceManager:
 
 
 def test_coding_agent_shim_delegates_plan_decision_to_one_read_only_codex_turn(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
     backend = _ShimBackend()
     shim = CodexCodingAgentShim(
         repo_root=tmp_path,
@@ -337,7 +339,24 @@ def test_coding_agent_shim_delegates_planning_editing_and_verification_to_codex_
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "repository"
-    repository.mkdir()
+    _git_repo(repository)
+    (repository / "README.md").write_text("# Existing\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Mana Test",
+            "-c",
+            "user.email=mana@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+        cwd=repository,
+        check=True,
+    )
     backend = _ShimBackend()
     manager = _ShimWorkspaceManager(tmp_path / "worktree")
     shim = CodexCodingAgentShim(
@@ -360,6 +379,7 @@ def test_coding_agent_shim_delegates_planning_editing_and_verification_to_codex_
 
 
 def test_coding_agent_shim_writes_directly_in_the_repository_root_by_default(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
     backend = _ShimBackend()
     shim = CodexCodingAgentShim(
         repo_root=tmp_path,
@@ -374,6 +394,53 @@ def test_coding_agent_shim_writes_directly_in_the_repository_root_by_default(tmp
     assert backend.workspaces[0].worktree_path == tmp_path.resolve()
     assert backend.workspaces[0].allow_in_place_write is True
     assert result["workspace_path"] == str(tmp_path.resolve())
+
+
+def test_direct_codex_shim_rejects_unprepared_repository_before_backend_start(tmp_path: Path) -> None:
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        backend_factory=lambda: pytest.fail("Codex backend must not start"),
+    )
+
+    with pytest.raises(RepositoryValidationError, match="Codex boundary validation"):
+        shim.generate_auto_execute("create the project", auto_chat_mode="edit")
+    assert not (tmp_path / ".git").exists()
+
+
+def test_codex_shim_preserves_selected_subdirectory_as_working_directory(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    selected = repository / "packages" / "app"
+    selected.mkdir(parents=True)
+    _git_repo(repository)
+    backend = _ShimBackend()
+    shim = CodexCodingAgentShim(
+        repo_root=repository,
+        working_directory=selected,
+        codex_settings=CodexSettings(enabled=True),
+        backend_factory=lambda: backend,
+    )
+
+    shim.generate("plan the app change", auto_chat_mode="plan_only")
+
+    assert backend.workspaces[0].repository_path == repository.resolve()
+    assert backend.workspaces[0].working_directory == selected.resolve()
+
+
+def test_unborn_repository_uses_explicit_in_place_workspace_without_worktree(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
+    backend = _ShimBackend()
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True, worktree_isolation=True),
+        backend_factory=lambda: backend,
+        workspace_manager_factory=lambda: pytest.fail("an unborn repository cannot create a worktree"),
+    )
+
+    shim.generate_auto_execute("create the initial files", auto_chat_mode="edit")
+
+    assert backend.workspaces[0].worktree_path == tmp_path.resolve()
+    assert backend.workspaces[0].allow_in_place_write is True
 
 
 def test_codex_backend_does_not_self_approve(tmp_path: Path) -> None:

@@ -17,8 +17,11 @@ Task ID:
 Repository:
 {workspace.repository_path}
 
-Worktree:
+Worktree root:
 {workspace.worktree_path}
+
+Working directory:
+{workspace.working_directory or workspace.worktree_path}
 
 Goal:
 {task.goal}

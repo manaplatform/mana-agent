@@ -20,6 +20,7 @@ def repository_id_for_path(path: str | Path) -> str:
     """
 
     resolved = str(Path(path).expanduser().resolve())
+    identity = os.path.normcase(resolved)
     repositories = mana_home() / "repositories"
     if repositories.is_dir():
         for metadata in repositories.glob("*/repository.json"):
@@ -27,11 +28,15 @@ def repository_id_for_path(path: str | Path) -> str:
                 payload = json.loads(metadata.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            if resolved in {str(payload.get("canonical_path") or ""), str(payload.get("git_root") or "")}:
+            persisted_paths = {
+                os.path.normcase(str(payload.get("canonical_path") or "")),
+                os.path.normcase(str(payload.get("git_root") or "")),
+            }
+            if identity in persisted_paths:
                 repository_id = str(payload.get("repository_id") or "").strip()
                 if repository_id:
                     return repository_id
-    return "repo_" + hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:20]
+    return "repo_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
 
 
 def workspace_dir(workspace_id: str) -> Path:

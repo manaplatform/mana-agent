@@ -36,6 +36,8 @@ from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 from mana_agent.services.chat_service import ChatService
 from mana_agent.memory import CodingMemoryService, MemoryService
 from mana_agent.execution import ExecutionManager, build_execution_manager
+from mana_agent.workspaces.preparation import PreparedRepository
+from mana_agent.workspaces.service import WorkspaceService
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,7 @@ class ChatStack:
     log_path: Path | None = None
     execution_manager: ExecutionManager | None = None
     routing_authority: GatewayRoutingAuthority | None = None
+    prepared_repository: PreparedRepository | None = None
 
 
 def build_chat_stack(
@@ -159,6 +162,7 @@ def build_chat_stack(
     config: ChatGatewayConfig,
     *,
     settings: Settings | None = None,
+    prepared_repository: PreparedRepository | None = None,
 ) -> ChatStack:
     """Build ask/chat and optional coding stack for *root*.
 
@@ -169,6 +173,24 @@ def build_chat_stack(
     root = Path(root).expanduser().resolve()
     cfg = config.normalized()
     settings = settings or Settings()
+
+    if cfg.coding_agent and prepared_repository is None:
+        workspace_service = WorkspaceService()
+        expected_workspace_id: str | None = None
+        if cfg.session_id:
+            try:
+                expected_workspace_id = workspace_service.store.get_session(
+                    cfg.session_id
+                ).workspace_id
+            except FileNotFoundError:
+                expected_workspace_id = None
+        prepared_repository = workspace_service.prepare_repository(
+            root,
+            allow_create=not bool(cfg.session_id),
+            initialize_if_missing=True,
+            expected_workspace_id=expected_workspace_id,
+            entry_point="gateway-stack",
+        )
 
     # --- steps / k ---
     chat_agent_max_steps = _resolve_agent_max_steps(
@@ -223,26 +245,16 @@ def build_chat_stack(
     session_id = cfg.session_id or f"sess-{uuid.uuid4().hex}"
     log_path = default_logs_dir(root) / f"mana_agent_{__import__('datetime').datetime.now().strftime('%Y%m%d')}.log"
 
-    # Workspace / repository ids (best-effort)
-    workspace_id: str | None = None
-    repository_id: str | None = None
-    try:
-        from mana_agent.workspaces.service import WorkspaceService
-        from mana_agent.workspaces.paths import repository_id_for_path
-
-        ws = WorkspaceService()
-        # Prefer existing session if provided
-        if cfg.session_id:
-            try:
-                ctx = ws.context_for_session(cfg.session_id)
-                workspace_id = getattr(ctx.workspace, "workspace_id", None) or getattr(
-                    ctx.session, "workspace_id", None
-                )
-            except Exception:
-                pass
-        repository_id = repository_id_for_path(root)
-    except Exception:
-        pass
+    workspace_id = prepared_repository.workspace_id if prepared_repository else None
+    repository_id = prepared_repository.repository_id if prepared_repository else None
+    if cfg.session_id and workspace_id is None:
+        try:
+            ctx = WorkspaceService().context_for_session(cfg.session_id)
+            workspace_id = ctx.workspace.workspace_id
+            repository_id = ctx.session.primary_repository_id
+        except (FileNotFoundError, ValueError):
+            workspace_id = None
+            repository_id = None
 
     routing_authority = GatewayRoutingAuthority(
         root,
@@ -360,6 +372,12 @@ def build_chat_stack(
         )
 
     if coding_agent_instance is None and cfg.coding_agent:
+        coding_repository_root = (
+            prepared_repository.repository_root if prepared_repository else root
+        )
+        coding_working_directory = (
+            prepared_repository.working_directory if prepared_repository else root
+        )
         if coding_agent_cls is CodexCodingAgentShim:
             codex_settings = CodexSettings.from_mana_settings(
                 settings,
@@ -372,7 +390,8 @@ def build_chat_stack(
                 update={"model": coding_model_assignment.resolved_model}
             )
             coding_agent_instance = coding_agent_cls(
-                repo_root=root,
+                repo_root=coding_repository_root,
+                working_directory=coding_working_directory,
                 codex_settings=codex_settings,
                 repository_id=repository_id,
                 session_id=session_id,
@@ -405,8 +424,8 @@ def build_chat_stack(
                     api_key=inference_connection.api_key,
                     model=effective_tool_worker_model,
                     base_url=effective_base_url,
-                    repo_root=root,
-                    project_root=root,
+                    repo_root=coding_repository_root,
+                    project_root=coding_working_directory,
                     allowed_prefixes=None,
                     tools_only_strict=cfg.tool_worker_strict,
                     model_level=tool_worker_model_assignment.model_level,
@@ -417,7 +436,8 @@ def build_chat_stack(
             coding_agent_instance = coding_agent_cls(
                 api_key=inference_connection.api_key,
                 base_url=effective_base_url,
-                repo_root=root,
+                repo_root=coding_repository_root,
+                project_root=coding_working_directory,
                 ask_agent=ask_service.ask_agent,
                 allowed_prefixes=None,
                 coding_memory_service=coding_memory_service,
@@ -517,6 +537,7 @@ def build_chat_stack(
         tools_execution_boot_warnings=tools_execution_boot_warnings,
         execution_manager=execution_manager,
         routing_authority=routing_authority,
+        prepared_repository=prepared_repository,
         coding_agent_is_custom=coding_agent_is_custom,
         effective_model=effective_model,
         chat_agent_max_steps=chat_agent_max_steps,

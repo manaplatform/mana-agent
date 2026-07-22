@@ -39,6 +39,7 @@ class WorkspaceContext(BaseModel):
 
     repository_path: Path
     worktree_path: Path
+    working_directory: Path | None = None
     branch_name: str = ""
     repository_instructions: str = ""
     sandbox: Literal["readOnly", "workspaceWrite"] = "workspaceWrite"
@@ -49,10 +50,21 @@ class WorkspaceContext(BaseModel):
     def _validate_paths(self) -> "WorkspaceContext":
         repository = self.repository_path.expanduser().resolve()
         worktree = self.worktree_path.expanduser().resolve()
+        working = (
+            self.working_directory.expanduser().resolve()
+            if self.working_directory is not None
+            else worktree
+        )
         if not repository.is_dir():
             raise ValueError(f"repository path does not exist: {repository}")
         if not worktree.is_dir():
             raise ValueError(f"worktree path does not exist: {worktree}")
+        if not working.is_dir():
+            raise ValueError(f"working directory does not exist: {working}")
+        try:
+            working.relative_to(worktree)
+        except ValueError as exc:
+            raise ValueError("working directory must be inside the assigned worktree") from exc
         if self.sandbox == "readOnly":
             return self
         if repository == worktree and not self.allow_in_place_write:

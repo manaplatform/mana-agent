@@ -57,6 +57,7 @@ from mana_agent.memory.errors import MemoryError
 from mana_agent.services.chat_service import ChatService
 from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.workspaces.service import WorkspaceService
+from mana_agent.workspaces.preparation import PreparedRepository, RepositoryPreparationError
 from mana_agent.evals.recorder import record_current
 from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
@@ -254,9 +255,13 @@ class AgentChatGateway:
         self._history_store = ChatSessionHistory()
 
         # Build stack (full coding stack when coding_agent=True)
-        self._stack: ChatStack = build_chat_stack(
-            self.root, self.config, settings=self.settings
-        )
+        try:
+            self._stack = build_chat_stack(
+                self.root, self.config, settings=self.settings
+            )
+        except RepositoryPreparationError:
+            logger.exception("gateway coding workspace preparation failed")
+            raise
         self._chat_service = self._stack.chat_service
         self._coding_agent = self._stack.coding_agent
         self._tools_orchestrator = self._stack.tools_orchestrator
@@ -267,6 +272,9 @@ class AgentChatGateway:
         self._coding_agent_max_steps = self._stack.coding_agent_max_steps
         self._resolved_k = self._stack.resolved_k
         self._coding_agent_is_custom = self._stack.coding_agent_is_custom
+        prepared = self._stack.prepared_repository
+        if prepared is not None and prepared.initialized:
+            self._emit_workspace_initialized(prepared.working_directory)
         self._entry_route_registry = entry_route_registry or self._build_entry_route_registry()
         route_llm = getattr(getattr(self.get_ask_service(), "entry_router", None), "llm", None)
         self._entry_router = entry_router or EntryRouter(
@@ -343,6 +351,47 @@ class AgentChatGateway:
         for registration in registrations:
             registry.register(registration)
         return registry
+
+    def _emit_workspace_initialized(self, path: Path) -> None:
+        message = f"Initialized a Git repository in {path}."
+        if callable(self._event_sink):
+            try:
+                self._event_sink(
+                    "workspace.repository_initialized",
+                    {"workspace": str(path), "message": message},
+                )
+            except TypeError:
+                try:
+                    self._event_sink("workspace.repository_initialized", message)
+                except Exception:
+                    logger.debug("workspace initialization status event failed", exc_info=True)
+            except Exception:
+                logger.debug("workspace initialization status event failed", exc_info=True)
+
+    def _prepare_coding_workspace(self) -> PreparedRepository:
+        expected_workspace_id = self._stack.workspace_id
+        prepared = self._workspaces.prepare_repository(
+            self.root,
+            allow_create=False,
+            initialize_if_missing=True,
+            expected_workspace_id=expected_workspace_id,
+            entry_point="gateway-turn",
+        )
+        self._stack.prepared_repository = prepared
+        self._stack.workspace_id = prepared.workspace_id
+        self._stack.repository_id = prepared.repository_id
+        if self._coding_agent is not None:
+            if hasattr(self._coding_agent, "repo_root"):
+                self._coding_agent.repo_root = prepared.repository_root
+            if hasattr(self._coding_agent, "working_directory"):
+                self._coding_agent.working_directory = prepared.working_directory
+            if hasattr(self._coding_agent, "repository_id"):
+                self._coding_agent.repository_id = prepared.repository_id
+            if hasattr(self._coding_agent, "workspace_id"):
+                self._coding_agent.workspace_id = prepared.workspace_id
+        if prepared.initialized:
+            self._emit_workspace_initialized(prepared.working_directory)
+        return prepared
 
     def _browser_route_availability(self) -> RouteAvailability:
         from mana_agent.config.user_config import get_setting
@@ -1336,6 +1385,7 @@ class AgentChatGateway:
             event_sink=sink,
             callbacks=options.get("callbacks"),
             agent_decision=mapped,
+            coding_workspace_preparer=self._prepare_coding_workspace,
         )
         result.payload.setdefault("route", decision.route)
         return result

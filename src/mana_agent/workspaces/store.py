@@ -64,8 +64,19 @@ class WorkspaceStore:
         return rows
 
     def find_repository_by_path(self, path: str | Path) -> RepositoryRecord | None:
-        canonical = str(Path(path).expanduser().resolve())
-        return next((item for item in self.list_repositories() if item.canonical_path == canonical or item.git_root == canonical), None)
+        canonical = os.path.normcase(str(Path(path).expanduser().resolve()))
+        return next(
+            (
+                item
+                for item in self.list_repositories()
+                if canonical
+                in {
+                    os.path.normcase(str(item.canonical_path or "")),
+                    os.path.normcase(str(item.git_root or "")),
+                }
+            ),
+            None,
+        )
 
     def save_workspace(self, record: WorkspaceRecord) -> WorkspaceRecord:
         atomic_write_json(workspace_dir(record.workspace_id) / "workspace.json", record.model_dump(mode="json"))

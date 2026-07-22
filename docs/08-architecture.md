@@ -65,6 +65,15 @@ All chat frontends connect through **`src/mana_agent/gateway/`**:
 - **`LaneCoordinator`** (`lane_coordinator.py`): the authoritative live task
   state machine, budget/concurrency owner, and repository/file lock manager.
 
+Before a coding stack or multi-agent coding runtime starts, the shared
+`WorkspaceService.prepare_repository` boundary resolves the selected working
+directory and actual Git root, validates persisted workspace ownership, reuses
+normal repositories and worktrees, or safely initializes an authorized non-Git
+directory without staging or committing files. Repository persistence is
+reconciled under the same preparation lock. Codex receives the repository root
+and selected working directory separately and only performs defensive Git
+validation; it does not initialize repositories itself.
+
 Frontends (CLI flags/I/O, TUI, Telegram, dashboard) collect config and render
 results; they should not rebuild CodingAgent independently.
 

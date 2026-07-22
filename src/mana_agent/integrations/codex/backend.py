@@ -110,6 +110,7 @@ class CodexCodingBackend:
         return result
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
+        self._validate_workspace(task, workspace)
         await self.start(
             workspace.repository_path,
             sandbox_mode=_codex_sandbox(workspace),
@@ -117,7 +118,6 @@ class CodexCodingBackend:
         if self._client is None:
             raise CodexUnavailableError("Codex app-server did not start")
         async with self._run_lock:
-            self._validate_workspace(task, workspace)
             notifications: list[dict[str, Any]] = []
             thread_id = ""
             turn_id = ""
@@ -151,7 +151,7 @@ class CodexCodingBackend:
                     {
                         "threadId": thread_id,
                         "input": [{"type": "text", "text": build_codex_prompt(task, workspace)}],
-                        "cwd": str(workspace.worktree_path.resolve()),
+                        "cwd": str(_execution_directory(workspace)),
                         "approvalPolicy": self.settings.approval_policy,
                         "sandbox": _codex_sandbox(workspace),
                         **({"model": self.settings.model} if self.settings.model else {}),
@@ -243,7 +243,7 @@ class CodexCodingBackend:
 
     def _thread_params(self, workspace: WorkspaceContext) -> dict[str, Any]:
         return {
-            "cwd": str(workspace.worktree_path.resolve()),
+            "cwd": str(_execution_directory(workspace)),
             "approvalPolicy": self.settings.approval_policy,
             "sandbox": _codex_sandbox(workspace),
             **({"model": self.settings.model} if self.settings.model else {}),
@@ -254,7 +254,11 @@ class CodexCodingBackend:
             return
         repository_root = workspace.repository_path.resolve()
         execution_root = workspace.worktree_path.resolve()
-        if self.settings.worktree_isolation and repository_root == execution_root:
+        if (
+            self.settings.worktree_isolation
+            and repository_root == execution_root
+            and not workspace.allow_in_place_write
+        ):
             raise CodexExecutionError("Codex writing task was not assigned an isolated worktree")
         if not self.settings.worktree_isolation and repository_root == execution_root and not workspace.allow_in_place_write:
             raise CodexExecutionError("Codex in-place writing was not explicitly authorized")
@@ -267,8 +271,16 @@ class CodexCodingBackend:
         )
         if completed.returncode != 0:
             raise CodexExecutionError("Codex worktree is not a readable Git checkout")
-        if self.settings.worktree_isolation and completed.stdout.strip():
+        if (
+            self.settings.worktree_isolation
+            and not workspace.allow_in_place_write
+            and completed.stdout.strip()
+        ):
             raise CodexExecutionError("Codex worktree must be clean before execution")
+
+
+def _execution_directory(workspace: WorkspaceContext) -> Path:
+    return (workspace.working_directory or workspace.worktree_path).resolve()
 
 
 def _response_id(response: dict[str, Any], key: str) -> str:
