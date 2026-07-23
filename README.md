@@ -813,6 +813,8 @@ Dashboard pages include:
 | Chat | Repository-grounded questions and coding-agent workflows. |
 | Analysis | Run analysis and inspect reports and diagrams. |
 | Taskboard | Active and completed tasks, agents, workers, and state. |
+| Processes | Persistent service health, managed logs, stop, and restart controls. |
+| Connectors | Secret-safe Telegram setup and shared connector state. |
 | Traces | Decisions, tool calls, verification results, and runtime events. |
 | Observability | Trace trees, timings, token usage, latency, errors, queue waits, and bottleneck findings. |
 | Automations | Create and manage persistent scheduled actions. |

@@ -8,7 +8,8 @@ All notable repository changes should be recorded here.
   - Added the shared typed command registry across gateway, CLI chat, Textual, API, and Telegram, connector setup/management, API session/command/connector/process endpoints, and a generated CLI capability matrix with explicit unsupported reasons.
   - Added a persistent registered-worker process manager with atomic metadata, identity-checked stop/restart, stale recovery, singleton prevention, bounded log reads, lifecycle events, and background Telegram startup without PID-file or arbitrary-shell execution.
   - Removed the TUI `/new` history message, the Telegram-only command implementation, dashboard-only chat identity, and dashboard-managed daemon chat thread.
-  - Verification: `PATH="$PWD/venv/bin:$PATH" venv/bin/python -m pytest -q` passed (1,207 passed, 2 skipped); focused unified-session/command/process, gateway, TUI, Telegram, and API conversation tests passed (45 tests); new/affected-module Ruff, Python compilation, and `git diff --check` passed. The required repository-wide `ruff check .` was run and still reports 803 unrelated pre-existing findings in legacy files/tests.
+  - Added Textual session/setup modals plus dashboard chat rename/delete, connector setup, and background-process health/log/control pages.
+  - Verification: `PATH="$PWD/venv/bin:$PATH" venv/bin/python -m pytest -q` passed (1,208 passed, 2 skipped); focused unified-session/command/process, gateway, natural-language routing, TUI, Telegram, and API conversation tests passed (60 tests), with a final focused UI/session/API pass (36 tests); new/affected-module Ruff, Python compilation, and `git diff --check` passed. The required repository-wide `ruff check .` was run and still reports 800 unrelated pre-existing findings in legacy files/tests.
 
 ## 2026-07-22
 

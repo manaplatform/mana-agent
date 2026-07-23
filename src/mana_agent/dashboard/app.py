@@ -11,7 +11,6 @@ Launch:
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 try:
     import streamlit as st
@@ -23,10 +22,12 @@ from mana_agent.dashboard.pages import (
     analyze,
     automations,
     chat,
+    connectors,
     cron,
     metrics,
     observability,
     overview,
+    processes,
     reports,
     skills,
     taskboard,
@@ -68,8 +69,10 @@ pages = {
         _page(taskboard.render, title="Taskboard & Traces", icon="🗂️", url_path="taskboard"),
         _page(observability.render, title="Observability", icon="📡", url_path="observability"),
         _page(metrics.render, title="Metrics", icon="📊", url_path="metrics"),
+        _page(processes.render, title="Processes", icon="⚙️", url_path="processes"),
     ],
     "Operations": [
+        _page(connectors.render, title="Connectors", icon="🔌", url_path="connectors"),
         _page(automations.render, title="Automations", icon="⚡", url_path="automations"),
         _page(cron.render, title="Cron Jobs", icon="⏰", url_path="cron"),
     ],

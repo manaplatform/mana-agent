@@ -44,6 +44,11 @@ def dispatch_command(payload: CommandRequest, request: Request, authorization: s
     gateway, sessions, processes, connectors = _services(request)
     if gateway is not None:
         result = gateway.dispatch_command(payload.text, session_id=payload.session_id, frontend="api", confirmed=payload.confirmed)
+        if result is None and not payload.text.lstrip().startswith("/"):
+            routed = gateway.process_turn(payload.session_id, payload.text)
+            if routed.mode != "command":
+                raise ManaApiError(422, "The model did not resolve this request to a registered command. No command was executed.")
+            return dict((routed.payload or {}).get("command_result") or {})
     else:
         try:
             record = sessions.workspaces.store.get_session(payload.session_id)

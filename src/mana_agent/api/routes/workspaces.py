@@ -206,9 +206,11 @@ def get_job(job_id: str) -> dict:
 
 @router.post("/sessions", status_code=201)
 def create_session(payload: SessionCreateRequest, authorization: str | None = Header(None)) -> dict:
+    from mana_agent.sessions import SessionService
+
     _require_mutation_token(authorization)
     cwd = _authorize_path(payload.cwd)
-    return WorkspaceService().create_session(cwd, workspace_id=payload.workspace_id).model_dump(mode="json")
+    return SessionService().create(cwd, workspace_id=payload.workspace_id, frontend="api").model_dump(mode="json")
 
 
 @router.get("/sessions")

@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -59,10 +60,9 @@ class BackgroundProcessManager:
         spec = get_registered_command(command_identifier)
         clean_args = {str(k): str(v) for k, v in (arguments or {}).items() if "token" not in str(k).lower() and "secret" not in str(k).lower()}
         self.recover_stale()
+        singleton_lock: Path | None = None
         if singleton_key:
-            duplicate = next((row for row in self.list() if row.singleton_key == singleton_key and row.state in {"starting", "running"}), None)
-            if duplicate:
-                raise RuntimeError(f"background process singleton is already running: {duplicate.process_id}")
+            singleton_lock = self._claim_singleton(singleton_key)
         record = ProcessRecord(
             process_type=process_type, command_identifier=command_identifier,
             sanitized_arguments=clean_args, singleton_key=singleton_key,
@@ -75,7 +75,15 @@ class BackgroundProcessManager:
         log_path = directory / "process.log"
         record.stdout_log = str(log_path)
         self.store.save(record)
-        env = {key: value for key, value in os.environ.items() if key in {"PATH", "PYTHONPATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG", "LC_ALL"}}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {
+                "PATH", "PYTHONPATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
+                "LANG", "LC_ALL", "HOME", "USER", "LOGNAME", "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+            }
+        }
         env["MANA_HOME"] = str(mana_home())
         env["MANA_PROCESS_MAX_LOG_BYTES"] = str(self.max_log_bytes)
         for name in spec.secret_environment_names(clean_args):
@@ -94,6 +102,8 @@ class BackgroundProcessManager:
             record.last_error_summary = str(exc)[:240]
             record.stopped_at = utc_iso()
             self.store.save(record)
+            if singleton_lock is not None:
+                singleton_lock.unlink(missing_ok=True)
             raise RuntimeError(f"background process failed to start: {exc}") from exc
         record.os_pid = process.pid
         record.process_identity = _identity(process.pid)
@@ -121,7 +131,9 @@ class BackgroundProcessManager:
             row.state = "stale"
             row.health = "unhealthy"
             row.last_error_summary = "PID is absent or belongs to another process; no signal was sent."
-            return self.store.save(row)
+            saved = self.store.save(row)
+            self._release_singleton(saved)
+            return saved
         row.state = "stopping"
         self.store.save(row)
         try:
@@ -145,6 +157,7 @@ class BackgroundProcessManager:
         row.heartbeat_at = row.stopped_at
         self.store.save(row)
         self._emit("background.stopped", row)
+        self._release_singleton(row)
         return row
 
     def restart(self, process_id: str) -> ProcessRecord:
@@ -176,6 +189,7 @@ class BackgroundProcessManager:
                 row.stopped_at = utc_iso()
                 row.last_error_summary = "Process disappeared or PID identity changed."
                 self.store.save(row)
+                self._release_singleton(row)
                 changed.append(row)
         return changed
 
@@ -196,6 +210,45 @@ class BackgroundProcessManager:
             return False
         current = _identity(row.os_pid)
         return bool(current and row.process_identity and current == row.process_identity)
+
+    def _claim_singleton(self, singleton_key: str) -> Path:
+        root = self.store.root / "singletons"
+        root.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(singleton_key.encode("utf-8")).hexdigest()
+        path = root / f"{digest}.lock"
+        for _attempt in range(2):
+            try:
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                duplicate = next(
+                    (
+                        row for row in self.list()
+                        if row.singleton_key == singleton_key and row.state in {"starting", "running"}
+                    ),
+                    None,
+                )
+                if duplicate is not None:
+                    raise RuntimeError(
+                        f"background process singleton is already running: {duplicate.process_id}"
+                    )
+                try:
+                    age = time.time() - path.stat().st_mtime
+                except OSError:
+                    age = 0
+                if age < 30:
+                    raise RuntimeError("background process singleton startup is already in progress")
+                path.unlink(missing_ok=True)
+                continue
+            else:
+                os.close(descriptor)
+                return path
+        raise RuntimeError("background process singleton lock could not be acquired")
+
+    def _release_singleton(self, row: ProcessRecord) -> None:
+        if not row.singleton_key:
+            return
+        digest = hashlib.sha256(row.singleton_key.encode("utf-8")).hexdigest()
+        (self.store.root / "singletons" / f"{digest}.lock").unlink(missing_ok=True)
 
     def _emit(self, event: str, row: ProcessRecord) -> None:
         if self.event_sink is not None:

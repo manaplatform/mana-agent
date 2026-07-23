@@ -120,6 +120,14 @@ class ConversationService:
             raise FileNotFoundError(conversation_id)
         return self._from_session(record)
 
+    def rename(self, conversation_id: str, title: str) -> ConversationRecord:
+        self.get_or_raise(conversation_id)
+        return self._from_session(self._sessions.rename(conversation_id, title))
+
+    def delete(self, conversation_id: str) -> None:
+        self.get_or_raise(conversation_id)
+        self._sessions.delete(conversation_id)
+
     def _save(self, record: ConversationRecord) -> ConversationRecord:
         session = self._sessions.rename(record.conversation_id, record.title)
         return self._from_session(session, execution_id=record.last_execution_id)

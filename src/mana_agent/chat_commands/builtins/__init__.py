@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from mana_agent.chat_commands.models import CommandContext, CommandDefinition, CommandResult
 
@@ -32,8 +33,23 @@ def _sessions(context: CommandContext, args: list[str]) -> CommandResult:
         row = context.sessions.rename(args[1], " ".join(args[2:]))
         return CommandResult(status="success", message=f"Renamed session {row.session_id} to {row.title}.", data={"session": row.model_dump(mode="json")})
     if action == "delete" and len(args) == 2:
-        context.sessions.delete(args[1], gateway=context.gateway)
-        return CommandResult(status="success", message=f"Deleted session {args[1]}.", events=[{"type": "session.deleted", "session_id": args[1]}])
+        deleted_id = args[1]
+        if context.gateway is not None and hasattr(context.gateway, "delete_session"):
+            context.gateway.delete_session(deleted_id)
+        else:
+            context.sessions.delete(deleted_id, gateway=context.gateway)
+        events = [{"type": "session.deleted", "session_id": deleted_id}]
+        data: dict[str, Any] = {}
+        if deleted_id == context.session_id:
+            if context.gateway is None or not hasattr(context.gateway, "create_new_session"):
+                raise RuntimeError("The active session was deleted but no gateway can bind its replacement.")
+            replacement = context.gateway.create_new_session(frontend=context.frontend)
+            data["session_id"] = replacement
+            events.extend([
+                {"type": "timeline.replace", "messages": []},
+                {"type": "session.activated", "session_id": replacement},
+            ])
+        return CommandResult(status="success", message=f"Deleted session {deleted_id}.", data=data, events=events)
     raise ValueError("Usage: /sessions [list|current|show [id]|switch <id>|rename <id> <title>|delete <id>]")
 
 

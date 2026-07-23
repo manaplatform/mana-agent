@@ -138,6 +138,15 @@ def render(root: Path | None = None) -> None:
         selected_label = st.selectbox("Open conversation", options, index=default_idx, key="chat_conv_select")
         conversation_id = labels[selected_label]
         st.session_state.active_conversation_id = conversation_id
+        rename_title = st.text_input("Rename chat", value=next(item.title for item in conversations if item.conversation_id == conversation_id), key=f"rename_{conversation_id}")
+        if st.button("Rename", use_container_width=True, key=f"rename_button_{conversation_id}"):
+            service.rename(conversation_id, rename_title)
+            st.rerun()
+        confirm_delete = st.checkbox("Confirm permanent deletion", key=f"confirm_delete_{conversation_id}")
+        if st.button("Delete chat", type="secondary", use_container_width=True, disabled=not confirm_delete, key=f"delete_{conversation_id}"):
+            service.delete(conversation_id)
+            st.session_state.pop("active_conversation_id", None)
+            st.rerun()
 
     conversation_id = st.session_state.active_conversation_id
     try:

@@ -9,6 +9,7 @@ from mana_agent.background.manager import BackgroundProcessManager
 from mana_agent.background.store import ProcessStore
 from mana_agent.chat_commands import CommandContext, CommandDispatcher, build_default_registry
 from mana_agent.chat_commands.models import CommandInvocation
+from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRouteRegistry, EntryRouter, RouteAvailability, RouteRegistration
 from mana_agent.sessions import SessionService
 from mana_agent.sessions.migration import DashboardConversationMigration
 
@@ -100,6 +101,27 @@ def test_natural_language_uses_model_resolver_not_keyword_fallback(monkeypatch, 
     )
     assert dispatcher.dispatch("Show my sessions.", context).status == "success"
     assert CommandDispatcher(build_default_registry()).dispatch("Show my sessions.", context) is None
+
+
+def test_gateway_entry_model_resolves_natural_language_to_registered_command() -> None:
+    registry = EntryRouteRegistry()
+    registry.register(RouteRegistration("command", "shared commands", lambda: RouteAvailability(True), ("sessions",)))
+
+    class Model:
+        def invoke(self, _messages):  # noqa: ANN001
+            return SimpleNamespace(content=json.dumps({
+                "route": "command", "confidence": 0.99, "reason": "list chats",
+                "required_sources": ["none"], "target_urls": [],
+                "command_name": "sessions", "command_arguments": ["list"],
+            }))
+
+    decision = EntryRouter(llm=Model(), registry=registry).route(
+        user_prompt="Show my sessions.",
+        context=EntryRouteContext(session_id="session_x", conversation_id="session_x", turn_id="turn_x"),
+    )
+    assert decision.route == "command"
+    assert decision.command_name == "sessions"
+    assert decision.command_arguments == ("list",)
 
 
 def test_background_store_survives_manager_restart_and_recovers_stale(monkeypatch, tmp_path: Path) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from textual import events
 from textual.message import Message
 from textual.widgets import TextArea
@@ -46,6 +48,10 @@ class MessageInput(TextArea):
             **kwargs,
         )
         self._reported_height = self.MIN_HEIGHT
+        self._command_completions: tuple[str, ...] = ()
+
+    def set_command_completions(self, names: list[str] | tuple[str, ...]) -> None:
+        self._command_completions = tuple(sorted({f"/{name.lstrip('/')}" for name in names}))
 
     @property
     def value(self) -> str:
@@ -70,6 +76,16 @@ class MessageInput(TextArea):
             event.prevent_default()
             self.insert("\n")
             return
+        if event.key == "tab" and self.text.startswith("/") and " " not in self.text:
+            matches = [item for item in self._command_completions if item.startswith(self.text)]
+            if matches:
+                completion = os.path.commonprefix(matches)
+                if len(matches) == 1:
+                    completion += " "
+                self.value = completion
+                event.stop()
+                event.prevent_default()
+                return
         await super()._on_key(event)
 
     def on_text_area_changed(self, _: TextArea.Changed) -> None:

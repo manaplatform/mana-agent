@@ -175,7 +175,8 @@ class ManaChatApp(App):
                 )
                 yield self.input
                 yield Static(
-                    "Enter sends · Shift+Enter adds a line · Ctrl+J / Alt+Enter also add a line",
+                    "Enter sends · Tab completes commands · Shift+Enter adds a line · "
+                    "Ctrl+J / Alt+Enter also add a line",
                     id="input-help",
                 )
 
@@ -185,6 +186,11 @@ class ManaChatApp(App):
     def on_mount(self) -> None:
         """Focus input and show a welcome message. Seed initial prompt if provided by CLI."""
         if self.input:
+            registry = getattr(self.gateway, "command_registry", None)
+            if registry is not None:
+                self.input.set_command_completions(
+                    [definition.canonical_name for definition in registry.definitions()]
+                )
             self.input.focus()
 
         # Safe immediate footer (avoids any early watcher issues)
@@ -246,7 +252,12 @@ class ManaChatApp(App):
         model = self.model or "default"
         root = self.repo_root.name if self.repo_root else ""
         tokens = f"tokens: {self.token_count}"
-        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}"
+        process_status = ""
+        manager = getattr(self.gateway, "background_processes", None)
+        if manager is not None:
+            active = sum(1 for row in manager.list() if row.state in {"starting", "running"})
+            process_status = f"  |  processes: {active}"
+        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}{process_status}"
 
     def action_clear_log(self) -> None:
         if self.chat_log:
@@ -391,6 +402,14 @@ class ManaChatApp(App):
                 for event in result.events:
                     if event.get("type") == "timeline.replace":
                         self._replace_timeline(event.get("messages") or [])
+                    elif event.get("type") == "session.picker":
+                        from mana_agent.tui.session_management import SessionPickerScreen
+
+                        self.push_screen(SessionPickerScreen(event.get("sessions") or []), self._apply_session_action)
+                if result.status == "input_required" and (result.next_prompt or {}).get("kind") == "connector.telegram.setup":
+                    from mana_agent.tui.session_management import TelegramSetupScreen
+
+                    self.push_screen(TelegramSetupScreen(self.repo_root), self._apply_telegram_setup)
                 if result.message:
                     self.history.add(AssistantMessageEvent(content=result.message))
                 if self.input:
@@ -456,6 +475,60 @@ class ManaChatApp(App):
                 self.history.add(UserMessageEvent(content=content, turn_id=turn_id))
             elif role == "assistant":
                 self.history.add(AssistantMessageEvent(content=content, turn_id=turn_id))
+
+    def _apply_session_action(self, action: Any | None) -> None:
+        if action is None or self.gateway is None or not self._gateway_session_id:
+            return
+        import shlex
+
+        command = f"/sessions {action.action} {shlex.quote(action.session_id)}"
+        if action.action == "rename":
+            command += " " + shlex.quote(action.title)
+        result = self.gateway.dispatch_command(
+            command,
+            session_id=self._gateway_session_id,
+            frontend="tui",
+            confirmed=action.action == "delete",
+        )
+        if result.status == "error":
+            self.notify(result.message, severity="error")
+            return
+        replacement_id = str(result.data.get("session_id") or "")
+        if replacement_id:
+            self._gateway_session_id = replacement_id
+        elif action.action == "switch":
+            self._gateway_session_id = action.session_id
+        for event in result.events:
+            if event.get("type") == "timeline.replace":
+                self._replace_timeline(event.get("messages") or [])
+        if result.message:
+            self.notify(result.message)
+
+    def _apply_telegram_setup(self, setup: Any | None) -> None:
+        if setup is None:
+            return
+        self.run_worker(self._complete_telegram_setup(setup), exclusive=True)
+
+    async def _complete_telegram_setup(self, setup: Any) -> None:
+        from mana_agent.connectors.service import TelegramConnectRequest
+
+        self.update_status("Validating Telegram…")
+        try:
+            result = await asyncio.to_thread(
+                self.gateway.connector_service.connect_telegram,
+                TelegramConnectRequest(
+                    transport=setup.transport, repository=setup.repository,
+                    allowed_users=setup.allowed_users, allowed_chats=setup.allowed_chats,
+                    webhook_url=setup.webhook_url, secret_source=setup.secret_source,
+                ),
+                token=setup.token,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.notify(str(exc), severity="error")
+        else:
+            self.notify(result.message)
+        finally:
+            self.update_status("Ready")
 
     async def _handle_real_turn_guarded(self, user_event: UserMessageEvent) -> None:
         try:
@@ -768,6 +841,15 @@ class ManaChatApp(App):
                     with coding_event_scope(_on_coding_event):
                         result = await asyncio.to_thread(_run_gateway_turn)
                     answer = str(getattr(result, "answer", "") or "")
+                    result_payload = dict(getattr(result, "payload", {}) or {})
+                    if str(getattr(result, "mode", "") or "") == "command":
+                        active_session_id = str(result_payload.get("session_id") or "")
+                        if active_session_id:
+                            self._gateway_session_id = active_session_id
+                        command_result = dict(result_payload.get("command_result") or {})
+                        for command_event in command_result.get("events") or []:
+                            if command_event.get("type") == "timeline.replace":
+                                self._replace_timeline(command_event.get("messages") or [])
                     if getattr(result, "error", None) and not answer:
                         answer = f"(Gateway error: {result.error})"
                     flow_id = getattr(result, "flow_id", None)
@@ -795,12 +877,13 @@ class ManaChatApp(App):
                     if self._count_tool_events_for_turn(turn_id) <= tools_before:
                         self._replay_tool_traces_from_result(result, turn_id=turn_id)
 
-                    self.history.add(
-                        AssistantMessageEvent(
-                            content=answer or "(No response)",
-                            turn_id=turn_id,
+                    if answer or str(getattr(result, "mode", "") or "") != "command":
+                        self.history.add(
+                            AssistantMessageEvent(
+                                content=answer or "(No response)",
+                                turn_id=turn_id,
+                            )
                         )
-                    )
                     if not route_mode:
                         self.update_status("Ready")
                     else:
