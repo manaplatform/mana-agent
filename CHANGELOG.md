@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-23
 
+- Fixed the dashboard's live API base control to remain initialized while navigating between Streamlit pages by rendering it in the shared entrypoint frame instead of inside route-specific callbacks.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_dashboard_navigation.py` passed.
+
 - Rebuilt dashboard chat delivery around the shared persisted `ChatEvent` stream: browser-side optimistic messages now reconcile by stable client ID, assistant/log/status events render as they arrive, correlated tool cards update in place, and ordered cursor replay restores missed events without duplication after reconnect or reload.
   - Added a deterministic dashboard event reducer, live REST/WebSocket component, gateway event forwarding, per-conversation sequence IDs, exact-delivery deduplication, lifecycle revision persistence, recursive event redaction, and an automatically managed local API when launching `mana-agent dashboard`.
   - Removed the dashboard gateway-to-classic-ask fallback; invalid or failed model execution now remains visible as a persisted failed run without executing a backup route.

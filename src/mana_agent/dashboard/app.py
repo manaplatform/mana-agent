@@ -49,13 +49,17 @@ st.session_state.setdefault("mana_api_base", str(os.getenv("MANA_DASHBOARD_API_B
 
 def _page(fn, *, title: str, icon: str, url_path: str, default: bool = False):
     def _runner() -> None:
-        st.sidebar.markdown("## 🧠 Mana Agent")
-        st.sidebar.caption(f"Root: `{root.name}`")
-        st.sidebar.text_input("Live API base", key="mana_api_base")
-        st.sidebar.caption("Navigation uses Streamlit page routes with active highlighting.")
         fn(root)
 
     return st.Page(_runner, title=title, icon=icon, url_path=url_path, default=default)
+
+
+def _render_shared_sidebar() -> None:
+    """Render controls whose state must survive Streamlit page navigation."""
+    st.sidebar.markdown("## 🧠 Mana Agent")
+    st.sidebar.caption(f"Root: `{root.name}`")
+    st.sidebar.text_input("Live API base", key="mana_api_base")
+    st.sidebar.caption("Navigation uses Streamlit page routes with active highlighting.")
 
 
 pages = {
@@ -80,4 +84,5 @@ pages = {
 }
 
 nav = st.navigation(pages, position="sidebar")
+_render_shared_sidebar()
 nav.run()
