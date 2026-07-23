@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-23
 
+- Fixed the Textual multiline composer to resize immediately after programmatic text assignment, including on Windows' Proactor event loop where the queued change event may arrive after the next layout cycle.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_tui_multiline_input.py` passed.
+
 - Fixed Textual `/new` timeline replacement to clear mounted chat cards as well as stored events, reset transient tool/token presentation state, and display the newly activated empty conversation immediately.
   - Verification: TUI command/rendering, gateway, and unified session regressions passed (42 tests); affected-file Ruff, Python compilation, and `git diff --check` passed.
 

@@ -63,6 +63,12 @@ class MessageInput(TextArea):
         self.load_text(value)
         lines = value.split("\n")
         self.cursor_location = (len(lines) - 1, len(lines[-1]))
+        # ``load_text`` posts ``Changed`` asynchronously. On Windows' Proactor
+        # loop that event can lag behind a test or caller's next layout cycle,
+        # leaving explicit multiline assignments at the one-line height. The
+        # new text is already authoritative for explicit line counting, so
+        # report it synchronously; the queued refresh still refines wrapping.
+        self._report_height()
 
     async def _on_key(self, event: events.Key) -> None:
         """Send on Enter and insert newlines only on explicit alternate keys."""
