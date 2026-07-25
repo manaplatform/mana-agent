@@ -722,6 +722,7 @@ def test_tools_manager_blocks_dangerous_shell_commands():
     with pytest.raises(ToolPermissionError):
         assert_shell_allowed("cat .env")
     assert_shell_allowed("python -m compileall src")
+    assert_shell_allowed("ssh root@130.185.73.235 'tail -n 10 /var/log/nginx/access.log'")
 
 
 def test_coding_agent_cannot_directly_execute_tools(tmp_path):

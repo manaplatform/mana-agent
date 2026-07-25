@@ -12,6 +12,8 @@ from mana_agent.prompting.builder import (
 )
 from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
 from mana_agent.prompting.layers import PROMPT_LAYER_ORDER, PromptLayer, compose_layers
+from mana_agent.coding.models import CodingTask, WorkspaceContext
+from mana_agent.integrations.codex.prompt_builder import build_codex_prompt
 
 
 def test_build_agent_flow_connects_selection_context_and_verification(tmp_path: Path) -> None:
@@ -75,6 +77,20 @@ def test_coding_prompt_builder_composes_stable_layers(tmp_path: Path) -> None:
     assert "Output Contract" in prompt
     assert "Flow ID: abc123" in prompt
     assert prompt.count("Core Identity") == 1
+
+
+def test_codex_prompt_allows_authorized_ssh_without_exposing_key_material(tmp_path: Path) -> None:
+    prompt = build_codex_prompt(
+        CodingTask(
+            task_id="ssh-task",
+            goal="Analyze a remote Nginx access log.",
+            requires_repository_write=False,
+        ),
+        WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly"),
+    )
+
+    assert "may pass the supplied identity-file" in prompt
+    assert "never inspect the key file" in prompt
 
 
 def test_compose_layers_rejects_unstable_order() -> None:

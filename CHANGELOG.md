@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-25
 
+- Enabled model-selected chat execution of explicit, user-authorized SSH tasks through the validated coding workflow.
+  - Clarified that workers may pass an authorized identity-file path to SSH while never reading key material or accepting passphrases in chat.
+  - Added SSH to the shell policy and documented SSH-agent handling for passphrase-protected keys.
+  - Verification: targeted gateway and shell-permission tests.
+
 - Prevented entry routing from reporting `SEARCH_NOT_AVAILABLE` (or another
   capability error) when the declared source is available in the live route
   registry.

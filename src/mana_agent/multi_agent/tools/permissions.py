@@ -45,6 +45,7 @@ ALLOWED_SHELL_PREFIXES = (
     "git reset",
     "git restore",
     "git tag",
+    "ssh",
 )
 
 

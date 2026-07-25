@@ -14,7 +14,7 @@ from mana_agent.gateway import (
     RouteAvailability,
     RouteRegistration,
 )
-from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision, EntryRoutingError
+from mana_agent.gateway.entry_routing import ENTRY_ROUTER_PROMPT, EntryRouteContext, EntryRoutingDecision, EntryRoutingError
 from mana_agent.gateway.entry_routing import gmail_route_availability
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -315,6 +315,11 @@ def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monke
     assert coding.calls
     assert coding.session_id == session_id
     assert coding_result.payload["session_id"] == session_id
+
+
+def test_entry_router_exposes_authorized_ssh_requests_to_coding_workflow() -> None:
+    assert "SSH to a named host" in ENTRY_ROUTER_PROMPT
+    assert "selects coding" in ENTRY_ROUTER_PROMPT
 
 
 def test_followup_gmail_reuses_one_session_and_supplies_previous_route(tmp_path: Path, monkeypatch) -> None:
