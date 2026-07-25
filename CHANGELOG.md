@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-25
 
+- Fixed reverse-worker credential loading on Windows by enforcing POSIX mode
+  bits only on POSIX platforms.
+  - Verification: `venv/bin/python -m pytest -q tests/remote_execution/test_reverse_worker_protocol.py`
+    passed (3 passed); `git diff --check` passed.
+
 - Bumped the package and documented release version to `v0.0.20`.
   - Verification: `tests/test_package_version.py` and `git diff --check` passed.
 
