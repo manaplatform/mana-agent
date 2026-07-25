@@ -1,13 +1,12 @@
-# Sandbox-safe remote SSH execution
+# Dual remote execution modes
 
-When Mana-Agent's runtime sandbox cannot open outbound TCP connections, a reverse-connected worker can execute SSH. The worker opens an authenticated WebSocket or HTTPS long-poll connection to the coordinator; the coordinator never calls into the worker.
+Mana-Agent supports two independent remote routes:
 
-`key_path` is only a local reference resolved by the worker. Mana-Agent never reads, uploads, returns, or logs private-key contents; `agent` authentication uses the worker's SSH agent. Register with a one-time coordinator enrolment token, then store only the opaque credential:
+- `remote-ssh` is direct OpenSSH execution from the local Mana-Agent process. It needs no coordinator, worker daemon, WebSocket, or Mana-Agent installation on the target.
+- `reverse-worker` sends work to an enrolled managed worker over its authenticated reverse connection.
 
-Ask Mana-Agent to register, start, or stop a worker in chat. The entry-routing
-model selects the typed `remote-worker` lifecycle action; no dedicated shell
-subcommand performs worker control.
+Use `mana ssh add <name> --host <host> --user <user> --identity <path>` (or `--use-agent`) to save non-secret SSH metadata. Private key contents are never read or stored. `mana ssh trust-host <name>` displays a scanned fingerprint and requires explicit approval before changing known-hosts. Direct SSH uses `StrictHostKeyChecking=yes` and never silently becomes a worker route. Use `--ssh-only` to record that a target must not be bootstrapped as a worker.
 
-Worker credentials are owner-readable only. Revoke a worker at the coordinator to invalidate its credential. Targets default to `prompt_each_time`; approvals bind worker, host, port, remote user, key identity, and exact command. Unknown or changed host keys require explicit handling; strict host-key checking remains enabled.
+The direct-SSH CLI supports `list`, `show`, `edit`, `remove`, `test`, `run`, `logs`, `doctor`, `upload`, and `download`. Chat routing uses the same `remote-ssh` contract and recognizes an explicit profile or explicitly supplied host, user, and authorized key/agent details. Tool actions are bound to `computer.ssh.connect`, `computer.ssh.execute`, `computer.ssh.read`, `computer.ssh.transfer`, profile mutations, and host trust permissions.
 
-Interactive shells, forwarding, transfers, writes, and privileged actions require distinct permissions. Full access is explicitly scoped and never bypasses the permission model. Authentication failures never fail over; only classified sandbox transport restrictions can choose a worker. Disconnected workers transition active jobs to `worker_disconnected`.
+Managed workers remain the route for persistent reverse connectivity. They use an authenticated WebSocket or HTTPS long-poll connection to the coordinator; the coordinator never calls into the worker. Worker credentials are owner-readable only, and worker jobs remain distinct from SSH-only targets. Interactive shells, forwarding, transfers, writes, and privileged actions require distinct permissions and exact action approval.

@@ -4,6 +4,35 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-25
 
+- Bumped the package and documented release version to `v0.0.20`.
+  - Verification: `tests/test_package_version.py` and `git diff --check` passed.
+
+- Updated chat remote execution to use direct SSH when a selected managed worker
+  is missing or offline, including when it disappears before approval; preserved
+  the direct-SSH completion message and authorized the registered remote SSH
+  tool through the operations lane.
+  - Updated entry routing with live managed-worker availability, provider and
+    worker-ID validation, and explicit direct-SSH selection when no worker is
+    connected.
+  - Kept remote-execution lane tasks waiting for approval and resumed/finished
+    them from the actual approved SSH job result.
+  - Returned bounded approved SSH stdout/stderr to chat and instructed remote
+    analysis routing to request concise command-level findings.
+  - Added a strict typed structured-output contract for entry routing whenever
+    the selected model exposes structured-output support, preventing malformed
+    text JSON from reaching route validation.
+  - Replaced the untyped remote-request schema field with strict nested SSH
+    request models accepted by OpenAI's strict response-format validation.
+  - Verification: targeted gateway, entry-routing, and remote-execution tests
+    passed; strict response schema validation passed.
+
+- Made remote-worker credential permission assertions platform-aware: POSIX mode
+  bits are checked on POSIX only, while Windows continues to verify credential
+  persistence without asserting unsupported permission metadata.
+  - Verification: `python3 -m compileall -q src/mana_agent/remote_execution tests/remote_execution`
+    and `git diff --check` passed. Targeted pytest was not run because the
+    available Python runtime does not have pytest installed.
+
 - Added the reverse-connected worker runtime: a typed, versioned and bounded JSON protocol; one-time enrollment with generated Ed25519 worker identities; owner-only/Keychain credential storage; authenticated coordinator WebSocket gateway; heartbeat/offline tracking; message de-duplication; revocation and rotation primitives; and execution-event integration with the existing remote-execution service.
   - Added macOS LaunchAgent installation, lifecycle/diagnostic CLI commands, a standalone reconnecting worker daemon, HTTPS-only production defaults, and API worker enrollment/connection routes. Bootstrap tokens are never written to worker configuration, logs, or LaunchAgent plist files.
   - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/remote_execution/test_remote_execution.py` passed (12 passed); Python compilation and targeted Ruff checks run.
@@ -1422,3 +1451,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Fixed shared OpenRouter fast/tool assignments being rejected by the evidence-based router solely because the same model also serves a higher-reasoning role.
   - Verification: focused OpenRouter gateway-routing regression test.
+## 2026-07-25
+
+- Added dual remote execution modes: persistent direct-SSH profiles alongside managed reverse workers, with secure OpenSSH-only execution and explicit route preservation.
+  - Verification: focused remote-execution and gateway tests passed (56 tests); Ruff, compilation, CLI help, and `git diff --check` passed.

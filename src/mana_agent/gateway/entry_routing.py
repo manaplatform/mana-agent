@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, ConfigDict, Field
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 
@@ -97,6 +98,57 @@ class EntryRoutingDecision:
         return asdict(self)
 
 
+class _StrictRoutingOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntryRoutingSSHTarget(_StrictRoutingOutput):
+    host: str = ""
+    port: int = 22
+    user: str = ""
+
+
+class EntryRoutingSSHAuthentication(_StrictRoutingOutput):
+    mode: Literal["agent", "key_path", "key"] = "agent"
+    key_path: str = ""
+
+
+class EntryRoutingRemoteCommand(_StrictRoutingOutput):
+    argv: list[str] = Field(default_factory=list)
+
+
+class EntryRoutingRemoteRequest(_StrictRoutingOutput):
+    provider: Literal["remote-ssh", "reverse-worker"] = "remote-ssh"
+    profile: str = ""
+    worker_id: str = ""
+    target: EntryRoutingSSHTarget | None = None
+    authentication: EntryRoutingSSHAuthentication | None = None
+    command: EntryRoutingRemoteCommand | None = None
+    working_directory: str | None = None
+    connect_timeout_seconds: int | None = None
+    known_hosts_file: str | None = None
+    timeout_seconds: int | None = None
+    read_only: bool = True
+    pty: bool = False
+
+
+class EntryRoutingOutput(_StrictRoutingOutput):
+    """Schema enforced at the model boundary before routing validation."""
+
+    route: str
+    confidence: float
+    reason: str
+    required_sources: list[str]
+    target_urls: list[str] = Field(default_factory=list)
+    requires_live_data: bool = False
+    reason_code: str = ""
+    error_code: str = ""
+    reuse_active_route: bool = False
+    command_name: str = ""
+    command_arguments: list[str] = Field(default_factory=list)
+    remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
+
+
 class EntryRoutingError(RuntimeError):
     """The model did not return a valid entry-routing decision."""
 
@@ -156,8 +208,16 @@ Route semantics:
 - conversation: ordinary discussion that needs no tool, connector, repository, or coding action.
 - coding: repository code/file changes handled by the Codex coding workflow.
 - remote_execution: explicit user-authorized SSH work. Never select coding for
-  SSH. Return an exact structured remote_request for an external worker; Codex
-  and the local shell must never execute it.
+  SSH. Return an exact structured remote_request. Select `remote-ssh` for direct
+  local OpenSSH execution or `reverse-worker` for an enrolled worker. Read the
+  remote_execution route availability details: when
+  `managed_worker_available` is false, provider MUST be `remote-ssh` and
+  worker_id MUST be "". Use reverse-worker only when it is true; use its
+  managed_worker_id rather than "auto". The remote_request must be valid JSON:
+  use an argv array of plain strings and never place shell syntax in JSON keys.
+  For an approved analysis request, choose a bounded command that emits the
+  requested concise findings (counts, top entries, and relevant samples) rather
+  than streaming an entire log; its stdout is shown back in chat after approval.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit.
 - gmail: inspect or act on the user's Gmail/email account through registered email tools.
 - calendar: calendar account operations through a registered account/cloud calendar connector.
@@ -207,7 +267,7 @@ Return JSON only:
   "reuse_active_route": false,
   "command_name": "sessions",
   "command_arguments": ["list"],
-  "remote_request": {"worker_id": "auto", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true}
+  "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true}
 }
 
 Examples:
@@ -266,19 +326,28 @@ class EntryRouter:
         }
         try:
             started = time.perf_counter()
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=ENTRY_ROUTER_PROMPT),
-                    HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
-                ]
-            )
-            content = getattr(response, "content", response)
-            if isinstance(content, list):
-                content = " ".join(
-                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
-                    for part in content
-                )
-            decision = self._validate(_extract_json(str(content)))
+            messages = [
+                SystemMessage(content=ENTRY_ROUTER_PROMPT),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+            ]
+            structured_output = getattr(self.llm, "with_structured_output", None)
+            if callable(structured_output):
+                response = structured_output(
+                    EntryRoutingOutput,
+                    method="json_schema",
+                    strict=True,
+                ).invoke(messages)
+                decision_payload = EntryRoutingOutput.model_validate(response).model_dump()
+            else:
+                response = self.llm.invoke(messages)
+                content = getattr(response, "content", response)
+                if isinstance(content, list):
+                    content = " ".join(
+                        str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                decision_payload = _extract_json(str(content))
+            decision = self._validate(decision_payload)
             record_current(
                 "model.decision",
                 {
@@ -392,11 +461,45 @@ class EntryRouter:
         remote_request = payload.get("remote_request") or {}
         if route == "remote_execution" and not isinstance(remote_request, dict):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: remote_execution requires structured remote_request.")
-            if not isinstance(raw_command_arguments, list) or any(not isinstance(item, str) for item in raw_command_arguments):
+        if route == "remote_execution":
+            provider = str(remote_request.get("provider") or "").strip()
+            worker_id = str(remote_request.get("worker_id") or "").strip()
+            if provider not in {"remote-ssh", "reverse-worker"}:
                 raise EntryRoutingError(
                     "Model decision failed: entry_route. No response was generated. "
-                    "Reason: command_arguments must be a list of strings."
+                    "Reason: remote_execution provider must be remote-ssh or reverse-worker."
                 )
+            remote_details = next(
+                (
+                    dict(row["availability"].get("details") or {})
+                    for row in self.registry.snapshot()
+                    if row["name"] == "remote_execution"
+                ),
+                {},
+            )
+            worker_available = bool(remote_details.get("managed_worker_available"))
+            if not worker_available and provider != "remote-ssh":
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: no managed worker is available; select provider remote-ssh."
+                )
+            if provider == "remote-ssh" and worker_id:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: direct SSH requests must not specify worker_id."
+                )
+            if provider == "reverse-worker" and (
+                not worker_id or worker_id != str(remote_details.get("managed_worker_id") or "")
+            ):
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: reverse-worker requests must use the available managed worker ID."
+                )
+        if not isinstance(raw_command_arguments, list) or any(not isinstance(item, str) for item in raw_command_arguments):
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: command_arguments must be a list of strings."
+            )
         return EntryRoutingDecision(
             route=route,  # type: ignore[arg-type]
             confidence=confidence,

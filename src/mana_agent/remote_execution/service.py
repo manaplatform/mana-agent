@@ -11,7 +11,6 @@ from mana_agent.remote_execution.models import RemoteExecutionEvent, RemoteExecu
 from mana_agent.remote_execution.providers.local_ssh import LocalSSHProvider
 from mana_agent.remote_execution.permissions import required_permission
 from mana_agent.remote_execution.target_policy import TargetPolicy
-from mana_agent.remote_execution.transport_errors import classify_ssh_failure, permits_external_worker_failover
 from mana_agent.remote_execution.worker import WorkerRegistry
 
 
@@ -24,12 +23,11 @@ class RemoteJob:
 
 
 class RemoteExecutionService:
-    def __init__(self, *, workers: WorkerRegistry | None = None, target_policy: TargetPolicy | None = None, event_sink: Callable[[RemoteExecutionEvent], None] | None = None, outbound_tcp_available: bool = True, fallback_to_external_worker: bool = True) -> None:
+    def __init__(self, *, workers: WorkerRegistry | None = None, target_policy: TargetPolicy | None = None, event_sink: Callable[[RemoteExecutionEvent], None] | None = None, outbound_tcp_available: bool = True) -> None:
         self.workers = workers or WorkerRegistry()
         self.target_policy = target_policy or TargetPolicy()
         self.event_sink = event_sink
         self.outbound_tcp_available = outbound_tcp_available
-        self.fallback_to_external_worker = fallback_to_external_worker
         self.jobs: dict[str, RemoteJob] = {}
         self._permission_requests: dict[str, str] = {}
         self._seen_events: set[tuple[str, int, str, tuple[tuple[str, object], ...]]] = set()
@@ -85,17 +83,27 @@ class RemoteExecutionService:
         if job.state is RemoteJobState.AWAITING_PERMISSION:
             return job
         request = job.request
-        if request.provider == "external_worker" or not self.outbound_tcp_available:
+        if request.provider in {"reverse-worker", "external_worker"}:
             return self._dispatch_worker(job)
+        # Legacy/auto requests may be routed to an already-connected worker when
+        # the host process cannot open TCP. Explicit `remote-ssh` never changes
+        # route, especially for state-changing work.
+        if not self.outbound_tcp_available and request.provider == "local_ssh":
+            return self._dispatch_worker(job)
+        if not self.outbound_tcp_available:
+            job.state = RemoteJobState.FAILED
+            raise RuntimeError(
+                "The local Mana-Agent process is not permitted to open the SSH connection. "
+                "This is a host-process sandbox restriction, not an SSH-key or route error."
+            )
         job.state = RemoteJobState.RUNNING
         try:
             code, _out, err = await LocalSSHProvider().execute(request, lambda event: self._emit(job, event), job.cancel)
             self._emit(job, RemoteExecutionEvent(job_id=request.job_id, session_id=request.session_id, kind="exit_code", data={"code": code}))
             if code == 0:
                 job.state = RemoteJobState.SUCCEEDED
-            elif self.fallback_to_external_worker and permits_external_worker_failover(classify_ssh_failure(err, code)):
-                return self._dispatch_worker(job)
             else:
+                # An explicit direct-SSH request is never silently rerouted to a worker.
                 job.state = RemoteJobState.FAILED
         except TimeoutError:
             job.state = RemoteJobState.TIMED_OUT

@@ -318,6 +318,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "run_lint": frozenset({"test_execution"}), "web_search": frozenset({"web_search"}),
     "github_search": frozenset({"web_search"}), "git_status": frozenset({"git_read"}),
     "git_diff": frozenset({"git_read"}),
+    "remote_ssh_execute": frozenset({"remote_ssh_execute"}),
 }
 
 for _git_read_tool in (

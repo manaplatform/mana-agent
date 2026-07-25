@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,8 @@ def test_identity_fallback_is_owner_only(tmp_path: Path, monkeypatch) -> None:
     identity = generate_identity("worker-1", "opaque-credential")
     store.save(identity)
     assert store.load("worker-1") == identity
-    assert store.path.stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert store.path.stat().st_mode & 0o077 == 0
 
 
 def test_launchagent_contains_no_credentials(tmp_path: Path) -> None:
