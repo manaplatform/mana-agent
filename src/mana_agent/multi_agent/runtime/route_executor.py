@@ -327,8 +327,8 @@ class RouteExecutor:
             if not decision.command_name or decision.command_name not in commands:
                 return f"unknown command: {decision.command_name or '<missing>'}"
         search_config = SearchConfig.from_env()
-        if decision.kind == "web_search" and not search_config.enable_web:
-            return "web search disabled"
+        if decision.kind == "web_search" and search_config.web_search_configuration_error:
+            return search_config.web_search_configuration_error
         if decision.kind == "github_search" and not search_config.enable_github:
             return "github search disabled"
         return None

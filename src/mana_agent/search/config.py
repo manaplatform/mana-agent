@@ -63,6 +63,45 @@ class SearchConfig:
     max_summary_words: int = 80
     enable_ask_agent: bool = True
 
+    @property
+    def web_search_configuration_error(self) -> str:
+        """Return the actionable reason public-web search cannot run, if any.
+
+        Route availability and execution validation share this contract so the
+        entry router never advertises a search capability that the provider
+        layer will reject later.
+        """
+        if not self.enable_web:
+            return "Public web search is disabled for this session."
+        provider = self.web_provider.strip().lower()
+        if not provider:
+            return "Public web search has no configured provider."
+        supported = {
+            "tavily",
+            "brave",
+            "serpapi",
+            "exa",
+            "google_cse",
+            "google",
+            "google-cse",
+            "bing",
+            "bing-compatible",
+            "custom",
+        }
+        if provider not in supported:
+            return f"Public web search provider '{provider}' is not supported."
+        if provider != "custom" and not self.web_api_key:
+            return "Public web search provider credentials are not configured."
+        if provider in {"google_cse", "google", "google-cse"} and not self.web_engine_id:
+            return "Google Custom Search requires MANA_WEB_SEARCH_ENGINE_ID."
+        if provider == "custom" and not self.web_endpoint:
+            return "Custom web search requires MANA_WEB_SEARCH_ENDPOINT."
+        return ""
+
+    @property
+    def web_search_available(self) -> bool:
+        return not self.web_search_configuration_error
+
     @classmethod
     def from_env(cls) -> "SearchConfig":
         settings = _settings()

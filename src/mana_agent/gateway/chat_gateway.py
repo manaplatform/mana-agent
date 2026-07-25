@@ -645,8 +645,23 @@ class AgentChatGateway:
     def _search_route_availability(self) -> RouteAvailability:
         from mana_agent.search.config import SearchConfig
 
-        enabled = SearchConfig.from_env().enable_web
-        return self._available(enabled, "Public web search is disabled for this session.")
+        config = SearchConfig.from_env()
+        reason = config.web_search_configuration_error
+        if not config.web_search_available:
+            return RouteAvailability(
+                available=False,
+                configured=bool(config.web_provider),
+                authorized=bool(config.web_api_key) or config.web_provider == "custom",
+                reason=reason,
+                setup_action=(
+                    "Configure a supported provider and its credentials in the Search settings."
+                ),
+                details={"provider": config.web_provider or None},
+            )
+        return RouteAvailability(
+            available=True,
+            details={"provider": config.web_provider},
+        )
 
     def _github_route_availability(self) -> RouteAvailability:
         from mana_agent.search.config import SearchConfig
