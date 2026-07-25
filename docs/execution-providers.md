@@ -36,6 +36,13 @@ concurrency_limit = 4
 The same nested objects may be supplied as JSON through their environment
 variables. Run `mana-agent doctor` after changing provider configuration.
 
+For an explicit, user-authorized SSH request made in chat, the entry model
+selects the coding workflow and its validated shell tool. The workflow preserves
+the specified host, user, identity path, and remote task; it does not invent
+connection details. Unlock passphrase-protected keys in the local SSH agent
+first (for example, `ssh-add ~/.ssh/id_ed25519`); passphrases are never accepted
+in chat.
+
 ## Provider setup
 
 - **Local process:** no setup. It has no network isolation and only best-effort

@@ -151,6 +151,12 @@ Route semantics:
   its canonical command_name and structured string command_arguments; never execute it directly.
 - conversation: ordinary discussion that needs no tool, connector, repository, or coding action.
 - coding: repository code/file changes handled by the Codex coding workflow.
+  Explicit, user-authorized terminal work—including SSH to a named host using a
+  supplied local identity file or SSH-agent identity—selects coding so the
+  model-selected tool workflow can execute and report it in chat. Preserve the
+  exact host, user, identity-file path, and requested remote action. Never
+  invent remote connection details, and do not select unsupported merely
+  because a request is expressed as a command line.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit.
 - gmail: inspect or act on the user's Gmail/email account through registered email tools.
 - calendar: calendar account operations through a registered account/cloud calendar connector.

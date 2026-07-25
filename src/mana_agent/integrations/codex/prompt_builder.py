@@ -48,7 +48,10 @@ Constraints:
 - Work only inside the assigned worktree.
 - Do not modify files outside the allowed scope without reporting why.
 - Do not commit, push, publish, or open a pull request.
-- Do not access credentials or elevate permissions.
+- Do not read, reveal, copy, or modify credentials, and do not elevate permissions.
+  For an explicit user-authorized SSH task, you may pass the supplied identity-file
+  path to the `ssh` client or use the local SSH agent; never inspect the key file,
+  request its passphrase in chat, or include credential material in output.
 - Preserve public behavior unless the task explicitly changes it.
 - Add or update tests for behavior changes.
 - When verification commands are listed, run them. Otherwise select and run
