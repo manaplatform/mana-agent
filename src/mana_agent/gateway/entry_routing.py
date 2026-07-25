@@ -359,6 +359,18 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 f"Reason: selected unavailable source(s): {', '.join(unavailable)}."
             )
+        if route == "capability_error":
+            available_sources = [
+                source
+                for source in sources
+                if source in source_routes and availability.get(source_routes[source], False)
+            ]
+            if available_sources:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: capability_error declared available source(s) unavailable: "
+                    f"{', '.join(available_sources)}."
+                )
         command_name = str(payload.get("command_name") or "").strip().lower().lstrip("/")
         raw_command_arguments = payload.get("command_arguments") or []
         command_registration = self.registry.get("command") if "command" in self.registry.names else None

@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-25
+
+- Prevented entry routing from reporting `SEARCH_NOT_AVAILABLE` (or another
+  capability error) when the declared source is available in the live route
+  registry.
+  - Verification: `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py`
+    passed (17 passed); Python compilation and `git diff --check` passed.
+
 ## 2026-07-24
 
 - Fixed macOS Music playback false positives. A play request now selects a
