@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-25
 
+- Added the reverse-connected worker runtime: a typed, versioned and bounded JSON protocol; one-time enrollment with generated Ed25519 worker identities; owner-only/Keychain credential storage; authenticated coordinator WebSocket gateway; heartbeat/offline tracking; message de-duplication; revocation and rotation primitives; and execution-event integration with the existing remote-execution service.
+  - Added macOS LaunchAgent installation, lifecycle/diagnostic CLI commands, a standalone reconnecting worker daemon, HTTPS-only production defaults, and API worker enrollment/connection routes. Bootstrap tokens are never written to worker configuration, logs, or LaunchAgent plist files.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/remote_execution/test_remote_execution.py` passed (12 passed); Python compilation and targeted Ruff checks run.
+
 - Added sandbox-safe remote SSH execution contracts, transport failure classification, exact remote target/action approvals, reverse-worker enrolment and owner-only credentials, streamed event de-duplication, and model-selected chat lifecycle actions for registering, starting, and stopping workers.
   - Verification: focused remote execution tests added; no real SSH connection was attempted.
 
