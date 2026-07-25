@@ -448,6 +448,71 @@ def test_router_unknown_source_error_identifies_invalid_model_value() -> None:
         raise AssertionError("unknown source identifiers must fail closed")
 
 
+def test_router_uses_structured_output_when_model_supports_it() -> None:
+    registry = _registry()
+    calls: list[tuple[object, str, bool]] = []
+
+    class StructuredModel:
+        def with_structured_output(self, schema, *, method: str, strict: bool):
+            calls.append((schema, method, strict))
+            return SimpleNamespace(
+                invoke=lambda _messages: {
+                    "route": "conversation",
+                    "confidence": 0.9,
+                    "reason": "No tool is needed.",
+                    "required_sources": ["none"],
+                }
+            )
+
+        def invoke(self, _messages):  # pragma: no cover - must not be used
+            raise AssertionError("structured output was available")
+
+    decision = EntryRouter(llm=StructuredModel(), registry=registry).route(
+        user_prompt="Hello",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.route == "conversation"
+    assert calls[0][1:] == ("json_schema", True)
+
+
+def test_remote_routing_requires_direct_ssh_without_a_managed_worker() -> None:
+    registry = EntryRouteRegistry()
+    registry.register(
+        RouteRegistration(
+            "remote_execution",
+            "SSH execution",
+            lambda: RouteAvailability(
+                available=True,
+                details={"managed_worker_available": False, "direct_ssh_available": True},
+            ),
+        )
+    )
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "remote_execution",
+            "confidence": 0.9,
+            "reason": "No managed worker is available.",
+            "required_sources": ["remote_execution"],
+            "target_urls": [],
+            "remote_request": {
+                "provider": "remote-ssh",
+                "worker_id": "",
+                "target": {"host": "example.test", "user": "root"},
+                "authentication": {"mode": "agent"},
+                "command": {"argv": ["true"]},
+            },
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Run true over SSH.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.remote_request["provider"] == "remote-ssh"
+
+
 def test_failed_required_browser_source_stops_multi_source_plan(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     failing_browser = _AskAgent(SimpleNamespace(answer="", sources=[], warnings=[], trace=[]))

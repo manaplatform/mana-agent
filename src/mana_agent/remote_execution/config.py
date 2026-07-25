@@ -20,6 +20,5 @@ class RemoteSSHConfig(BaseModel):
 class RemoteExecutionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     default_provider: str = "auto"
-    fallback_to_external_worker: bool = True
     default_worker: str = ""
     ssh: RemoteSSHConfig = Field(default_factory=RemoteSSHConfig)

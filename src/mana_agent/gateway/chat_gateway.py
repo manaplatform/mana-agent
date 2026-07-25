@@ -65,6 +65,19 @@ from mana_agent.integrations.computer_control.context import authenticated_compu
 from mana_agent.remote_execution.service import RemoteExecutionService
 
 logger = logging.getLogger(__name__)
+_REMOTE_OUTPUT_LIMIT = 65_536
+
+
+def _remote_job_output(job: Any, *, limit: int = _REMOTE_OUTPUT_LIMIT) -> str:
+    """Return bounded command output for the user-approved remote job."""
+    output = "".join(
+        str(event.data.get("chunk", ""))
+        for event in job.events
+        if event.kind in {"stdout", "stderr"}
+    )
+    if len(output) <= limit:
+        return output
+    return f"[Output truncated to {limit} characters]\n{output[-limit:]}"
 
 
 def _computer_permission_requests_from_trace(response: Any) -> list[dict[str, str]]:
@@ -314,6 +327,7 @@ class AgentChatGateway:
 
         self.command_registry = build_default_registry()
         self.remote_execution_service = RemoteExecutionService()
+        self._remote_job_lanes: dict[str, str] = {}
         self._entry_route_registry = entry_route_registry or self._build_entry_route_registry()
         route_llm = getattr(getattr(self.get_ask_service(), "entry_router", None), "llm", None)
         self._entry_router = entry_router or EntryRouter(
@@ -357,8 +371,29 @@ class AgentChatGateway:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _available(value: bool = True, reason: str = "") -> RouteAvailability:
-        return RouteAvailability(available=value, reason=reason)
+    def _available(
+        value: bool = True,
+        reason: str = "",
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> RouteAvailability:
+        return RouteAvailability(available=value, reason=reason, details=details or {})
+
+    def _remote_execution_route_availability(self) -> RouteAvailability:
+        """Expose the currently model-selectable managed-worker route."""
+        try:
+            worker = self.remote_execution_service.workers.select_connected_worker()
+        except LookupError:
+            return self._available(
+                details={"managed_worker_available": False, "direct_ssh_available": True}
+            )
+        return self._available(
+            details={
+                "managed_worker_available": True,
+                "managed_worker_id": worker.registration.worker_id,
+                "direct_ssh_available": True,
+            }
+        )
 
     def _json_setting(self, name: str) -> dict[str, Any]:
         value = getattr(self.settings, name, "{}")
@@ -393,11 +428,71 @@ class AgentChatGateway:
         """Approve and resume only the exact remote SSH job bound to this ID."""
         from mana_agent.execution.manager import run_sync
 
+        pending = next(
+            (
+                item for item in self.remote_execution_service.pending_permissions()
+                if item["permission_request_id"] == permission_request_id
+            ),
+            None,
+        )
+        if pending is not None:
+            pending_job = self.remote_execution_service.jobs[pending["job_id"]]
+            request = pending_job.request
+            if request.provider in {"reverse-worker", "external_worker"}:
+                try:
+                    self.remote_execution_service.workers.worker(request.worker_id)
+                except LookupError:
+                    # Rebind the still-pending approval to the direct request,
+                    # so a worker disappearing between prompt and approval does
+                    # not leave the chat route stranded.
+                    pending_job.request = request.model_copy(
+                        update={"provider": "remote-ssh", "worker_id": ""}
+                    )
         job = self.remote_execution_service.approve_permission(permission_request_id)
+        lane_task_id = getattr(self, "_remote_job_lanes", {}).get(job.request.job_id)
+        if lane_task_id:
+            self._lane_coordinator.transition(
+                lane_task_id,
+                LaneTaskState.RUNNING,
+                reason="remote SSH permission approved",
+            )
         try:
             job = run_sync(self.remote_execution_service.execute(job.request.job_id))
         except RuntimeError as exc:
+            if lane_task_id:
+                self._lane_coordinator.finish(
+                    lane_task_id,
+                    state=LaneTaskState.FAILED,
+                    error=str(exc),
+                )
+                self._remote_job_lanes.pop(job.request.job_id, None)
             return {"status": "worker_unavailable", "job_id": job.request.job_id, "message": str(exc)}
+        if lane_task_id:
+            lane_state = (
+                LaneTaskState.COMPLETED
+                if job.state.value == "succeeded"
+                else LaneTaskState.FAILED
+            )
+            self._lane_coordinator.finish(
+                lane_task_id,
+                state=lane_state,
+                verification_state={"remote_job_state": job.state.value},
+                error="" if lane_state is LaneTaskState.COMPLETED else f"remote SSH job ended as {job.state.value}",
+            )
+            self._remote_job_lanes.pop(job.request.job_id, None)
+        if job.request.provider == "remote-ssh":
+            message = (
+                "Approved remote SSH job completed through direct SSH."
+                if job.state.value == "succeeded"
+                else f"Direct SSH job ended with state: {job.state.value}."
+            )
+            if output := _remote_job_output(job):
+                message = f"{message}\n\nRemote command output:\n{output}"
+            return {
+                "status": job.state.value,
+                "job_id": job.request.job_id,
+                "message": message,
+            }
         return {"status": job.state.value, "job_id": job.request.job_id, "message": "Approved remote SSH job was dispatched to its selected external worker."}
 
     def _build_entry_route_registry(self) -> EntryRouteRegistry:
@@ -409,7 +504,12 @@ class AgentChatGateway:
                 "Codex coding workflow for repository file changes.",
                 lambda: self._available(self._coding_agent is not None, "Coding agent is not configured."),
             ),
-            RouteRegistration("remote_execution", "Structured external-worker SSH execution.", lambda: self._available(), ("remote_ssh_execute",)),
+            RouteRegistration(
+                "remote_execution",
+                "Structured direct SSH or managed-worker execution.",
+                self._remote_execution_route_availability,
+                ("remote_ssh_execute",),
+            ),
             RouteRegistration("artifact", "User-provided document and media artifact operations.", lambda: self._available(True), ("artifact_read", "artifact_write")),
             RouteRegistration(
                 "command",
@@ -1329,15 +1429,26 @@ class AgentChatGateway:
                                 error=str(exc),
                             )
                             raise
-                        self._lane_coordinator.finish(
-                            reservation.execution.task_id,
-                            state=(LaneTaskState.FAILED if result.error else LaneTaskState.COMPLETED),
-                            changed_files=result.changed_files,
-                            consumed_input_tokens=requested_input,
-                            consumed_output_tokens=max(0, len(result.answer or "") // 4),
-                            verification_state={"mode": result.mode, "error": result.error},
-                            error=str(result.error or ""),
-                        )
+                        if result.mode == "remote-awaiting-permission":
+                            job_id = str(result.payload.get("job_id") or "")
+                            if not job_id:
+                                raise RuntimeError("Remote permission request did not include a job ID.")
+                            self._remote_job_lanes[job_id] = reservation.execution.task_id
+                            self._lane_coordinator.transition(
+                                reservation.execution.task_id,
+                                LaneTaskState.WAITING,
+                                reason="waiting for remote SSH permission",
+                            )
+                        else:
+                            self._lane_coordinator.finish(
+                                reservation.execution.task_id,
+                                state=(LaneTaskState.FAILED if result.error else LaneTaskState.COMPLETED),
+                                changed_files=result.changed_files,
+                                consumed_input_tokens=requested_input,
+                                consumed_output_tokens=max(0, len(result.answer or "") // 4),
+                                verification_state={"mode": result.mode, "error": result.error},
+                                error=str(result.error or ""),
+                            )
                         result.payload.update(
                             {
                                 "lane_id": lane_id.value,
@@ -1578,11 +1689,39 @@ class AgentChatGateway:
         if decision.route == "remote_execution":
             from mana_agent.execution.manager import run_sync
             from mana_agent.remote_execution.models import RemoteExecutionRequest
+            from mana_agent.remote_execution.profiles import get_profile
 
             try:
                 remote_payload = dict(decision.remote_request)
-                if remote_payload.get("worker_id") == "auto":
-                    remote_payload["worker_id"] = self.remote_execution_service.workers.select_connected_worker().registration.worker_id
+                profile_name = str(remote_payload.pop("profile", "") or "").strip()
+                provider = str(remote_payload.get("provider", "") or "").strip()
+                if profile_name:
+                    profile = get_profile(profile_name)
+                    remote_payload.update({
+                        "provider": "remote-ssh", "worker_id": "", "target": profile.target().model_dump(),
+                        "authentication": profile.authentication().model_dump(),
+                        "timeout_seconds": profile.connect_timeout_seconds,
+                        "connect_timeout_seconds": profile.connect_timeout_seconds,
+                        "known_hosts_file": str(profile.known_hosts_path()),
+                    })
+                elif provider in {"", "remote-ssh", "local_ssh"}:
+                    remote_payload["provider"] = "remote-ssh"
+                    remote_payload["worker_id"] = ""
+                elif provider in {"reverse-worker", "external_worker"}:
+                    worker_id = str(remote_payload.get("worker_id") or "").strip()
+                    try:
+                        if worker_id == "auto":
+                            worker_id = self.remote_execution_service.workers.select_connected_worker().registration.worker_id
+                        else:
+                            self.remote_execution_service.workers.worker(worker_id)
+                    except LookupError:
+                        # The user explicitly requested that a missing managed
+                        # worker use the same model-selected direct SSH target.
+                        # The request remains subject to direct-SSH permission.
+                        remote_payload["provider"] = "remote-ssh"
+                        remote_payload["worker_id"] = ""
+                    else:
+                        remote_payload["worker_id"] = worker_id
                 authentication = remote_payload.get("authentication")
                 if isinstance(authentication, dict) and authentication.get("mode") == "key":
                     # `key` is a documented model-schema alias for the precise
@@ -1593,10 +1732,11 @@ class AgentChatGateway:
                     **remote_payload,
                     "job_id": f"remote_{context.turn_id}",
                     "session_id": context.session_id,
-                    "provider": "external_worker",
                 })
             except (ValueError, LookupError) as exc:
                 return ChatTurnResult(answer=f"Model-selected remote SSH request is invalid: {exc}", error="remote_request_invalid", mode="route-error", decision=decision, payload={"route": decision.route})
+            if lane_task_id:
+                self._lane_coordinator.authorize_tool(lane_task_id, "remote_ssh_execute")
             job = self.remote_execution_service.submit(request)
             if job.state.value == "awaiting_permission":
                 permission = self.remote_execution_service.pending_permissions()[-1]
@@ -1628,8 +1768,14 @@ class AgentChatGateway:
             try:
                 job = run_sync(self.remote_execution_service.execute(request.job_id))
             except RuntimeError as exc:
-                return ChatTurnResult(answer=str(exc), error="external_worker_unavailable", mode="remote-worker-unavailable", decision=decision, payload={"route": decision.route, "job_id": request.job_id})
-            return ChatTurnResult(answer="Remote SSH job was assigned to the selected external worker.", mode="remote-assigned", decision=decision, payload={"route": decision.route, "job_id": request.job_id, "state": job.state.value})
+                return ChatTurnResult(answer=str(exc), error="remote_execution_unavailable", mode="remote-execution-unavailable", decision=decision, payload={"route": decision.route, "job_id": request.job_id})
+            if request.provider == "remote-ssh":
+                output = _remote_job_output(job)
+                answer = f"Direct SSH job completed with state: {job.state.value}."
+                if output:
+                    answer = f"{answer}\n\n{output}"
+                return ChatTurnResult(answer=answer, mode="remote-completed", decision=decision, payload={"route": decision.route, "provider": "remote-ssh", "job_id": request.job_id, "state": job.state.value, "events": [event.model_dump(mode="json") for event in job.events]})
+            return ChatTurnResult(answer="Remote job was assigned to the selected managed worker.", mode="remote-assigned", decision=decision, payload={"route": decision.route, "provider": "reverse-worker", "job_id": request.job_id, "state": job.state.value})
 
         mapped = {
             "coding": AgentDecision(

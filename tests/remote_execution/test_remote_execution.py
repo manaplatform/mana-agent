@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import os
 from pathlib import Path
 import pytest
 from mana_agent.remote_execution.models import RemoteCommand, RemoteExecutionEvent, RemoteExecutionRequest, SSHAuthentication, SSHTarget, WorkerRegistration
@@ -61,7 +62,9 @@ def test_worker_enrolment_is_one_time_and_credential_is_private(tmp_path: Path) 
         registry.enrol(token, registration)
     path = tmp_path / "credential"
     store_worker_credential(path, credential)
-    assert path.stat().st_mode & 0o077 == 0
+    assert path.read_text(encoding="utf-8") == credential
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o077 == 0
 
 def test_sandbox_selects_external_worker_and_deduplicates_events() -> None:
     seen: list[RemoteExecutionEvent] = []

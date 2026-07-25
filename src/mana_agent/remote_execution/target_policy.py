@@ -16,7 +16,7 @@ class TargetPolicyMode(str, Enum):
 def target_identity(request: RemoteExecutionRequest) -> str:
     key = request.authentication.key_path or "agent"
     target = request.target
-    return f"{request.worker_id}|{target.user}@{target.host}:{target.port}|{key}"
+    return f"{request.provider}|{request.worker_id}|{target.user}@{target.host}:{target.port}|{key}"
 
 
 class TargetPolicy:

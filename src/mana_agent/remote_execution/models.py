@@ -52,12 +52,15 @@ class PermissionCategory(str, Enum):
 class RemoteExecutionRequest(StrictModel):
     job_id: str
     session_id: str
-    worker_id: str
-    provider: Literal["local_ssh", "external_worker"] = "external_worker"
+    # Direct SSH targets intentionally have no worker identity or enrolment.
+    worker_id: str = ""
+    provider: Literal["remote-ssh", "reverse-worker", "local_ssh", "external_worker"] = "reverse-worker"
     target: SSHTarget
     authentication: SSHAuthentication
     command: RemoteCommand
     working_directory: str | None = None
+    connect_timeout_seconds: int = Field(default=15, gt=0, le=600)
+    known_hosts_file: str | None = None
     timeout_seconds: int = Field(default=60, gt=0, le=3600)
     read_only: bool = True
     pty: bool = False
@@ -111,6 +114,6 @@ class WorkerRegistration(StrictModel):
 class RemoteExecutionEvent(StrictModel):
     job_id: str
     session_id: str
-    kind: Literal["worker_selected", "target_resolution", "host_key_verification", "permission_requested", "connection_started", "stdout", "stderr", "exit_code", "timeout", "cancelled", "worker_disconnected"]
+    kind: Literal["worker_selected", "target_resolution", "host_key_verification", "permission_requested", "connection_started", "stdout", "stderr", "exit_code", "timeout", "cancelled", "worker_disconnected", "resolving_host", "authenticating", "command_started", "connection_closed"]
     data: dict[str, str | int | bool | None] = Field(default_factory=dict)
     sequence: int = Field(default=0, ge=0)
