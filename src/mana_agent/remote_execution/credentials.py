@@ -74,7 +74,10 @@ class CredentialStore:
                 pass
         if not self.path.exists():
             return None
-        if self.path.stat().st_mode & 0o077:
+        # Windows does not expose POSIX group/world mode bits reliably.  The
+        # fallback file is still created with the narrowest permissions the
+        # platform supports, but only enforce this metadata on POSIX.
+        if os.name == "posix" and self.path.stat().st_mode & 0o077:
             raise PermissionError("worker identity file must not be group/world accessible")
         return WorkerIdentity(**json.loads(self.path.read_text(encoding="utf-8")))
 
