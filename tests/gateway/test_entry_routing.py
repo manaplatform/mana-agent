@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from mana_agent.gateway import (
     AgentChatGateway,
     EntryRouteRegistry,
@@ -12,7 +14,7 @@ from mana_agent.gateway import (
     RouteAvailability,
     RouteRegistration,
 )
-from mana_agent.gateway.entry_routing import EntryRoutingDecision, EntryRoutingError
+from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision, EntryRoutingError
 from mana_agent.gateway.entry_routing import gmail_route_availability
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -213,6 +215,34 @@ def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path
     assert "gmail" in result.answer.lower()
     assert not chat.conversation_calls
     assert not ask_agent.calls
+
+
+def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
+    class _IncorrectCapabilityModel:
+        def invoke(self, _messages: list[Any]) -> Any:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "capability_error",
+                        "confidence": 0.98,
+                        "reason": "search is unavailable",
+                        "required_sources": ["search"],
+                        "target_urls": [],
+                        "requires_live_data": True,
+                        "reason_code": "SEARCH_UNAVAILABLE",
+                        "error_code": "SEARCH_NOT_AVAILABLE",
+                        "reuse_active_route": False,
+                    }
+                )
+            )
+
+    router = EntryRouter(llm=_IncorrectCapabilityModel(), registry=_registry())
+
+    with pytest.raises(EntryRoutingError, match=r"declared available source\(s\) unavailable: search"):
+        router.route(
+            user_prompt="Find current public information about Mana-Agent.",
+            context=EntryRouteContext(session_id="session", conversation_id="session", turn_id="turn"),
+        )
 
 
 def test_gmail_availability_reads_live_account_and_credential_registry(monkeypatch) -> None:
