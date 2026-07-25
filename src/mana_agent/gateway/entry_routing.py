@@ -24,6 +24,7 @@ EntryRouteName = Literal[
     "repository",
     "memory",
     "automation",
+    "remote_execution",
     "artifact",
     "command",
     "unsupported",
@@ -32,12 +33,12 @@ EntryRouteName = Literal[
 
 RequiredSource = Literal[
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "internal_knowledge", "none",
+    "memory", "artifact", "remote_execution", "internal_knowledge", "none",
 ]
 
 REQUIRED_SOURCES: set[str] = {
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "internal_knowledge", "none",
+    "memory", "artifact", "remote_execution", "internal_knowledge", "none",
 }
 TOOL_SOURCES = REQUIRED_SOURCES - {"internal_knowledge", "none"}
 
@@ -89,6 +90,7 @@ class EntryRoutingDecision:
     reuse_active_route: bool = False
     command_name: str = ""
     command_arguments: tuple[str, ...] = ()
+    remote_request: dict[str, Any] = field(default_factory=dict)
     source: str = "model"
 
     def to_dict(self) -> dict[str, Any]:
@@ -149,14 +151,13 @@ request to conversation merely because its connector is unavailable.
 Route semantics:
 - command: a request equivalent to one command exposed by the supplied command route tools. Return
   its canonical command_name and structured string command_arguments; never execute it directly.
+  Remote-worker lifecycle requests must select the `remote-worker` command with exactly
+  `["register"|"start"|"stop", worker_id]`. This is a model decision, never keyword routing.
 - conversation: ordinary discussion that needs no tool, connector, repository, or coding action.
 - coding: repository code/file changes handled by the Codex coding workflow.
-  Explicit, user-authorized terminal work—including SSH to a named host using a
-  supplied local identity file or SSH-agent identity—selects coding so the
-  model-selected tool workflow can execute and report it in chat. Preserve the
-  exact host, user, identity-file path, and requested remote action. Never
-  invent remote connection details, and do not select unsupported merely
-  because a request is expressed as a command line.
+- remote_execution: explicit user-authorized SSH work. Never select coding for
+  SSH. Return an exact structured remote_request for an external worker; Codex
+  and the local shell must never execute it.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit.
 - gmail: inspect or act on the user's Gmail/email account through registered email tools.
 - calendar: calendar account operations through a registered account/cloud calendar connector.
@@ -195,7 +196,7 @@ fallback. Direct URL signals are supplied separately; do not treat them as repos
 
 Return JSON only:
 {
-  "route": "conversation|coding|artifact|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|unsupported|capability_error",
+  "route": "conversation|coding|remote_execution|artifact|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|unsupported|capability_error",
   "confidence": 0.0,
   "reason": "short routing reason",
   "required_sources": ["browser"],
@@ -205,7 +206,8 @@ Return JSON only:
   "error_code": "",
   "reuse_active_route": false,
   "command_name": "sessions",
-  "command_arguments": ["list"]
+  "command_arguments": ["list"],
+  "remote_request": {"worker_id": "auto", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true}
 }
 
 Examples:
@@ -247,6 +249,7 @@ class EntryRouter:
                 "command": [["none"]],
                 "unsupported": [["none"]],
                 "coding": [["repository"]],
+                "remote_execution": [["remote_execution"]],
                 "artifact": [["artifact"]],
                 "gmail": [["gmail"]],
                 "calendar": [["calendar"]],
@@ -358,7 +361,7 @@ class EntryRouter:
         if route == "capability_error" and not error_code:
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: capability_error requires error_code.")
         availability = {row["name"]: bool(row["availability"]["available"]) for row in self.registry.snapshot()}
-        source_routes = {"browser": "browser", "search": "search", "github": "github", "repository": "repository", "gmail": "gmail", "calendar": "calendar", "computer": "computer", "memory": "memory"}
+        source_routes = {"browser": "browser", "search": "search", "github": "github", "repository": "repository", "gmail": "gmail", "calendar": "calendar", "computer": "computer", "memory": "memory", "remote_execution": "remote_execution"}
         unavailable = [source for source in sources if source in source_routes and not availability.get(source_routes[source], False)]
         if unavailable and route != "capability_error":
             raise EntryRoutingError(
@@ -386,6 +389,9 @@ class EntryRouter:
                     "Model decision failed: entry_route. No response was generated. "
                     "Reason: command route selected an unknown command."
                 )
+        remote_request = payload.get("remote_request") or {}
+        if route == "remote_execution" and not isinstance(remote_request, dict):
+            raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: remote_execution requires structured remote_request.")
             if not isinstance(raw_command_arguments, list) or any(not isinstance(item, str) for item in raw_command_arguments):
                 raise EntryRoutingError(
                     "Model decision failed: entry_route. No response was generated. "
@@ -408,6 +414,7 @@ class EntryRouter:
                 and all(isinstance(item, str) for item in raw_command_arguments)
                 else ()
             ),
+            remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
         )
 
 

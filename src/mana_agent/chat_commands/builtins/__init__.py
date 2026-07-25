@@ -3,7 +3,18 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import BaseModel
+
 from mana_agent.chat_commands.models import CommandContext, CommandDefinition, CommandResult
+
+
+class RemoteWorkerArguments(BaseModel):
+    values: list[str]
+
+    def model_post_init(self, __context: object) -> None:
+        _ = __context
+        if len(self.values) != 2 or self.values[0] not in {"register", "start", "stop"}:
+            raise ValueError("Usage: /remote-worker <register|start|stop> <worker-id>")
 
 
 def _sessions(context: CommandContext, args: list[str]) -> CommandResult:
@@ -125,6 +136,13 @@ def _cancel(context: CommandContext, _args: list[str]) -> CommandResult:
     return CommandResult(status="success", message="Cancellation requested." if cancelled else "No cancellable turn is active.")
 
 
+def _remote_worker(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None or not hasattr(context.gateway, "remote_worker_command"):
+        raise RuntimeError("Remote execution coordinator is unavailable. No fallback action was executed.")
+    result = context.gateway.remote_worker_command(args[0], args[1])
+    return CommandResult(status="success", message=str(result.pop("message")), data=result)
+
+
 def _computer_confirm(context: CommandContext, args: list[str]) -> CommandResult:
     from mana_agent.integrations.computer_control.cancellation import approve_computer_action
     from mana_agent.integrations.computer_control.service import default_computer_control_service
@@ -233,6 +251,7 @@ def definitions() -> list[CommandDefinition]:
         CommandDefinition(canonical_name="disconnect", description="Remove connector configuration.", argument_schema="<name>", required_capability="connectors", confirmation_required=True, handler=lambda context, args: _connect(context, ["disconnect", *args])),
         CommandDefinition(canonical_name="status", description="Show the active chat status.", required_capability="gateway", handler=_status),
         CommandDefinition(canonical_name="cancel", description="Cancel the active agent turn.", required_capability="gateway", handler=_cancel),
+        CommandDefinition(canonical_name="remote-worker", description="Model-selected remote worker lifecycle: register, start, or stop an external SSH worker.", argument_schema="<register|start|stop> <worker-id>", argument_model=RemoteWorkerArguments, required_capability="gateway", confirmation_actions=frozenset({"stop"}), handler=_remote_worker),
         CommandDefinition(
             canonical_name="computer-confirm",
             description="List or explicitly approve a pending exact computer action.",

@@ -318,8 +318,8 @@ def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monke
 
 
 def test_entry_router_exposes_authorized_ssh_requests_to_coding_workflow() -> None:
-    assert "SSH to a named host" in ENTRY_ROUTER_PROMPT
-    assert "selects coding" in ENTRY_ROUTER_PROMPT
+    assert "remote_execution" in ENTRY_ROUTER_PROMPT
+    assert "Never select coding for" in ENTRY_ROUTER_PROMPT
 
 
 def test_followup_gmail_reuses_one_session_and_supplies_previous_route(tmp_path: Path, monkeypatch) -> None:

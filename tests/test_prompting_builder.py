@@ -79,7 +79,7 @@ def test_coding_prompt_builder_composes_stable_layers(tmp_path: Path) -> None:
     assert prompt.count("Core Identity") == 1
 
 
-def test_codex_prompt_allows_authorized_ssh_without_exposing_key_material(tmp_path: Path) -> None:
+def test_codex_prompt_requires_external_worker_for_authorized_ssh(tmp_path: Path) -> None:
     prompt = build_codex_prompt(
         CodingTask(
             task_id="ssh-task",
@@ -89,7 +89,8 @@ def test_codex_prompt_allows_authorized_ssh_without_exposing_key_material(tmp_pa
         WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly"),
     )
 
-    assert "may pass the supplied identity-file" in prompt
+    assert "Never invoke `ssh` from this Codex process" in prompt
+    assert "external worker" in prompt
     assert "never inspect the key file" in prompt
 
 

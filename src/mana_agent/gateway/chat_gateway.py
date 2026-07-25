@@ -62,6 +62,7 @@ from mana_agent.evals.recorder import record_current
 from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
 from mana_agent.integrations.computer_control.context import authenticated_computer_client
+from mana_agent.remote_execution.service import RemoteExecutionService
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +313,7 @@ class AgentChatGateway:
         from mana_agent.chat_commands import CommandDispatcher, build_default_registry
 
         self.command_registry = build_default_registry()
+        self.remote_execution_service = RemoteExecutionService()
         self._entry_route_registry = entry_route_registry or self._build_entry_route_registry()
         route_llm = getattr(getattr(self.get_ask_service(), "entry_router", None), "llm", None)
         self._entry_router = entry_router or EntryRouter(
@@ -370,6 +372,34 @@ class AgentChatGateway:
             raise ValueError(f"Invalid {name} configuration: expected a JSON object")
         return parsed
 
+    def remote_worker_command(self, action: str, worker_id: str) -> dict[str, str]:
+        """Execute a validated lifecycle action selected by the entry model."""
+        clean_action = str(action).strip().lower()
+        clean_worker_id = str(worker_id).strip()
+        if clean_action not in {"register", "start", "stop"} or not clean_worker_id:
+            raise ValueError("Remote worker action must be register, start, or stop with a worker ID.")
+        registry = self.remote_execution_service.workers
+        if clean_action == "register":
+            token = registry.issue_enrolment_token(clean_worker_id)
+            return {"status": "enrolment_issued", "worker_id": clean_worker_id, "enrolment_token": token, "message": "Give this one-time token to the external worker transport. It expires in 10 minutes and is not stored in chat history."}
+        if clean_action == "start":
+            if registry.registration(clean_worker_id) is None:
+                raise RuntimeError("Worker is not enrolled. Ask to register it first; no fallback action was executed.")
+            return {"status": "awaiting_connection", "worker_id": clean_worker_id, "message": "Waiting for the enrolled worker to establish its authenticated outbound connection."}
+        registry.disconnect(clean_worker_id)
+        return {"status": "stopped", "worker_id": clean_worker_id, "message": "Worker connection was stopped; active jobs are marked disconnected."}
+
+    def remote_permission_command(self, permission_request_id: str) -> dict[str, str]:
+        """Approve and resume only the exact remote SSH job bound to this ID."""
+        from mana_agent.execution.manager import run_sync
+
+        job = self.remote_execution_service.approve_permission(permission_request_id)
+        try:
+            job = run_sync(self.remote_execution_service.execute(job.request.job_id))
+        except RuntimeError as exc:
+            return {"status": "worker_unavailable", "job_id": job.request.job_id, "message": str(exc)}
+        return {"status": job.state.value, "job_id": job.request.job_id, "message": "Approved remote SSH job was dispatched to its selected external worker."}
+
     def _build_entry_route_registry(self) -> EntryRouteRegistry:
         registry = EntryRouteRegistry()
         registrations = (
@@ -379,6 +409,7 @@ class AgentChatGateway:
                 "Codex coding workflow for repository file changes.",
                 lambda: self._available(self._coding_agent is not None, "Coding agent is not configured."),
             ),
+            RouteRegistration("remote_execution", "Structured external-worker SSH execution.", lambda: self._available(), ("remote_ssh_execute",)),
             RouteRegistration("artifact", "User-provided document and media artifact operations.", lambda: self._available(True), ("artifact_read", "artifact_write")),
             RouteRegistration(
                 "command",
@@ -1195,6 +1226,7 @@ class AgentChatGateway:
                     "computer": "tool",
                     "automation": "tool",
                     "artifact": "tool",
+                    "remote_execution": "tool",
                 }.get(entry_decision.route, "main")
                 parallel_requested = bool(options.pop("request_parallel_candidates", False))
                 route_tools = self._entry_route_registry.get(entry_decision.route).tools
@@ -1251,6 +1283,7 @@ class AgentChatGateway:
                         "computer": ("computer",),
                         "automation": ("deployment", "shell_read", "shell_write"),
                         "artifact": ("artifact_read", "artifact_write"),
+                        "remote_execution": ("remote_ssh_execute",),
                     }.get(entry_decision.route, ())
                     reservation = self._lane_coordinator.reserve(
                         normalized_intent=text,
@@ -1541,6 +1574,62 @@ class AgentChatGateway:
                 decision=decision, context=context, text=text, ask_service=ask_service,
                 callbacks=options.get("callbacks"),
             )
+
+        if decision.route == "remote_execution":
+            from mana_agent.execution.manager import run_sync
+            from mana_agent.remote_execution.models import RemoteExecutionRequest
+
+            try:
+                remote_payload = dict(decision.remote_request)
+                if remote_payload.get("worker_id") == "auto":
+                    remote_payload["worker_id"] = self.remote_execution_service.workers.select_connected_worker().registration.worker_id
+                authentication = remote_payload.get("authentication")
+                if isinstance(authentication, dict) and authentication.get("mode") == "key":
+                    # `key` is a documented model-schema alias for the precise
+                    # worker-only `key_path` mode; it never selects a fallback
+                    # provider and never reads the referenced key.
+                    remote_payload["authentication"] = {**authentication, "mode": "key_path"}
+                request = RemoteExecutionRequest.model_validate({
+                    **remote_payload,
+                    "job_id": f"remote_{context.turn_id}",
+                    "session_id": context.session_id,
+                    "provider": "external_worker",
+                })
+            except (ValueError, LookupError) as exc:
+                return ChatTurnResult(answer=f"Model-selected remote SSH request is invalid: {exc}", error="remote_request_invalid", mode="route-error", decision=decision, payload={"route": decision.route})
+            job = self.remote_execution_service.submit(request)
+            if job.state.value == "awaiting_permission":
+                permission = self.remote_execution_service.pending_permissions()[-1]
+                from mana_agent.chat.events import CodingActivityEvent
+                from mana_agent.chat.history import get_history
+
+                get_history().add(CodingActivityEvent(activity={
+                    "event_type": "remote_execution.waiting_permission",
+                    "title": "Remote SSH permission required",
+                    "metadata": {
+                        "permission_request_id": permission["permission_request_id"],
+                        "permission_scope": "remote.ssh.execute",
+                        "preview": f"{permission['target']} · {permission['command']}",
+                        "remote_permission": True,
+                    },
+                }, turn_id=context.turn_id))
+                if sink is not None:
+                    sink(
+                        "remote_execution.waiting_permission",
+                        "Remote SSH permission required",
+                        metadata={
+                            "permission_request_id": permission["permission_request_id"],
+                            "permission_scope": "remote.ssh.execute",
+                            "preview": f"{permission['target']} · {permission['command']}",
+                            "remote_permission": True,
+                        },
+                    )
+                return ChatTurnResult(answer="Remote SSH permission is required for the exact selected request.", mode="remote-awaiting-permission", decision=decision, payload={"route": decision.route, "job_id": request.job_id, "permission_request": permission, "events": [event.model_dump(mode="json") for event in job.events]})
+            try:
+                job = run_sync(self.remote_execution_service.execute(request.job_id))
+            except RuntimeError as exc:
+                return ChatTurnResult(answer=str(exc), error="external_worker_unavailable", mode="remote-worker-unavailable", decision=decision, payload={"route": decision.route, "job_id": request.job_id})
+            return ChatTurnResult(answer="Remote SSH job was assigned to the selected external worker.", mode="remote-assigned", decision=decision, payload={"route": decision.route, "job_id": request.job_id, "state": job.state.value})
 
         mapped = {
             "coding": AgentDecision(

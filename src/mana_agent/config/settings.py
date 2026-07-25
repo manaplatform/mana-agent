@@ -221,6 +221,9 @@ class Settings(BaseSettings):
     mana_execution_global_concurrency: int = Field(default=16, alias="MANA_EXECUTION_GLOBAL_CONCURRENCY")
     mana_execution_routing: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_EXECUTION_ROUTING")
     mana_execution_providers: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_EXECUTION_PROVIDERS")
+    # Remote SSH execution has its own policy and never modifies global OpenSSH
+    # configuration. Values are structured JSON in Mana user configuration.
+    mana_remote_execution: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_REMOTE_EXECUTION")
 
     # Mana-managed settings are intentionally repository-independent.  Loading
     # a project's ``.env`` here can silently replace the API key selected in

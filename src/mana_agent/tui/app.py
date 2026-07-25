@@ -243,7 +243,7 @@ class ManaChatApp(App):
         if not isinstance(event, CodingActivityEvent):
             return
         activity = event.activity
-        if activity.get("event_type") != "computer.waiting_permission":
+        if activity.get("event_type") not in {"computer.waiting_permission", "remote_execution.waiting_permission"}:
             return
         metadata = activity.get("metadata") or {}
         request_id = str(metadata.get("permission_request_id") or "")
@@ -259,6 +259,7 @@ class ManaChatApp(App):
             request_id=request_id,
             scope=str(metadata.get("permission_scope") or ""),
             preview=str(metadata.get("preview") or activity.get("title") or ""),
+            remote=bool(metadata.get("remote_permission")),
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
@@ -269,6 +270,7 @@ class ManaChatApp(App):
                 request_id=event.request_id,
                 scope=event.scope,
                 preview=event.preview,
+                remote=event.remote,
             ),
             self._apply_computer_permission,
         )
@@ -288,6 +290,14 @@ class ManaChatApp(App):
         )
 
         try:
+            if choice.remote:
+                if choice.decision is None:
+                    self.notify("Remote SSH request denied.", severity="warning")
+                    return
+                result = await asyncio.to_thread(self.gateway.remote_permission_command, choice.request_id)
+                self.notify(result["message"])
+                self.history.add(AssistantMessageEvent(content=result["message"]))
+                return
             if choice.decision is None:
                 await asyncio.to_thread(
                     deny_computer_permission,

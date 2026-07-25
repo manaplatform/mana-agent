@@ -71,6 +71,7 @@ def test_lane_selection_uses_decision_intent_and_invalid_model_lane_uses_valid_r
     assert select_lane(entry_route="coding") == LaneId.CODING
     assert select_lane(intent="verify") == LaneId.VERIFY
     assert select_lane(entry_route="search", model_lane="not-a-lane") == LaneId.RESEARCH
+    assert select_lane(entry_route="remote_execution") == LaneId.OPERATIONS
     with pytest.raises(ValueError, match="No valid specialist lane decision"):
         select_lane(entry_route="missing", model_lane="not-a-lane")
 
