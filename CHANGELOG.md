@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-25
 
+- Made public-web search a fully validated entry-routing capability. Search is
+  now advertised only when its selected provider has the required configuration
+  and credentials; route execution applies the same validation so unavailable
+  search produces a truthful setup result instead of an invalid
+  `capability_error` decision.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q
+    tests/gateway/test_entry_routing.py tests/test_search_config.py` passed
+    (22 passed); `git diff --check` passed.
+
 - Fixed reverse-worker credential loading on Windows by enforcing POSIX mode
   bits only on POSIX platforms.
   - Verification: `venv/bin/python -m pytest -q tests/remote_execution/test_reverse_worker_protocol.py`

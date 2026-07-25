@@ -245,6 +245,24 @@ def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
         )
 
 
+def test_search_route_availability_requires_a_configured_provider(tmp_path: Path, monkeypatch) -> None:
+    from mana_agent.search.config import SearchConfig
+
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    monkeypatch.setattr(
+        SearchConfig,
+        "from_env",
+        classmethod(lambda cls: SearchConfig(enable_web=True, web_provider="tavily")),
+    )
+
+    availability = gateway._search_route_availability()
+
+    assert availability.available is False
+    assert availability.configured is True
+    assert availability.authorized is False
+    assert "credentials" in availability.reason.lower()
+
+
 def test_gmail_availability_reads_live_account_and_credential_registry(monkeypatch) -> None:
     from mana_agent.connectors.email.models import (
         EmailAccount,
