@@ -49,9 +49,11 @@ Constraints:
 - Do not modify files outside the allowed scope without reporting why.
 - Do not commit, push, publish, or open a pull request.
 - Do not read, reveal, copy, or modify credentials, and do not elevate permissions.
-  For an explicit user-authorized SSH task, you may pass the supplied identity-file
-  path to the `ssh` client or use the local SSH agent; never inspect the key file,
-  request its passphrase in chat, or include credential material in output.
+  Never invoke `ssh` from this Codex process. Explicit user-authorized SSH tasks
+  must be submitted as structured jobs to a connected external worker. That worker
+  alone may resolve an identity-file path or SSH agent; never inspect the key file,
+  request its passphrase in chat, or include credential material in output. If no
+  worker is connected, report that condition without attempting local SSH.
 - Preserve public behavior unless the task explicitly changes it.
 - Add or update tests for behavior changes.
 - When verification commands are listed, run them. Otherwise select and run

@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-25
 
+- Added sandbox-safe remote SSH execution contracts, transport failure classification, exact remote target/action approvals, reverse-worker enrolment and owner-only credentials, streamed event de-duplication, and model-selected chat lifecycle actions for registering, starting, and stopping workers.
+  - Verification: focused remote execution tests added; no real SSH connection was attempted.
+
+- Changed coding and Codex SSH policy so sandboxed processes never invoke `ssh` directly; remote SSH now requires a connected external worker and fails explicitly without a local fallback.
+  - Entry routing now requires a model-selected structured `remote_execution` request rather than sending SSH work to the coding/Codex lane.
+  - Remote execution is coordinated by the explicit operations specialist lane.
+  - Added exact-job remote SSH permission request IDs and explicit approval/resume handling.
+  - Remote SSH model decisions can now select the sole trusted connected worker automatically.
+
 - Enabled model-selected chat execution of explicit, user-authorized SSH tasks through the validated coding workflow.
   - Clarified that workers may pass an authorized identity-file path to SSH while never reading key material or accepting passphrases in chat.
   - Added SSH to the shell policy and documented SSH-agent handling for passphrase-protected keys.

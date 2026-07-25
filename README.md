@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://api.manadev.net/uploads/images/e60304eb-03f0-4342-8ca9-b060899fea35.png" alt="Mana-Agent banner" width="100%" />
+  <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent banner" width="100%" />
 </p>
 
 <h1 align="center">Mana-Agent</h1>
