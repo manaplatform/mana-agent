@@ -88,6 +88,8 @@ class WorkerCapabilities(StrictModel):
     ssh: bool = True
     local_process: bool = True
     docker: bool = False
+    artifact_streaming: bool = True
+    supported_providers: list[str] = Field(default_factory=lambda: ["local-process"])
 
 
 class WorkerRegistration(StrictModel):
@@ -98,6 +100,12 @@ class WorkerRegistration(StrictModel):
     ssh_available: bool
     labels: list[str] = Field(default_factory=list)
     max_concurrent_jobs: int = Field(default=1, gt=0, le=64)
+    architecture: str = ""
+    hostname: str = ""
+    mana_version: str = ""
+    protocol_version: int = 1
+    public_key_pem: str = Field(default="", max_length=4096)
+    capability_restrictions: list[str] = Field(default_factory=list)
 
 
 class RemoteExecutionEvent(StrictModel):
@@ -106,4 +114,3 @@ class RemoteExecutionEvent(StrictModel):
     kind: Literal["worker_selected", "target_resolution", "host_key_verification", "permission_requested", "connection_started", "stdout", "stderr", "exit_code", "timeout", "cancelled", "worker_disconnected"]
     data: dict[str, str | int | bool | None] = Field(default_factory=dict)
     sequence: int = Field(default=0, ge=0)
-

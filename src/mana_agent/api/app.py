@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import Any
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -23,6 +24,12 @@ def create_app(
     chat_gateway: Any | None = None,
     github_autopilot: Any | None = None,
 ) -> FastAPI:
+    from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
+    worker_gateway = WorkerGateway(WorkerGatewayConfig(
+        enabled=os.getenv("MANA_WORKER_GATEWAY_ENABLED", "").lower() in {"1", "true", "yes"},
+        public_url=os.getenv("MANA_WORKER_GATEWAY_PUBLIC_URL", ""),
+        allow_insecure_local_development=os.getenv("MANA_WORKER_GATEWAY_LOCAL_DEV", "").lower() in {"1", "true", "yes"},
+    ))
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
@@ -71,6 +78,7 @@ def create_app(
     app.include_router(control_router)
     app.include_router(events_ws_router)
     app.include_router(workspaces_router)
+    app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:
         from mana_agent.github_autopilot.webhook import router as github_autopilot_router
         app.include_router(github_autopilot_router)
@@ -78,6 +86,7 @@ def create_app(
     # Make the central chat gateway (if provided) available to routes / services
     if chat_gateway is not None:
         app.state.chat_gateway = chat_gateway
+    app.state.worker_gateway = worker_gateway
     if telegram_connector is not None:
         from fastapi import Response
 

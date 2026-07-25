@@ -27,6 +27,7 @@
 - [Troubleshooting](#troubleshooting)
 - [Configuration](#configuration)
 - [Computer control](docs/22-computer-control.md)
+- [Reverse workers](docs/23-reverse-workers.md)
 - [Telegram connector](#telegram-connector)
 - [Web dashboard](#web-dashboard)
 - [Documentation](#documentation)
