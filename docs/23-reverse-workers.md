@@ -15,17 +15,27 @@ opt in with `--allow-insecure-http`.
 
 ## Installation
 
-Create a short-lived enrollment token on the coordinator, then run on the target Mac:
+Create a short-lived enrollment token from a coordinator client. The
+coordinator generates the worker ID when `--worker-id` is omitted:
 
 ```bash
-mana-agent worker install --coordinator https://agent.example.com --token '<short-lived-token>' --name office-mac
+mana-agent worker enrollment create \
+  --coordinator https://agent.example.com \
+  --name office-worker
 ```
+
+The JSON response contains `worker_id`, the sensitive one-use `token`, and an
+`install_command` containing the same worker ID. Replace
+`<sensitive-token>` in that command with the returned token and run it on the
+target. Use `--worker-id <stable-id>` during enrollment creation only when an
+external system needs to choose the ID.
 
 For a trusted development network without TLS, HTTP can be enabled explicitly:
 
 ```bash
 mana-agent worker install --coordinator http://192.168.1.10:8000 \
-  --token '<short-lived-token>' --allow-insecure-http
+  --token '<short-lived-token>' --worker-id '<generated-worker-id>' \
+  --allow-insecure-http
 ```
 
 This also enables the worker's unencrypted `ws://` connection. Enrollment
@@ -46,9 +56,11 @@ Use `mana-agent worker status`, `logs`, `doctor`, `reconnect`, and `uninstall
 platform service repair. Revocation and identity rotation should be initiated
 by the coordinator; a revoked host must enroll again.
 
-On macOS, `worker start` can reload an installed but unloaded LaunchAgent. If
-the LaunchAgent has not been installed, it exits with an instruction to run
-`worker install` instead of attempting enrollment or service creation.
+On macOS, `worker start` can reload an installed but unloaded LaunchAgent. On
+Linux, `worker start`, `stop`, and `restart` control the installed
+`systemd --user` unit. If the platform service has not been installed, these
+commands exit with an instruction to run `worker install` instead of attempting
+enrollment or service creation.
 
 After authentication, workers send a signed, bounded Fleet capability inventory.
 Runtime facts are probed locally; coordinator-assigned trust labels are not

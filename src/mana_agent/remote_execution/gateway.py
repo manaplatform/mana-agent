@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import shlex
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -24,6 +26,10 @@ from mana_agent.fleet.models import WorkerStatus
 from mana_agent.fleet.registry import FleetRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _new_worker_id() -> str:
+    return f"worker_{uuid.uuid4().hex}"
 
 
 class WorkerGatewayConfig(BaseModel):
@@ -64,7 +70,7 @@ class EnrollmentResponse(BaseModel):
 
 
 class EnrollmentCreateRequest(BaseModel):
-    worker_id: str = Field(min_length=3, max_length=128)
+    worker_id: str = Field(default_factory=_new_worker_id, min_length=3, max_length=128)
     name: str = Field(default="", max_length=128)
     expires_in_seconds: int | None = Field(default=None, ge=60, le=86400)
     labels: list[str] = Field(default_factory=list, max_length=32)
@@ -266,8 +272,17 @@ def build_worker_router(gateway: WorkerGateway) -> APIRouter:
                                               capability_restrictions=payload.capability_restrictions)
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        install_args = [
+            "mana-agent", "worker", "install",
+            "--coordinator", gateway.config.public_url,
+            "--token", "<sensitive-token>",
+            "--worker-id", payload.worker_id,
+            "--name", payload.name or payload.worker_id,
+        ]
+        if urlparse(gateway.config.public_url).scheme == "http":
+            install_args.append("--allow-insecure-http")
         return {"worker_id": payload.worker_id, "token": token, "expires_in_seconds": payload.expires_in_seconds or gateway.config.bootstrap_token_ttl_seconds,
-                "install_command": f"mana-agent worker install --coordinator {gateway.config.public_url} --token <sensitive-token> --name {payload.name or payload.worker_id}"}
+                "install_command": shlex.join(install_args)}
 
     @router.websocket("/connect")
     async def connect(websocket: WebSocket) -> None:

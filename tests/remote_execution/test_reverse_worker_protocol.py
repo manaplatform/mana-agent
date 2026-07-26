@@ -5,11 +5,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from mana_agent.remote_execution.credentials import CredentialStore, generate_identity
 from mana_agent.remote_execution.daemon import WorkerRuntimeConfig, load_worker_config, write_worker_config
-from mana_agent.remote_execution.gateway import WorkerGatewayConfig
+from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
 from mana_agent.remote_execution.installer import LABEL, MacOSInstaller, WorkerServiceError, launchagent_payload
+from mana_agent.remote_execution.installers.linux import LinuxSystemdInstaller, UNIT_NAME
 from mana_agent.remote_execution.protocol import WorkerMessage
 
 
@@ -136,3 +139,70 @@ def test_worker_gateway_http_requires_explicit_opt_in() -> None:
         default_config.validate_public_url()
 
     insecure_config.validate_public_url()
+
+
+def test_linux_worker_lifecycle_uses_systemd_user_service(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv, **kwargs):  # noqa: ANN001
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    installer = LinuxSystemdInstaller(home=tmp_path, runner=runner)
+    installer.unit_path.parent.mkdir(parents=True)
+    installer.unit_path.touch()
+
+    installer.start()
+    installer.stop()
+    installer.restart()
+
+    assert calls == [
+        ["systemctl", "--user", "start", UNIT_NAME],
+        ["systemctl", "--user", "stop", UNIT_NAME],
+        ["systemctl", "--user", "restart", UNIT_NAME],
+    ]
+
+
+def test_linux_worker_lifecycle_requires_installation(tmp_path: Path) -> None:
+    installer = LinuxSystemdInstaller(home=tmp_path)
+
+    with pytest.raises(WorkerServiceError, match="worker install"):
+        installer.start()
+
+
+def test_linux_worker_lifecycle_reports_systemctl_error(tmp_path: Path) -> None:
+    def runner(argv, **kwargs):  # noqa: ANN001
+        raise subprocess.CalledProcessError(
+            1,
+            argv,
+            stderr="Failed to connect to bus",
+        )
+
+    installer = LinuxSystemdInstaller(home=tmp_path, runner=runner)
+    installer.unit_path.parent.mkdir(parents=True)
+    installer.unit_path.touch()
+
+    with pytest.raises(WorkerServiceError, match="Failed to connect to bus"):
+        installer.start()
+
+
+def test_coordinator_generates_worker_id_and_complete_http_install_command(monkeypatch) -> None:
+    monkeypatch.delenv("MANA_API_TOKEN", raising=False)
+    gateway = WorkerGateway(WorkerGatewayConfig(
+        enabled=True,
+        public_url="http://coordinator.internal:8000",
+        allow_insecure_http=True,
+    ))
+    app = FastAPI()
+    app.include_router(build_worker_router(gateway))
+
+    response = TestClient(app).post(
+        "/api/v1/workers/enrollments",
+        json={"name": "ubuntu-worker"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["worker_id"].startswith("worker_")
+    assert f"--worker-id {payload['worker_id']}" in payload["install_command"]
+    assert "--allow-insecure-http" in payload["install_command"]

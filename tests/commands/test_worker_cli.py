@@ -29,7 +29,13 @@ def test_worker_start_reports_service_error_without_traceback(monkeypatch) -> No
 
 def test_worker_enrollment_rejects_http_without_explicit_opt_in(tmp_path) -> None:
     with pytest.raises(typer.BadParameter, match="--allow-insecure-http"):
-        _enroll("http://coordinator.internal:8000", "enrollment-token", "worker", tmp_path)
+        _enroll(
+            "http://coordinator.internal:8000",
+            "enrollment-token",
+            "worker-1",
+            "worker",
+            tmp_path,
+        )
 
 
 def test_worker_enrollment_allows_explicit_http(tmp_path, monkeypatch) -> None:
@@ -57,6 +63,7 @@ def test_worker_enrollment_allows_explicit_http(tmp_path, monkeypatch) -> None:
     config = _enroll(
         "http://coordinator.internal:8000",
         "enrollment-token",
+        "worker-1",
         "worker",
         tmp_path,
         allow_insecure_http=True,
@@ -65,3 +72,43 @@ def test_worker_enrollment_allows_explicit_http(tmp_path, monkeypatch) -> None:
     assert requests[0].full_url == "http://coordinator.internal:8000/api/v1/workers/enroll"
     assert config.allow_insecure_http is True
     assert config.websocket_url == "ws://coordinator.internal:8000/api/v1/workers/connect"
+
+
+def test_linux_worker_start_uses_platform_installer(monkeypatch) -> None:
+    calls = []
+
+    class LinuxInstaller:
+        def start(self) -> None:
+            calls.append("start")
+
+    monkeypatch.setattr(worker_cli, "_installer", lambda: LinuxInstaller())
+    monkeypatch.setattr(worker_cli.platform, "system", lambda: "Linux")
+
+    result = CliRunner().invoke(worker_app, ["start"])
+
+    assert result.exit_code == 0
+    assert calls == ["start"]
+    assert "Worker start requested" in result.output
+
+
+def test_enrollment_create_lets_coordinator_generate_worker_id(monkeypatch) -> None:
+    calls = []
+
+    def coordinator_call(coordinator, path, **kwargs):  # noqa: ANN001
+        calls.append((coordinator, path, kwargs))
+        return {
+            "worker_id": "worker_generated",
+            "token": "sensitive-token",
+            "install_command": "mana-agent worker install --worker-id worker_generated",
+        }
+
+    monkeypatch.setattr(worker_cli, "_coordinator_call", coordinator_call)
+
+    result = CliRunner().invoke(
+        worker_app,
+        ["enrollment", "create", "--coordinator", "http://coordinator.internal:8000"],
+    )
+
+    assert result.exit_code == 0
+    assert '"worker_id": "worker_generated"' in result.output
+    assert "worker_id" not in calls[0][2]["payload"]

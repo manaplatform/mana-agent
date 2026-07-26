@@ -9,11 +9,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from mana_agent.remote_execution.service_errors import WorkerServiceError
+
 LABEL = "net.manaplatform.mana-agent.worker"
-
-
-class WorkerServiceError(RuntimeError):
-    """Raised when an installed worker service cannot be controlled."""
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,27 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Added Linux `worker start`, `stop`, and `restart` through the installed
+  `systemd --user` unit, with install-state validation and concise bounded
+  systemctl errors.
+- Made worker service-control errors render through explicit stderr output and
+  exit code 1, avoiding version-dependent `ClickException` handling in direct
+  Typer sub-app invocation.
+- Made `worker enrollment create --worker-id` optional so the coordinator
+  generates and returns a unique worker ID. Generated install commands now
+  include the reserved `--worker-id` (and HTTP opt-in when required), while
+  `worker install` requires that ID to prevent token/registration mismatches.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/remote_execution
+    tests/fleet/test_fleet_core.py tests/gateway/test_chat_gateway.py
+    tests/test_api_conversations.py tests/test_api_workspaces.py` passed (76
+    passed); targeted Ruff, compilation, CLI help checks, and `git diff
+    --check` passed.
+  - CI rendering regression verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/test_cli_smoke.py
+    tests/remote_execution` passed (99 passed); the real missing-service command
+    printed the expected stderr error and exited 1.
+
 - Added explicit `--allow-insecure-http` reverse-worker enrollment for trusted
   development networks, including persisted `ws://` reconnect behavior and a
   backward-compatible `--insecure-local-development` CLI alias. HTTPS remains

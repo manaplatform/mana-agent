@@ -7,12 +7,10 @@ import json
 import platform
 import socket
 import urllib.request
-import uuid
 import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-import click
 import typer
 
 from mana_agent.remote_execution.credentials import CredentialStore, generate_identity
@@ -62,12 +60,12 @@ def _coordinator_call(coordinator: str, path: str, *, method: str = "GET", paylo
 def _enroll(
     coordinator: str,
     token: str,
+    worker_id: str,
     name: str,
     state_dir: Path,
     *,
     allow_insecure_http: bool = False,
 ) -> WorkerRuntimeConfig:
-    worker_id = f"worker_{uuid.uuid4().hex}"
     identity = generate_identity(worker_id)
     registration = ReverseWorkerDaemon.registration(worker_id, name or socket.gethostname(), identity.public_key_pem)
     payload = json.dumps({"token": token, "registration": registration.model_dump(mode="json")}).encode()
@@ -91,6 +89,7 @@ def _enroll(
 
 @worker_app.command("install")
 def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: str = typer.Option("", "--token", hide_input=True),
+                   worker_id: str = typer.Option(..., "--worker-id", help="Worker ID returned by `worker enrollment create`."),
                    name: str = typer.Option("", "--name"), state_dir: str | None = typer.Option(None, "--state-dir"),
                    allow_insecure_http: bool = typer.Option(
                        False,
@@ -104,7 +103,14 @@ def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: 
     if not token:
         token = typer.prompt("Short-lived enrollment token", hide_input=True)
     root = _state_dir(state_dir)
-    config = _enroll(coordinator, token, name, root, allow_insecure_http=allow_insecure_http)
+    config = _enroll(
+        coordinator,
+        token,
+        worker_id,
+        name,
+        root,
+        allow_insecure_http=allow_insecure_http,
+    )
     write_worker_config(config)
     _installer().install()
     typer.echo(f"Worker {config.worker_id} enrolled and service installed. Run `mana-agent worker doctor` to verify connectivity.")
@@ -112,13 +118,13 @@ def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: 
 
 @worker_app.command("run", hidden=True)
 def run_worker(state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
-    """LaunchAgent entrypoint; intended to run independently from the TUI."""
+    """Service entrypoint; intended to run independently from the TUI."""
     asyncio.run(ReverseWorkerDaemon(load_worker_config(_state_dir(state_dir))).run())
 
 
 @worker_app.command("uninstall")
 def uninstall_worker(yes: bool = typer.Option(False, "--yes"), state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
-    if not yes and not typer.confirm("Remove this worker LaunchAgent and its local identity?", default=False):
+    if not yes and not typer.confirm("Remove this worker service and its local identity?", default=False):
         raise typer.Abort()
     _installer().uninstall()
     root = _state_dir(state_dir)
@@ -130,24 +136,23 @@ def uninstall_worker(yes: bool = typer.Option(False, "--yes"), state_dir: str | 
     typer.echo("Worker service and local identity removed.")
 
 
-def _mac_control(action: str) -> None:
-    if platform.system() != "Darwin":
-        raise typer.BadParameter("worker service control is currently implemented for macOS")
-    installer = MacOSInstaller(home=Path.home())
+def _service_control(action: str) -> None:
+    installer = _installer()
+    control = getattr(installer, action, None)
+    if control is None:
+        raise typer.BadParameter(
+            f"worker service {action} is not implemented for {platform.system()}"
+        )
     try:
-        if action == "start":
-            installer.start()
-        elif action == "stop":
-            installer.stop()
-        elif action == "restart":
-            installer.restart()
+        control()
     except WorkerServiceError as exc:
-        raise click.ClickException(str(exc)) from exc
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"Worker {action} requested.")
 
 
 for _name in ("start", "stop", "restart"):
-    worker_app.command(_name)(lambda action=_name: _mac_control(action))
+    worker_app.command(_name)(lambda action=_name: _service_control(action))
 
 
 @worker_app.command("status")
@@ -188,7 +193,7 @@ def reconnect_worker() -> None:
     if hasattr(installer, "reconnect"):
         installer.reconnect()
     else:
-        _mac_control("restart")
+        _service_control("restart")
 
 
 @worker_app.command("rotate-identity")
@@ -197,12 +202,16 @@ def rotate_identity() -> None:
 
 
 @enrollment_app.command("create")
-def create_enrollment(coordinator: str = typer.Option(..., "--coordinator"), worker_id: str = typer.Option(..., "--worker-id"),
+def create_enrollment(coordinator: str = typer.Option(..., "--coordinator"),
+                      worker_id: str = typer.Option("", "--worker-id", help="Optional stable ID; generated by the coordinator when omitted."),
                       name: str = typer.Option("", "--name"), expires_in: int = typer.Option(900, "--expires-in"),
                       api_token: str = typer.Option("", "--api-token", hide_input=True)) -> None:
     """Create a sensitive, short-lived coordinator enrollment payload."""
+    payload = {"name": name, "expires_in_seconds": expires_in}
+    if worker_id:
+        payload["worker_id"] = worker_id
     result = _coordinator_call(coordinator, "/api/v1/workers/enrollments", method="POST",
-                               payload={"worker_id": worker_id, "name": name, "expires_in_seconds": expires_in}, api_token=api_token)
+                               payload=payload, api_token=api_token)
     typer.echo(json.dumps(result, indent=2))
 
 

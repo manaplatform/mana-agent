@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from mana_agent.remote_execution.service_errors import WorkerServiceError
+
 UNIT_NAME = "mana-agent-worker.service"
 
 
@@ -70,6 +72,18 @@ class LinuxSystemdInstaller:
         self.unit_path.unlink(missing_ok=True)
         self._systemctl("daemon-reload", check=False)
 
+    def start(self) -> None:
+        self._require_installed()
+        self._systemctl("start", UNIT_NAME)
+
+    def stop(self) -> None:
+        self._require_installed()
+        self._systemctl("stop", UNIT_NAME)
+
+    def restart(self) -> None:
+        self._require_installed()
+        self._systemctl("restart", UNIT_NAME)
+
     def status(self) -> bool:
         return self._systemctl("is-active", "--quiet", UNIT_NAME, check=False).returncode == 0
 
@@ -81,10 +95,24 @@ class LinuxSystemdInstaller:
         return (result.stdout or result.stderr)[-100_000:]
 
     def reconnect(self) -> None:
-        self._systemctl("restart", UNIT_NAME)
+        self.restart()
+
+    def _require_installed(self) -> None:
+        if not self.unit_path.is_file():
+            raise WorkerServiceError(
+                "Worker service is not installed. Run `mana-agent worker install` "
+                "with a coordinator URL, enrollment token, and worker ID first."
+            )
 
     def _systemctl(self, *args: str, check: bool = True):
-        return self.runner(
-            ["systemctl", "--user", *args],
-            capture_output=True, text=True, check=check,
-        )
+        try:
+            return self.runner(
+                ["systemctl", "--user", *args],
+                capture_output=True, text=True, check=check,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()[-2_000:]
+            suffix = f": {detail}" if detail else ""
+            raise WorkerServiceError(
+                f"Unable to {args[0]} the Linux worker service{suffix}"
+            ) from exc
