@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Made Fleet capability fingerprints and signed inventory payloads deterministic
+  across operating systems and Python hash seeds by recursively sorting all
+  unordered capability values before JSON serialization.
+  - Verification: `PYTHONHASHSEED=4 .venv/bin/python -m pytest -q` passed
+    (1310 passed, 2 skipped); the Fleet, Fleet CLI, and Fleet Eval suites passed
+    under the same seed (14 passed); the focused macOS failure cases and
+    cross-seed regression passed (3 passed); targeted Ruff, Fleet source
+    compilation, and `git diff --check` passed.
+
 - Fixed Windows CI interruption during stale session and lane-lock recovery by
   replacing destructive Windows `os.kill(pid, 0)` liveness probes with a
   read-only process-handle query shared by recovery and connector-status paths.

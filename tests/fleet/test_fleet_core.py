@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 import asyncio
+import os
 import subprocess
 import sys
 
@@ -140,6 +141,37 @@ def test_authenticated_capability_update_rejects_stale_and_bad_signature() -> No
             signature=b"invalid",
             capability_ttl_seconds=300,
         )
+
+
+def test_capability_fingerprint_is_stable_across_hash_seeds() -> None:
+    script = """
+from datetime import datetime, timezone
+from mana_agent.fleet.models import WorkerCapabilities, WorkerLabels
+
+capabilities = WorkerCapabilities(
+    worker_id="worker_linux",
+    platform="linux",
+    platform_release="test",
+    architecture="x86_64",
+    python_versions=("3.12",),
+    available_tools=frozenset({"git", "pytest"}),
+    labels=WorkerLabels(values=frozenset({"trusted", "isolated"})),
+    workspace_backends=frozenset({"execution-fabric", "local"}),
+    execution_providers=frozenset({"local-process", "reverse-worker"}),
+    last_probe_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+)
+print(capabilities.fingerprint)
+"""
+    fingerprints = {
+        subprocess.check_output(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            text=True,
+        ).strip()
+        for seed in ("1", "4")
+    }
+
+    assert len(fingerprints) == 1
 
 
 def test_registry_persists_revoke_and_never_reenables(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
@@ -24,6 +25,37 @@ def fleet_id(prefix: str) -> str:
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+
+def _canonical_json_value(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return _canonical_json_value(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    if isinstance(value, (set, frozenset)):
+        items = [_canonical_json_value(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item) for item in value]
+    if isinstance(value, datetime):
+        encoded = value.isoformat()
+        return encoded[:-6] + "Z" if encoded.endswith("+00:00") else encoded
+    if isinstance(value, Enum):
+        return _canonical_json_value(value.value)
+    return value
+
+
+def canonical_model_payload(model: BaseModel, *, exclude: set[str] | None = None) -> bytes:
+    """Serialize a model deterministically, including all unordered containers."""
+    payload = model.model_dump(mode="python", exclude=exclude)
+    return json.dumps(
+        _canonical_json_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 class WorkerStatus(str, Enum):
@@ -134,9 +166,8 @@ class WorkerCapabilities(StrictModel):
 
     @property
     def fingerprint(self) -> str:
-        payload = self.model_dump(mode="json", exclude={"last_probe_at"})
         return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            canonical_model_payload(self, exclude={"last_probe_at"})
         ).hexdigest()
 
 

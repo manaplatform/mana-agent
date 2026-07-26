@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import platform
 import shutil
 from collections.abc import Callable
 from datetime import timedelta
 
 from .errors import FleetCapabilityError
-from .models import WorkerCapabilities, WorkerLabels, utc_now
+from .models import WorkerCapabilities, WorkerLabels, canonical_model_payload, utc_now
 
 MAX_INVENTORY_BYTES = 64 * 1024
 PROBE_TOOLS = ("git", "pytest", "ruff", "node", "npm", "docker")
@@ -81,10 +80,7 @@ async def probe_worker_capabilities(
 
 
 def canonical_inventory_payload(capabilities: WorkerCapabilities) -> bytes:
-    return json.dumps(
-        capabilities.model_dump(mode="json"),
-        sort_keys=True, separators=(",", ":"),
-    ).encode()
+    return canonical_model_payload(capabilities)
 
 
 def validate_inventory_update(
