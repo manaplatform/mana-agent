@@ -5,13 +5,12 @@ import json
 import os
 import stat
 import tempfile
-import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
+from mana_agent.compat import tomllib
 from mana_agent.workspaces.paths import mana_home
 
 

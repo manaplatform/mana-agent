@@ -4,6 +4,25 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Fixed Python 3.10 CI collection by routing TOML parsing through a shared
+  compatibility import, adding the conditional `tomli` backport dependency,
+  and making package-version and test TOML reads use the same supported
+  fallback. Added a Python 3.10-compatible `StrEnum` boundary for computer
+  control, preventing the next standard-library compatibility failure in the
+  expanded CI matrix.
+  - Verification: forced `tomllib`-unavailable and `StrEnum`-unavailable
+    import checks passed; `.venv/bin/python -m pytest -q
+    tests/connectors/test_telegram_cli_config.py tests/test_codex_runtime.py
+    tests/test_package_version.py tests/commands/test_analyze_slash_command.py
+    tests/commands/test_fleet_cli.py tests/evals tests/execution tests/fleet
+    tests/gateway` passed (182 passed); computer-control tests passed (43
+    passed); the built wheel contains
+    `Requires-Dist: tomli<3.0,>=2.0; python_version < "3.11"`; targeted Ruff,
+    source compilation, and `git diff --check` passed.
+  - Verification note: an actual Python 3.10 interpreter is not installed in
+    the local environment; the conditional branches were forced explicitly and
+    the GitHub Actions Python 3.10 job remains the authoritative matrix run.
+
 - Added the disabled-by-default Mana Fleet distributed verification foundation:
   strict versioned worker/capability/selection/plan/job/result/run models,
   authenticated bounded capability updates, deterministic fail-closed worker

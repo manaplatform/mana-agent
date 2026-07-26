@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
+    import tomli as tomllib
 
 from mana_agent import __version__
 from mana_agent._version import get_version

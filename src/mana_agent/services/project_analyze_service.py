@@ -6,12 +6,12 @@ import hashlib
 import json
 import os
 import re
-import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from mana_agent.compat import tomllib
 from mana_agent.dependencies.dependency_service import FRAMEWORK_SIGNALS, _normalize_dep_name
 from mana_agent.services.project_llm_analyze_service import (
     AnalyzeEvidence,

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from mana_agent.compat import tomllib
 from mana_agent.config.settings import mana_home
 
 
