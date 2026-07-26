@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Fixed standalone API coordinators to initialize a persistent Fleet registry
+  for reverse-worker capability updates. Authenticated workers can now publish
+  their inventory when the server is started with `mana-agent api` or
+  `mana_agent.api.app:app`, instead of being rejected because no ChatGateway
+  was supplied.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/fleet/test_fleet_core.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (36 passed); `git diff --check`
+    passed. Ruff was not run because it is not installed in the local virtual
+    environment.
+
 - Updated stable release publishing to retain the triggering Git tag (including
   calendar tags such as `v2026.07.26`) while using the application version for
   the GitHub Release title and package metadata validation.
