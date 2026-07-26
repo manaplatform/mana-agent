@@ -22,7 +22,13 @@ All notable repository changes should be recorded here.
   the standalone release validator, and intercepting `Path.open` writes in the
   pytest real-home safety guard for Python versions whose pathlib accessor
   bypasses a patched `io.open`.
-  - Verification: pending.
+  - Verification: `.venv/bin/python -m pytest -q` passed (1311 passed, 2
+    skipped); all affected computer-control, release-validation,
+    runtime-isolation, and package tests passed (56 passed); the forced Python
+    3.10 release-validator TOML path passed; targeted Ruff, source/script
+    compilation, and `git diff --check` passed.
+  - Verification note: Python 3.10 is not installed locally, so the GitHub
+    Actions Ubuntu Python 3.10 job remains the authoritative native run.
 
 - Made Fleet capability fingerprints and signed inventory payloads deterministic
   across operating systems and Python hash seeds by recursively sorting all
