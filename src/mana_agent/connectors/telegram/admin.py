@@ -7,6 +7,8 @@ import signal
 import subprocess
 from typing import Any
 
+from mana_agent.compat import process_exists
+
 from .client import TelegramBotClient
 from .config import TelegramConfig
 from .store import TelegramUpdateStore
@@ -21,13 +23,7 @@ class TelegramAdminService:
 
     def status(self) -> dict[str, Any]:
         pid = self._pid()
-        running = False
-        if pid is not None:
-            try:
-                os.kill(pid, 0)
-                running = True
-            except (ProcessLookupError, PermissionError):
-                running = False
+        running = pid is not None and process_exists(pid)
         store = TelegramUpdateStore(self.config.database_path)
         return {
             "enabled": self.config.enabled,

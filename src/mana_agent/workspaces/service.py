@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Iterable
 if TYPE_CHECKING:
     from mana_agent.workspaces.preparation import PreparedRepository
 
+from mana_agent.compat import process_exists
 from mana_agent.utils.project_discovery import MANIFEST_FILENAMES, MANIFEST_GLOBS
 from mana_agent.workspaces.context import WorkspaceContext
 from mana_agent.workspaces.discovery import discover_git_repositories
@@ -481,15 +482,7 @@ class WorkspaceService:
             if session.status != "active" or session.primary_repository_id != repo.repository_id:
                 continue
             owner_pid = session.owner_pid
-            alive = False
-            if owner_pid and owner_pid > 0:
-                try:
-                    os.kill(owner_pid, 0)
-                except OSError:
-                    alive = False
-                else:
-                    alive = True
-            if alive:
+            if owner_pid and process_exists(owner_pid):
                 continue
             finalized.append(self.close_session(session.session_id, status="abandoned"))
         return finalized

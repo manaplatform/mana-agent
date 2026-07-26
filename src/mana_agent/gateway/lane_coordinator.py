@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from mana_agent.compat import process_exists
 from mana_agent.gateway.lanes import (
     ACTIVE_LANE_STATES,
     LockMode,
@@ -69,18 +70,6 @@ def _iso(value: datetime | None = None) -> str:
 def _stable_hash(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _pid_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -866,7 +855,7 @@ class LaneCoordinator:
                     len(worker_parts) >= 2
                     and worker_parts[0] == "gateway"
                     and worker_parts[1].isdigit()
-                    and not _pid_exists(int(worker_parts[1]))
+                    and not process_exists(int(worker_parts[1]))
                 )
                 expired = heartbeat + timedelta(seconds=self.contracts[execution.owning_lane].timeout_seconds + 30) < _now()
                 if worker_missing or expired:

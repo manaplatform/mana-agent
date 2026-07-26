@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Fixed Windows CI interruption during stale session and lane-lock recovery by
+  replacing destructive Windows `os.kill(pid, 0)` liveness probes with a
+  read-only process-handle query shared by recovery and connector-status paths.
+  - Verification: `.venv/bin/python -m pytest -q` passed (1309 passed, 2
+    skipped); targeted Windows-process, stale-session, lane-lock, and Telegram
+    tests passed (16 passed); targeted Ruff, source compilation, and
+    `git diff --check` passed.
+  - Verification note: the native Windows process-handle branch requires the
+    GitHub Actions Windows runner for authoritative execution.
+
 - Fixed Python 3.10 CI collection by routing TOML parsing through a shared
   compatibility import, adding the conditional `tomli` backport dependency,
   and making package-version and test TOML reads use the same supported
