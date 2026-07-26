@@ -26,7 +26,17 @@ def create_app(
     github_autopilot: Any | None = None,
 ) -> FastAPI:
     from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
+    from mana_agent.config.settings import Settings
+    from mana_agent.fleet import FleetConfig, FleetRegistry, FleetStore
+
     gateway_settings = load_effective_settings(include_env=True)
+    fleet_registry = getattr(chat_gateway, "fleet_registry", None)
+    if fleet_registry is None:
+        # The API server is commonly started without a ChatGateway. Reverse
+        # workers still publish their Fleet capability inventory over this API,
+        # so the standalone coordinator must own the same persistent registry.
+        fleet_config = FleetConfig.from_settings(Settings())
+        fleet_registry = FleetRegistry(FleetStore(fleet_config.root), fleet_config)
     worker_gateway = WorkerGateway(WorkerGatewayConfig(
         enabled=validate_bool(gateway_settings["MANA_WORKER_GATEWAY_ENABLED"]),
         public_url=str(gateway_settings["MANA_WORKER_GATEWAY_PUBLIC_URL"]),
@@ -36,7 +46,7 @@ def create_app(
         allow_insecure_local_development=validate_bool(
             gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
         ),
-    ), fleet_registry=getattr(chat_gateway, "fleet_registry", None))
+    ), fleet_registry=fleet_registry)
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
@@ -95,6 +105,7 @@ def create_app(
     if chat_gateway is not None:
         app.state.chat_gateway = chat_gateway
     app.state.worker_gateway = worker_gateway
+    app.state.fleet_registry = fleet_registry
     if telegram_connector is not None:
         from fastapi import Response
 

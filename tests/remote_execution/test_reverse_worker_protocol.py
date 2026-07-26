@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from mana_agent.api.app import create_app
 from mana_agent.config.user_config import save_user_config
+from mana_agent.fleet.models import WorkerCapabilities as FleetWorkerCapabilities
+from mana_agent.fleet.models import WorkerIdentity as FleetWorkerIdentity
+from mana_agent.fleet.models import WorkerLabels
 from mana_agent.remote_execution.credentials import CredentialStore, generate_identity
-from mana_agent.remote_execution.daemon import WorkerRuntimeConfig, load_worker_config, write_worker_config
-from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
+from mana_agent.remote_execution.daemon import ReverseWorkerDaemon, WorkerRuntimeConfig, load_worker_config, write_worker_config
+from mana_agent.remote_execution.gateway import EnrollmentRequest, WorkerGateway, WorkerGatewayConfig, build_worker_router
 from mana_agent.remote_execution.installer import LABEL, MacOSInstaller, WorkerServiceError, launchagent_payload
 from mana_agent.remote_execution.installers.linux import LinuxSystemdInstaller, UNIT_NAME
 from mana_agent.remote_execution.protocol import WorkerMessage
@@ -288,3 +295,60 @@ def test_api_worker_gateway_preserves_environment_fallback(
     assert config.enabled is True
     assert config.public_url == "http://environment-coordinator.internal:8000"
     assert config.allow_insecure_http is True
+
+
+def test_standalone_api_accepts_authenticated_worker_capabilities(tmp_path: Path, monkeypatch) -> None:
+    """The ASGI app must provide Fleet storage even without a ChatGateway."""
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    app = create_app(telegram_config=type(
+        "TelegramConfig",
+        (),
+        {"enabled": False, "effective_transport": "polling"},
+    )())
+    gateway = app.state.worker_gateway
+    assert app.state.fleet_registry is gateway.fleet_registry
+
+    worker_id = "worker-standalone"
+    identity = generate_identity(worker_id)
+    registration = ReverseWorkerDaemon.registration(
+        worker_id, "standalone", identity.public_key_pem,
+    )
+    token = gateway.registry.issue_enrolment_token(worker_id)
+    enrollment = gateway.enroll(EnrollmentRequest(token=token, registration=registration))
+    inventory = FleetWorkerCapabilities(
+        worker_id=worker_id,
+        platform="linux",
+        architecture="x86_64",
+        labels=WorkerLabels(),
+        last_probe_at=datetime.now(timezone.utc),
+    )
+    capability_message = WorkerMessage(
+        type="worker.capabilities",
+        worker_id=worker_id,
+        payload={"inventory": inventory.model_dump(mode="json")},
+    )
+    private_key = serialization.load_pem_private_key(
+        identity.private_key_pem.encode(), password=None,
+    )
+    capability_message.signature = base64.b64encode(
+        private_key.sign(capability_message.signing_bytes())
+    ).decode()
+
+    with pytest.raises(WebSocketDisconnect):
+        with TestClient(app).websocket_connect("/api/v1/workers/connect") as websocket:
+            websocket.send_text(WorkerMessage(
+                type="worker.hello",
+                worker_id=worker_id,
+                payload={"credential": enrollment.credential},
+            ).model_dump_json())
+            assert WorkerMessage.parse_frame(websocket.receive_text()).type == "worker.authenticated"
+            websocket.send_text(capability_message.model_dump_json())
+
+    worker = gateway.fleet_registry.require(worker_id)
+    assert worker.capabilities == inventory
+    assert worker.identity == FleetWorkerIdentity(
+        worker_id=worker_id,
+        identity_fingerprint=worker.identity.identity_fingerprint,
+        authenticated=True,
+        credential_status="valid",
+    )
