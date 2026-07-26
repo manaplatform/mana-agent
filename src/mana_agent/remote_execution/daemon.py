@@ -20,6 +20,7 @@ from mana_agent.remote_execution.credentials import CredentialStore, WorkerIdent
 from mana_agent.remote_execution.models import RemoteExecutionRequest, WorkerCapabilities, WorkerRegistration
 from mana_agent.remote_execution.protocol import MessageType, WorkerMessage
 from mana_agent.remote_execution.providers.local_ssh import LocalSSHProvider
+from mana_agent.fleet.capabilities import probe_worker_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class WorkerRuntimeConfig:
     name: str
     state_dir: Path
     heartbeat_interval_seconds: int = 15
+    allow_insecure_http: bool = False
     allow_insecure_local_development: bool = False
 
     @property
@@ -38,9 +40,17 @@ class WorkerRuntimeConfig:
         parsed = urlparse(self.coordinator_url)
         if parsed.scheme == "https":
             return self.coordinator_url.rstrip("/") + "/api/v1/workers/connect"
-        if self.allow_insecure_local_development and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        explicit_http = self.allow_insecure_http and parsed.scheme == "http"
+        legacy_local_http = (
+            self.allow_insecure_local_development
+            and parsed.scheme == "http"
+            and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        )
+        if explicit_http or legacy_local_http:
             return "ws" + self.coordinator_url[4:].rstrip("/") + "/api/v1/workers/connect"
-        raise ValueError("worker requires an HTTPS coordinator (HTTP is localhost development only)")
+        raise ValueError(
+            "worker requires an HTTPS coordinator; HTTP requires explicit allow_insecure_http configuration"
+        )
 
 
 class ReverseWorkerDaemon:
@@ -90,6 +100,22 @@ class ReverseWorkerDaemon:
             authenticated = WorkerMessage.parse_frame(await socket_client.recv())
             if authenticated.type is not MessageType.AUTHENTICATED:
                 raise PermissionError("coordinator did not authenticate worker")
+            capabilities = await probe_worker_capabilities(
+                identity.worker_id,
+                labels=set(),
+                max_concurrency=self.registration(
+                    identity.worker_id, self.config.name, identity.public_key_pem
+                ).max_concurrent_jobs,
+                execution_providers={"reverse-worker"},
+            )
+            await socket_client.send(self._signed(
+                identity,
+                WorkerMessage(
+                    type=MessageType.CAPABILITIES,
+                    worker_id=identity.worker_id,
+                    payload={"inventory": capabilities.model_dump(mode="json")},
+                ),
+            ).model_dump_json())
             heartbeat = asyncio.create_task(self._heartbeats(socket_client, identity))
             try:
                 while not self.stop_event.is_set():
@@ -168,6 +194,7 @@ def write_worker_config(config: WorkerRuntimeConfig) -> Path:
     config_path = config.state_dir / "worker.json"
     config_path.write_text(json.dumps({"coordinator_url": config.coordinator_url, "worker_id": config.worker_id,
                                        "name": config.name, "heartbeat_interval_seconds": config.heartbeat_interval_seconds,
+                                       "allow_insecure_http": config.allow_insecure_http,
                                        "allow_insecure_local_development": config.allow_insecure_local_development}), encoding="utf-8")
     config_path.chmod(0o600)
     return config_path

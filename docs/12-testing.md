@@ -1,5 +1,10 @@
 # Testing
 
+The deterministic Fleet smoke suite is `python -m pytest tests/fleet -q`. It
+uses fake/local providers and temporary Git repositories; it requires no public
+network, cloud account, or remote host. Normal CI runs the project on Ubuntu
+with Python 3.10, 3.12, and 3.14, plus Windows and macOS with Python 3.12.
+
 `mana-agent` should be tested at the unit, integration, and smoke-test levels
 so repository changes can be validated with confidence.
 

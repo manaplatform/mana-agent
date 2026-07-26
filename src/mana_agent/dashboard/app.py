@@ -26,6 +26,7 @@ from mana_agent.dashboard.pages import (
     computer_control,
     connectors,
     cron,
+    fleet,
     metrics,
     observability,
     overview,
@@ -78,6 +79,7 @@ pages = {
         _page(processes.render, title="Processes", icon="⚙️", url_path="processes"),
     ],
     "Operations": [
+        _page(fleet.render, title="Fleet", icon="🛰️", url_path="fleet"),
         _page(computer_control.render, title="Computer Control", icon="🖥️", url_path="computer-control"),
         _page(connectors.render, title="Connectors", icon="🔌", url_path="connectors"),
         _page(automations.render, title="Automations", icon="⚡", url_path="automations"),

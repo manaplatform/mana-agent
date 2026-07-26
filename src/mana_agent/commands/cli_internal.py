@@ -828,17 +828,33 @@ def _automation_root(root: str | None) -> Path:
 @automation_app.command("create")
 def automation_create_command(
     name: str = typer.Option(..., "--name", help="Readable schedule name."),
-    action: str = typer.Option(..., "--action", help="analyze, daily_report, self_improvement, or custom."),
+    action: str = typer.Option(..., "--action", help="analyze, daily_report, self_improvement, fleet-verify, or custom."),
     cron: str = typer.Option(..., "--cron", help="Five-field POSIX cron expression."),
     target: list[str] = typer.Option(..., "--target", help="Deployment target: local and/or github."),
     command: str | None = typer.Option(None, "--command", help="Required for action=custom."),
+    platform: list[str] = typer.Option([], "--platform", help="Required platform for action=fleet-verify; repeatable."),
+    verify_command: list[str] = typer.Option([], "--verify-command", help="Verification command for action=fleet-verify; repeatable."),
+    maximum_workers: int = typer.Option(4, "--maximum-workers", min=1, max=64),
+    timeout: int = typer.Option(1800, "--timeout", min=1, max=86400),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
     """Create and immediately deploy an explicitly requested schedule."""
     from mana_agent.automations.service import AutomationValidationError, ScheduleDefinition, deploy_schedule
 
     try:
-        schedule = ScheduleDefinition.create(name=name, action=action, cron=cron, targets=target, command=command)
+        action_config = (
+            {
+                "platforms": platform,
+                "commands": verify_command,
+                "maximum_workers": maximum_workers,
+                "timeout": timeout,
+            }
+            if action == "fleet-verify" else {}
+        )
+        schedule = ScheduleDefinition.create(
+            name=name, action=action, cron=cron, targets=target,
+            command=command, action_config=action_config,
+        )
         deployed = deploy_schedule(schedule, _automation_root(root))
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -952,14 +968,24 @@ def automation_run_now_command(
 
 @automation_app.command("execute", hidden=True)
 def automation_execute_command(
-    action: str = typer.Option(..., "--action", help="Built-in action selected by a saved schedule."),
+    action: str | None = typer.Option(None, "--action", help="Compatibility built-in action."),
+    schedule_id: str | None = typer.Option(None, "--schedule-id", help="Saved schedule identity."),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
     """Execute a built-in action for a deployed schedule."""
-    from mana_agent.automations.service import AutomationValidationError, execute_builtin_action
+    from mana_agent.automations.service import AutomationValidationError, execute_builtin_action, get_schedule
 
     try:
-        result = execute_builtin_action(action, _automation_root(root))
+        root_path = _automation_root(root)
+        if schedule_id:
+            schedule = get_schedule(root_path, schedule_id)
+            result = execute_builtin_action(
+                schedule.action, root_path, action_config=schedule.action_config,
+            )
+        elif action:
+            result = execute_builtin_action(action, root_path)
+        else:
+            raise AutomationValidationError("--schedule-id is required")
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print_json(json.dumps(result))

@@ -17,12 +17,15 @@ from .ui_helpers import (
 from mana_agent.doctor.reporter import render as render_doctor_report
 from mana_agent.doctor.runner import run_doctor
 from mana_agent.evals.cli import eval_app
+from mana_agent.fleet.cli import fleet_app
 
 # Use exactly one canonical Typer app.
 # Do not create a second typer.Typer() here.
 app = _cli_internal.app
 if not any(group.name == "eval" for group in app.registered_groups):
     app.add_typer(eval_app, name="eval")
+if not any(group.name == "fleet" for group in app.registered_groups):
+    app.add_typer(fleet_app, name="fleet")
 
 
 def _replace_command(name: str, callback, **kwargs) -> None:

@@ -2,6 +2,198 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-26
+
+- Fixed Windows Python 3.12 CI for macOS LaunchAgent lifecycle tests by making
+  the launchd user ID an explicit injectable boundary. Production macOS still
+  resolves its real POSIX UID, while cross-platform tests no longer call the
+  unavailable Windows `os.getuid`.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py tests/fleet/test_fleet_core.py` passed
+    (34 passed); an explicit `os.getuid`-unavailable simulation produced the
+    expected injected `gui/501` launchd domain; targeted Ruff, compilation, and
+    `git diff --check` passed.
+  - Verification note: Windows is not available locally, so GitHub Actions
+    remains the authoritative native Windows Python 3.12 run.
+
+- Added worker-gateway settings to the typed Mana user configuration and made
+  API startup read `MANA_WORKER_GATEWAY_*` values from `~/.mana/config.toml`,
+  with environment variables filling keys not explicitly configured.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py tests/test_chat_first_configuration.py
+    tests/test_tui_user_config.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (60 passed); targeted Ruff,
+    compilation, and `git diff --check` passed. A live local configuration load
+    resolved the gateway as enabled at the configured HTTP public URL.
+
+- Fixed coordinator enrollment failures to display bounded API error details
+  without urllib tracebacks. Disabled or invalid worker-gateway configuration
+  now identifies the exact environment variables required, and the HTTP setup
+  documentation enables the gateway before enrollment.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/gateway/test_chat_gateway.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (51 passed); targeted Ruff,
+    compilation, and `git diff --check` passed.
+
+- Added Linux `worker start`, `stop`, and `restart` through the installed
+  `systemd --user` unit, with install-state validation and concise bounded
+  systemctl errors.
+- Made worker service-control errors render through explicit stderr output and
+  exit code 1, avoiding version-dependent `ClickException` handling in direct
+  Typer sub-app invocation.
+- Made `worker enrollment create --worker-id` optional so the coordinator
+  generates and returns a unique worker ID. Generated install commands now
+  include the reserved `--worker-id` (and HTTP opt-in when required), while
+  `worker install` requires that ID to prevent token/registration mismatches.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/remote_execution
+    tests/fleet/test_fleet_core.py tests/gateway/test_chat_gateway.py
+    tests/test_api_conversations.py tests/test_api_workspaces.py` passed (76
+    passed); targeted Ruff, compilation, CLI help checks, and `git diff
+    --check` passed.
+  - CI rendering regression verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/test_cli_smoke.py
+    tests/remote_execution` passed (99 passed); the real missing-service command
+    printed the expected stderr error and exited 1.
+
+- Added explicit `--allow-insecure-http` reverse-worker enrollment for trusted
+  development networks, including persisted `ws://` reconnect behavior and a
+  backward-compatible `--insecure-local-development` CLI alias. HTTPS remains
+  the default and HTTP without explicit opt-in fails safely.
+  - Added matching coordinator opt-in through
+    `MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP`.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/remote_execution
+    tests/gateway/test_chat_gateway.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (58 passed); targeted Ruff,
+    compilation, and `git diff --check` passed.
+
+- Fixed macOS `worker start` to report an actionable install-first error when
+  the LaunchAgent is absent, bootstrap an installed but unloaded LaunchAgent,
+  and present bounded `launchctl` failures without a Python traceback.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_fleet_cli.py tests/remote_execution
+    tests/commands/test_worker_cli.py` passed (23 passed); the real
+    `.venv/bin/mana-agent worker start` missing-install path exited 1 with the
+    expected concise error; targeted Ruff, compilation, and `git diff --check`
+    passed.
+
+- Updated the package and documented release version to `v0.1.0`.
+  - Verification: `.venv/bin/python -m pytest -q tests/test_package_version.py` passed.
+
+- Fixed package installation by replacing nonexistent LangChain `0.3.50`
+  minimum versions with the mutually compatible published `0.3.27` baseline
+  and synchronizing `pyproject.toml` with `requirements.txt`.
+  - Verification: isolated `pip install --dry-run --ignore-installed .`
+    resolved the project and selected `langchain==0.3.30`,
+    `langchain-community==0.3.31`, and `langchain-openai==0.3.35`; the built
+    wheel contains all three corrected dependency declarations; packaging,
+    LangChain compatibility, dependency-service, and CLI smoke tests passed (84
+    passed); targeted Ruff and `git diff --check` passed.
+
+- Fixed the remaining Ubuntu Python 3.10 failures by catching
+  `asyncio.TimeoutError` explicitly, using the conditional `tomli` backport in
+  the standalone release validator, and intercepting `Path.open` writes in the
+  pytest real-home safety guard for Python versions whose pathlib accessor
+  bypasses a patched `io.open`.
+  - Verification: `.venv/bin/python -m pytest -q` passed (1311 passed, 2
+    skipped); all affected computer-control, release-validation,
+    runtime-isolation, and package tests passed (56 passed); the forced Python
+    3.10 release-validator TOML path passed; targeted Ruff, source/script
+    compilation, and `git diff --check` passed.
+  - Verification note: Python 3.10 is not installed locally, so the GitHub
+    Actions Ubuntu Python 3.10 job remains the authoritative native run.
+
+- Made Fleet capability fingerprints and signed inventory payloads deterministic
+  across operating systems and Python hash seeds by recursively sorting all
+  unordered capability values before JSON serialization.
+  - Verification: `PYTHONHASHSEED=4 .venv/bin/python -m pytest -q` passed
+    (1310 passed, 2 skipped); the Fleet, Fleet CLI, and Fleet Eval suites passed
+    under the same seed (14 passed); the focused macOS failure cases and
+    cross-seed regression passed (3 passed); targeted Ruff, Fleet source
+    compilation, and `git diff --check` passed.
+
+- Fixed Windows CI interruption during stale session and lane-lock recovery by
+  replacing destructive Windows `os.kill(pid, 0)` liveness probes with a
+  read-only process-handle query shared by recovery and connector-status paths.
+  - Verification: `.venv/bin/python -m pytest -q` passed (1309 passed, 2
+    skipped); targeted Windows-process, stale-session, lane-lock, and Telegram
+    tests passed (16 passed); targeted Ruff, source compilation, and
+    `git diff --check` passed.
+  - Verification note: the native Windows process-handle branch requires the
+    GitHub Actions Windows runner for authoritative execution.
+
+- Fixed Python 3.10 CI collection by routing TOML parsing through a shared
+  compatibility import, adding the conditional `tomli` backport dependency,
+  and making package-version and test TOML reads use the same supported
+  fallback. Added a Python 3.10-compatible `StrEnum` boundary for computer
+  control, preventing the next standard-library compatibility failure in the
+  expanded CI matrix.
+  - Verification: forced `tomllib`-unavailable and `StrEnum`-unavailable
+    import checks passed; `.venv/bin/python -m pytest -q
+    tests/connectors/test_telegram_cli_config.py tests/test_codex_runtime.py
+    tests/test_package_version.py tests/commands/test_analyze_slash_command.py
+    tests/commands/test_fleet_cli.py tests/evals tests/execution tests/fleet
+    tests/gateway` passed (182 passed); computer-control tests passed (43
+    passed); the built wheel contains
+    `Requires-Dist: tomli<3.0,>=2.0; python_version < "3.11"`; targeted Ruff,
+    source compilation, and `git diff --check` passed.
+  - Verification note: an actual Python 3.10 interpreter is not installed in
+    the local environment; the conditional branches were forced explicitly and
+    the GitHub Actions Python 3.10 job remains the authoritative matrix run.
+
+- Added the disabled-by-default Mana Fleet distributed verification foundation:
+  strict versioned worker/capability/selection/plan/job/result/run models,
+  authenticated bounded capability updates, deterministic fail-closed worker
+  selection, persistent health and revocation, atomic owner-only run storage,
+  ordered replayable events, cross-process cancellation, restart recovery,
+  immutable completed results, matrix aggregation, and exact-action Fleet
+  permission bindings.
+  - Fleet jobs create an isolated detached Git worktree, verify the exact commit
+    and clean starting state, and delegate provisioning, argv execution,
+    artifacts, timeouts, and cleanup to the existing `ExecutionManager`.
+    Required platform coverage is never weakened and infrastructure failure is
+    not reported as test failure.
+  - Added `mana-agent fleet` worker/job/doctor/verify/compare/log/artifact/
+    cancellation commands, canonical `/fleet` chat registration, shared Fleet
+    API/event replay endpoints, a read-only Fleet dashboard page, and a global
+    doctor check.
+  - Added persistent `fleet-verify` automation schedules with explicit
+    platforms, commands, worker limits, and timeouts; deployed schedules invoke
+    the same Fleet CLI/service instead of a scheduler-specific runner.
+  - Extended authenticated reverse workers with signed runtime capability
+    messages and coordinator-assigned trust labels. Added owner-scoped Linux
+    `systemd --user` and Windows Task Scheduler installers while preserving the
+    macOS LaunchAgent.
+  - Added Fleet Eval configuration validation, cross-platform CI coverage,
+    Fleet architecture/operations documentation, updated repository URLs and
+    project layout, and removed the duplicated saved-workflow documentation.
+  - Verification: `.venv/bin/python -m pytest tests/fleet -q` passed (11
+    passed); `.venv/bin/python -m pytest tests/fleet
+    tests/test_automation_service.py tests/test_doctor.py
+    tests/remote_execution tests/gateway tests/evals
+    tests/commands/test_fleet_cli.py tests/test_api_workspaces.py
+    tests/test_api_conversations.py -q` passed (155 passed);
+    `.venv/bin/python -m ruff check src/mana_agent/fleet
+    src/mana_agent/remote_execution/installers
+    src/mana_agent/remote_execution/daemon.py
+    src/mana_agent/remote_execution/gateway.py
+    src/mana_agent/commands/worker_cli.py
+    src/mana_agent/api/routes/fleet.py
+    src/mana_agent/doctor/checks/fleet.py tests/fleet
+    tests/commands/test_fleet_cli.py tests/evals/test_fleet_eval_config.py`
+    passed; `.venv/bin/python -m compileall -q src` passed; `git diff --check`
+    passed; `.venv/bin/python -m pytest -q` passed (1304 passed, 2 skipped).
+    Workflow YAML parsed with PyYAML, and help smoke checks passed for
+    `mana-agent fleet`, `fleet list`, `fleet verify`, `eval`, and `doctor`.
+  - Verification note: `.venv/bin/python -m ruff check .` remains blocked by
+    792 pre-existing violations in unrelated modules and tests; those files
+    were not modified as part of Fleet.
+
 ## 2026-07-25
 
 - Made public-web search a fully validated entry-routing capability. Search is

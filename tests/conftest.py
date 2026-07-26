@@ -54,6 +54,7 @@ def _install_real_mana_write_guard() -> None:
 
     original_open = builtins.open
     original_io_open = io.open
+    original_path_open = Path.open
     original_os_open = os.open
     original_mkdir = os.mkdir
     original_makedirs = os.makedirs
@@ -75,6 +76,11 @@ def _install_real_mana_write_guard() -> None:
         if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
             _reject_real_mana_write(file)
         return original_io_open(file, mode, *args, **kwargs)
+
+    def guarded_path_open(path, mode="r", *args, **kwargs):  # noqa: ANN001
+        if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
+            _reject_real_mana_write(path)
+        return original_path_open(path, mode, *args, **kwargs)
 
     def guarded_os_open(path, flags, *args, **kwargs):  # noqa: ANN001
         write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
@@ -123,6 +129,7 @@ def _install_real_mana_write_guard() -> None:
 
     builtins.open = guarded_open
     io.open = guarded_io_open
+    Path.open = guarded_path_open
     os.open = guarded_os_open
     os.mkdir = guarded_mkdir
     os.makedirs = guarded_makedirs

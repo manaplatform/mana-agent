@@ -6,16 +6,18 @@ import asyncio
 import json
 import platform
 import socket
+import urllib.error
 import urllib.request
-import uuid
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 
 from mana_agent.remote_execution.credentials import CredentialStore, generate_identity
 from mana_agent.remote_execution.daemon import ReverseWorkerDaemon, WorkerRuntimeConfig, load_worker_config, write_worker_config
-from mana_agent.remote_execution.installer import MacOSInstaller
+from mana_agent.remote_execution.installer import MacOSInstaller, WorkerServiceError
+from mana_agent.remote_execution.installers import LinuxSystemdInstaller, WindowsTaskSchedulerInstaller
 
 worker_app = typer.Typer(help="Install and operate this machine as an outbound reverse worker.", no_args_is_help=True)
 enrollment_app = typer.Typer(help="Create or use short-lived worker enrollment payloads.", no_args_is_help=True)
@@ -24,7 +26,25 @@ worker_app.add_typer(enrollment_app, name="enrollment")
 
 
 def _state_dir(state_dir: str | None) -> Path:
-    return Path(state_dir).expanduser().resolve() if state_dir else Path.home() / "Library/Application Support/ManaAgent"
+    if state_dir:
+        return Path(state_dir).expanduser().resolve()
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/Application Support/ManaAgent"
+    if system == "Windows":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ManaAgent/state"
+    return Path.home() / ".local/share/mana-agent"
+
+
+def _installer():
+    system = platform.system()
+    if system == "Darwin":
+        return MacOSInstaller(home=Path.home())
+    if system == "Linux":
+        return LinuxSystemdInstaller(home=Path.home())
+    if system == "Windows":
+        return WindowsTaskSchedulerInstaller()
+    raise typer.BadParameter(f"worker service installation is unsupported on {system}")
 
 
 def _coordinator_call(coordinator: str, path: str, *, method: str = "GET", payload: dict | None = None,
@@ -34,18 +54,59 @@ def _coordinator_call(coordinator: str, path: str, *, method: str = "GET", paylo
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
     request = urllib.request.Request(coordinator.rstrip("/") + path, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read(1_048_577)
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read(16_385)
+        detail = _coordinator_error_detail(error_body[:16_384], fallback=exc.reason)
+        typer.echo(f"Coordinator request failed (HTTP {exc.code}): {detail}", err=True)
+        raise typer.Exit(1) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        detail = str(getattr(exc, "reason", exc))[-2_000:]
+        typer.echo(f"Coordinator connection failed: {detail}", err=True)
+        raise typer.Exit(1) from exc
+    if len(response_body) > 1_048_576:
+        typer.echo("Coordinator response exceeded the 1 MiB safety limit.", err=True)
+        raise typer.Exit(1)
+    try:
+        return json.loads(response_body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        typer.echo("Coordinator returned an invalid JSON response.", err=True)
+        raise typer.Exit(1) from exc
 
 
-def _enroll(coordinator: str, token: str, name: str, state_dir: Path, *, insecure_local_development: bool = False) -> WorkerRuntimeConfig:
-    worker_id = f"worker_{uuid.uuid4().hex}"
+def _coordinator_error_detail(body: bytes, *, fallback: str) -> str:
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        text = body.decode("utf-8", errors="replace").strip()
+        return text[-2_000:] or str(fallback)
+    if isinstance(payload, dict):
+        detail = payload.get("detail") or payload.get("error")
+        if detail:
+            return str(detail)[-2_000:]
+    return str(fallback)
+
+
+def _enroll(
+    coordinator: str,
+    token: str,
+    worker_id: str,
+    name: str,
+    state_dir: Path,
+    *,
+    allow_insecure_http: bool = False,
+) -> WorkerRuntimeConfig:
     identity = generate_identity(worker_id)
     registration = ReverseWorkerDaemon.registration(worker_id, name or socket.gethostname(), identity.public_key_pem)
     payload = json.dumps({"token": token, "registration": registration.model_dump(mode="json")}).encode()
     parsed = coordinator.rstrip("/")
-    if not parsed.startswith("https://") and not (insecure_local_development and parsed.startswith("http://localhost")):
-        raise typer.BadParameter("coordinator must use HTTPS (HTTP is allowed only for explicit localhost development)")
+    scheme = urlparse(parsed).scheme.lower()
+    if scheme != "https" and not (allow_insecure_http and scheme == "http"):
+        raise typer.BadParameter(
+            "coordinator must use HTTPS; pass --allow-insecure-http to explicitly use HTTP"
+        )
     request = urllib.request.Request(parsed + "/api/v1/workers/enroll", data=payload,
                                     headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -55,39 +116,49 @@ def _enroll(coordinator: str, token: str, name: str, state_dir: Path, *, insecur
         raise typer.BadParameter("worker enrollment failed; check the coordinator URL, TLS, and token") from exc
     CredentialStore(state_dir).save(type(identity)(worker_id=str(result["worker_id"]), credential=str(result["credential"]), private_key_pem=identity.private_key_pem))
     return WorkerRuntimeConfig(coordinator_url=coordinator, worker_id=str(result["worker_id"]), name=name or registration.display_name,
-                               state_dir=state_dir, allow_insecure_local_development=insecure_local_development)
+                               state_dir=state_dir, allow_insecure_http=allow_insecure_http)
 
 
 @worker_app.command("install")
 def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: str = typer.Option("", "--token", hide_input=True),
+                   worker_id: str = typer.Option(..., "--worker-id", help="Worker ID returned by `worker enrollment create`."),
                    name: str = typer.Option("", "--name"), state_dir: str | None = typer.Option(None, "--state-dir"),
-                   insecure_local_development: bool = typer.Option(False, "--insecure-local-development")) -> None:
-    """Enroll then install a user LaunchAgent on macOS; never stores the bootstrap token."""
+                   allow_insecure_http: bool = typer.Option(
+                       False,
+                       "--allow-insecure-http",
+                       "--insecure-local-development",
+                       help="Allow unencrypted HTTP/ws transport; credentials may be exposed in transit.",
+                   )) -> None:
+    """Enroll and install an owner-scoped worker service; never stores the bootstrap token."""
     if not coordinator:
-        coordinator = typer.prompt("Coordinator HTTPS URL")
+        coordinator = typer.prompt("Coordinator URL")
     if not token:
         token = typer.prompt("Short-lived enrollment token", hide_input=True)
     root = _state_dir(state_dir)
-    config = _enroll(coordinator, token, name, root, insecure_local_development=insecure_local_development)
+    config = _enroll(
+        coordinator,
+        token,
+        worker_id,
+        name,
+        root,
+        allow_insecure_http=allow_insecure_http,
+    )
     write_worker_config(config)
-    if platform.system() != "Darwin":
-        raise typer.BadParameter("automatic service installation is currently implemented for macOS")
-    MacOSInstaller(home=Path.home()).install()
-    typer.echo(f"Worker {config.worker_id} enrolled and LaunchAgent installed. Run `mana-agent worker doctor` to verify connectivity.")
+    _installer().install()
+    typer.echo(f"Worker {config.worker_id} enrolled and service installed. Run `mana-agent worker doctor` to verify connectivity.")
 
 
 @worker_app.command("run", hidden=True)
 def run_worker(state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
-    """LaunchAgent entrypoint; intended to run independently from the TUI."""
+    """Service entrypoint; intended to run independently from the TUI."""
     asyncio.run(ReverseWorkerDaemon(load_worker_config(_state_dir(state_dir))).run())
 
 
 @worker_app.command("uninstall")
 def uninstall_worker(yes: bool = typer.Option(False, "--yes"), state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
-    if not yes and not typer.confirm("Remove this worker LaunchAgent and its local identity?", default=False):
+    if not yes and not typer.confirm("Remove this worker service and its local identity?", default=False):
         raise typer.Abort()
-    if platform.system() == "Darwin":
-        MacOSInstaller(home=Path.home()).uninstall()
+    _installer().uninstall()
     root = _state_dir(state_dir)
     worker_id = ""
     if (root / "worker.json").exists():
@@ -97,39 +168,41 @@ def uninstall_worker(yes: bool = typer.Option(False, "--yes"), state_dir: str | 
     typer.echo("Worker service and local identity removed.")
 
 
-def _mac_control(action: str) -> None:
-    if platform.system() != "Darwin":
-        raise typer.BadParameter("worker service control is currently implemented for macOS")
-    installer = MacOSInstaller(home=Path.home())
-    if action == "start":
-        installer._launch("kickstart", "-k", f"gui/{os.getuid()}/net.manaplatform.mana-agent.worker")
-    elif action == "stop":
-        installer._bootout(ignore_errors=False)
-    elif action == "restart":
-        installer._bootout(ignore_errors=True)
-        installer.install()
+def _service_control(action: str) -> None:
+    installer = _installer()
+    control = getattr(installer, action, None)
+    if control is None:
+        raise typer.BadParameter(
+            f"worker service {action} is not implemented for {platform.system()}"
+        )
+    try:
+        control()
+    except WorkerServiceError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"Worker {action} requested.")
 
 
 for _name in ("start", "stop", "restart"):
-    worker_app.command(_name)(lambda action=_name: _mac_control(action))
+    worker_app.command(_name)(lambda action=_name: _service_control(action))
 
 
 @worker_app.command("status")
 def worker_status(state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
     root = _state_dir(state_dir)
     config_exists, identity = (root / "worker.json").exists(), CredentialStore(root).load()
-    service = MacOSInstaller(home=Path.home()).status() if platform.system() == "Darwin" else False
+    service = _installer().status()
     typer.echo(json.dumps({"configured": config_exists, "identity_present": bool(identity), "service_running": service}, indent=2))
 
 
 @worker_app.command("logs")
 def worker_logs(lines: int = typer.Option(100, "--lines", min=1, max=10000)) -> None:
-    path = Path.home() / "Library/Logs/ManaAgent/worker.err.log"
-    if not path.exists():
-        typer.echo("No worker log file exists yet.")
+    installer = _installer()
+    if hasattr(installer, "logs"):
+        typer.echo("\n".join(installer.logs().splitlines()[-lines:]))
         return
-    typer.echo("\n".join(path.read_text(errors="replace").splitlines()[-lines:]))
+    path = Path.home() / "Library/Logs/ManaAgent/worker.err.log"
+    typer.echo("\n".join(path.read_text(errors="replace").splitlines()[-lines:]) if path.exists() else "No worker log file exists yet.")
 
 
 @worker_app.command("doctor")
@@ -137,17 +210,22 @@ def worker_doctor(repair: bool = typer.Option(False, "--repair"), state_dir: str
     root = _state_dir(state_dir)
     findings = {"config": (root / "worker.json").exists(), "identity": CredentialStore(root).load() is not None,
                 "state_writable": root.exists() and __import__('os').access(root, __import__('os').W_OK),
-                "launchagent": platform.system() != "Darwin" or MacOSInstaller(home=Path.home()).status()}
+                "service": _installer().status()}
     typer.echo(json.dumps(findings, indent=2))
-    if repair and platform.system() == "Darwin" and findings["config"] and not findings["launchagent"]:
-        MacOSInstaller(home=Path.home()).install()
-        typer.echo("LaunchAgent repaired.")
+    if repair and findings["config"] and not findings["service"]:
+        _installer().install()
+        typer.echo("Worker service repaired.")
     if not all(findings.values()):
         raise typer.Exit(1)
 
 
 @worker_app.command("reconnect")
-def reconnect_worker() -> None: _mac_control("restart")
+def reconnect_worker() -> None:
+    installer = _installer()
+    if hasattr(installer, "reconnect"):
+        installer.reconnect()
+    else:
+        _service_control("restart")
 
 
 @worker_app.command("rotate-identity")
@@ -156,12 +234,16 @@ def rotate_identity() -> None:
 
 
 @enrollment_app.command("create")
-def create_enrollment(coordinator: str = typer.Option(..., "--coordinator"), worker_id: str = typer.Option(..., "--worker-id"),
+def create_enrollment(coordinator: str = typer.Option(..., "--coordinator"),
+                      worker_id: str = typer.Option("", "--worker-id", help="Optional stable ID; generated by the coordinator when omitted."),
                       name: str = typer.Option("", "--name"), expires_in: int = typer.Option(900, "--expires-in"),
                       api_token: str = typer.Option("", "--api-token", hide_input=True)) -> None:
     """Create a sensitive, short-lived coordinator enrollment payload."""
+    payload = {"name": name, "expires_in_seconds": expires_in}
+    if worker_id:
+        payload["worker_id"] = worker_id
     result = _coordinator_call(coordinator, "/api/v1/workers/enrollments", method="POST",
-                               payload={"worker_id": worker_id, "name": name, "expires_in_seconds": expires_in}, api_token=api_token)
+                               payload=payload, api_token=api_token)
     typer.echo(json.dumps(result, indent=2))
 
 

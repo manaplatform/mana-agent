@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import shlex
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -17,8 +19,17 @@ from mana_agent.remote_execution.models import RemoteExecutionRequest, WorkerReg
 from mana_agent.remote_execution.protocol import MessageType, WorkerMessage
 from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.remote_execution.worker import WorkerRegistry
+from mana_agent.fleet.models import WorkerCapabilities as FleetWorkerCapabilities
+from mana_agent.fleet.models import WorkerIdentity as FleetWorkerIdentity
+from mana_agent.fleet.models import WorkerLabels as FleetWorkerLabels
+from mana_agent.fleet.models import WorkerStatus
+from mana_agent.fleet.registry import FleetRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _new_worker_id() -> str:
+    return f"worker_{uuid.uuid4().hex}"
 
 
 class WorkerGatewayConfig(BaseModel):
@@ -30,15 +41,21 @@ class WorkerGatewayConfig(BaseModel):
     offline_after_seconds: int = Field(default=45, ge=10, le=900)
     bootstrap_token_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     require_manual_approval: bool = False
+    allow_insecure_http: bool = False
     allow_insecure_local_development: bool = False
 
     def validate_public_url(self) -> None:
         parsed = urlparse(self.public_url)
         if parsed.scheme == "https":
             return
+        if self.allow_insecure_http and parsed.scheme == "http":
+            return
         if self.allow_insecure_local_development and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
             return
-        raise ValueError("worker gateway requires HTTPS; HTTP is only allowed for explicit localhost development")
+        raise ValueError(
+            "worker gateway public URL is invalid; set MANA_WORKER_GATEWAY_PUBLIC_URL "
+            "to HTTPS, or also set MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP=true for HTTP"
+        )
 
 
 class EnrollmentRequest(BaseModel):
@@ -54,7 +71,7 @@ class EnrollmentResponse(BaseModel):
 
 
 class EnrollmentCreateRequest(BaseModel):
-    worker_id: str = Field(min_length=3, max_length=128)
+    worker_id: str = Field(default_factory=_new_worker_id, min_length=3, max_length=128)
     name: str = Field(default="", max_length=128)
     expires_in_seconds: int | None = Field(default=None, ge=60, le=86400)
     labels: list[str] = Field(default_factory=list, max_length=32)
@@ -71,10 +88,12 @@ class WorkerGateway:
     """One gateway integrated into the API application, never an inbound worker server."""
 
     def __init__(self, config: WorkerGatewayConfig | None = None, *, registry: WorkerRegistry | None = None,
-                 execution: RemoteExecutionService | None = None) -> None:
+                 execution: RemoteExecutionService | None = None,
+                 fleet_registry: FleetRegistry | None = None) -> None:
         self.config = config or WorkerGatewayConfig()
         self.registry = registry or WorkerRegistry()
         self.execution = execution or RemoteExecutionService(workers=self.registry, event_sink=self._execution_event)
+        self.fleet_registry = fleet_registry
         self.sessions: dict[str, _Session] = {}
         self.audit_events: list[dict[str, Any]] = []
 
@@ -85,7 +104,10 @@ class WorkerGateway:
     def create_enrollment(self, *, worker_id: str, name: str = "", ttl_seconds: int | None = None,
                           labels: list[str] | None = None, capability_restrictions: list[str] | None = None) -> str:
         if not self.config.enabled:
-            raise RuntimeError("worker gateway is disabled")
+            raise RuntimeError(
+                "worker gateway is disabled; set MANA_WORKER_GATEWAY_ENABLED=true "
+                "on the coordinator and restart it"
+            )
         self.config.validate_public_url()
         token = self.registry.issue_enrolment_token(worker_id, ttl_seconds=ttl_seconds or self.config.bootstrap_token_ttl_seconds,
                                                     name=name, labels=labels, capability_restrictions=capability_restrictions)
@@ -124,6 +146,11 @@ class WorkerGateway:
                 self.registry.disconnect(worker_id)
                 self.sessions.pop(worker_id, None)
                 self.execution.worker_disconnected(worker_id)
+                if self.fleet_registry is not None:
+                    try:
+                        self.fleet_registry.set_status(worker_id, WorkerStatus.OFFLINE)
+                    except Exception:
+                        logger.debug("unable to persist Fleet worker offline status", exc_info=True)
                 self.audit("worker.heartbeat_missed", worker_id=worker_id)
                 offline.append(worker_id)
         return offline
@@ -157,10 +184,42 @@ class WorkerGateway:
                         raise PermissionError("worker ID changed during session")
                     if not self.registry.accept_message(worker_id, message.message_id):
                         continue
-                    if message.signature:
-                        self.registry.verify_signature(worker_id, message.signing_bytes(), base64.b64decode(message.signature))
+                    if not message.signature:
+                        raise PermissionError("authenticated worker messages must be signed")
+                    self.registry.verify_signature(worker_id, message.signing_bytes(), base64.b64decode(message.signature))
                     if message.type is MessageType.HEARTBEAT:
                         self.registry.heartbeat(worker_id)
+                        if self.fleet_registry is not None:
+                            self.fleet_registry.heartbeat(worker_id)
+                    elif message.type is MessageType.CAPABILITIES:
+                        if self.fleet_registry is None:
+                            raise RuntimeError("Fleet capability registry is unavailable")
+                        registration = self.registry.registration(worker_id)
+                        if registration is None:
+                            raise PermissionError("worker registration disappeared during capability update")
+                        inventory = FleetWorkerCapabilities.model_validate(message.payload.get("inventory"))
+                        if inventory.worker_id != worker_id:
+                            raise PermissionError("capability inventory worker identity mismatch")
+                        # Trust labels are coordinator enrollment policy, never
+                        # self-asserted worker capability data.
+                        inventory = inventory.model_copy(update={
+                            "labels": FleetWorkerLabels(values=frozenset(registration.labels))
+                        })
+                        import hashlib
+                        identity_fingerprint = hashlib.sha256(
+                            registration.public_key_pem.encode()
+                        ).hexdigest()
+                        self.fleet_registry.accept_capabilities(
+                            inventory,
+                            FleetWorkerIdentity(
+                                worker_id=worker_id,
+                                identity_fingerprint=identity_fingerprint,
+                                authenticated=True,
+                                credential_status="valid",
+                            ),
+                            display_name=registration.display_name,
+                        )
+                        self.fleet_registry.heartbeat(worker_id)
                     elif message.type in {MessageType.COMPLETED, MessageType.FAILED, MessageType.CANCELLED}:
                         job = self.execution.jobs.get(message.job_id)
                         if job and job.state not in {job.state.SUCCEEDED, job.state.FAILED, job.state.CANCELLED}:
@@ -183,6 +242,11 @@ class WorkerGateway:
                 self.registry.disconnect(worker_id)
                 self.sessions.pop(worker_id, None)
                 self.execution.worker_disconnected(worker_id)
+                if self.fleet_registry is not None:
+                    try:
+                        self.fleet_registry.set_status(worker_id, WorkerStatus.OFFLINE)
+                    except Exception:
+                        logger.debug("unable to persist Fleet disconnect status", exc_info=True)
                 self.audit("worker.disconnected", worker_id=worker_id)
 
 
@@ -212,8 +276,17 @@ def build_worker_router(gateway: WorkerGateway) -> APIRouter:
                                               capability_restrictions=payload.capability_restrictions)
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        install_args = [
+            "mana-agent", "worker", "install",
+            "--coordinator", gateway.config.public_url,
+            "--token", "<sensitive-token>",
+            "--worker-id", payload.worker_id,
+            "--name", payload.name or payload.worker_id,
+        ]
+        if urlparse(gateway.config.public_url).scheme == "http":
+            install_args.append("--allow-insecure-http")
         return {"worker_id": payload.worker_id, "token": token, "expires_in_seconds": payload.expires_in_seconds or gateway.config.bootstrap_token_ttl_seconds,
-                "install_command": f"mana-agent worker install --coordinator {gateway.config.public_url} --token <sensitive-token> --name {payload.name or payload.worker_id}"}
+                "install_command": shlex.join(install_args)}
 
     @router.websocket("/connect")
     async def connect(websocket: WebSocket) -> None:

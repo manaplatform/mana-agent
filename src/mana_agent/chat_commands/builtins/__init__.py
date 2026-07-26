@@ -143,6 +143,25 @@ def _remote_worker(context: CommandContext, args: list[str]) -> CommandResult:
     return CommandResult(status="success", message=str(result.pop("message")), data=result)
 
 
+def _fleet(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None or not hasattr(context.gateway, "fleet_command"):
+        raise RuntimeError(
+            "Fleet coordinator is unavailable in this gateway. "
+            "No local or provider fallback was executed."
+        )
+    result = context.gateway.fleet_command(
+        list(args), session_id=context.session_id,
+        workspace_id=context.workspace_id, repository_id=context.repository_id,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("Fleet coordinator returned an invalid typed command result.")
+    return CommandResult(
+        status="success",
+        message=str(result.get("message") or ""),
+        data={key: value for key, value in result.items() if key != "message"},
+    )
+
+
 def _computer_confirm(context: CommandContext, args: list[str]) -> CommandResult:
     from mana_agent.integrations.computer_control.cancellation import approve_computer_action
     from mana_agent.integrations.computer_control.service import default_computer_control_service
@@ -252,6 +271,14 @@ def definitions() -> list[CommandDefinition]:
         CommandDefinition(canonical_name="status", description="Show the active chat status.", required_capability="gateway", handler=_status),
         CommandDefinition(canonical_name="cancel", description="Cancel the active agent turn.", required_capability="gateway", handler=_cancel),
         CommandDefinition(canonical_name="remote-worker", description="Model-selected remote worker lifecycle: register, start, or stop an external SSH worker.", argument_schema="<register|start|stop> <worker-id>", argument_model=RemoteWorkerArguments, required_capability="gateway", confirmation_actions=frozenset({"stop"}), handler=_remote_worker),
+        CommandDefinition(
+            canonical_name="fleet",
+            description="Inspect or execute a typed Fleet verification workflow.",
+            argument_schema="[list|workers|jobs|run <suite>|verify|compare <run-id>|cancel <job-id>]",
+            required_capability="gateway",
+            confirmation_actions=frozenset({"cancel"}),
+            handler=_fleet,
+        ),
         CommandDefinition(
             canonical_name="computer-confirm",
             description="List or explicitly approve a pending exact computer action.",

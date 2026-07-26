@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 
+from mana_agent.compat import tomllib
 from mana_agent.workspaces.models import RepositoryRecord, RepositoryRelationship, WorkspaceRecord
 from mana_agent.workspaces.paths import workspace_dir
 from mana_agent.workspaces.store import WorkspaceStore, atomic_write_json
@@ -23,8 +24,6 @@ def _package_names(repo: RepositoryRecord) -> set[str]:
     pyproject = root / "pyproject.toml"
     if pyproject.is_file():
         try:
-            import tomllib
-
             name = str(tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {}).get("name") or "").lower()
             if name:
                 names.add(name)

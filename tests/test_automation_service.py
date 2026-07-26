@@ -76,6 +76,29 @@ def test_custom_command_is_rendered_only_after_explicit_validation(tmp_path: Pat
     assert service.schedule_command(schedule, tmp_path) == "./scripts/backup.sh"
 
 
+def test_fleet_schedule_requires_explicit_matrix_and_uses_fleet_command(tmp_path: Path) -> None:
+    with pytest.raises(AutomationValidationError, match="platforms"):
+        ScheduleDefinition.create(
+            name="Fleet", action="fleet-verify", cron="0 2 * * *",
+            targets=["local"], action_config={},
+        )
+    schedule = ScheduleDefinition.create(
+        name="Fleet", action="fleet-verify", cron="0 2 * * *",
+        targets=["local"],
+        action_config={
+            "platforms": ["linux", "windows"],
+            "commands": ["python -m pytest -q"],
+            "maximum_workers": 2,
+            "timeout": 900,
+        },
+    )
+    command = service.schedule_command(schedule, tmp_path)
+    assert "mana-agent fleet verify" in command
+    assert "--platform linux" in command
+    assert "--platform windows" in command
+    assert "--command 'python -m pytest -q'" in command
+
+
 def test_status_reports_local_drift_without_default_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service.shutil, "which", lambda name: "/usr/bin/crontab" if name == "crontab" else None)
 

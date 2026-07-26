@@ -4,7 +4,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,6 +31,23 @@ class SuiteDefaults(BaseModel):
     concurrency: int = 1
     provider_concurrency: dict[str, int] = Field(default_factory=dict)
     retain_workspaces: bool = False
+    required_platforms: list[Literal["linux", "windows", "macos"]] = Field(default_factory=list)
+    minimum_platform_coverage: int = Field(default=0, ge=0, le=3)
+    runtime: dict[str, list[str]] = Field(default_factory=dict)
+    fleet: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_fleet_defaults(self) -> "SuiteDefaults":
+        if self.workspace_backend == "fleet":
+            if not self.required_platforms:
+                raise ValueError("fleet Eval suites require explicit required_platforms")
+            if self.minimum_platform_coverage > len(set(self.required_platforms)):
+                raise ValueError("minimum_platform_coverage exceeds required platforms")
+            allowed = {"labels", "maximum_workers", "per_worker_concurrency"}
+            unknown = set(self.fleet) - allowed
+            if unknown:
+                raise ValueError(f"unknown fleet Eval settings: {', '.join(sorted(unknown))}")
+        return self
 
 
 class ScoreWeights(BaseModel):
@@ -200,7 +217,7 @@ def validate_suite_runtime(suite: EvalSuite) -> None:
     known_tools = {str(item["name"]) for item in agent_tool_descriptions()}
     known_lanes = {item.value for item in LaneId}
     for variant in suite.variants:
-        if variant.workspace_backend != "local-worktree":
+        if variant.workspace_backend not in {"local-worktree", "execution-fabric", "fleet"}:
             raise EvalConfigurationError(f"unsupported workspace backend: {variant.workspace_backend}")
         unknown_tools = (set(variant.tool_allowlist) | set(variant.tool_denylist)) - known_tools
         if unknown_tools:

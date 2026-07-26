@@ -5,12 +5,12 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mana_agent.compat import tomllib
 from mana_agent.config.settings import mana_home
 from mana_agent.integrations.codex.exceptions import CodexConfigurationError
 from mana_agent.integrations.codex.runtime_config import CodexRuntimeConfig, RUNTIME_API_KEY_ENV

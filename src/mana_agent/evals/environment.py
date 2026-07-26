@@ -50,8 +50,8 @@ def capture_environment(
         reasons.append("repository commit is unavailable")
     if status:
         reasons.append("starting workspace is dirty")
-    if workspace_backend != "local-worktree":
-        reasons.append(f"workspace backend {workspace_backend!r} is not implemented")
+    if workspace_backend not in {"local-worktree", "execution-fabric", "fleet"}:
+        reasons.append(f"workspace backend {workspace_backend!r} is unsupported")
     if not deterministic_task:
         reasons.append("task definition is not deterministic")
     if not has_test_command:

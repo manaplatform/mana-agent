@@ -3,11 +3,11 @@ from __future__ import annotations
 import ast
 import json
 import re
-import tomllib
 from pathlib import Path
 from typing import Iterable
 
 from mana_agent.analysis.models import DependencyEdge, DependencyGraphReport
+from mana_agent.compat import tomllib
 from mana_agent.models import DependencyPackageRef
 from mana_agent.utils.io import iter_source_files, language_for_path
 

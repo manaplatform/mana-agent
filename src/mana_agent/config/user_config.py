@@ -5,13 +5,12 @@ import json
 import os
 import stat
 import tempfile
-import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
+from mana_agent.compat import tomllib
 from mana_agent.workspaces.paths import mana_home
 
 
@@ -137,6 +136,10 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_WORKSPACE_ALLOWED_ROOTS": "",
     "MANA_API_TOKEN": "",
     "MANA_MCP_SERVER_TOKEN": "",
+    "MANA_WORKER_GATEWAY_ENABLED": False,
+    "MANA_WORKER_GATEWAY_PUBLIC_URL": "",
+    "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP": False,
+    "MANA_WORKER_GATEWAY_LOCAL_DEV": False,
     "MANA_ACP_ENABLED": True,
     "MANA_ACP_ALLOWED_ROOTS": "",
     "MANA_ACP_MCP_FORWARDING": True,
@@ -313,6 +316,10 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_WORKSPACE_ALLOWED_ROOTS": "mana_workspace_allowed_roots",
     "MANA_API_TOKEN": "mana_api_token",
     "MANA_MCP_SERVER_TOKEN": "mana_mcp_server_token",
+    "MANA_WORKER_GATEWAY_ENABLED": "mana_worker_gateway_enabled",
+    "MANA_WORKER_GATEWAY_PUBLIC_URL": "mana_worker_gateway_public_url",
+    "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP": "mana_worker_gateway_allow_insecure_http",
+    "MANA_WORKER_GATEWAY_LOCAL_DEV": "mana_worker_gateway_local_dev",
     "MANA_ACP_ENABLED": "mana_acp_enabled",
     "MANA_ACP_ALLOWED_ROOTS": "mana_acp_allowed_roots",
     "MANA_ACP_MCP_FORWARDING": "mana_acp_mcp_forwarding",
@@ -424,6 +431,10 @@ CONFIG_WRITE_ORDER = [
     "MANA_SEARCH_MAX_SUMMARY_WORDS",
     "MANA_SEARCH_ENABLE_ASK_AGENT",
     "MANA_BROWSER_ENABLED",
+    "MANA_WORKER_GATEWAY_ENABLED",
+    "MANA_WORKER_GATEWAY_PUBLIC_URL",
+    "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP",
+    "MANA_WORKER_GATEWAY_LOCAL_DEV",
     "MANA_ACP_ENABLED",
     "MANA_ACP_ALLOWED_ROOTS",
     "MANA_ACP_MCP_FORWARDING",
@@ -704,6 +715,10 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         cleaned["computer_control"] = ComputerControlSettings.model_validate(raw_computer).model_dump(mode="json")
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
+    if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
+        cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"] = validate_base_url(
+            str(cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"])
+        )
     for name in (
         "DEFAULT_TOP_K",
         "MANA_SEARCH_MAX_RESULTS",
@@ -730,6 +745,9 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         "MANA_LLM_SUPPORTS_REASONING",
         "MANA_LLM_SUPPORTS_TOOLS_WITH_CHAT_REASONING",
         "MANA_MEMORY_FALLBACK_TO_INTERNAL",
+        "MANA_WORKER_GATEWAY_ENABLED",
+        "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP",
+        "MANA_WORKER_GATEWAY_LOCAL_DEV",
     ):
         if name in cleaned:
             if str(cleaned[name] or "").strip():

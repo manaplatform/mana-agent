@@ -64,7 +64,7 @@ class BaseProvider(ABC):
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=2)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
         return process is not None

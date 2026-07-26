@@ -1,5 +1,13 @@
 # Architecture
 
+## Fleet verification boundary
+
+`mana_agent.fleet` owns worker capability inventory, health, deterministic
+selection, persisted runs, matrices, and ordered Fleet events. It does not own
+a second command runner: every selected provider is validated and executed by
+`ExecutionManager`. Authenticated reverse-worker transport supplies worker
+identity and signed capabilities. See [Mana Fleet](24-fleet.md).
+
 `mana-agent` is a Python CLI + service stack that performs repository analysis and
 LLM-driven “agentic” workflows. The architecture is organized around three
 axes:

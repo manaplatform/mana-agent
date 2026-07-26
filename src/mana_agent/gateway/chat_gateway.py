@@ -327,6 +327,17 @@ class AgentChatGateway:
 
         self.command_registry = build_default_registry()
         self.remote_execution_service = RemoteExecutionService()
+        from mana_agent.fleet import FleetConfig, FleetRegistry, FleetService, FleetStore
+
+        self.fleet_config = FleetConfig.from_settings(self.settings)
+        self.fleet_store = FleetStore(self.fleet_config.root)
+        self.fleet_registry = FleetRegistry(self.fleet_store, self.fleet_config)
+        self.fleet_service = FleetService(
+            config=self.fleet_config,
+            registry=self.fleet_registry,
+            execution_manager=self.execution_manager,
+            store=self.fleet_store,
+        )
         self._remote_job_lanes: dict[str, str] = {}
         self._entry_route_registry = entry_route_registry or self._build_entry_route_registry()
         route_llm = getattr(getattr(self.get_ask_service(), "entry_router", None), "llm", None)
@@ -423,6 +434,48 @@ class AgentChatGateway:
             return {"status": "awaiting_connection", "worker_id": clean_worker_id, "message": "Waiting for the enrolled worker to establish its authenticated outbound connection."}
         registry.disconnect(clean_worker_id)
         return {"status": "stopped", "worker_id": clean_worker_id, "message": "Worker connection was stopped; active jobs are marked disconnected."}
+
+    def fleet_command(
+        self, args: list[str], *, session_id: str = "",
+        workspace_id: str = "", repository_id: str = "",
+    ) -> dict[str, Any]:
+        """Serve canonical Fleet controls without inventing execution decisions."""
+        _ = (session_id, workspace_id, repository_id)
+        action = args[0].lower() if args else "list"
+        if action in {"list", "workers"}:
+            workers = [
+                item.model_dump(mode="json")
+                for item in self.fleet_registry.list()
+            ]
+            return {
+                "message": json.dumps(workers, indent=2),
+                "workers": workers,
+            }
+        if action == "jobs":
+            jobs = [
+                item.model_dump(mode="json")
+                for run in self.fleet_store.list_runs()
+                for item in run.jobs
+            ]
+            return {"message": json.dumps(jobs, indent=2), "jobs": jobs}
+        if action == "compare" and len(args) == 2:
+            run = self.fleet_store.load_run(args[1])
+            if run.summary is None:
+                raise RuntimeError("Fleet run has not completed comparison.")
+            summary = run.summary.model_dump(mode="json")
+            return {"message": json.dumps(summary, indent=2), "summary": summary}
+        if action == "cancel" and len(args) == 2:
+            self.fleet_service.cancel(args[1])
+            return {"message": f"Cancellation requested for Fleet job {args[1]}.", "job_id": args[1]}
+        if action in {"run", "verify"}:
+            raise RuntimeError(
+                "Fleet execution requires a validated structured selection request from "
+                "the gateway routing authority. No default platform, command, worker, or "
+                "local fallback was selected."
+            )
+        raise ValueError(
+            "Usage: /fleet [list|workers|jobs|run <suite>|verify|compare <run-id>|cancel <job-id>]"
+        )
 
     def remote_permission_command(self, permission_request_id: str) -> dict[str, str]:
         """Approve and resume only the exact remote SSH job bound to this ID."""

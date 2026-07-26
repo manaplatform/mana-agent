@@ -15,7 +15,10 @@ def _read_pyproject_version(start: Path) -> str | None:
         if not path.is_file():
             continue
         try:
-            import tomllib
+            try:
+                import tomllib
+            except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
+                import tomli as tomllib
 
             data = tomllib.loads(path.read_text(encoding="utf-8"))
             version = data.get("project", {}).get("version")

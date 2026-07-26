@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.0.21-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-purple" />
 </p>
 
 `mana-agent` is an installable Python CLI and optional web dashboard for understanding, operating, and safely changing software repositories. It combines repository indexing, static analysis, semantic retrieval, multi-agent orchestration, constrained tool execution, Git operations, document processing, browser automation, external search, and remote connectors in one traceable workflow.
 
-> **Current documented version:** `v0.0.21`
+> **Current documented version:** `v0.1.0`
 
 ## Quick links
 
@@ -178,14 +178,14 @@ mana-agent doctor --json
 ### Install with `pipx`
 
 ```bash
-pipx install git+https://github.com/manadevelopment23/mana-agent.git
+pipx install git+https://github.com/manaplatform/mana-agent.git
 mana-agent --help
 ```
 
 ### Install from source
 
 ```bash
-git clone https://github.com/manadevelopment23/mana-agent.git
+git clone https://github.com/manaplatform/mana-agent.git
 cd mana-agent
 
 python3 -m venv .venv
@@ -218,7 +218,7 @@ python -m playwright install chromium
 
 ```bash
 curl -L -o mana-agent \
-  https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-linux-x64
+  https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-linux-x64
 chmod +x mana-agent
 sudo mv mana-agent /usr/local/bin/mana-agent
 mana-agent --help
@@ -228,7 +228,7 @@ mana-agent --help
 
 ```bash
 curl -L -o mana-agent \
-  https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-macos-arm64
+  https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-macos-arm64
 chmod +x mana-agent
 sudo mv mana-agent /usr/local/bin/mana-agent
 mana-agent --help
@@ -238,7 +238,7 @@ mana-agent --help
 
 ```bash
 curl -L -o mana-agent \
-  https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-macos-x64
+  https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-macos-x64
 chmod +x mana-agent
 sudo mv mana-agent /usr/local/bin/mana-agent
 mana-agent --help
@@ -248,7 +248,7 @@ mana-agent --help
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-windows-x64.exe" `
+  -Uri "https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-windows-x64.exe" `
   -OutFile "mana-agent.exe"
 
 .\mana-agent.exe --help
@@ -1057,8 +1057,17 @@ src/mana_agent/
   connectors/     Email, Telegram, and external service adapters
   dependencies/   Dependency graph support
   describe/       Repository description services
+  evals/          Eval Lab suites, storage, scoring, replay, and gates
+  execution/      Provider-neutral sandbox execution fabric
+  fleet/          Trusted cross-platform verification orchestration
+  gateway/        Typed entry routing and shared chat runtime boundary
+  github_autopilot/ Authorized GitHub event automation
+  integrations/   Codex and computer-control integrations
+  memory/         Scoped internal and external memory providers
   multi_agent/    Decisions, agents, taskboard, queues, tools, traces
   parsers/        Language and document parser entry points
+  protocols/      ACP, A2A, and common protocol adapters
+  remote_execution/ Direct SSH and authenticated reverse workers
   renderers/      Report and diagram rendering
   services/       Analyze, ask, index, report, security, and workflows
   tools/          Repository, Git, document, browser, and connector tools
@@ -1089,6 +1098,8 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/04-commands.md`](docs/04-commands.md) | CLI command reference. |
 | [`docs/19-experience-to-skill-workshop.md`](docs/19-experience-to-skill-workshop.md) | Verified experience, proposal review, installation, and quarantine. |
 | [`docs/21-entry-routing-and-chat-sessions.md`](docs/21-entry-routing-and-chat-sessions.md) | Typed entry routing, connector availability, and chat-session lifecycle. |
+| [`docs/24-fleet.md`](docs/24-fleet.md) | Fleet architecture, trust, workers, CLI, permissions, and operations. |
+| [`docs/25-cross-platform-verification.md`](docs/25-cross-platform-verification.md) | Verification matrices, outcomes, Eval configuration, and recovery. |
 | [`docs/05-configuration.md`](docs/05-configuration.md) | Provider, model, search, and runtime settings. |
 | [`docs/06-workflows.md`](docs/06-workflows.md) | Common analysis and coding workflows. |
 | [`docs/07-diagram.md`](docs/07-diagram.md) | Standalone Mermaid architecture diagram. |

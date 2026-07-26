@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
+
+from mana_agent.compat import StrEnum
 
 
 def utc_now() -> datetime:

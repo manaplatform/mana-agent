@@ -9,6 +9,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from mana_agent.remote_execution.service_errors import WorkerServiceError
+
 LABEL = "net.manaplatform.mana-agent.worker"
 
 
@@ -32,9 +34,18 @@ def launchagent_payload(*, executable: str, state_dir: Path, log_dir: Path) -> d
 
 
 class MacOSInstaller:
-    def __init__(self, *, home: Path | None = None, runner=subprocess.run) -> None:
+    def __init__(
+        self,
+        *,
+        home: Path | None = None,
+        runner=subprocess.run,
+        user_id: int | None = None,
+    ) -> None:
+        if user_id is not None and user_id < 0:
+            raise ValueError("macOS user ID must be non-negative")
         self.paths = MacOSPaths((home or Path.home()).resolve())
         self.runner = runner
+        self.user_id = user_id
 
     def install(self, *, executable: str | None = None) -> Path:
         executable = executable or shutil.which("mana-agent")
@@ -51,8 +62,8 @@ class MacOSInstaller:
             with self.paths.plist.open("wb") as stream:
                 plistlib.dump(launchagent_payload(executable=executable, state_dir=self.paths.support, log_dir=self.paths.logs), stream)
             os.chmod(self.paths.plist, 0o600)
-            self._launch("bootstrap", f"gui/{os.getuid()}", str(self.paths.plist))
-            self._launch("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
+            self._launch("bootstrap", self._user_domain(), str(self.paths.plist))
+            self._launch("kickstart", "-k", self._service_domain())
             return self.paths.plist
         except Exception:
             self._bootout(ignore_errors=True)
@@ -63,12 +74,66 @@ class MacOSInstaller:
         self._bootout(ignore_errors=True)
         self.paths.plist.unlink(missing_ok=True)
 
+    def start(self) -> None:
+        self._require_installed()
+        if not self.status():
+            self._launch("bootstrap", self._user_domain(), str(self.paths.plist))
+        self._launch("kickstart", "-k", self._service_domain())
+
+    def stop(self) -> None:
+        self._require_installed()
+        self._bootout(ignore_errors=False)
+
+    def restart(self) -> None:
+        self._require_installed()
+        self._bootout(ignore_errors=True)
+        self._launch("bootstrap", self._user_domain(), str(self.paths.plist))
+        self._launch("kickstart", "-k", self._service_domain())
+
     def status(self) -> bool:
-        result = self.runner(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, text=True, check=False)
+        result = self.runner(
+            ["launchctl", "print", self._service_domain()],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         return result.returncode == 0
 
+    def _require_installed(self) -> None:
+        if not self.paths.plist.is_file():
+            raise WorkerServiceError(
+                "Worker service is not installed. Run `mana-agent worker install` "
+                "with a coordinator URL and enrollment token first."
+            )
+
     def _bootout(self, *, ignore_errors: bool) -> None:
-        self._launch("bootout", f"gui/{os.getuid()}", str(self.paths.plist), check=not ignore_errors)
+        self._launch(
+            "bootout",
+            self._user_domain(),
+            str(self.paths.plist),
+            check=not ignore_errors,
+        )
+
+    def _user_domain(self) -> str:
+        user_id = self.user_id
+        if user_id is None:
+            getuid = getattr(os, "getuid", None)
+            if getuid is None:
+                raise WorkerServiceError(
+                    "macOS worker service control requires a POSIX user ID"
+                )
+            user_id = int(getuid())
+        return f"gui/{user_id}"
+
+    def _service_domain(self) -> str:
+        return f"{self._user_domain()}/{LABEL}"
 
     def _launch(self, *args: str, check: bool = True) -> None:
-        self.runner(["launchctl", *args], capture_output=True, text=True, check=check)
+        try:
+            self.runner(["launchctl", *args], capture_output=True, text=True, check=check)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()[-2_000:]
+            suffix = f": {detail}" if detail else ""
+            raise WorkerServiceError(
+                f"Unable to {args[0]} the macOS worker service{suffix}"
+            ) from exc
