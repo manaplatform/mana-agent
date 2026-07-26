@@ -10,6 +10,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_PATH = _ROOT / ".github" / "workflows" / "publish-pypi.yml"
+_RELEASE_WORKFLOW_PATH = _ROOT / ".github" / "workflows" / "release.yml"
 _VALIDATOR_PATH = _ROOT / ".github" / "scripts" / "validate_release_version.py"
 
 
@@ -47,6 +48,17 @@ def test_publish_job_uses_verified_artifact_oidc_and_production_guardrails() -> 
     assert "cancel-in-progress: false" in workflow
     assert "pypa/gh-action-pypi-publish@" in workflow
     assert "packages-dir: dist/" in workflow
+
+
+def test_stable_github_release_tag_is_derived_from_the_application_version() -> None:
+    workflow = _RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "name: Resolve stable release version" in workflow
+    assert 'release_tag = f"v{version}"' in workflow
+    assert "tag_name: ${{ env.RELEASE_TAG }}" in workflow
+    assert "name: ${{ env.RELEASE_TAG }}" in workflow
+    assert '--tag "${RELEASE_TAG}"' in workflow
+    assert "tag_name: ${{ github.ref_name }}" not in workflow
 
 
 def test_release_version_validator_requires_exact_canonical_version(tmp_path: Path) -> None:

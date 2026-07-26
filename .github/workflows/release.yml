@@ -295,6 +295,31 @@ jobs:
                   raise SystemExit(f"Checksum mismatch for {asset.name}")
           PY
 
+      - name: Resolve stable release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          import tomllib
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          version = project["version"]
+          if not isinstance(version, str) or not version:
+              raise SystemExit("pyproject.toml [project].version must be a non-empty string")
+
+          release_tag = f"v{version}"
+          trigger_tag = os.environ["GITHUB_REF_NAME"]
+          if trigger_tag != release_tag:
+              raise SystemExit(
+                  f"Release trigger tag {trigger_tag!r} does not match application version tag "
+                  f"{release_tag!r}."
+              )
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"RELEASE_VERSION={version}\n")
+              env_file.write(f"RELEASE_TAG={release_tag}\n")
+
       - name: Move latest-dev tag
         if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
         shell: bash
@@ -315,7 +340,7 @@ jobs:
         run: |
           set -euo pipefail
           python .github/scripts/build_release_notes.py \
-            --tag "${GITHUB_REF_NAME}" \
+            --tag "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --token "${GITHUB_TOKEN}" \
             --target-commitish "${GITHUB_SHA}" \
@@ -331,8 +356,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
           body_path: release-body.md
           files: release-assets/*
           fail_on_unmatched_files: true

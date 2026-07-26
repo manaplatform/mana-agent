@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Updated the stable GitHub Release workflow to derive its tag, title, and
+  release-notes version from `pyproject.toml` instead of the GitHub event tag.
+  A mismatched version-tag trigger now stops publication before any release is
+  created.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/test_publish_pypi_workflow.py` passed (8 passed); release and PyPI
+    workflow YAML parsed with PyYAML; `git diff --check` passed.
+
 - Fixed Windows Python 3.12 CI for macOS LaunchAgent lifecycle tests by making
   the launchd user ID an explicit injectable boundary. Production macOS still
   resolves its real POSIX UID, while cross-platform tests no longer call the
