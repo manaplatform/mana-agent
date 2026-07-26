@@ -12,6 +12,10 @@ from pathlib import Path
 LABEL = "net.manaplatform.mana-agent.worker"
 
 
+class WorkerServiceError(RuntimeError):
+    """Raised when an installed worker service cannot be controlled."""
+
+
 @dataclass(frozen=True)
 class MacOSPaths:
     home: Path
@@ -63,12 +67,42 @@ class MacOSInstaller:
         self._bootout(ignore_errors=True)
         self.paths.plist.unlink(missing_ok=True)
 
+    def start(self) -> None:
+        self._require_installed()
+        if not self.status():
+            self._launch("bootstrap", f"gui/{os.getuid()}", str(self.paths.plist))
+        self._launch("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
+
+    def stop(self) -> None:
+        self._require_installed()
+        self._bootout(ignore_errors=False)
+
+    def restart(self) -> None:
+        self._require_installed()
+        self._bootout(ignore_errors=True)
+        self._launch("bootstrap", f"gui/{os.getuid()}", str(self.paths.plist))
+        self._launch("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
+
     def status(self) -> bool:
         result = self.runner(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, text=True, check=False)
         return result.returncode == 0
+
+    def _require_installed(self) -> None:
+        if not self.paths.plist.is_file():
+            raise WorkerServiceError(
+                "Worker service is not installed. Run `mana-agent worker install` "
+                "with a coordinator URL and enrollment token first."
+            )
 
     def _bootout(self, *, ignore_errors: bool) -> None:
         self._launch("bootout", f"gui/{os.getuid()}", str(self.paths.plist), check=not ignore_errors)
 
     def _launch(self, *args: str, check: bool = True) -> None:
-        self.runner(["launchctl", *args], capture_output=True, text=True, check=check)
+        try:
+            self.runner(["launchctl", *args], capture_output=True, text=True, check=check)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()[-2_000:]
+            suffix = f": {detail}" if detail else ""
+            raise WorkerServiceError(
+                f"Unable to {args[0]} the macOS worker service{suffix}"
+            ) from exc

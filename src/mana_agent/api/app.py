@@ -29,6 +29,9 @@ def create_app(
     worker_gateway = WorkerGateway(WorkerGatewayConfig(
         enabled=os.getenv("MANA_WORKER_GATEWAY_ENABLED", "").lower() in {"1", "true", "yes"},
         public_url=os.getenv("MANA_WORKER_GATEWAY_PUBLIC_URL", ""),
+        allow_insecure_http=os.getenv(
+            "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP", ""
+        ).lower() in {"1", "true", "yes"},
         allow_insecure_local_development=os.getenv("MANA_WORKER_GATEWAY_LOCAL_DEV", "").lower() in {"1", "true", "yes"},
     ), fleet_registry=getattr(chat_gateway, "fleet_registry", None))
     telegram_connector = None

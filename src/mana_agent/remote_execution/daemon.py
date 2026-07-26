@@ -32,6 +32,7 @@ class WorkerRuntimeConfig:
     name: str
     state_dir: Path
     heartbeat_interval_seconds: int = 15
+    allow_insecure_http: bool = False
     allow_insecure_local_development: bool = False
 
     @property
@@ -39,9 +40,17 @@ class WorkerRuntimeConfig:
         parsed = urlparse(self.coordinator_url)
         if parsed.scheme == "https":
             return self.coordinator_url.rstrip("/") + "/api/v1/workers/connect"
-        if self.allow_insecure_local_development and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        explicit_http = self.allow_insecure_http and parsed.scheme == "http"
+        legacy_local_http = (
+            self.allow_insecure_local_development
+            and parsed.scheme == "http"
+            and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        )
+        if explicit_http or legacy_local_http:
             return "ws" + self.coordinator_url[4:].rstrip("/") + "/api/v1/workers/connect"
-        raise ValueError("worker requires an HTTPS coordinator (HTTP is localhost development only)")
+        raise ValueError(
+            "worker requires an HTTPS coordinator; HTTP requires explicit allow_insecure_http configuration"
+        )
 
 
 class ReverseWorkerDaemon:
@@ -185,6 +194,7 @@ def write_worker_config(config: WorkerRuntimeConfig) -> Path:
     config_path = config.state_dir / "worker.json"
     config_path.write_text(json.dumps({"coordinator_url": config.coordinator_url, "worker_id": config.worker_id,
                                        "name": config.name, "heartbeat_interval_seconds": config.heartbeat_interval_seconds,
+                                       "allow_insecure_http": config.allow_insecure_http,
                                        "allow_insecure_local_development": config.allow_insecure_local_development}), encoding="utf-8")
     config_path.chmod(0o600)
     return config_path

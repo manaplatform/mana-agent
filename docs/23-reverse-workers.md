@@ -8,6 +8,11 @@ Enable the worker gateway with a public HTTPS URL. A reverse proxy must forward 
 
 For Nginx, enable HTTP/1.1 upgrades and forward `Upgrade` and `Connection` headers for the connect path. For Caddy, a normal `reverse_proxy` handles WebSocket upgrades automatically.
 
+For an explicitly insecure HTTP development coordinator, set
+`MANA_WORKER_GATEWAY_PUBLIC_URL` to its `http://` URL and set
+`MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP=true`. The worker must independently
+opt in with `--allow-insecure-http`.
+
 ## Installation
 
 Create a short-lived enrollment token on the coordinator, then run on the target Mac:
@@ -15,6 +20,17 @@ Create a short-lived enrollment token on the coordinator, then run on the target
 ```bash
 mana-agent worker install --coordinator https://agent.example.com --token '<short-lived-token>' --name office-mac
 ```
+
+For a trusted development network without TLS, HTTP can be enabled explicitly:
+
+```bash
+mana-agent worker install --coordinator http://192.168.1.10:8000 \
+  --token '<short-lived-token>' --allow-insecure-http
+```
+
+This also enables the worker's unencrypted `ws://` connection. Enrollment
+tokens, worker credentials, job data, and results can be observed or modified
+in transit, so do not use this option across an untrusted network.
 
 The installer enrolls first and stores the identity separately. On macOS it
 writes non-secret configuration under
@@ -30,8 +46,14 @@ Use `mana-agent worker status`, `logs`, `doctor`, `reconnect`, and `uninstall
 platform service repair. Revocation and identity rotation should be initiated
 by the coordinator; a revoked host must enroll again.
 
+On macOS, `worker start` can reload an installed but unloaded LaunchAgent. If
+the LaunchAgent has not been installed, it exits with an instruction to run
+`worker install` instead of attempting enrollment or service creation.
+
 After authentication, workers send a signed, bounded Fleet capability inventory.
 Runtime facts are probed locally; coordinator-assigned trust labels are not
 self-asserted. See [Mana Fleet](24-fleet.md).
 
-HTTP/WS is refused except when explicitly enabling local-development mode for `localhost`. Production deployments require HTTPS/WSS, certificate validation, a reverse proxy that preserves WebSocket upgrades, and short enrollment TTLs.
+HTTP/WS is refused unless `--allow-insecure-http` is explicitly selected.
+Production deployments require HTTPS/WSS, certificate validation, a reverse
+proxy that preserves WebSocket upgrades, and short enrollment TTLs.

@@ -35,15 +35,20 @@ class WorkerGatewayConfig(BaseModel):
     offline_after_seconds: int = Field(default=45, ge=10, le=900)
     bootstrap_token_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     require_manual_approval: bool = False
+    allow_insecure_http: bool = False
     allow_insecure_local_development: bool = False
 
     def validate_public_url(self) -> None:
         parsed = urlparse(self.public_url)
         if parsed.scheme == "https":
             return
+        if self.allow_insecure_http and parsed.scheme == "http":
+            return
         if self.allow_insecure_local_development and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
             return
-        raise ValueError("worker gateway requires HTTPS; HTTP is only allowed for explicit localhost development")
+        raise ValueError(
+            "worker gateway requires HTTPS; HTTP requires explicit allow_insecure_http configuration"
+        )
 
 
 class EnrollmentRequest(BaseModel):

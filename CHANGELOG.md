@@ -4,6 +4,28 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Added explicit `--allow-insecure-http` reverse-worker enrollment for trusted
+  development networks, including persisted `ws://` reconnect behavior and a
+  backward-compatible `--insecure-local-development` CLI alias. HTTPS remains
+  the default and HTTP without explicit opt-in fails safely.
+  - Added matching coordinator opt-in through
+    `MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP`.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/remote_execution
+    tests/gateway/test_chat_gateway.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (58 passed); targeted Ruff,
+    compilation, and `git diff --check` passed.
+
+- Fixed macOS `worker start` to report an actionable install-first error when
+  the LaunchAgent is absent, bootstrap an installed but unloaded LaunchAgent,
+  and present bounded `launchctl` failures without a Python traceback.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_fleet_cli.py tests/remote_execution
+    tests/commands/test_worker_cli.py` passed (23 passed); the real
+    `.venv/bin/mana-agent worker start` missing-install path exited 1 with the
+    expected concise error; targeted Ruff, compilation, and `git diff --check`
+    passed.
+
 - Updated the package and documented release version to `v0.1.0`.
   - Verification: `.venv/bin/python -m pytest -q tests/test_package_version.py` passed.
 

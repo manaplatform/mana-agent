@@ -10,12 +10,14 @@ import urllib.request
 import uuid
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
+import click
 import typer
 
 from mana_agent.remote_execution.credentials import CredentialStore, generate_identity
 from mana_agent.remote_execution.daemon import ReverseWorkerDaemon, WorkerRuntimeConfig, load_worker_config, write_worker_config
-from mana_agent.remote_execution.installer import MacOSInstaller
+from mana_agent.remote_execution.installer import MacOSInstaller, WorkerServiceError
 from mana_agent.remote_execution.installers import LinuxSystemdInstaller, WindowsTaskSchedulerInstaller
 
 worker_app = typer.Typer(help="Install and operate this machine as an outbound reverse worker.", no_args_is_help=True)
@@ -57,14 +59,24 @@ def _coordinator_call(coordinator: str, path: str, *, method: str = "GET", paylo
         return json.loads(response.read())
 
 
-def _enroll(coordinator: str, token: str, name: str, state_dir: Path, *, insecure_local_development: bool = False) -> WorkerRuntimeConfig:
+def _enroll(
+    coordinator: str,
+    token: str,
+    name: str,
+    state_dir: Path,
+    *,
+    allow_insecure_http: bool = False,
+) -> WorkerRuntimeConfig:
     worker_id = f"worker_{uuid.uuid4().hex}"
     identity = generate_identity(worker_id)
     registration = ReverseWorkerDaemon.registration(worker_id, name or socket.gethostname(), identity.public_key_pem)
     payload = json.dumps({"token": token, "registration": registration.model_dump(mode="json")}).encode()
     parsed = coordinator.rstrip("/")
-    if not parsed.startswith("https://") and not (insecure_local_development and parsed.startswith("http://localhost")):
-        raise typer.BadParameter("coordinator must use HTTPS (HTTP is allowed only for explicit localhost development)")
+    scheme = urlparse(parsed).scheme.lower()
+    if scheme != "https" and not (allow_insecure_http and scheme == "http"):
+        raise typer.BadParameter(
+            "coordinator must use HTTPS; pass --allow-insecure-http to explicitly use HTTP"
+        )
     request = urllib.request.Request(parsed + "/api/v1/workers/enroll", data=payload,
                                     headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -74,20 +86,25 @@ def _enroll(coordinator: str, token: str, name: str, state_dir: Path, *, insecur
         raise typer.BadParameter("worker enrollment failed; check the coordinator URL, TLS, and token") from exc
     CredentialStore(state_dir).save(type(identity)(worker_id=str(result["worker_id"]), credential=str(result["credential"]), private_key_pem=identity.private_key_pem))
     return WorkerRuntimeConfig(coordinator_url=coordinator, worker_id=str(result["worker_id"]), name=name or registration.display_name,
-                               state_dir=state_dir, allow_insecure_local_development=insecure_local_development)
+                               state_dir=state_dir, allow_insecure_http=allow_insecure_http)
 
 
 @worker_app.command("install")
 def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: str = typer.Option("", "--token", hide_input=True),
                    name: str = typer.Option("", "--name"), state_dir: str | None = typer.Option(None, "--state-dir"),
-                   insecure_local_development: bool = typer.Option(False, "--insecure-local-development")) -> None:
+                   allow_insecure_http: bool = typer.Option(
+                       False,
+                       "--allow-insecure-http",
+                       "--insecure-local-development",
+                       help="Allow unencrypted HTTP/ws transport; credentials may be exposed in transit.",
+                   )) -> None:
     """Enroll and install an owner-scoped worker service; never stores the bootstrap token."""
     if not coordinator:
-        coordinator = typer.prompt("Coordinator HTTPS URL")
+        coordinator = typer.prompt("Coordinator URL")
     if not token:
         token = typer.prompt("Short-lived enrollment token", hide_input=True)
     root = _state_dir(state_dir)
-    config = _enroll(coordinator, token, name, root, insecure_local_development=insecure_local_development)
+    config = _enroll(coordinator, token, name, root, allow_insecure_http=allow_insecure_http)
     write_worker_config(config)
     _installer().install()
     typer.echo(f"Worker {config.worker_id} enrolled and service installed. Run `mana-agent worker doctor` to verify connectivity.")
@@ -117,13 +134,15 @@ def _mac_control(action: str) -> None:
     if platform.system() != "Darwin":
         raise typer.BadParameter("worker service control is currently implemented for macOS")
     installer = MacOSInstaller(home=Path.home())
-    if action == "start":
-        installer._launch("kickstart", "-k", f"gui/{os.getuid()}/net.manaplatform.mana-agent.worker")
-    elif action == "stop":
-        installer._bootout(ignore_errors=False)
-    elif action == "restart":
-        installer._bootout(ignore_errors=True)
-        installer.install()
+    try:
+        if action == "start":
+            installer.start()
+        elif action == "stop":
+            installer.stop()
+        elif action == "restart":
+            installer.restart()
+    except WorkerServiceError as exc:
+        raise click.ClickException(str(exc)) from exc
     typer.echo(f"Worker {action} requested.")
 
 
