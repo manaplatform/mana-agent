@@ -39,7 +39,7 @@ class WorkerRuntimeConfig:
     def websocket_url(self) -> str:
         parsed = urlparse(self.coordinator_url)
         if parsed.scheme == "https":
-            return self.coordinator_url.rstrip("/") + "/api/v1/workers/connect"
+            return "wss" + self.coordinator_url[5:].rstrip("/") + "/api/v1/workers/connect"
         explicit_http = self.allow_insecure_http and parsed.scheme == "http"
         legacy_local_http = (
             self.allow_insecure_local_development

@@ -4,6 +4,22 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Updated stable release publishing to retain the triggering Git tag (including
+  calendar tags such as `v2026.07.26`) while using the application version for
+  the GitHub Release title and package metadata validation.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/test_publish_pypi_workflow.py` passed (9 passed); the release
+    validator accepted `v2026.07.26` with explicit mismatch opt-in; targeted
+    Ruff and `git diff --check` passed.
+
+- Fixed reverse workers enrolled against HTTPS coordinators to connect through
+  `wss://` rather than passing an invalid `https://` URL to the WebSocket
+  client.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py` passed (23 passed); targeted Ruff and
+    `git diff --check` passed.
+
 - Updated the stable GitHub Release workflow to derive its tag, title, and
   release-notes version from `pyproject.toml` instead of the GitHub event tag.
   A mismatched version-tag trigger now stops publication before any release is

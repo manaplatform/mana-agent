@@ -56,11 +56,19 @@ def read_project_metadata(pyproject_path: Path) -> tuple[str, str]:
     return name.strip(), version_text
 
 
-def validate_tag(tag: str, package_version: str) -> None:
-    """Require the tag, with at most one leading v removed, to match exactly."""
+def validate_tag_name(tag: str) -> None:
+    """Require a non-empty GitHub release tag with the standard v prefix."""
     tag = tag.strip()
     if not tag:
         raise ValueError("Release tag is missing or empty")
+    if not tag.startswith("v"):
+        raise ValueError(f"Release tag {tag!r} must start with 'v'")
+
+
+def validate_tag(tag: str, package_version: str) -> None:
+    """Require the tag, with at most one leading v removed, to match exactly."""
+    validate_tag_name(tag)
+    tag = tag.strip()
     tag_version = tag[1:] if tag.startswith("v") else tag
     if not tag_version:
         raise ValueError(f"Release tag {tag!r} does not contain a version")
@@ -100,6 +108,11 @@ def main() -> int:
     parser.add_argument("--tag", required=True, help="GitHub Release tag to validate")
     parser.add_argument("--pyproject", type=Path, default=Path("pyproject.toml"))
     parser.add_argument(
+        "--allow-tag-version-mismatch",
+        action="store_true",
+        help="allow a GitHub release tag that differs from the package version",
+    )
+    parser.add_argument(
         "--check-pypi",
         action="store_true",
         help="fail if the package version already exists on production PyPI",
@@ -108,7 +121,10 @@ def main() -> int:
 
     try:
         name, version = read_project_metadata(args.pyproject)
-        validate_tag(args.tag, version)
+        if args.allow_tag_version_mismatch:
+            validate_tag_name(args.tag)
+        else:
+            validate_tag(args.tag, version)
         if args.check_pypi:
             ensure_version_is_unpublished(name, version)
     except ValueError as exc:
