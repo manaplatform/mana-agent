@@ -112,6 +112,19 @@ def test_worker_http_coordinator_requires_explicit_opt_in(tmp_path: Path) -> Non
     )
 
 
+def test_worker_https_coordinator_uses_secure_websocket(tmp_path: Path) -> None:
+    config = WorkerRuntimeConfig(
+        coordinator_url="https://coordinator.example.com",
+        worker_id="worker-1",
+        name="worker",
+        state_dir=tmp_path,
+    )
+
+    assert config.websocket_url == (
+        "wss://coordinator.example.com/api/v1/workers/connect"
+    )
+
+
 def test_worker_http_opt_in_persists_in_runtime_config(tmp_path: Path) -> None:
     config = WorkerRuntimeConfig(
         coordinator_url="http://coordinator.internal:8000",

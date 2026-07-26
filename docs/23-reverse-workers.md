@@ -21,7 +21,7 @@ values before starting or restarting it:
 
 ```toml
 MANA_WORKER_GATEWAY_ENABLED = true
-MANA_WORKER_GATEWAY_PUBLIC_URL = "http://151.233.56.46:8000"
+MANA_WORKER_GATEWAY_PUBLIC_URL = "http://xxx.xx.xx.xx:8000"
 MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP = true
 ```
 
