@@ -53,7 +53,8 @@ class WorkerGatewayConfig(BaseModel):
         if self.allow_insecure_local_development and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
             return
         raise ValueError(
-            "worker gateway requires HTTPS; HTTP requires explicit allow_insecure_http configuration"
+            "worker gateway public URL is invalid; set MANA_WORKER_GATEWAY_PUBLIC_URL "
+            "to HTTPS, or also set MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP=true for HTTP"
         )
 
 
@@ -103,7 +104,10 @@ class WorkerGateway:
     def create_enrollment(self, *, worker_id: str, name: str = "", ttl_seconds: int | None = None,
                           labels: list[str] | None = None, capability_restrictions: list[str] | None = None) -> str:
         if not self.config.enabled:
-            raise RuntimeError("worker gateway is disabled")
+            raise RuntimeError(
+                "worker gateway is disabled; set MANA_WORKER_GATEWAY_ENABLED=true "
+                "on the coordinator and restart it"
+            )
         self.config.validate_public_url()
         token = self.registry.issue_enrolment_token(worker_id, ttl_seconds=ttl_seconds or self.config.bootstrap_token_ttl_seconds,
                                                     name=name, labels=labels, capability_restrictions=capability_restrictions)

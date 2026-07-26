@@ -138,6 +138,13 @@ class Settings(BaseSettings):
     mana_workspace_allowed_roots: str = Field(default="", alias="MANA_WORKSPACE_ALLOWED_ROOTS")
     mana_api_token: str = Field(default="", alias="MANA_API_TOKEN")
     mana_mcp_server_token: str = Field(default="", alias="MANA_MCP_SERVER_TOKEN")
+    mana_worker_gateway_enabled: bool = Field(default=False, alias="MANA_WORKER_GATEWAY_ENABLED")
+    mana_worker_gateway_public_url: str = Field(default="", alias="MANA_WORKER_GATEWAY_PUBLIC_URL")
+    mana_worker_gateway_allow_insecure_http: bool = Field(
+        default=False,
+        alias="MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP",
+    )
+    mana_worker_gateway_local_dev: bool = Field(default=False, alias="MANA_WORKER_GATEWAY_LOCAL_DEV")
     mana_acp_enabled: bool = Field(default=True, alias="MANA_ACP_ENABLED")
     mana_acp_allowed_roots: str = Field(default="", alias="MANA_ACP_ALLOWED_ROOTS")
     mana_acp_mcp_forwarding: bool = Field(default=True, alias="MANA_ACP_MCP_FORWARDING")

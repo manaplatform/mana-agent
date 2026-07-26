@@ -4,6 +4,41 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Fixed Windows Python 3.12 CI for macOS LaunchAgent lifecycle tests by making
+  the launchd user ID an explicit injectable boundary. Production macOS still
+  resolves its real POSIX UID, while cross-platform tests no longer call the
+  unavailable Windows `os.getuid`.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py tests/fleet/test_fleet_core.py` passed
+    (34 passed); an explicit `os.getuid`-unavailable simulation produced the
+    expected injected `gui/501` launchd domain; targeted Ruff, compilation, and
+    `git diff --check` passed.
+  - Verification note: Windows is not available locally, so GitHub Actions
+    remains the authoritative native Windows Python 3.12 run.
+
+- Added worker-gateway settings to the typed Mana user configuration and made
+  API startup read `MANA_WORKER_GATEWAY_*` values from `~/.mana/config.toml`,
+  with environment variables filling keys not explicitly configured.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py tests/test_chat_first_configuration.py
+    tests/test_tui_user_config.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (60 passed); targeted Ruff,
+    compilation, and `git diff --check` passed. A live local configuration load
+    resolved the gateway as enabled at the configured HTTP public URL.
+
+- Fixed coordinator enrollment failures to display bounded API error details
+  without urllib tracebacks. Disabled or invalid worker-gateway configuration
+  now identifies the exact environment variables required, and the HTTP setup
+  documentation enables the gateway before enrollment.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/gateway/test_chat_gateway.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (51 passed); targeted Ruff,
+    compilation, and `git diff --check` passed.
+
 - Added Linux `worker start`, `stop`, and `restart` through the installed
   `systemd --user` unit, with install-state validation and concise bounded
   systemctl errors.

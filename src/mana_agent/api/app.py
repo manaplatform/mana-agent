@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import Any
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -16,6 +15,7 @@ from mana_agent.api.routes.events_ws import router as events_ws_router
 from mana_agent.api.routes.fleet import router as fleet_router
 from mana_agent.api.routes.repository_analyze import router as repository_analyze_router
 from mana_agent.api.routes.workspaces import router as workspaces_router
+from mana_agent.config.user_config import load_effective_settings, validate_bool
 
 
 def create_app(
@@ -26,13 +26,16 @@ def create_app(
     github_autopilot: Any | None = None,
 ) -> FastAPI:
     from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
+    gateway_settings = load_effective_settings(include_env=True)
     worker_gateway = WorkerGateway(WorkerGatewayConfig(
-        enabled=os.getenv("MANA_WORKER_GATEWAY_ENABLED", "").lower() in {"1", "true", "yes"},
-        public_url=os.getenv("MANA_WORKER_GATEWAY_PUBLIC_URL", ""),
-        allow_insecure_http=os.getenv(
-            "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP", ""
-        ).lower() in {"1", "true", "yes"},
-        allow_insecure_local_development=os.getenv("MANA_WORKER_GATEWAY_LOCAL_DEV", "").lower() in {"1", "true", "yes"},
+        enabled=validate_bool(gateway_settings["MANA_WORKER_GATEWAY_ENABLED"]),
+        public_url=str(gateway_settings["MANA_WORKER_GATEWAY_PUBLIC_URL"]),
+        allow_insecure_http=validate_bool(
+            gateway_settings["MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP"]
+        ),
+        allow_insecure_local_development=validate_bool(
+            gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
+        ),
     ), fleet_registry=getattr(chat_gateway, "fleet_registry", None))
     telegram_connector = None
     if telegram_config is None:

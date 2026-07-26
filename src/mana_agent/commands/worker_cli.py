@@ -6,6 +6,7 @@ import asyncio
 import json
 import platform
 import socket
+import urllib.error
 import urllib.request
 import os
 from pathlib import Path
@@ -53,8 +54,39 @@ def _coordinator_call(coordinator: str, path: str, *, method: str = "GET", paylo
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
     request = urllib.request.Request(coordinator.rstrip("/") + path, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read(1_048_577)
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read(16_385)
+        detail = _coordinator_error_detail(error_body[:16_384], fallback=exc.reason)
+        typer.echo(f"Coordinator request failed (HTTP {exc.code}): {detail}", err=True)
+        raise typer.Exit(1) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        detail = str(getattr(exc, "reason", exc))[-2_000:]
+        typer.echo(f"Coordinator connection failed: {detail}", err=True)
+        raise typer.Exit(1) from exc
+    if len(response_body) > 1_048_576:
+        typer.echo("Coordinator response exceeded the 1 MiB safety limit.", err=True)
+        raise typer.Exit(1)
+    try:
+        return json.loads(response_body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        typer.echo("Coordinator returned an invalid JSON response.", err=True)
+        raise typer.Exit(1) from exc
+
+
+def _coordinator_error_detail(body: bytes, *, fallback: str) -> str:
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        text = body.decode("utf-8", errors="replace").strip()
+        return text[-2_000:] or str(fallback)
+    if isinstance(payload, dict):
+        detail = payload.get("detail") or payload.get("error")
+        if detail:
+            return str(detail)[-2_000:]
+    return str(fallback)
 
 
 def _enroll(

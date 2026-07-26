@@ -1,4 +1,6 @@
+import io
 import json
+import urllib.error
 
 import pytest
 import typer
@@ -112,3 +114,30 @@ def test_enrollment_create_lets_coordinator_generate_worker_id(monkeypatch) -> N
     assert result.exit_code == 0
     assert '"worker_id": "worker_generated"' in result.output
     assert "worker_id" not in calls[0][2]["payload"]
+
+
+def test_enrollment_create_surfaces_coordinator_error_without_traceback(monkeypatch) -> None:
+    def urlopen(request, timeout):  # noqa: ANN001
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(json.dumps({
+                "detail": (
+                    "worker gateway is disabled; "
+                    "set MANA_WORKER_GATEWAY_ENABLED=true on the coordinator and restart it"
+                )
+            }).encode()),
+        )
+
+    monkeypatch.setattr(worker_cli.urllib.request, "urlopen", urlopen)
+
+    result = CliRunner().invoke(
+        worker_app,
+        ["enrollment", "create", "--coordinator", "http://coordinator.internal:8000"],
+    )
+
+    assert result.exit_code == 1
+    assert "MANA_WORKER_GATEWAY_ENABLED=true" in result.output
+    assert "Traceback" not in result.output

@@ -8,10 +8,27 @@ Enable the worker gateway with a public HTTPS URL. A reverse proxy must forward 
 
 For Nginx, enable HTTP/1.1 upgrades and forward `Upgrade` and `Connection` headers for the connect path. For Caddy, a normal `reverse_proxy` handles WebSocket upgrades automatically.
 
-For an explicitly insecure HTTP development coordinator, set
-`MANA_WORKER_GATEWAY_PUBLIC_URL` to its `http://` URL and set
-`MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP=true`. The worker must independently
-opt in with `--allow-insecure-http`.
+Enable the gateway in `~/.mana/config.toml` before starting the coordinator
+process:
+
+```toml
+MANA_WORKER_GATEWAY_ENABLED = true
+MANA_WORKER_GATEWAY_PUBLIC_URL = "https://agent.example.com"
+```
+
+For an explicitly insecure HTTP development coordinator, configure all three
+values before starting or restarting it:
+
+```toml
+MANA_WORKER_GATEWAY_ENABLED = true
+MANA_WORKER_GATEWAY_PUBLIC_URL = "http://151.233.56.46:8000"
+MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP = true
+```
+
+Environment variables with the same names remain available when those keys are
+not explicitly present in `config.toml`.
+
+The worker must independently opt in with `--allow-insecure-http`.
 
 ## Installation
 
