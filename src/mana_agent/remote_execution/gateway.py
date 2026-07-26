@@ -17,6 +17,11 @@ from mana_agent.remote_execution.models import RemoteExecutionRequest, WorkerReg
 from mana_agent.remote_execution.protocol import MessageType, WorkerMessage
 from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.remote_execution.worker import WorkerRegistry
+from mana_agent.fleet.models import WorkerCapabilities as FleetWorkerCapabilities
+from mana_agent.fleet.models import WorkerIdentity as FleetWorkerIdentity
+from mana_agent.fleet.models import WorkerLabels as FleetWorkerLabels
+from mana_agent.fleet.models import WorkerStatus
+from mana_agent.fleet.registry import FleetRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +76,12 @@ class WorkerGateway:
     """One gateway integrated into the API application, never an inbound worker server."""
 
     def __init__(self, config: WorkerGatewayConfig | None = None, *, registry: WorkerRegistry | None = None,
-                 execution: RemoteExecutionService | None = None) -> None:
+                 execution: RemoteExecutionService | None = None,
+                 fleet_registry: FleetRegistry | None = None) -> None:
         self.config = config or WorkerGatewayConfig()
         self.registry = registry or WorkerRegistry()
         self.execution = execution or RemoteExecutionService(workers=self.registry, event_sink=self._execution_event)
+        self.fleet_registry = fleet_registry
         self.sessions: dict[str, _Session] = {}
         self.audit_events: list[dict[str, Any]] = []
 
@@ -124,6 +131,11 @@ class WorkerGateway:
                 self.registry.disconnect(worker_id)
                 self.sessions.pop(worker_id, None)
                 self.execution.worker_disconnected(worker_id)
+                if self.fleet_registry is not None:
+                    try:
+                        self.fleet_registry.set_status(worker_id, WorkerStatus.OFFLINE)
+                    except Exception:
+                        logger.debug("unable to persist Fleet worker offline status", exc_info=True)
                 self.audit("worker.heartbeat_missed", worker_id=worker_id)
                 offline.append(worker_id)
         return offline
@@ -157,10 +169,42 @@ class WorkerGateway:
                         raise PermissionError("worker ID changed during session")
                     if not self.registry.accept_message(worker_id, message.message_id):
                         continue
-                    if message.signature:
-                        self.registry.verify_signature(worker_id, message.signing_bytes(), base64.b64decode(message.signature))
+                    if not message.signature:
+                        raise PermissionError("authenticated worker messages must be signed")
+                    self.registry.verify_signature(worker_id, message.signing_bytes(), base64.b64decode(message.signature))
                     if message.type is MessageType.HEARTBEAT:
                         self.registry.heartbeat(worker_id)
+                        if self.fleet_registry is not None:
+                            self.fleet_registry.heartbeat(worker_id)
+                    elif message.type is MessageType.CAPABILITIES:
+                        if self.fleet_registry is None:
+                            raise RuntimeError("Fleet capability registry is unavailable")
+                        registration = self.registry.registration(worker_id)
+                        if registration is None:
+                            raise PermissionError("worker registration disappeared during capability update")
+                        inventory = FleetWorkerCapabilities.model_validate(message.payload.get("inventory"))
+                        if inventory.worker_id != worker_id:
+                            raise PermissionError("capability inventory worker identity mismatch")
+                        # Trust labels are coordinator enrollment policy, never
+                        # self-asserted worker capability data.
+                        inventory = inventory.model_copy(update={
+                            "labels": FleetWorkerLabels(values=frozenset(registration.labels))
+                        })
+                        import hashlib
+                        identity_fingerprint = hashlib.sha256(
+                            registration.public_key_pem.encode()
+                        ).hexdigest()
+                        self.fleet_registry.accept_capabilities(
+                            inventory,
+                            FleetWorkerIdentity(
+                                worker_id=worker_id,
+                                identity_fingerprint=identity_fingerprint,
+                                authenticated=True,
+                                credential_status="valid",
+                            ),
+                            display_name=registration.display_name,
+                        )
+                        self.fleet_registry.heartbeat(worker_id)
                     elif message.type in {MessageType.COMPLETED, MessageType.FAILED, MessageType.CANCELLED}:
                         job = self.execution.jobs.get(message.job_id)
                         if job and job.state not in {job.state.SUCCEEDED, job.state.FAILED, job.state.CANCELLED}:
@@ -183,6 +227,11 @@ class WorkerGateway:
                 self.registry.disconnect(worker_id)
                 self.sessions.pop(worker_id, None)
                 self.execution.worker_disconnected(worker_id)
+                if self.fleet_registry is not None:
+                    try:
+                        self.fleet_registry.set_status(worker_id, WorkerStatus.OFFLINE)
+                    except Exception:
+                        logger.debug("unable to persist Fleet disconnect status", exc_info=True)
                 self.audit("worker.disconnected", worker_id=worker_id)
 
 

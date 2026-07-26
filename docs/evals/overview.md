@@ -1,5 +1,11 @@
 # Mana Eval Lab
 
+Eval workspace backend contracts include `local-worktree`, `execution-fabric`,
+and `fleet`. Fleet defaults must explicitly declare platforms and minimum
+coverage. An unavailable Fleet service or invalid selection fails before
+execution; Eval Lab never substitutes a local workspace. See
+[cross-platform verification](../25-cross-platform-verification.md#eval-lab).
+
 Mana Eval Lab runs the existing Mana-Agent gateway in a clean Git worktree and records a portable, versioned execution history. It does not implement a second gateway, router, coding agent, tool runner, reviewer, or verifier.
 
 The execution contract is:

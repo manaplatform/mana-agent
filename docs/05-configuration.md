@@ -1,5 +1,13 @@
 # Configuration
 
+## Mana Fleet
+
+Fleet is disabled by default with `MANA_FLEET_ENABLED=false`. Worker, timeout,
+concurrency, capability TTL, log/artifact limit, retention, repair, and trust
+settings are listed in [the Fleet guide](24-fleet.md#configuration). Enabling
+Fleet does not register or trust a worker; enrollment and a fresh authenticated
+capability inventory are still required.
+
 ## Computer control
 
 Computer control is disabled by default and configured through the Textual

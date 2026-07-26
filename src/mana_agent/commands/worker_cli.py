@@ -16,6 +16,7 @@ import typer
 from mana_agent.remote_execution.credentials import CredentialStore, generate_identity
 from mana_agent.remote_execution.daemon import ReverseWorkerDaemon, WorkerRuntimeConfig, load_worker_config, write_worker_config
 from mana_agent.remote_execution.installer import MacOSInstaller
+from mana_agent.remote_execution.installers import LinuxSystemdInstaller, WindowsTaskSchedulerInstaller
 
 worker_app = typer.Typer(help="Install and operate this machine as an outbound reverse worker.", no_args_is_help=True)
 enrollment_app = typer.Typer(help="Create or use short-lived worker enrollment payloads.", no_args_is_help=True)
@@ -24,7 +25,25 @@ worker_app.add_typer(enrollment_app, name="enrollment")
 
 
 def _state_dir(state_dir: str | None) -> Path:
-    return Path(state_dir).expanduser().resolve() if state_dir else Path.home() / "Library/Application Support/ManaAgent"
+    if state_dir:
+        return Path(state_dir).expanduser().resolve()
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/Application Support/ManaAgent"
+    if system == "Windows":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ManaAgent/state"
+    return Path.home() / ".local/share/mana-agent"
+
+
+def _installer():
+    system = platform.system()
+    if system == "Darwin":
+        return MacOSInstaller(home=Path.home())
+    if system == "Linux":
+        return LinuxSystemdInstaller(home=Path.home())
+    if system == "Windows":
+        return WindowsTaskSchedulerInstaller()
+    raise typer.BadParameter(f"worker service installation is unsupported on {system}")
 
 
 def _coordinator_call(coordinator: str, path: str, *, method: str = "GET", payload: dict | None = None,
@@ -62,7 +81,7 @@ def _enroll(coordinator: str, token: str, name: str, state_dir: Path, *, insecur
 def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: str = typer.Option("", "--token", hide_input=True),
                    name: str = typer.Option("", "--name"), state_dir: str | None = typer.Option(None, "--state-dir"),
                    insecure_local_development: bool = typer.Option(False, "--insecure-local-development")) -> None:
-    """Enroll then install a user LaunchAgent on macOS; never stores the bootstrap token."""
+    """Enroll and install an owner-scoped worker service; never stores the bootstrap token."""
     if not coordinator:
         coordinator = typer.prompt("Coordinator HTTPS URL")
     if not token:
@@ -70,10 +89,8 @@ def install_worker(coordinator: str = typer.Option("", "--coordinator"), token: 
     root = _state_dir(state_dir)
     config = _enroll(coordinator, token, name, root, insecure_local_development=insecure_local_development)
     write_worker_config(config)
-    if platform.system() != "Darwin":
-        raise typer.BadParameter("automatic service installation is currently implemented for macOS")
-    MacOSInstaller(home=Path.home()).install()
-    typer.echo(f"Worker {config.worker_id} enrolled and LaunchAgent installed. Run `mana-agent worker doctor` to verify connectivity.")
+    _installer().install()
+    typer.echo(f"Worker {config.worker_id} enrolled and service installed. Run `mana-agent worker doctor` to verify connectivity.")
 
 
 @worker_app.command("run", hidden=True)
@@ -86,8 +103,7 @@ def run_worker(state_dir: str | None = typer.Option(None, "--state-dir")) -> Non
 def uninstall_worker(yes: bool = typer.Option(False, "--yes"), state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
     if not yes and not typer.confirm("Remove this worker LaunchAgent and its local identity?", default=False):
         raise typer.Abort()
-    if platform.system() == "Darwin":
-        MacOSInstaller(home=Path.home()).uninstall()
+    _installer().uninstall()
     root = _state_dir(state_dir)
     worker_id = ""
     if (root / "worker.json").exists():
@@ -119,17 +135,18 @@ for _name in ("start", "stop", "restart"):
 def worker_status(state_dir: str | None = typer.Option(None, "--state-dir")) -> None:
     root = _state_dir(state_dir)
     config_exists, identity = (root / "worker.json").exists(), CredentialStore(root).load()
-    service = MacOSInstaller(home=Path.home()).status() if platform.system() == "Darwin" else False
+    service = _installer().status()
     typer.echo(json.dumps({"configured": config_exists, "identity_present": bool(identity), "service_running": service}, indent=2))
 
 
 @worker_app.command("logs")
 def worker_logs(lines: int = typer.Option(100, "--lines", min=1, max=10000)) -> None:
-    path = Path.home() / "Library/Logs/ManaAgent/worker.err.log"
-    if not path.exists():
-        typer.echo("No worker log file exists yet.")
+    installer = _installer()
+    if hasattr(installer, "logs"):
+        typer.echo("\n".join(installer.logs().splitlines()[-lines:]))
         return
-    typer.echo("\n".join(path.read_text(errors="replace").splitlines()[-lines:]))
+    path = Path.home() / "Library/Logs/ManaAgent/worker.err.log"
+    typer.echo("\n".join(path.read_text(errors="replace").splitlines()[-lines:]) if path.exists() else "No worker log file exists yet.")
 
 
 @worker_app.command("doctor")
@@ -137,17 +154,22 @@ def worker_doctor(repair: bool = typer.Option(False, "--repair"), state_dir: str
     root = _state_dir(state_dir)
     findings = {"config": (root / "worker.json").exists(), "identity": CredentialStore(root).load() is not None,
                 "state_writable": root.exists() and __import__('os').access(root, __import__('os').W_OK),
-                "launchagent": platform.system() != "Darwin" or MacOSInstaller(home=Path.home()).status()}
+                "service": _installer().status()}
     typer.echo(json.dumps(findings, indent=2))
-    if repair and platform.system() == "Darwin" and findings["config"] and not findings["launchagent"]:
-        MacOSInstaller(home=Path.home()).install()
-        typer.echo("LaunchAgent repaired.")
+    if repair and findings["config"] and not findings["service"]:
+        _installer().install()
+        typer.echo("Worker service repaired.")
     if not all(findings.values()):
         raise typer.Exit(1)
 
 
 @worker_app.command("reconnect")
-def reconnect_worker() -> None: _mac_control("restart")
+def reconnect_worker() -> None:
+    installer = _installer()
+    if hasattr(installer, "reconnect"):
+        installer.reconnect()
+    else:
+        _mac_control("restart")
 
 
 @worker_app.command("rotate-identity")

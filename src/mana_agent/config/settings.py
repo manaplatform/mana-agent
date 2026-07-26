@@ -221,6 +221,20 @@ class Settings(BaseSettings):
     mana_execution_global_concurrency: int = Field(default=16, alias="MANA_EXECUTION_GLOBAL_CONCURRENCY")
     mana_execution_routing: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_EXECUTION_ROUTING")
     mana_execution_providers: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_EXECUTION_PROVIDERS")
+    # Distributed verification is opt-in and fail-closed when no compatible
+    # authenticated worker satisfies the model-produced selection request.
+    mana_fleet_enabled: bool = Field(default=False, alias="MANA_FLEET_ENABLED")
+    mana_fleet_max_workers_per_run: int = Field(default=4, alias="MANA_FLEET_MAX_WORKERS_PER_RUN")
+    mana_fleet_max_concurrent_jobs: int = Field(default=4, alias="MANA_FLEET_MAX_CONCURRENT_JOBS")
+    mana_fleet_capability_ttl_seconds: int = Field(default=300, alias="MANA_FLEET_CAPABILITY_TTL_SECONDS")
+    mana_fleet_heartbeat_timeout_seconds: int = Field(default=90, alias="MANA_FLEET_HEARTBEAT_TIMEOUT_SECONDS")
+    mana_fleet_job_timeout_seconds: int = Field(default=1800, alias="MANA_FLEET_JOB_TIMEOUT_SECONDS")
+    mana_fleet_workspace_max_lifetime_seconds: int = Field(default=3600, alias="MANA_FLEET_WORKSPACE_MAX_LIFETIME_SECONDS")
+    mana_fleet_max_log_bytes: int = Field(default=1_048_576, alias="MANA_FLEET_MAX_LOG_BYTES")
+    mana_fleet_max_artifact_bytes: int = Field(default=104_857_600, alias="MANA_FLEET_MAX_ARTIFACT_BYTES")
+    mana_fleet_retain_days: int = Field(default=30, alias="MANA_FLEET_RETAIN_DAYS")
+    mana_fleet_auto_repair_enabled: bool = Field(default=False, alias="MANA_FLEET_AUTO_REPAIR_ENABLED")
+    mana_fleet_require_trusted_label: bool = Field(default=True, alias="MANA_FLEET_REQUIRE_TRUSTED_LABEL")
     # Remote SSH execution has its own policy and never modifies global OpenSSH
     # configuration. Values are structured JSON in Mana user configuration.
     mana_remote_execution: dict[str, Any] | str = Field(default_factory=dict, alias="MANA_REMOTE_EXECUTION")

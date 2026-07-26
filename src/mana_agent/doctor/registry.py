@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.doctor.checks import codex, configuration, execution, filesystem, protocols, routing, runtime
+from mana_agent.doctor.checks import codex, configuration, execution, filesystem, fleet, protocols, routing, runtime
 from mana_agent.doctor.models import DoctorCheck
 
 
@@ -10,6 +10,7 @@ CHECKS: tuple[DoctorCheck, ...] = (
     DoctorCheck("installation/executable-path", "Installation", "Locate console script.", runtime.installation),
     DoctorCheck("tools/requirements", "Tools", "Locate Git.", runtime.git_available),
     DoctorCheck("execution/providers", "Execution", "Validate sandbox providers.", execution.providers),
+    DoctorCheck("fleet/configuration", "Fleet", "Validate Fleet state, worker health, and execution providers.", fleet.configuration),
     DoctorCheck("routing/models", "Routing", "Validate adaptive model candidates, evidence, budgets, and isolation.", routing.model_routing),
     DoctorCheck("config/parse", "Configuration", "Parse managed configuration.", configuration.parse),
     DoctorCheck("config/schema", "Configuration", "Validate managed configuration.", configuration.schema),

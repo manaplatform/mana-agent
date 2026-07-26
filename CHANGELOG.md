@@ -2,6 +2,56 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-26
+
+- Added the disabled-by-default Mana Fleet distributed verification foundation:
+  strict versioned worker/capability/selection/plan/job/result/run models,
+  authenticated bounded capability updates, deterministic fail-closed worker
+  selection, persistent health and revocation, atomic owner-only run storage,
+  ordered replayable events, cross-process cancellation, restart recovery,
+  immutable completed results, matrix aggregation, and exact-action Fleet
+  permission bindings.
+  - Fleet jobs create an isolated detached Git worktree, verify the exact commit
+    and clean starting state, and delegate provisioning, argv execution,
+    artifacts, timeouts, and cleanup to the existing `ExecutionManager`.
+    Required platform coverage is never weakened and infrastructure failure is
+    not reported as test failure.
+  - Added `mana-agent fleet` worker/job/doctor/verify/compare/log/artifact/
+    cancellation commands, canonical `/fleet` chat registration, shared Fleet
+    API/event replay endpoints, a read-only Fleet dashboard page, and a global
+    doctor check.
+  - Added persistent `fleet-verify` automation schedules with explicit
+    platforms, commands, worker limits, and timeouts; deployed schedules invoke
+    the same Fleet CLI/service instead of a scheduler-specific runner.
+  - Extended authenticated reverse workers with signed runtime capability
+    messages and coordinator-assigned trust labels. Added owner-scoped Linux
+    `systemd --user` and Windows Task Scheduler installers while preserving the
+    macOS LaunchAgent.
+  - Added Fleet Eval configuration validation, cross-platform CI coverage,
+    Fleet architecture/operations documentation, updated repository URLs and
+    project layout, and removed the duplicated saved-workflow documentation.
+  - Verification: `.venv/bin/python -m pytest tests/fleet -q` passed (11
+    passed); `.venv/bin/python -m pytest tests/fleet
+    tests/test_automation_service.py tests/test_doctor.py
+    tests/remote_execution tests/gateway tests/evals
+    tests/commands/test_fleet_cli.py tests/test_api_workspaces.py
+    tests/test_api_conversations.py -q` passed (155 passed);
+    `.venv/bin/python -m ruff check src/mana_agent/fleet
+    src/mana_agent/remote_execution/installers
+    src/mana_agent/remote_execution/daemon.py
+    src/mana_agent/remote_execution/gateway.py
+    src/mana_agent/commands/worker_cli.py
+    src/mana_agent/api/routes/fleet.py
+    src/mana_agent/doctor/checks/fleet.py tests/fleet
+    tests/commands/test_fleet_cli.py tests/evals/test_fleet_eval_config.py`
+    passed; `.venv/bin/python -m compileall -q src` passed; `git diff --check`
+    passed; `.venv/bin/python -m pytest -q` passed (1304 passed, 2 skipped).
+    Workflow YAML parsed with PyYAML, and help smoke checks passed for
+    `mana-agent fleet`, `fleet list`, `fleet verify`, `eval`, and `doctor`.
+  - Verification note: `.venv/bin/python -m ruff check .` remains blocked by
+    792 pre-existing violations in unrelated modules and tests; those files
+    were not modified as part of Fleet.
+
 ## 2026-07-25
 
 - Made public-web search a fully validated entry-routing capability. Search is

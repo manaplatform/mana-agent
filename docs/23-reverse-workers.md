@@ -8,7 +8,7 @@ Enable the worker gateway with a public HTTPS URL. A reverse proxy must forward 
 
 For Nginx, enable HTTP/1.1 upgrades and forward `Upgrade` and `Connection` headers for the connect path. For Caddy, a normal `reverse_proxy` handles WebSocket upgrades automatically.
 
-## macOS installation
+## Installation
 
 Create a short-lived enrollment token on the coordinator, then run on the target Mac:
 
@@ -16,8 +16,22 @@ Create a short-lived enrollment token on the coordinator, then run on the target
 mana-agent worker install --coordinator https://agent.example.com --token '<short-lived-token>' --name office-mac
 ```
 
-The installer enrolls first, writes non-secret configuration under `~/Library/Application Support/ManaAgent/`, stores the identity separately, and installs `net.manaplatform.mana-agent.worker` as a user LaunchAgent. The plist contains neither token nor private credential.
+The installer enrolls first and stores the identity separately. On macOS it
+writes non-secret configuration under
+`~/Library/Application Support/ManaAgent/` and installs
+`net.manaplatform.mana-agent.worker` as a user LaunchAgent. Linux installs
+`mana-agent-worker.service` with `systemd --user`. Windows installs an explicit
+least-privilege Task Scheduler task and owner-restricted state under
+`LOCALAPPDATA`. Service definitions contain neither token nor private
+credential.
 
-Use `mana-agent worker status`, `logs`, `doctor`, `reconnect`, and `uninstall --yes` for lifecycle management. `doctor --repair` only repairs an existing local LaunchAgent. Revocation and identity rotation should be initiated by the coordinator; a revoked host must enroll again.
+Use `mana-agent worker status`, `logs`, `doctor`, `reconnect`, and `uninstall
+--yes` for lifecycle management. `doctor --repair` only applies the registered
+platform service repair. Revocation and identity rotation should be initiated
+by the coordinator; a revoked host must enroll again.
+
+After authentication, workers send a signed, bounded Fleet capability inventory.
+Runtime facts are probed locally; coordinator-assigned trust labels are not
+self-asserted. See [Mana Fleet](24-fleet.md).
 
 HTTP/WS is refused except when explicitly enabling local-development mode for `localhost`. Production deployments require HTTPS/WSS, certificate validation, a reverse proxy that preserves WebSocket upgrades, and short enrollment TTLs.

@@ -74,4 +74,8 @@ class UnsupportedWorkspaceBackend:
 def workspace_backend(name: str, root: str | Path, *, retain: bool = False) -> WorkspaceBackend:
     if name == "local-worktree":
         return LocalWorktreeBackend(root, retain=retain)
+    if name in {"execution-fabric", "fleet"}:
+        return UnsupportedWorkspaceBackend(
+            f"{name} (a validated ExecutionManager/FleetService decision is required)"
+        )
     return UnsupportedWorkspaceBackend(name)

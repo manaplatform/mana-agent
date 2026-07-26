@@ -1,5 +1,10 @@
 # Tool System
 
+Fleet verification is an orchestration service, not a broad remote-command
+tool. CLI and chat inputs compile into typed selection and verification
+contracts. Provider execution, argv validation, artifact confinement, and
+cleanup remain within the existing execution tool boundary.
+
 ## Computer tools
 
 When `[computer_control].enabled` is true, the normal model-selected tool loop

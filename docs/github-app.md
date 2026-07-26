@@ -1,5 +1,11 @@
 # Mana-Agent GitHub App
 
+Fleet verification from GitHub remains subject to the same webhook delivery
+persistence, actor authorization, repository allowlist, and draft-only repair
+policy as other Autopilot actions. Untrusted issue, review, workflow, and log
+text cannot provide raw remote commands or grant Fleet permissions. Fleet is
+disabled by default.
+
 Mana GitHub Autopilot is a webhook-driven GitHub App integration. It accepts supported repository events, persists each delivery before scheduling work, authorizes the relevant installation and actor, and sends validated coding tasks through `CodexCodingAgentShim`. It does not poll, schedule GitHub Actions, merge pull requests, or fall back to the legacy coding agent.
 
 ## GitHub App setup

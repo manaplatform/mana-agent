@@ -20,6 +20,7 @@ from mana_agent.remote_execution.credentials import CredentialStore, WorkerIdent
 from mana_agent.remote_execution.models import RemoteExecutionRequest, WorkerCapabilities, WorkerRegistration
 from mana_agent.remote_execution.protocol import MessageType, WorkerMessage
 from mana_agent.remote_execution.providers.local_ssh import LocalSSHProvider
+from mana_agent.fleet.capabilities import probe_worker_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,22 @@ class ReverseWorkerDaemon:
             authenticated = WorkerMessage.parse_frame(await socket_client.recv())
             if authenticated.type is not MessageType.AUTHENTICATED:
                 raise PermissionError("coordinator did not authenticate worker")
+            capabilities = await probe_worker_capabilities(
+                identity.worker_id,
+                labels=set(),
+                max_concurrency=self.registration(
+                    identity.worker_id, self.config.name, identity.public_key_pem
+                ).max_concurrent_jobs,
+                execution_providers={"reverse-worker"},
+            )
+            await socket_client.send(self._signed(
+                identity,
+                WorkerMessage(
+                    type=MessageType.CAPABILITIES,
+                    worker_id=identity.worker_id,
+                    payload={"inventory": capabilities.model_dump(mode="json")},
+                ),
+            ).model_dump_json())
             heartbeat = asyncio.create_task(self._heartbeats(socket_client, identity))
             try:
                 while not self.stop_event.is_set():

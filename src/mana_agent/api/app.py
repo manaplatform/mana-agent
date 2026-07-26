@@ -13,6 +13,7 @@ from mana_agent.api.routes.analyze import router as analyze_router
 from mana_agent.api.routes.conversations import router as conversations_router
 from mana_agent.api.routes.control import router as control_router
 from mana_agent.api.routes.events_ws import router as events_ws_router
+from mana_agent.api.routes.fleet import router as fleet_router
 from mana_agent.api.routes.repository_analyze import router as repository_analyze_router
 from mana_agent.api.routes.workspaces import router as workspaces_router
 
@@ -29,7 +30,7 @@ def create_app(
         enabled=os.getenv("MANA_WORKER_GATEWAY_ENABLED", "").lower() in {"1", "true", "yes"},
         public_url=os.getenv("MANA_WORKER_GATEWAY_PUBLIC_URL", ""),
         allow_insecure_local_development=os.getenv("MANA_WORKER_GATEWAY_LOCAL_DEV", "").lower() in {"1", "true", "yes"},
-    ))
+    ), fleet_registry=getattr(chat_gateway, "fleet_registry", None))
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
@@ -77,6 +78,7 @@ def create_app(
     app.include_router(conversations_router)
     app.include_router(control_router)
     app.include_router(events_ws_router)
+    app.include_router(fleet_router)
     app.include_router(workspaces_router)
     app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:

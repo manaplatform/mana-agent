@@ -112,7 +112,7 @@ class EvalVariant(StrictModel):
     context_limits: dict[str, int] = Field(default_factory=dict)
     token_budgets: dict[str, int] = Field(default_factory=dict)
     cost_budgets: dict[str, float] = Field(default_factory=dict)
-    workspace_backend: Literal["local-worktree", "docker", "remote"] = "local-worktree"
+    workspace_backend: Literal["local-worktree", "execution-fabric", "fleet"] = "local-worktree"
     environment_specification: str = "local"
     random_seed: int = 0
     trial_number: int = 1

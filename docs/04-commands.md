@@ -1,5 +1,14 @@
 # Commands
 
+## Fleet
+
+`mana-agent fleet` lists and manages trusted workers, inspects jobs/logs/
+artifacts, compares immutable matrices, and starts explicit cross-platform
+verification. Run `mana-agent fleet --help` and
+`mana-agent fleet verify --help` for the complete options. Verification requires
+at least one explicit `--platform` and `--command`; no platform, provider, or
+local fallback is inferred. See [Mana Fleet](24-fleet.md).
+
 ## Computer permission and confirmation
 
 When a computer permission is configured as `ask`, the active Textual chat opens
