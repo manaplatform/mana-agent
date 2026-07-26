@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-26
 
+- Updated the package and documented release version to `v0.1.0`.
+  - Verification: `.venv/bin/python -m pytest -q tests/test_package_version.py` passed.
+
 - Made Fleet capability fingerprints and signed inventory payloads deterministic
   across operating systems and Python hash seeds by recursively sorting all
   unordered capability values before JSON serialization.
