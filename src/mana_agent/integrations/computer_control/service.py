@@ -332,7 +332,7 @@ class ComputerControlService:
             self._execution_sessions[action.execution_id] = session_id
             try:
                 result = await asyncio.wait_for(task, timeout=action.timeout_seconds)
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 await self.provider.cancel(action.execution_id)
                 raise ActionTimedOut(
                     f"Computer action exceeded its {action.timeout_seconds:g}-second timeout."

@@ -7,6 +7,23 @@ All notable repository changes should be recorded here.
 - Updated the package and documented release version to `v0.1.0`.
   - Verification: `.venv/bin/python -m pytest -q tests/test_package_version.py` passed.
 
+- Fixed package installation by replacing nonexistent LangChain `0.3.50`
+  minimum versions with the mutually compatible published `0.3.27` baseline
+  and synchronizing `pyproject.toml` with `requirements.txt`.
+  - Verification: isolated `pip install --dry-run --ignore-installed .`
+    resolved the project and selected `langchain==0.3.30`,
+    `langchain-community==0.3.31`, and `langchain-openai==0.3.35`; the built
+    wheel contains all three corrected dependency declarations; packaging,
+    LangChain compatibility, dependency-service, and CLI smoke tests passed (84
+    passed); targeted Ruff and `git diff --check` passed.
+
+- Fixed the remaining Ubuntu Python 3.10 failures by catching
+  `asyncio.TimeoutError` explicitly, using the conditional `tomli` backport in
+  the standalone release validator, and intercepting `Path.open` writes in the
+  pytest real-home safety guard for Python versions whose pathlib accessor
+  bypasses a patched `io.open`.
+  - Verification: pending.
+
 - Made Fleet capability fingerprints and signed inventory payloads deterministic
   across operating systems and Python hash seeds by recursively sorting all
   unordered capability values before JSON serialization.
