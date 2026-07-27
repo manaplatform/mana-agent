@@ -173,13 +173,19 @@ def test_consecutive_messages_do_not_retain_another_widgets_wrap_width() -> None
 
             await pilot.resize_terminal(70, 24)
             await pilot.pause()
-            history.add(UserMessageEvent(content="x" * 60))
+            # Keep the new line below the narrowest card width. Mounting another
+            # card may make the chat log add a vertical scrollbar, which reduces
+            # the available width independently of the per-widget rewrap behavior
+            # this regression covers.
+            history.add(UserMessageEvent(content="x" * 50))
             await pilot.pause()
             second = _message(app, 1)
 
             assert first.wrap_width == first.scrollable_content_region.width
+            assert first.wrapped_document._width == first.wrap_width
             assert first.wrapped_document.height == 2
             assert second.wrap_width == second.scrollable_content_region.width
+            assert second.wrapped_document._width == second.wrap_width
             assert second.wrapped_document.height == 1
             assert first.wrap_width == second.wrap_width
 
