@@ -1,0 +1,4 @@
+interface:
+  display_name: "PDF Creator"
+  short_description: "Create polished, verified PDF reports"
+  default_prompt: "Use $pdf-create to create a polished PDF in the Mana-Agent launch directory."

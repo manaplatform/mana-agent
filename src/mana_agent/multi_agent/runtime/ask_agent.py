@@ -1055,6 +1055,7 @@ class AskAgent:
         read_telemetry: dict[str, int] | None = None,
         required_mcp_server: str | None = None,
         enable_run_evidence: bool = True,
+        skill_root: str | Path | None = None,
     ) -> tuple[list[BaseTool], list[ToolInvocationTrace], list[SearchHit], list[str]]:
         traces: list[ToolInvocationTrace] = []
         sources: list[SearchHit] = []
@@ -1425,10 +1426,14 @@ class AskAgent:
         def apply_patch_batch(patches: list[dict[str, Any]]) -> str:
             return dumps_tool_result(repo_apply_patch_batch(self.project_root, patches=patches))
 
-        skill_manager = SkillManager(project_root=self.project_root)
+        skill_manager = SkillManager(project_root=skill_root or self.project_root)
+        loaded_skill_names: set[str] = set()
 
         def read_skill(skill_name: str) -> str:
-            return skill_manager.read_skill(skill_name)
+            content = skill_manager.read_skill(skill_name)
+            if not content.startswith("Error:"):
+                loaded_skill_names.add(str(skill_name).strip().lower().replace("_", "-"))
+            return content
 
         def list_files(glob: str = "**/*", limit: int = 200) -> str:
             return dumps_tool_result(repo_list_files(self.project_root, glob=glob, limit=limit))
@@ -1516,6 +1521,17 @@ class AskAgent:
             )
 
         def document_create(path: str, content: dict[str, Any], file_type: str | None = None, overwrite: bool = False) -> str:
+            document_type = str(file_type or Path(path).suffix.lstrip(".")).strip().lower()
+            if document_type == "pdf" and "pdf-create" not in loaded_skill_names:
+                return dumps_tool_result({
+                    "ok": False,
+                    "error": "required_skill_not_loaded",
+                    "required_skill": "pdf-create",
+                    "message": (
+                        "PDF document_create requires read_skill(skill_name='pdf-create') "
+                        "to complete successfully before creation."
+                    ),
+                })
             return dumps_tool_result(document_service.create(path, content=content, file_type=file_type, overwrite=overwrite))
 
         def document_update(path: str, operation: str, payload: dict[str, Any], backup: bool = True) -> str:
@@ -1730,7 +1746,10 @@ class AskAgent:
             StructuredTool.from_function(
                 func=document_create,
                 name="document_create",
-                description="Create DOCX, XLSX/XLSM, CSV, or simple text PDF artifacts without overwriting by default.",
+                description=(
+                    "Create DOCX, XLSX/XLSM, CSV, or styled PDF artifacts without overwriting by default. "
+                    "PDF creation requires a successful read_skill('pdf-create') call first."
+                ),
                 args_schema=_DocumentCreateInput,
             ),
             StructuredTool.from_function(
@@ -1909,6 +1928,7 @@ class AskAgent:
             read_telemetry=read_telemetry,
             required_mcp_server=required_mcp_server,
             enable_run_evidence=use_run_evidence,
+            skill_root=policy.get("skill_root"),
         )
         pending_external_traces = list(getattr(self, "_pending_external_search_traces", []) or [])
         if pending_external_traces:

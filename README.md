@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.1-purple" />
 </p>
 
 `mana-agent` is an installable Python CLI and optional web dashboard for understanding, operating, and safely changing software repositories. It combines repository indexing, static analysis, semantic retrieval, multi-agent orchestration, constrained tool execution, Git operations, document processing, browser automation, external search, and remote connectors in one traceable workflow.
 
-> **Current documented version:** `v0.1.0`
+> **Current documented version:** `v0.1.1`
 
 ## Quick links
 
@@ -138,7 +138,7 @@ flowchart LR
 
 The model chooses capabilities from tool metadata and active policy. Fixed chat keywords should not silently replace model routing for repository, connector, search, or mutation work.
 
-Every chat turn first passes through the gateway's typed entry router. It selects a registered conversation, coding, connector, search, repository, or automation path from live runtime availability before any response is generated. One session is opened per chat, reused for all turns, and explicitly finalized on exit or `/new`; see [entry routing and chat sessions](docs/21-entry-routing-and-chat-sessions.md).
+Every chat turn first passes through the gateway's typed entry router. It selects a registered conversation, coding, connector, search, repository, automation, or `multi_task` orchestration path from live runtime availability before any response is generated. A compound turn creates one root TaskBoard item and independently routed children with explicit dependencies; safe independent work can run concurrently through the existing lanes and locks, while partial failures and child-specific approvals remain visible. One session is opened per chat, reused for all turns, and explicitly finalized on exit or `/new`; see [entry routing and chat sessions](docs/21-entry-routing-and-chat-sessions.md).
 
 Local computer control is an explicit `computer` route and remains disabled
 until configured. It exposes narrow tools rather than raw OS command execution,
@@ -643,6 +643,9 @@ Document safety rules include:
 - formulas are preserved unless replacement is explicitly requested;
 - macro-enabled workbooks are opened with preservation where supported;
 - updates create backups by default and use atomic writes where possible;
+- new PDFs require the `pdf-create` skill to be loaded before
+  `document_create`, use a structured paginated report layout, and are written
+  to the directory where Mana-Agent was launched;
 - deletion requires explicit intent and remains constrained to the project root.
 
 ### Browser automation

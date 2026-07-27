@@ -25,7 +25,12 @@ MainAgent
 TaskBoard state is persisted in `.mana/taskboard/state.json`; append-only events
 are written to `.mana/taskboard/history.jsonl`. Tasks store status, risk,
 assigned agents, required capabilities, files, queue jobs, plan, evidence,
-assumptions, blockers, discussions, decisions, and verification results.
+assumptions, blockers, discussions, decisions, and verification results. Compound
+roots additionally persist child IDs, decomposition ID mappings, and aggregate
+progress; children persist explicit TaskBoard dependencies, entry route, lane,
+acceptance criteria, routing evidence, verification, artifacts, approvals, and
+result summary. Older TaskBoard JSON remains loadable because these fields have
+empty backward-compatible defaults.
 
 ## Communication And Decisions
 
@@ -49,6 +54,24 @@ The production `AgentChatGateway` is the outer resource owner for CLI, TUI, dash
 Lane contracts define ownership, handoffs, tool capabilities, model restrictions, per-lane concurrency, subagent limits, token/cost budgets, priority, repository/write requirements, lock policy, timeout, and retry policy. The coordinator also applies global, provider/model, repository-mutation, and per-session limits. Capacity-constrained work remains queued and interactive priority precedes background priority without changing task identity.
 
 Active-task fingerprints include normalized intent, repository, workspace, session, target files, lane, and parent relationship. Equivalent active work attaches to the existing task. Review and verification remain distinct lane stages in the same lineage and therefore are not collapsed into their coding stage.
+
+## Compound request orchestration
+
+`AgentChatGateway` exposes `multi_task` as a first-class, tool-free entry route.
+Its structured planner decomposes a compound goal, persists one root and its
+children in the existing TaskBoard, and schedules the validated DAG with bounded
+concurrency. Every child returns to the same typed entry-routing authority and
+then enters its selected specialist lane; the parent never claims child tools or
+capabilities. QueueManager, lane capacity, workspace/repository/file locks,
+permission approvals, cancellation, budgets, and verification remain in force.
+
+Independent read-only children may overlap. Dependencies wait for successful
+prerequisites, mutations remain lock-serialized, and capability failures or
+approval waits remain local to the owning child. The root aggregates structured
+child status and never reports full success after partial completion. `/tasks`,
+`/task`, dashboard/TUI events, WebSocket events, and traces use the same persisted
+root/child identities. No second task store, scheduler, frontend path, or public
+orchestration entry point is introduced.
 
 ## Verification
 

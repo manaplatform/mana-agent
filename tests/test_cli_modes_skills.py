@@ -31,6 +31,9 @@ def test_skills_init_list_show_uses_root_directory(tmp_path: Path) -> None:
     result_init = runner.invoke(app, ["skills", "init", "--repo", str(tmp_path)])
     assert result_init.exit_code == 0
     assert (tmp_path / "skills" / "cli" / "SKILL.md").exists()
+    pdf_skill = tmp_path / "skills" / "pdf-create" / "SKILL.md"
+    assert pdf_skill.exists()
+    assert "Mana-Agent launch directory" in pdf_skill.read_text(encoding="utf-8")
 
     custom = "# CLI Skill\n\ncustom root skill\n"
     (tmp_path / "skills" / "cli" / "SKILL.md").write_text(custom, encoding="utf-8")

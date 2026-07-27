@@ -419,6 +419,7 @@ class LaneCoordinator:
         routing_decision_id: str = "",
         provider: str = "",
         task_type: str = "single",
+        taskboard_task_id: str | None = None,
     ) -> LaneReservation:
         contract = self.contracts[lane_id]
         if contract.requires_repository and not repository_id:
@@ -453,7 +454,15 @@ class LaneCoordinator:
                             "target_files": active.target_files, "lane": active.owning_lane.value,
                             "parent_task_id": active.parent_task_id,
                         })
-                        if active.state in ACTIVE_LANE_STATES and active_fingerprint == fingerprint:
+                        explicit_identity_matches = (
+                            not taskboard_task_id
+                            or active.taskboard_task_id == taskboard_task_id
+                        )
+                        if (
+                            active.state in ACTIVE_LANE_STATES
+                            and active_fingerprint == fingerprint
+                            and explicit_identity_matches
+                        ):
                             self.emit("lane.duplicate_detected", task_id=active.task_id, lane_id=lane_id, duplicate_of=active.task_id)
                             return LaneReservation(active, duplicate=True)
                     capacity_available = True
@@ -487,7 +496,13 @@ class LaneCoordinator:
                 remaining = max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens)
                 if budget.reserved_tokens > remaining:
                     raise LaneBudgetError("child reservation exceeds the parent task's remaining budget")
-            if parent_task_id:
+            if taskboard_task_id:
+                task = self.taskboard.get_task(taskboard_task_id)
+                expected_parent = self._executions[parent_task_id].taskboard_task_id if parent_task_id else None
+                if task.parent_task_id != expected_parent:
+                    raise LaneCoordinatorError("existing TaskBoard child does not match the selected lane parent")
+                self.taskboard.add_files_to_inspect(task.task_id, files)
+            elif parent_task_id:
                 parent_execution = self._executions[parent_task_id]
                 task = self.taskboard.create_child_task(
                     parent_execution.taskboard_task_id,
@@ -651,6 +666,20 @@ class LaneCoordinator:
                 "reason": reason,
                 "at": execution.updated_at,
             })
+            task = self.taskboard.get_task(execution.taskboard_task_id)
+            mapped_task_status = {
+                LaneTaskState.QUEUED: TaskStatus.QUEUED,
+                LaneTaskState.RUNNING: TaskStatus.IN_PROGRESS,
+                LaneTaskState.WAITING: TaskStatus.WAITING_FOR_TOOLS,
+                LaneTaskState.BLOCKED: TaskStatus.BLOCKED,
+                LaneTaskState.CANCELLED: TaskStatus.CANCELLED,
+            }.get(state)
+            if mapped_task_status is not None and task.status != mapped_task_status:
+                self.taskboard.update_status(
+                    execution.taskboard_task_id,
+                    mapped_task_status,
+                    reason=reason if mapped_task_status == TaskStatus.BLOCKED else None,
+                )
             self._persist_locked()
         if state in _CONTROL_TERMINAL_STATES or state in {LaneTaskState.PAUSED, LaneTaskState.BLOCKED}:
             self.lock_manager.release_task(task_id)

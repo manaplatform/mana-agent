@@ -390,6 +390,43 @@ def test_ask_agent_registers_call_graph_tool(tmp_path: Path) -> None:
     assert "call_graph" in {item.name for item in tools}
 
 
+def test_pdf_document_create_requires_pdf_skill_read(tmp_path: Path) -> None:
+    launch_root = tmp_path / "launch"
+    artifact_root = tmp_path / "artifact"
+    artifact_root.mkdir()
+    skill_dir = launch_root / "skills" / "pdf-create"
+    skill_dir.mkdir(parents=True)
+    skill_dir.joinpath("SKILL.md").write_text(
+        "---\nname: pdf-create\ndescription: Create verified PDF reports.\n---\n\n"
+        "# PDF Creation\n\nLAUNCH ROOT SKILL\n",
+        encoding="utf-8",
+    )
+    agent = _build_agent(artifact_root)
+    tools, _traces, _, _ = agent._build_tools(
+        k_default=4,
+        timeout_seconds=1,
+        skill_root=launch_root,
+    )
+    tool_map = {tool.name: tool for tool in tools}
+    arguments = {
+        "path": "report.pdf",
+        "file_type": "pdf",
+        "content": {"title": "Report", "paragraphs": ["Verified content."]},
+    }
+
+    blocked = json.loads(tool_map["document_create"].invoke(arguments))
+    assert blocked["error"] == "required_skill_not_loaded"
+    assert not (artifact_root / "report.pdf").exists()
+
+    loaded = tool_map["read_skill"].invoke({"skill_name": "pdf-create"})
+    assert "LAUNCH ROOT SKILL" in loaded
+    created = json.loads(tool_map["document_create"].invoke(arguments))
+
+    assert created["ok"] is True
+    assert created["verification"]["layout"] == "styled_report"
+    assert (artifact_root / "report.pdf").is_file()
+
+
 def test_ask_agent_does_not_discover_mcp_without_explicit_provider(tmp_path: Path, monkeypatch) -> None:
     agent = _build_agent(tmp_path)
 

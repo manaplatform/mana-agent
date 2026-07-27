@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "LLM-powered static analysis and repository understanding tool"
 readme = "README.md"
 requires-python = ">=3.10,<=3.14.6"  # Support up to Python 3.14.6; some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
@@ -44,6 +44,7 @@ dependencies = [
   "python-docx>=1.1,<2.0",
   "openpyxl>=3.1,<4.0",
   "pypdf>=4.0,<7.0",
+  "reportlab>=4.0,<5.0",
 
   # Background jobs / cache
   "redis>=4.5.0,<5.0.0",

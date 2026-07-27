@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import shutil
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -299,6 +300,7 @@ class AgentChatGateway:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._active: set[str] = set()
         self._async_turn_lock = asyncio.Lock()
+        self._multi_task_route_lock = threading.Lock()
         self._chat_session_id: str | None = None
         self._history_store = ChatSessionHistory()
 
@@ -552,6 +554,11 @@ class AgentChatGateway:
         registry = EntryRouteRegistry()
         registrations = (
             RouteRegistration("conversation", "Ordinary tool-free conversation.", lambda: self._available()),
+            RouteRegistration(
+                "multi_task",
+                "Orchestrates two or more separately routed child-task lifecycles.",
+                lambda: self._available(),
+            ),
             RouteRegistration(
                 "coding",
                 "Codex coding workflow for repository file changes.",
@@ -1220,12 +1227,42 @@ class AgentChatGateway:
         return True
 
     def list_tasks(self, *, session_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
-        return [asdict(item) for item in self._lane_coordinator.list_tasks(active_only=active_only, session_id=session_id)]
+        return [
+            self._task_surface(item)
+            for item in self._lane_coordinator.list_tasks(active_only=active_only, session_id=session_id)
+        ]
 
     def inspect_task(self, task_id: str) -> dict[str, Any]:
         task = self._lane_coordinator.inspect_task(task_id)
-        children = [asdict(item) for item in self._lane_coordinator.executions if item.parent_task_id == task_id]
-        return {**asdict(task), "children": children}
+        children = [
+            self._task_surface(item)
+            for item in self._lane_coordinator.executions
+            if item.parent_task_id == task_id
+        ]
+        return {**self._task_surface(task), "children": children}
+
+    def _task_surface(self, execution: Any) -> dict[str, Any]:
+        payload = asdict(execution)
+        try:
+            task = self._lane_coordinator.taskboard.get_task(execution.taskboard_task_id)
+        except KeyError:
+            return payload
+        payload.update({
+            "taskboard_status": task.status.value,
+            "entry_route": task.entry_route,
+            "owning_lane": task.owning_lane or execution.owning_lane.value,
+            "depends_on": list(task.depends_on),
+            "acceptance_criteria": list(task.acceptance_criteria),
+            "decomposition_local_id": task.decomposition_local_id,
+            "preferred_parallelism": task.preferred_parallelism,
+            "result_summary": task.result_summary,
+            "verification_status": task.verification_status,
+            "output_artifacts": list(task.output_artifacts),
+            "approval_request_ids": list(task.approval_request_ids),
+            "aggregate_progress": task.aggregate_progress,
+            "child_task_ids": list(task.child_task_ids),
+        })
+        return payload
 
     def pause_task(self, task_id: str, *, reason: str = "paused by main model") -> dict[str, Any]:
         return asdict(self._lane_coordinator.pause(task_id, reason=reason))
@@ -1377,10 +1414,35 @@ class AgentChatGateway:
                             "command_result": command_result.model_dump(mode="json"),
                         },
                     )
+                if entry_decision.route == "multi_task":
+                    result = self._execute_multi_task_route(
+                        decision=entry_decision,
+                        context=route_context,
+                        text=text,
+                        state=state,
+                        ask_service=ask_service,
+                        sink=sink,
+                        options=dict(options),
+                    )
+                    return self._finalize_turn_result(
+                        result=result,
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        text=text,
+                        state=state,
+                        memory_warning=memory_warning,
+                    )
                 registration = self._entry_route_registry.get(entry_decision.route)
                 availability = registration.availability()
                 if entry_decision.route == "artifact":
-                    available, reason = artifact_handler_availability(route_context.artifact_evidence)
+                    artifact_evidence = dict(route_context.artifact_evidence)
+                    if entry_decision.artifact_family:
+                        artifact_evidence["artifact_families"] = sorted({
+                            *artifact_evidence.get("artifact_families", []),
+                            entry_decision.artifact_family,
+                        })
+                    available, reason = artifact_handler_availability(artifact_evidence)
                     availability = RouteAvailability(available, reason=reason)
                 execution_role = {
                     "coding": "coding",
@@ -1534,82 +1596,15 @@ class AgentChatGateway:
                     )
                 except _RoutePreflightComplete as complete:
                     result = complete.result
-            result.payload.update(
-                {
-                    "session_id": session_id,
-                    "conversation_id": conversation_id,
-                    "turn_id": turn_id,
-                    "entry_route": str((result.payload or {}).get("route") or state.get("active_route") or "unsupported"),
-                }
+            return self._finalize_turn_result(
+                result=result,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                text=text,
+                state=state,
+                memory_warning=memory_warning,
             )
-            if memory_warning:
-                result.warnings.append(memory_warning)
-            # Sync flow id back if coding agent advanced it
-            if result.flow_id:
-                state["active_flow_id"] = result.flow_id
-            for index, trace in enumerate(result.trace or []):
-                if not isinstance(trace, dict):
-                    continue
-                summary = str(
-                    trace.get("result_summary")
-                    or trace.get("output_preview")
-                    or trace.get("status")
-                    or ""
-                ).strip()
-                self._append_session_message(
-                    session_id,
-                    role="tool",
-                    content=summary[:4000],
-                    turn_id=turn_id,
-                    metadata={
-                        "tool_name": str(trace.get("tool_name") or "tool"),
-                        "sequence": index,
-                    },
-                )
-            if result.answer:
-                self._append_session_message(
-                    session_id,
-                    role="assistant",
-                    content=result.answer,
-                    turn_id=turn_id,
-                    metadata={"model": self.config.model, "mode": result.mode},
-                )
-            else:
-                self._append_session_message(
-                    session_id,
-                    role="system",
-                    content=result.error or "Turn interrupted before an assistant response.",
-                    turn_id=turn_id,
-                    metadata={"state": "failed" if result.error else "interrupted"},
-                )
-            write_warning = ""
-            if result.payload.get("entry_route") != "computer":
-                write_warning = self._record_followup_memory(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
-                    user_text=text,
-                    result=result,
-                )
-            if write_warning:
-                result.warnings.append(write_warning)
-            record_current(
-                "gateway.turn.finished",
-                {
-                    "turn_id": turn_id,
-                    "mode": result.mode,
-                    "answer": (
-                        "[computer-control response omitted from observability]"
-                        if result.payload.get("entry_route") == "computer"
-                        else result.answer
-                    ),
-                    "error": result.error,
-                    "warnings": result.warnings,
-                    "changed_files": result.changed_files,
-                    "payload": result.payload,
-                },
-            )
-            return result
         except BaseException as exc:
             record_current("gateway.turn.failed", {"turn_id": turn_id, "error_type": type(exc).__name__, "error": str(exc)})
             self._append_session_message(
@@ -1622,6 +1617,554 @@ class AgentChatGateway:
             raise
         finally:
             self._active.discard(session_id)
+
+    def _finalize_turn_result(
+        self,
+        *,
+        result: ChatTurnResult,
+        session_id: str,
+        conversation_id: str,
+        turn_id: str,
+        text: str,
+        state: dict[str, Any],
+        memory_warning: str = "",
+    ) -> ChatTurnResult:
+        result.payload.update(
+            {
+                "session_id": session_id,
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                "entry_route": str(
+                    (result.payload or {}).get("route")
+                    or state.get("active_route")
+                    or "unsupported"
+                ),
+            }
+        )
+        if memory_warning:
+            result.warnings.append(memory_warning)
+        # Sync flow id back if coding agent advanced it
+        if result.flow_id:
+            state["active_flow_id"] = result.flow_id
+        for index, trace in enumerate(result.trace or []):
+            if not isinstance(trace, dict):
+                continue
+            summary = str(
+                trace.get("result_summary")
+                or trace.get("output_preview")
+                or trace.get("status")
+                or ""
+            ).strip()
+            self._append_session_message(
+                session_id,
+                role="tool",
+                content=summary[:4000],
+                turn_id=turn_id,
+                metadata={
+                    "tool_name": str(trace.get("tool_name") or "tool"),
+                    "sequence": index,
+                },
+            )
+        if result.answer:
+            self._append_session_message(
+                session_id,
+                role="assistant",
+                content=result.answer,
+                turn_id=turn_id,
+                metadata={"model": self.config.model, "mode": result.mode},
+            )
+        else:
+            self._append_session_message(
+                session_id,
+                role="system",
+                content=result.error or "Turn interrupted before an assistant response.",
+                turn_id=turn_id,
+                metadata={"state": "failed" if result.error else "interrupted"},
+            )
+        write_warning = ""
+        if result.payload.get("entry_route") != "computer":
+            write_warning = self._record_followup_memory(
+                session_id=session_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                user_text=text,
+                result=result,
+            )
+        if write_warning:
+            result.warnings.append(write_warning)
+        record_current(
+            "gateway.turn.finished",
+            {
+                "turn_id": turn_id,
+                "mode": result.mode,
+                "answer": (
+                    "[computer-control response omitted from observability]"
+                    if result.payload.get("entry_route") == "computer"
+                    else result.answer
+                ),
+                "error": result.error,
+                "warnings": result.warnings,
+                "changed_files": result.changed_files,
+                "payload": result.payload,
+            },
+        )
+        return result
+
+    def _execute_multi_task_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        state: dict[str, Any],
+        ask_service: Any,
+        sink: Any,
+        options: dict[str, Any],
+    ) -> ChatTurnResult:
+        from mana_agent.multi_agent.core.types import TaskStatus
+        from mana_agent.multi_agent.runtime.multi_task_orchestrator import (
+            MultiTaskChildResult,
+            MultiTaskError,
+            MultiTaskOrchestrator,
+        )
+
+        board = self._lane_coordinator.taskboard
+        normalized_request = " ".join(text.split())
+        for execution in self._lane_coordinator.executions:
+            if execution.parent_task_id or execution.session_id != context.session_id:
+                continue
+            if execution.state not in {
+                LaneTaskState.ROUTING, LaneTaskState.QUEUED, LaneTaskState.RUNNING,
+                LaneTaskState.WAITING, LaneTaskState.BLOCKED, LaneTaskState.PAUSED,
+            }:
+                continue
+            persisted = board.get_task(execution.taskboard_task_id)
+            if persisted.entry_route != "multi_task":
+                continue
+            if " ".join(persisted.normalized_goal.split()) != normalized_request:
+                continue
+            return ChatTurnResult(
+                answer=(
+                    "An equivalent compound request is already persisted in the gateway. "
+                    f"Current progress: {persisted.aggregate_progress or execution.state.value}."
+                ),
+                mode="lane-duplicate",
+                decision=decision,
+                payload={
+                    "route": "multi_task",
+                    "root_task_id": persisted.task_id,
+                    "root_lane_task_id": execution.task_id,
+                    "overall_status": execution.state.value,
+                    "progress": persisted.aggregate_progress,
+                    "duplicate": True,
+                },
+            )
+        root_task = board.create_task(
+            title=f"Compound request: {text[:120]}",
+            user_request=text,
+            normalized_goal=text,
+            owner_agent_id="gateway:multi_task",
+            action_type="gateway:multi_task",
+            workspace_id=board.store.workspace_id,
+            session_id=context.session_id,
+            repository_ids=[board.store.repository_id],
+            primary_repository_id=board.store.repository_id,
+        )
+        board.update_orchestration(
+            root_task.task_id,
+            entry_route="multi_task",
+            owning_lane="research",
+            routing_evidence=decision.to_dict(),
+            aggregate_progress="0/? completed",
+        )
+        board.update_status(root_task.task_id, TaskStatus.PLANNING)
+        orchestrator = MultiTaskOrchestrator(
+            llm=self._entry_router.llm,
+            taskboard=board,
+            maximum_concurrency=int(getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)),
+        )
+        try:
+            plan = orchestrator.decompose(
+                user_prompt=text,
+                context={
+                    "entry_route": decision.to_dict(),
+                    "conversation": context.to_dict(),
+                    "routes": self._entry_route_registry.snapshot(),
+                    "workspace_id": board.store.workspace_id,
+                    "repository_id": board.store.repository_id,
+                },
+            )
+        except MultiTaskError as exc:
+            board.update_status(root_task.task_id, TaskStatus.FAILED, reason=str(exc))
+            return ChatTurnResult(
+                answer=str(exc),
+                error="multi_task_decomposition_invalid",
+                mode="route-multi-task-error",
+                decision=decision,
+                payload={"route": "multi_task", "root_task_id": root_task.task_id},
+            )
+
+        root_model_decision = self.routing_authority.route(RoutingRequest(
+            role="planner",
+            task_description=plan.goal,
+            task_type="orchestration",
+            complexity=Complexity.MEDIUM,
+            risk=RiskLevel.MEDIUM,
+            required_capabilities=frozenset({"structured_output"}),
+            latency_requirement=LatencyClass.STANDARD,
+            budgets=routing_budgets_from_settings(self.settings),
+            task_id=root_task.task_id,
+            parent_task_id=f"{context.turn_id}:entry",
+            session_id=context.session_id,
+            workspace_id=board.store.workspace_id,
+            repository_id=board.store.repository_id,
+            execution_lane="multi_task",
+            expected_output_type="multi_task_result",
+            subagents_allowed=True,
+            parallel_execution_allowed=True,
+            main_model_requested_multi_agent=True,
+            main_model_requested_parallel=True,
+            maximum_concurrency=orchestrator.maximum_concurrency,
+        ))
+        root_reservation = self._lane_coordinator.reserve(
+            normalized_intent=plan.goal,
+            lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
+            session_id=context.session_id,
+            workspace_id=board.store.workspace_id,
+            repository_id=board.store.repository_id,
+            model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
+            requested_input_tokens=max(1, len(text) // 4),
+            requested_output_tokens=min(40_000, max(4096, len(plan.tasks) * 4096)),
+            capabilities=(),
+            routing_decision_id=root_model_decision.decision_id,
+            provider=root_model_decision.provider,
+            task_type="multi_task_root",
+            taskboard_task_id=root_task.task_id,
+        )
+        self._lane_coordinator.start(root_reservation)
+
+        def execute_child(item: Any, child_task_id: str) -> MultiTaskChildResult:
+            child_context = EntryRouteContext(
+                session_id=context.session_id,
+                conversation_id=context.conversation_id,
+                turn_id=f"{context.turn_id}:{item.local_id}",
+                previous_route="",
+                conversation_summary=context.conversation_summary,
+                artifact_evidence=artifact_routing_evidence(
+                    root=self.root,
+                    user_prompt=item.request,
+                    attachments=options.get("attachments", ()),
+                    target_files=options.get("target_files", ()),
+                ),
+                atomic_child=True,
+                orchestration_parent_task_id=root_task.task_id,
+            )
+            with self._multi_task_route_lock:
+                child_decision = self._entry_router.route(
+                    user_prompt=item.request,
+                    context=child_context,
+                )
+            if child_decision.route == "multi_task":
+                raise MultiTaskError(
+                    f"Child {item.local_id!r} was not atomic: recursive multi_task routing is not allowed."
+                )
+            child_task = board.get_task(child_task_id)
+            prerequisite_results: list[str] = []
+            for dependency_id in child_task.depends_on:
+                dependency = board.get_task(dependency_id)
+                if dependency.result_summary:
+                    prerequisite_results.append(
+                        f"{dependency.title}:\n{dependency.result_summary}"
+                    )
+            execution_item = item.model_copy(update={
+                "request": (
+                    item.request
+                    if not prerequisite_results
+                    else item.request
+                    + "\n\nValidated prerequisite results:\n\n"
+                    + "\n\n".join(prerequisite_results)
+                )
+            })
+            return self._execute_validated_child_route(
+                item=execution_item,
+                child_task_id=child_task_id,
+                root_lane_task_id=root_reservation.execution.task_id,
+                decision=child_decision,
+                context=child_context,
+                state=state,
+                ask_service=ask_service,
+                sink=sink,
+                options=dict(options),
+            )
+
+        results = orchestrator.execute(
+            root_task_id=root_task.task_id,
+            plan=plan,
+            execute_child=execute_child,
+            is_cancelled=lambda: root_reservation.execution.state == LaneTaskState.CANCELLED,
+        )
+        child_payloads = [asdict(item) for item in results]
+        statuses = {item.status for item in results}
+        changed_files = [path for item in results for path in item.changed_files]
+        approvals = [request_id for item in results for request_id in item.approval_request_ids]
+        if root_reservation.execution.state == LaneTaskState.CANCELLED:
+            overall = "cancelled"
+        elif statuses <= {"completed", "skipped"}:
+            overall = "done"
+            self._lane_coordinator.finish(
+                root_reservation.execution.task_id,
+                changed_files=changed_files,
+                verification_state={"children": child_payloads, "status": overall},
+            )
+        elif statuses.intersection({"blocked", "awaiting_approval"}):
+            overall = "blocked"
+            self._lane_coordinator.mark_blocked(
+                root_reservation.execution.task_id,
+                reason="one or more child tasks require a capability, prerequisite, or approval",
+            )
+        else:
+            overall = "failed"
+            self._lane_coordinator.finish(
+                root_reservation.execution.task_id,
+                state=LaneTaskState.FAILED,
+                changed_files=changed_files,
+                verification_state={"children": child_payloads, "status": overall},
+                error="one or more child tasks failed and no safe continuation remains",
+            )
+        completed_count = sum(item.status in {"completed", "skipped"} for item in results)
+        board.update_orchestration(
+            root_task.task_id,
+            result_summary=f"{completed_count}/{len(results)} completed; overall status: {overall}",
+            verification_status=overall,
+            output_artifacts=[path for item in results for path in item.artifacts],
+            approval_request_ids=approvals,
+            aggregate_progress=f"{completed_count}/{len(results)} completed",
+        )
+        lines = [f"Compound goal: {plan.goal}", ""]
+        for item in results:
+            detail = item.result or item.blocker or "No result was returned."
+            lines.append(f"- {item.title} [{item.route or 'unrouted'}]: {item.status} — {detail}")
+        lines.extend(["", f"Overall status: {overall.upper()} ({completed_count}/{len(results)} completed)."])
+        if approvals:
+            lines.append("Approvals required: " + ", ".join(approvals))
+        return ChatTurnResult(
+            answer="\n".join(lines),
+            error=None if overall in {"done", "blocked"} else f"multi_task_{overall}",
+            mode="route-multi-task",
+            decision=decision,
+            changed_files=changed_files,
+            warnings=["The compound request completed only partially."] if overall != "done" else [],
+            payload={
+                "route": "multi_task",
+                "root_task_id": root_task.task_id,
+                "root_lane_task_id": root_reservation.execution.task_id,
+                "overall_status": overall,
+                "progress": f"{completed_count}/{len(results)} completed",
+                "decomposition": plan.model_dump(mode="json"),
+                "local_id_map": dict(board.get_task(root_task.task_id).decomposition_id_map),
+                "children": child_payloads,
+                "approvals_required": approvals,
+            },
+        )
+
+    def _execute_validated_child_route(
+        self,
+        *,
+        item: Any,
+        child_task_id: str,
+        root_lane_task_id: str,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        state: dict[str, Any],
+        ask_service: Any,
+        sink: Any,
+        options: dict[str, Any],
+    ) -> Any:
+        from mana_agent.multi_agent.runtime.multi_task_orchestrator import MultiTaskChildResult
+
+        registration = self._entry_route_registry.get(decision.route)
+        availability = registration.availability()
+        if decision.route == "artifact":
+            artifact_evidence = dict(context.artifact_evidence)
+            if decision.artifact_family:
+                artifact_evidence["artifact_families"] = sorted({
+                    *artifact_evidence.get("artifact_families", []),
+                    decision.artifact_family,
+                })
+            available, reason = artifact_handler_availability(artifact_evidence)
+            availability = RouteAvailability(available, reason=reason)
+        execution_role = {
+            "coding": "coding", "search": "research", "github": "research",
+            "browser": "research", "repository": "research", "memory": "research",
+            "gmail": "tool", "calendar": "tool", "computer": "tool",
+            "automation": "tool", "artifact": "tool", "remote_execution": "tool",
+        }.get(decision.route, "main")
+        route_tools = registration.tools
+        execution_decision = self.routing_authority.route(RoutingRequest(
+            role=execution_role,
+            task_description=item.request,
+            task_type="coding" if decision.route == "coding" else "artifact" if decision.route == "artifact" else "routine",
+            complexity=Complexity.MEDIUM if decision.route == "coding" else Complexity.LOW,
+            risk=RiskLevel.MEDIUM if decision.route in {"coding", "automation"} else RiskLevel.LOW,
+            required_tools=frozenset(route_tools),
+            latency_requirement=LatencyClass.STANDARD,
+            budgets=routing_budgets_from_settings(self.settings),
+            task_id=child_task_id,
+            parent_task_id=root_lane_task_id,
+            session_id=context.session_id,
+            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+            repository_id=self._lane_coordinator.taskboard.store.repository_id,
+            execution_lane=decision.route,
+            expected_output_type="repository_patch" if decision.route == "coding" else "artifact" if decision.route == "artifact" else "text",
+            maximum_concurrency=int(getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)),
+        ))
+        self._apply_selected_model(getattr(ask_service, "ask_agent", None), execution_decision.selected_model)
+        lane_id = self._lane_coordinator.select_lane(entry_route=decision.route)
+        capabilities = {
+            "coding": ("repository_read", "repository_write", "shell_read", "shell_write", "git_read", "test_execution"),
+            "repository": ("repository_read",), "browser": ("browser",),
+            "search": ("web_search",), "github": ("web_search",), "memory": ("memory",),
+            "gmail": ("email",), "calendar": ("calendar",), "computer": ("computer",),
+            "automation": ("deployment", "shell_read", "shell_write"),
+            "artifact": ("artifact_read", "artifact_write"), "remote_execution": ("remote_ssh_execute",),
+        }.get(decision.route, ())
+        reservation = self._lane_coordinator.reserve(
+            normalized_intent=item.request,
+            lane_id=lane_id,
+            session_id=context.session_id,
+            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+            repository_id=self._lane_coordinator.taskboard.store.repository_id,
+            target_files=[str(value) for value in options.get("target_files", [])],
+            parent_task_id=root_lane_task_id,
+            root_task_id=self._lane_coordinator.inspect_task(root_lane_task_id).root_task_id,
+            model=f"{execution_decision.provider}/{execution_decision.selected_model}",
+            requested_input_tokens=max(1, len(item.request) // 4),
+            requested_output_tokens=max(256, int(options.get("reserved_output_tokens", 2048))),
+            capabilities=capabilities,
+            routing_decision_id=execution_decision.decision_id,
+            provider=execution_decision.provider,
+            task_type="multi_task_child",
+            taskboard_task_id=child_task_id,
+        )
+        self._lane_coordinator.taskboard.update_orchestration(
+            child_task_id,
+            entry_route=decision.route,
+            owning_lane=lane_id.value,
+            routing_evidence=decision.to_dict(),
+        )
+        self._lane_coordinator.start(reservation)
+        if decision.route not in {"capability_error", "unsupported"} and not availability.available:
+            result = ChatTurnResult(
+                answer=availability.reason,
+                error="route_unavailable",
+                mode=f"route-{decision.route}-unavailable",
+                decision=decision,
+                payload={"route": decision.route, "availability": availability.to_dict()},
+            )
+        elif decision.route == "command":
+            import shlex
+            command = "/" + decision.command_name
+            if decision.command_arguments:
+                command += " " + " ".join(shlex.quote(value) for value in decision.command_arguments)
+            command_result = self.dispatch_command(command, session_id=context.session_id)
+            result = ChatTurnResult(
+                answer=command_result.message if command_result else "Command dispatch failed.",
+                error=None if command_result else "command_dispatch_failed",
+                mode="command",
+                decision=decision,
+                payload={"route": "command"},
+            )
+        else:
+            child_options = dict(options)
+            child_options["_lane_task_id"] = reservation.execution.task_id
+            child_options["_isolated_child_prompt"] = True
+            result = self._execute_entry_route(
+                decision=decision,
+                context=context,
+                text=item.request,
+                state=state,
+                ask_service=ask_service,
+                sink=sink,
+                options=child_options,
+            )
+        approval_ids = self._approval_request_ids(result.payload)
+        awaiting = result.mode in {"remote-awaiting-permission"} or bool(approval_ids)
+        if awaiting:
+            status = "awaiting_approval"
+            job_id = str(result.payload.get("job_id") or "")
+            if result.mode == "remote-awaiting-permission" and job_id:
+                self._remote_job_lanes[job_id] = reservation.execution.task_id
+            self._lane_coordinator.transition(
+                reservation.execution.task_id,
+                LaneTaskState.WAITING,
+                reason="waiting for child-specific approval",
+            )
+        elif result.error == "route_unavailable" or decision.route == "capability_error":
+            status = "blocked"
+            self._lane_coordinator.mark_blocked(
+                reservation.execution.task_id,
+                reason=result.answer or str(result.error),
+            )
+        elif result.error:
+            status = "failed"
+            self._lane_coordinator.finish(
+                reservation.execution.task_id,
+                state=LaneTaskState.FAILED,
+                changed_files=result.changed_files,
+                error=str(result.error),
+            )
+        else:
+            status = "completed"
+            self._lane_coordinator.finish(
+                reservation.execution.task_id,
+                changed_files=result.changed_files,
+                verification_state={"mode": result.mode, "status": "completed"},
+            )
+        artifacts = [str(item.get("path")) for item in result.sources if isinstance(item, dict) and item.get("path")]
+        if result.changed_files:
+            self._lane_coordinator.taskboard.add_files_touched(
+                child_task_id,
+                [str(path) for path in result.changed_files],
+            )
+        self._lane_coordinator.taskboard.update_orchestration(
+            child_task_id,
+            result_summary=result.answer[:4000],
+            verification_status=str(result.payload.get("verification_status") or result.mode),
+            output_artifacts=artifacts,
+            approval_request_ids=approval_ids,
+        )
+        return MultiTaskChildResult(
+            local_id=item.local_id,
+            task_id=child_task_id,
+            title=item.title,
+            route=decision.route,
+            status=status,
+            result=result.answer,
+            blocker=str(result.error or "") if status != "completed" else "",
+            verification_status=str(result.payload.get("verification_status") or result.mode),
+            changed_files=list(result.changed_files),
+            artifacts=artifacts,
+            approval_request_ids=approval_ids,
+            payload=dict(result.payload),
+        )
+
+    @staticmethod
+    def _approval_request_ids(payload: dict[str, Any]) -> list[str]:
+        found: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                request_id = value.get("permission_request_id") or value.get("confirmation_request_id")
+                if request_id and str(request_id) not in found:
+                    found.append(str(request_id))
+                for nested in value.values():
+                    visit(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    visit(nested)
+
+        visit(payload)
+        return found
 
     @staticmethod
     def _apply_selected_model(target: Any, model: str) -> None:
@@ -1650,6 +2193,11 @@ class AgentChatGateway:
         options: dict[str, Any],
     ) -> ChatTurnResult:
         lane_task_id = str(options.get("_lane_task_id") or "")
+        execution_text = (
+            text
+            if bool(options.get("_isolated_child_prompt"))
+            else _conversation_prompt(state, text)
+        )
         if bool(options.get("protocol_read_only")) and decision.route in {
             "coding",
             "automation",
@@ -1703,13 +2251,13 @@ class AgentChatGateway:
         if len(decision.required_sources) > 1 or decision.required_sources[0] in {"browser", "search", "github"}:
             return self._execute_required_sources(
                 decision=decision,
-                text=_conversation_prompt(state, text),
+                text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
             )
         if decision.route == "conversation":
             try:
-                answer = self._chat_service.ask_conversation(_conversation_prompt(state, text))
+                answer = self._chat_service.ask_conversation(execution_text)
             except Exception as exc:
                 return ChatTurnResult(answer="", error=f"Conversation request failed: {exc}", mode="route-error")
             return ChatTurnResult(
@@ -1730,7 +2278,7 @@ class AgentChatGateway:
             return self._execute_gmail_route(
                 decision=decision,
                 context=context,
-                text=_conversation_prompt(state, text),
+                text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
             )
@@ -1742,7 +2290,7 @@ class AgentChatGateway:
             return self._execute_computer_route(
                 decision=decision,
                 context=context,
-                text=_conversation_prompt(state, text),
+                text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
                 event_sink=sink,
@@ -1920,7 +2468,7 @@ class AgentChatGateway:
         ask_service: Any,
         callbacks: Any,
     ) -> ChatTurnResult:
-        """Run model-selected document tools in an isolated artifact workspace."""
+        """Run model-selected document tools with isolated attachment staging."""
         agent = getattr(ask_service, "ask_agent", None)
         if agent is None or not callable(getattr(agent, "run", None)):
             return ChatTurnResult(
@@ -1928,8 +2476,8 @@ class AgentChatGateway:
                 error="artifact_executor_unavailable", mode="route-artifact-error", decision=decision,
                 payload={"route": "artifact", "routing_evidence": context.artifact_evidence},
             )
-        workspace = (mana_home() / "artifacts" / context.session_id / context.turn_id).resolve()
-        workspace.mkdir(parents=True, exist_ok=True)
+        staging_workspace = (mana_home() / "artifacts" / context.session_id / context.turn_id).resolve()
+        staging_workspace.mkdir(parents=True, exist_ok=True)
         staged: list[str] = []
         for reference in context.artifact_evidence.get("references", []):
             if not isinstance(reference, dict) or reference.get("provenance") != "attachment":
@@ -1937,9 +2485,11 @@ class AgentChatGateway:
             source = Path(str(reference.get("path") or "")).expanduser()
             if not source.is_file():
                 continue
-            destination = workspace / Path(str(reference.get("filename") or source.name)).name
+            destination = staging_workspace / Path(str(reference.get("filename") or source.name)).name
             shutil.copy2(source, destination)
             staged.append(destination.name)
+        execution_root = staging_workspace if staged else self.root
+        required_skill = "pdf-create" if decision.artifact_family == "pdf" else ""
         original_root = getattr(agent, "project_root", None)
         if original_root is None:
             return ChatTurnResult(
@@ -1947,30 +2497,56 @@ class AgentChatGateway:
                 error="artifact_executor_incompatible", mode="route-artifact-error", decision=decision,
                 payload={"route": "artifact", "routing_evidence": context.artifact_evidence},
             )
+        location_instruction = (
+            "Create the final artifact directly in the Mana-Agent launch directory using a relative basename. "
+            if not staged
+            else "Inspect the staged artifact first, preserve the original, and write the modified output in this staging workspace. "
+        )
+        skill_instruction = (
+            f"Before document_create, call read_skill(skill_name={required_skill!r}) and follow it exactly. "
+            if required_skill
+            else ""
+        )
         prompt = (
-            "You are the artifact executor. Complete the requested operation using only document tools. "
-            "The working directory is an isolated artifact workspace; do not use repository or shell tools. "
-            "Inspect the staged artifact first, preserve the original, and write any modified output in this workspace. "
+            "You are the artifact executor. Complete the requested operation using only the permitted document tools. "
+            "Do not use repository mutation or shell tools. "
+            f"{location_instruction}{skill_instruction}"
             f"Staged inputs: {', '.join(staged) or 'none'}.\n\nUser request:\n{text}"
         )
         before = {
             path.name: (path.stat().st_mtime_ns, path.stat().st_size)
-            for path in workspace.iterdir() if path.is_file()
+            for path in execution_root.iterdir() if path.is_file()
         }
         try:
-            agent.project_root = workspace
+            agent.project_root = execution_root
+            allowed_tools = [
+                "document_detect",
+                "document_read",
+                "document_analyze",
+                "document_create",
+                "document_update",
+            ]
+            if required_skill:
+                allowed_tools.insert(0, "read_skill")
             response = agent.run(
                 question=prompt,
-                index_dir=None,
+                # AskAgent requires a concrete index path even when its policy
+                # exposes document tools only. Keep that inert path inside the
+                # isolated artifact workspace rather than passing None.
+                index_dir=staging_workspace / ".artifact-index",
                 k=self._resolved_k,
                 max_steps=max(6, int(self.config.agent_max_steps or 6)),
                 timeout_seconds=max(30, self._agent_timeout_seconds),
                 callbacks=callbacks,
-                system_prompt="Use document tools only; report unsupported formats precisely.",
+                system_prompt=(
+                    "Use only the permitted skill/document tools; report unsupported formats precisely. "
+                    "A PDF must not be created until the model-selected pdf-create skill has been read."
+                ),
                 tool_policy={
-                    "allowed_tools": ["document_detect", "document_read", "document_analyze", "document_create", "document_update"],
+                    "allowed_tools": allowed_tools,
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
+                    "skill_root": str(self.root),
                 },
                 flow_id=context.session_id,
                 run_id=context.turn_id,
@@ -1980,7 +2556,7 @@ class AgentChatGateway:
         finally:
             agent.project_root = original_root
         outputs = [
-            str(path) for path in workspace.iterdir() if path.is_file()
+            str(path) for path in execution_root.iterdir() if path.is_file()
             and before.get(path.name) != (path.stat().st_mtime_ns, path.stat().st_size)
         ]
         answer = str(getattr(response, "answer", response) or "").strip()
@@ -1993,7 +2569,15 @@ class AgentChatGateway:
             decision=decision,
             trace=trace,
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={"route": "artifact", "routing_evidence": context.artifact_evidence, "output_artifacts": outputs, "selected_handler": sorted(context.artifact_evidence.get("artifact_families") or [])},
+            payload={
+                "route": "artifact",
+                "routing_evidence": context.artifact_evidence,
+                "output_artifacts": outputs,
+                "selected_handler": sorted({
+                    *context.artifact_evidence.get("artifact_families", []),
+                    *([decision.artifact_family] if decision.artifact_family else []),
+                }),
+            },
         )
 
     def _execute_required_sources(

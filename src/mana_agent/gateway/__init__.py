@@ -28,6 +28,12 @@ from .turn_engine import (
     process_chat_turn,
     should_use_coding_agent_turn,
 )
+from mana_agent.multi_agent.runtime.multi_task_orchestrator import (
+    MultiTaskError,
+    MultiTaskItem,
+    MultiTaskOrchestrator,
+    MultiTaskPlan,
+)
 
 __all__ = [
     "AgentChatGateway",
@@ -50,6 +56,10 @@ __all__ = [
     "LanePriority",
     "LaneTaskState",
     "LockMode",
+    "MultiTaskError",
+    "MultiTaskItem",
+    "MultiTaskOrchestrator",
+    "MultiTaskPlan",
     "ChatTurnResult",
     "process_chat_turn",
     "should_use_coding_agent_turn",
