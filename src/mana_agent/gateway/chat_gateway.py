@@ -1520,7 +1520,7 @@ class AgentChatGateway:
                         "gmail": ("email",),
                         "calendar": ("calendar",),
                         "computer": ("computer",),
-                        "automation": ("deployment", "shell_read", "shell_write"),
+                        "automation": ("automation", "deployment", "shell_read", "shell_write"),
                         "artifact": ("artifact_read", "artifact_write"),
                         "remote_execution": ("remote_ssh_execute",),
                     }.get(entry_decision.route, ())
@@ -2034,7 +2034,7 @@ class AgentChatGateway:
             "repository": ("repository_read",), "browser": ("browser",),
             "search": ("web_search",), "github": ("web_search",), "memory": ("memory",),
             "gmail": ("email",), "calendar": ("calendar",), "computer": ("computer",),
-            "automation": ("deployment", "shell_read", "shell_write"),
+            "automation": ("automation", "deployment", "shell_read", "shell_write"),
             "artifact": ("artifact_read", "artifact_write"), "remote_execution": ("remote_ssh_execute",),
         }.get(decision.route, ())
         reservation = self._lane_coordinator.reserve(

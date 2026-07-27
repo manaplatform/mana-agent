@@ -59,6 +59,12 @@ def test_message_widgets_support_textual_mouse_selection_and_copy() -> None:
     _run(run())
 
 
+def test_read_only_message_cards_do_not_paint_an_inner_cursor_line() -> None:
+    """Chat cards own the border; selectable text must not add a second box."""
+    assert ".text-area--cursor-line" in SelectableText.DEFAULT_CSS
+    assert "background: transparent" in SelectableText.DEFAULT_CSS
+
+
 def test_coding_activity_updates_one_turn_scoped_panel_live() -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)

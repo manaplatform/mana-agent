@@ -2,6 +2,15 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-28
+
+- Registered the typed automation chat tools with the Operations lane's explicit
+  `automation` capability, so a validated automation route can reach
+  `automation_create` without bypassing lane permission checks. Simplified
+  read-only TUI message cards by suppressing TextArea's inner cursor-line fill.
+  - Verification: focused lane, automation-route, gateway, and TUI tests passed;
+    changed-file Ruff passed.
+
 ## 2026-07-27
 
 - Unified schedules and dashboard automation records behind the versioned
