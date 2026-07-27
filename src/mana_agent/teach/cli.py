@@ -244,39 +244,6 @@ def grant_command(
     )
 
 
-@teach_app.command("schedule")
-def schedule_command(
-    flow_id: str = typer.Argument(...),
-    cron: str = typer.Option(..., "--cron", help="Five-field POSIX cron expression (UTC)."),
-    target: list[str] = typer.Option(["local"], "--target"),
-    version_policy: str = typer.Option("pinned", "--version-policy", help="pinned or latest."),
-) -> None:
-    from mana_agent.automations.service import ScheduleDefinition, deploy_schedule
-
-    service = _service()
-    flow = _run(lambda: service.storage.load_flow(flow_id))
-    if flow.status not in {"verified", "active"}:
-        raise typer.BadParameter("Only a verified or explicitly active flow can be scheduled.")
-    missing_defaults = [name for name, item in flow.inputs.items() if item.required and item.default is None]
-    if missing_defaults:
-        raise typer.BadParameter("Mandatory scheduled inputs have no defaults: " + ", ".join(missing_defaults))
-    if version_policy not in {"pinned", "latest"}:
-        raise typer.BadParameter("--version-policy must be pinned or latest.")
-    schedule = ScheduleDefinition.create(
-        name=f"Teach flow: {flow.name}",
-        action="teach-flow",
-        cron=cron,
-        targets=target,
-        action_config={
-            "flow_id": flow.id,
-            "flow_version": flow.version if version_policy == "pinned" else None,
-            "version_policy": version_policy,
-            "inputs": {name: item.default for name, item in flow.inputs.items()},
-        },
-    )
-    _json(_run(lambda: deploy_schedule(schedule, Path.cwd())))
-
-
 @teach_app.command("record-event", hidden=True)
 def record_event_command(
     event_json: str = typer.Argument(..., help="Versioned RecordedEvent JSON from an integrated adapter."),

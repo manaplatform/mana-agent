@@ -39,6 +39,10 @@ class _Replay(_Flow):
     inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class _Handoff(_Flow):
+    version: int | None = Field(default=None, ge=1)
+
+
 def _response(operation) -> str:
     try:
         value = operation()
@@ -98,6 +102,17 @@ def build_teach_langchain_tools() -> list[Any]:
             args_schema=_Replay,
             func=lambda flow_id, mode, inputs, source_decision_id: _response(
                 lambda: TeachService().replay(flow_id, mode=mode, inputs=inputs)
+            ),
+        ),
+        StructuredTool.from_function(
+            name="teach_automation_handoff",
+            description=(
+                "Return secret-free structured metadata for an exact reviewed and verified "
+                "Teach flow version before creating an automation."
+            ),
+            args_schema=_Handoff,
+            func=lambda flow_id, source_decision_id, version=None: _response(
+                lambda: TeachService().automation_handoff(flow_id, version=version)
             ),
         ),
     ]

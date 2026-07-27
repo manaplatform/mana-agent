@@ -129,6 +129,45 @@ def _status(context: CommandContext, _args: list[str]) -> CommandResult:
     return CommandResult(status="success", message=f"Mana-Agent session status: {context.gateway.status(context.session_id)}.")
 
 
+def _automations(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None or not hasattr(context.gateway, "root"):
+        raise RuntimeError("Automation store is unavailable. No fallback action was executed.")
+    from mana_agent.automations.service import AutomationService, human_trigger
+
+    service = AutomationService(context.gateway.root)
+    action = args[0].lower() if args else "list"
+    if action == "list":
+        rows = [item.to_dict() for item in service.list()]
+        lines = [
+            f"{item['id']}  {item['name']}  {human_trigger(service.get(item['id']).trigger)}  "
+            f"{item['deployment']['status']}"
+            for item in rows
+        ]
+        return CommandResult(
+            status="success",
+            message="\n".join(lines) or "No automations found.",
+            data={"automations": rows},
+            events=[{"type": "automation.list", "automations": rows}],
+        )
+    if action == "status" and len(args) == 2:
+        status = service.status(args[1])
+        return CommandResult(
+            status="success",
+            message=json.dumps(status, indent=2, default=str),
+            data=status,
+            events=[{"type": "automation.status", **status}],
+        )
+    if action == "delete" and len(args) == 2:
+        deleted = service.delete(args[1])
+        return CommandResult(
+            status="success",
+            message=f"Deleted automation {deleted.id}.",
+            data={"automation_id": deleted.id},
+            events=[{"type": "automation.deleted", "automation_id": deleted.id}],
+        )
+    raise ValueError("Usage: /automations [list|status <id>|delete <id>]")
+
+
 def _cancel(context: CommandContext, _args: list[str]) -> CommandResult:
     if context.gateway is None:
         raise RuntimeError("Gateway is unavailable. No fallback action was executed.")
@@ -270,6 +309,15 @@ def definitions() -> list[CommandDefinition]:
         CommandDefinition(canonical_name="disconnect", description="Remove connector configuration.", argument_schema="<name>", required_capability="connectors", confirmation_required=True, handler=lambda context, args: _connect(context, ["disconnect", *args])),
         CommandDefinition(canonical_name="status", description="Show the active chat status.", required_capability="gateway", handler=_status),
         CommandDefinition(canonical_name="cancel", description="Cancel the active agent turn.", required_capability="gateway", handler=_cancel),
+        CommandDefinition(
+            canonical_name="automations",
+            aliases=("automation",),
+            description="List, inspect, or delete chat-authored automations.",
+            argument_schema="[list|status <id>|delete <id>]",
+            required_capability="gateway",
+            confirmation_actions=frozenset({"delete"}),
+            handler=_automations,
+        ),
         CommandDefinition(canonical_name="remote-worker", description="Model-selected remote worker lifecycle: register, start, or stop an external SSH worker.", argument_schema="<register|start|stop> <worker-id>", argument_model=RemoteWorkerArguments, required_capability="gateway", confirmation_actions=frozenset({"stop"}), handler=_remote_worker),
         CommandDefinition(
             canonical_name="fleet",

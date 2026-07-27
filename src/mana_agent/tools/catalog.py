@@ -27,6 +27,18 @@ class ToolCatalogEntry:
 # those tools are registered on AskAgent / ChatService (not every contract-only
 # name). Grouped by category for readable TUI output.
 _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
+    (
+        "automation_create",
+        "Create and deploy a typed durable automation from a model decision.",
+        "automation",
+    ),
+    ("automation_list", "List durable automations.", "automation"),
+    ("automation_status", "Inspect automation deployment and run status.", "automation"),
+    ("automation_update", "Update a durable automation.", "automation"),
+    ("automation_delete", "Delete an automation and deployment artifacts.", "automation"),
+    ("automation_enable", "Enable a durable automation.", "automation"),
+    ("automation_disable", "Disable a durable automation.", "automation"),
+    ("automation_run_now", "Run a persisted automation immediately.", "automation"),
     # Search / research
     (
         "web_search",

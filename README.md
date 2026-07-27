@@ -57,7 +57,7 @@ Use Mana-Agent to:
 - inspect and operate Git without unsafe shell interpolation;
 - work with Word, PDF, Excel, CSV, and project-library files;
 - automate browser tasks in an isolated Playwright session;
-- run persistent schedules through local cron or GitHub Actions;
+- create persistent automations through model-driven chat;
 - connect Gmail and Telegram to the same model-driven runtime;
 - continue multi-turn coding work with repository-scoped memory.
 
@@ -82,8 +82,8 @@ Use Mana-Agent to:
 | External search | Optional model-selected web and GitHub search with repository-local result caching. |
 | Remote connectors | Gmail access and Telegram bot interaction through the same tool-aware chat runtime. |
 | Protocol gateway | ACP v1 editor access and A2A 1.0 server/client delegation through the shared gateway, sessions, task board, memory, lanes, and tool policy. |
-| Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automations, cron jobs, and settings. |
-| Automations | Persistent scheduled actions deployed to local cron, GitHub Actions, or both. |
+| Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automation inspection, and settings. |
+| Automations | Typed persistent jobs authored in chat and deployed through hidden platform schedulers. |
 | Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and repository-local runtime data. |
 | Mana Eval Lab | Reproducible multi-variant runs, immutable trajectories, replay, leaderboards, paired regression reports, and fail-closed CI gates. |
 
@@ -865,8 +865,7 @@ Dashboard pages include:
 | Connectors | Secret-safe Telegram setup and shared connector state. |
 | Traces | Decisions, tool calls, verification results, and runtime events. |
 | Observability | Trace trees, timings, token usage, latency, errors, queue waits, and bottleneck findings. |
-| Automations | Create and manage persistent scheduled actions. |
-| Cron Jobs | Inspect deployment state and enable, disable, or remove schedules. |
+| Automations | Inspect chat-authored jobs, deployment health, recent runs, and delete definitions. |
 | Settings | Provider, model-role, search, connector, and runtime settings. |
 
 For dashboard development, prefer the command above so the live-chat API and
@@ -915,19 +914,17 @@ Local telemetry remains authoritative when an export fails.
 
 ---
 
-## Automations and cron jobs
+## Automations
 
-Schedules are stored in:
+Canonical definitions and run records are stored per repository under:
 
 ```text
-.mana/automations/config.json
+~/.mana/repositories/<repository-id>/automations/config.json
 ```
 
-A schedule can target:
-
-- local cron;
-- GitHub Actions;
-- both targets from one Mana-Agent schedule.
+Cron, launchd, systemd, Windows Task Scheduler, interval wakeups, and GitHub
+workflow schedules are hidden deployment details. The user-facing concept is
+always an Automation.
 
 Install dependencies:
 
@@ -935,36 +932,29 @@ Install dependencies:
 pip install "mana-agent[automations]"
 ```
 
-Create and deploy a schedule:
+Create and update automations in chat:
 
 ```bash
-mana-agent automation create \
-  --name "Nightly analysis" \
-  --action analyze \
-  --cron "0 2 * * *" \
-  --target local \
-  --target github \
-  --deploy
+mana-agent chat
+# You: Analyse this repository every night.
+# You: Check my email every 5 hours.
+# You: Run the reviewed invoice Teach flow every weekday at 9 AM.
 ```
 
-Lifecycle commands:
+The public CLI is management-only:
 
 ```bash
 mana-agent automation list
-mana-agent automation show sch_<id>
-mana-agent automation status sch_<id>
-mana-agent automation deploy sch_<id>
-mana-agent automation run sch_<id>
-mana-agent automation enable sch_<id>
-mana-agent automation disable sch_<id>
-mana-agent automation remove sch_<id>
+mana-agent automation status aut_<id>
+mana-agent automation delete aut_<id>
 ```
 
-Local cron uses the host timezone. GitHub Actions schedules use UTC.
-
-For GitHub targets, Mana-Agent generates one managed workflow per schedule. The workflow installs the required package extras, executes the action, uploads `.mana/` as workflow artifacts, and exposes manual dispatch.
-
-When deployment requires repository changes, Mana-Agent must show planned file and Git operations before commit or push and must not silently modify the default branch.
+Definitions store an explicit IANA timezone. Exact intervals retain an anchor
+and elapsed seconds; they are never approximated as a cron expression. The
+hidden executor reloads the record by ID, acquires a lease, records bounded
+redacted output, and advances the next run. If no durable backend or required
+permission is available, the persisted deployment/run state is truthfully
+blocked.
 
 ---
 
@@ -1150,6 +1140,7 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/16-email-connectors.md`](docs/16-email-connectors.md) | Gmail connector setup and security. |
 | [`docs/17-browser-automation.md`](docs/17-browser-automation.md) | Browser automation setup and safety. |
 | [`docs/18-telegram-connector.md`](docs/18-telegram-connector.md) | Telegram bot setup, polling/webhook deployment, security, and troubleshooting. |
+| [`docs/27-automations.md`](docs/27-automations.md) | Unified automation schema, migration, deployment, execution, and Teach handoff. |
 | [`docs/adaptive-coding-runtime.md`](docs/adaptive-coding-runtime.md) | Adaptive coding runtime overview and behavior. |
 | [`docs/multi-agent-routing.md`](docs/multi-agent-routing.md) | Multi-agent routing architecture and decision flow. |
 

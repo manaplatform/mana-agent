@@ -234,6 +234,47 @@ class TeachService:
         publish_teach_event("flow_saved", flow_id=flow.id, title="Teach workflow saved", status="completed")
         return flow
 
+    def automation_handoff(self, flow_id: str, *, version: int | None = None) -> dict[str, Any]:
+        """Return safe structured metadata for automation authoring.
+
+        Raw recordings, selectors, captured input values, and grant secrets are
+        intentionally excluded. Eligibility requires both review activation and
+        observable successful verification.
+        """
+        flow = self.storage.load_flow(flow_id, version)
+        if not flow.steps:
+            raise TeachError("Teach flows with no steps cannot be automated.")
+        if flow.status not in {"verified", "active"} or flow.statistics.verified_replays < 1:
+            raise TeachError(
+                "Teach flow must be reviewed and have a successful verified replay before automation."
+            )
+        return {
+            "flow_id": flow.id,
+            "flow_version": flow.version,
+            "name": flow.name,
+            "description": flow.description,
+            "inputs": {
+                name: {
+                    "type": item.type,
+                    "required": item.required,
+                    "has_default": item.default is not None,
+                    "secret": item.secret,
+                    "description": item.description,
+                }
+                for name, item in flow.inputs.items()
+            },
+            "required_permission_scopes": sorted(set(flow.permissions)),
+            "required_capabilities": list(flow.required_capabilities),
+            "supported_platforms": list(flow.supported_platforms),
+            "verification": {
+                "rule_ids": [rule.id for rule in flow.verify],
+                "rule_types": [rule.type for rule in flow.verify],
+                "verified_replays": flow.statistics.verified_replays,
+                "last_verified_at": flow.statistics.last_verified_at,
+            },
+            "eligible_for_automation": True,
+        }
+
     def replay(
         self,
         flow_id: str,

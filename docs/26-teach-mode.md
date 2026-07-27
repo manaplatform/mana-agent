@@ -121,20 +121,23 @@ fallback candidates with failure history; unaffected steps are preserved.
 Replay should continue from a safe application checkpoint once the selected
 execution adapter supports checkpoint continuation.
 
-## Scheduling
+## Automation handoff
 
-Only verified or explicitly accepted flows can be scheduled. Every mandatory
-input needs a default or explicit source:
+Only reviewed flows with a successful verified replay can become automations.
+Ask through chat; the handoff exposes safe flow metadata and pins the exact
+version:
 
 ```bash
-mana-agent teach schedule export-my-weekly-report \
-  --cron "0 16 * * 5" --target local --version-policy pinned
+mana-agent chat
+# You: Run the reviewed export-my-weekly-report flow every Friday at 4 PM.
 ```
 
-Pinned jobs retain the selected flow version. `latest` is an explicit opt-in to
-adopt future revisions. Scheduled execution still enforces permissions,
-confirmation, and final verification; a headless schedule cannot confirm a
-sensitive action.
+The automation stores `flow_id`, `flow_version`, validated inputs, permission
+scope references, and verification metadata. It never copies raw recording
+events, selectors, desktop grants, or captured keyboard/mouse data. Updating
+the pinned version is an explicit automation update. Background execution still
+enforces permissions, confirmation, and final verification; a headless run
+cannot confirm a sensitive action.
 
 ## Export and import
 

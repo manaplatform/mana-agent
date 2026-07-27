@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mana_agent.automations.service import AutomationValidationError, ScheduleDefinition, schedule_command
+from mana_agent.automations.service import (
+    AutomationService,
+    AutomationValidationError,
+    CronTrigger,
+    TeachFlowJob,
+)
 from mana_agent.commands.cli import app
 from mana_agent.teach.config import TeachSettings
 from mana_agent.teach.correction import TargetedSelectorRepair
@@ -217,28 +222,63 @@ def test_package_rejects_path_traversal(tmp_path: Path) -> None:
         ManaFlowPackager().import_package(package)
 
 
-def test_scheduler_accepts_versioned_verified_flow_contract() -> None:
-    schedule = ScheduleDefinition.create(
-        name="Weekly flow",
-        action="teach-flow",
-        cron="0 16 * * 5",
-        targets=["local"],
-        action_config={
-            "flow_id": "weekly-report",
-            "flow_version": 2,
-            "version_policy": "pinned",
-            "inputs": {},
-        },
+def test_only_reviewed_verified_teach_version_can_be_automated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    teach = TeachService()
+    draft = ManaFlow(
+        id="weekly-report",
+        name="Weekly report",
+        steps=[FlowStep(id="export", action="browser.click")],
+        verify=[VerificationRule(id="visible", type="ui.text_visible", arguments={"text": "Done"})],
     )
-    assert "teach replay weekly-report" in schedule_command(schedule, Path("/tmp/repo"))
-    with pytest.raises(AutomationValidationError):
-        ScheduleDefinition.create(
-            name="Bad",
-            action="teach-flow",
-            cron="0 16 * * 5",
-            targets=["local"],
-            action_config={"flow_id": "x", "version_policy": "pinned", "inputs": {}},
+    teach.storage.save_flow(draft)
+    with pytest.raises(AutomationValidationError, match="reviewed"):
+        TeachFlowJob(
+            flow_id=draft.id,
+            flow_version=draft.version,
+            inputs={},
+            required_permission_scopes=[],
+            verification={"rule_ids": ["visible"]},
         )
+        AutomationService(tmp_path).create(
+            name="Bad flow",
+            source="teach",
+            trigger=CronTrigger(expression="0 16 * * 5", timezone="UTC"),
+            job={
+                "type": "teach_flow", "flow_id": draft.id, "flow_version": draft.version,
+                "inputs": {}, "required_permission_scopes": [],
+                "verification": {"rule_ids": ["visible"]},
+            },
+            timezone_name="UTC",
+            deploy=False,
+        )
+    draft.status = "active"
+    draft.version = 2
+    draft.statistics.verified_replays = 1
+    draft.statistics.last_verified_at = datetime.now(timezone.utc)
+    teach.storage.save_flow(draft)
+    handoff = teach.automation_handoff(draft.id, version=2)
+    created = AutomationService(tmp_path).create(
+        name="Weekly flow",
+        source="teach",
+        trigger=CronTrigger(expression="0 16 * * 5", timezone="UTC"),
+        job={
+            "type": "teach_flow", "flow_id": handoff["flow_id"],
+            "flow_version": handoff["flow_version"], "inputs": {},
+            "required_permission_scopes": handoff["required_permission_scopes"],
+            "verification": handoff["verification"],
+        },
+        timezone_name="UTC",
+        deploy=False,
+    )
+    assert created.job.type == "teach_flow"
+    assert created.job.flow_id == draft.id
+    assert created.job.flow_version == 2
+    serialized = json.dumps(created.to_dict())
+    assert "RecordedEvent" not in serialized
+    assert "keyboard" not in serialized
 
 
 def test_cli_doctor_and_start_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

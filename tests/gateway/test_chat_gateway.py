@@ -248,6 +248,12 @@ def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:
     assert gw is not None
     assert gw.root == tmp_path.resolve()
     assert not gw.owns_coding_stack()
+    automation_route = gw._entry_route_registry.get("automation")
+    assert set(automation_route.tools) == {
+        "automation_create", "automation_get", "automation_list", "automation_status",
+        "automation_update", "automation_delete", "automation_enable",
+        "automation_disable", "automation_run_now",
+    }
 
 
 def test_gateway_creates_session_and_simple_send(tmp_path: Path, monkeypatch) -> None:

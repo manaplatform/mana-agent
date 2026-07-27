@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-27
 
+- Unified schedules and dashboard automation records behind the versioned
+  `AutomationDefinition` contract. Added locked atomic migration, exact anchored
+  interval/cron/once triggers, typed jobs, persistent platform deployment,
+  leased ID-based headless execution, canonical run history and events,
+  model-only chat authoring tools, reviewed/verified Teach flow handoff, and
+  management-only CLI/dashboard/TUI surfaces. Removed the public cron alias,
+  raw automation/Teach schedule creation commands, and the dashboard Cron page.
+  - Verification: focused automation, Teach, dashboard, chat-tool, entry-route,
+    gateway, and platform-adapter tests passed; changed-file Ruff, Python 3.12
+    compilation, and `git diff --check` passed; full
+    `.venv/bin/python -m pytest -q` passed (1,384 passed, 2 skipped).
+
 - Fixed Teach Mode atomic persistence on Windows: temporary-file writes now
   conditionally apply POSIX-only descriptor permissions, allowing descriptors
   to close before replacement and cleanup. Docker secret environment files use

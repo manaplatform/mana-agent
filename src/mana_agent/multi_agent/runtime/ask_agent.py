@@ -1812,6 +1812,9 @@ class AskAgent:
 
             teach_tools = build_teach_langchain_tools()
 
+        from mana_agent.automations.runtime_tools import build_automation_langchain_tools
+        automation_tools = build_automation_langchain_tools(self.project_root)
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
@@ -1820,6 +1823,7 @@ class AskAgent:
             *browser_tools,
             *computer_tools,
             *teach_tools,
+            *automation_tools,
             *mcp_tools,
             *list(getattr(self, "tools", []) or []),
         ]
