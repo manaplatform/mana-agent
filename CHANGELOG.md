@@ -721,7 +721,7 @@ All notable repository changes should be recorded here.
 - Added a production PyPI release workflow using GitHub Release publication, PyPI Trusted Publishing/OIDC, immutable action pins, once-built verified artifacts, version/PyPI availability gates, and serialized non-cancelling deployment concurrency.
   - Manual dispatches can validate and rebuild an existing tag but cannot reach the production publish job; push and pull-request CI now tests, builds, and checks distributions without publishing.
   - Added automated workflow safety and release-version validation coverage plus one-time Trusted Publisher and release documentation.
-  - Verification: Pending.
+  - Verification: `actionlint -color .github/workflows/publish-pypi.yml .github/workflows/ci.yml` passed; all GitHub workflow YAML parsed successfully; `python .github/scripts/validate_release_version.py --tag v0.0.15 --check-pypi` passed; `python -m build --sdist --wheel` produced one wheel and one sdist and `python -m twine check` passed for both; `PATH="$PWD/venv/bin:$PATH" PYTHONPATH=src ./venv/bin/python -m pytest -q` passed (947 tests, 1 skipped).
 
 - Added the Experience-to-Skill Workshop and trusted built-in `skill-creator` capability.
   - Completed, verified task experience now passes deterministic eligibility gates and evidence-weighted confidence scoring before any model generation occurs.
