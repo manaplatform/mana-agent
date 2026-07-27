@@ -57,15 +57,21 @@ class TeachService:
         task_name: str,
         *,
         permissions: list[str] | None = None,
-        desktop: bool = False,
+        desktop: bool | None = None,
     ) -> TeachSession:
         if not self.settings.enabled:
             raise TeachError("Teach Mode is disabled in ~/.mana/config.toml.")
+        if desktop is None:
+            statuses = grant_status(self.grants)
+            # Once the user has granted every local desktop scope, `teach
+            # start` means desktop recording. Do not silently create an empty
+            # semantic-only session when macOS/Windows/Linux approval is still
+            # missing: require_desktop_grants below emits the corrective error.
+            desktop = self.settings.desktop_capture or all(item.mana_granted for item in statuses)
         report = self.doctor()
         active = [name for name, item in report["recorders"].items() if item["available"]]
         if not active:
             raise TeachError("No Teach Mode recorder is available.")
-        desktop = desktop or self.settings.desktop_capture
         if desktop:
             require_desktop_grants(self.grants)
         granted_permissions = list(permissions or [])

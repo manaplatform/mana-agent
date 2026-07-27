@@ -51,6 +51,12 @@ during review. Sensitive/redacted typing steps are always marked for review.
 Continuous screenshots, clipboard contents, passwords, cookies, and tokens are
 not captured.
 
+After all local grants are recorded, ordinary `teach start "…"` also selects
+desktop capture automatically. If an OS permission is missing, startup fails
+with the exact required scope instead of silently creating an empty semantic-only
+recording. Use `--no-desktop` only when you deliberately want semantic-only
+capture.
+
 Recording is local, visible in CLI/event surfaces, and limited to enabled event
 sources. It does not capture continuous video, screenshots, clipboard contents,
 or raw password text. Browser and computer-control integrations may submit

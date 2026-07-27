@@ -31,7 +31,7 @@ from mana_agent.teach.models import (
 )
 from mana_agent.teach.normalizer import SemanticNormalizer, rank_selectors
 from mana_agent.teach.packaging import ManaFlowPackager
-from mana_agent.teach.permissions import DESKTOP_GRANTS, TeachGrantStore, grant_status
+from mana_agent.teach.permissions import DESKTOP_GRANTS, GrantStatus, TeachGrantStore, grant_status
 from mana_agent.teach.replay import SafeReplayExecutor
 from mana_agent.teach.service import TeachService
 from mana_agent.teach.storage import LocalTeachStorage
@@ -330,6 +330,20 @@ def test_desktop_start_fails_closed_without_explicit_grants(tmp_path: Path) -> N
     assert service.storage.list_sessions() == []
 
 
+def test_start_fails_instead_of_silently_dropping_to_semantic_capture_after_grants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = _service(tmp_path)
+    service.grants.grant(list(DESKTOP_GRANTS))
+    monkeypatch.setattr(
+        "mana_agent.teach.service.require_desktop_grants",
+        lambda _store: (_ for _ in ()).throw(TeachError("OS desktop permission is missing.")),
+    )
+    with pytest.raises(TeachError, match="OS desktop permission"):
+        service.start("Monitor desktop")
+    assert service.storage.list_sessions() == []
+
+
 def test_desktop_start_persists_grants_and_monitor_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -346,6 +360,30 @@ def test_desktop_start_persists_grants_and_monitor_identity(
     session = service.start("Monitor desktop", desktop=True)
     assert session.monitor_pid == 4321
     assert set(DESKTOP_GRANTS).issubset(session.permission_grants)
+
+
+def test_start_auto_attaches_desktop_after_all_grants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = _service(tmp_path)
+    service.grants.grant(list(DESKTOP_GRANTS))
+    monkeypatch.setattr("mana_agent.teach.service.require_desktop_grants", lambda _store: None)
+    monkeypatch.setattr(
+        "mana_agent.teach.service.grant_status",
+        lambda _store: [
+            GrantStatus(scope=scope, mana_granted=True, available=True, os_granted=True)
+            for scope in DESKTOP_GRANTS
+        ],
+    )
+
+    def attach(session: TeachSession) -> int:
+        session.monitor_pid = 9876
+        service.storage.save_session(session)
+        return 9876
+
+    monkeypatch.setattr(service.monitor, "start", attach)
+    session = service.start("Desktop by default")
+    assert session.monitor_pid == 9876
 
 
 def test_redacted_typing_compiles_to_mandatory_review(tmp_path: Path) -> None:

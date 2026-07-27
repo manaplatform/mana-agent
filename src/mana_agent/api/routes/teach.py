@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/v1/teach", tags=["teach"])
 class StartRequest(BaseModel):
     task_name: str = Field(min_length=1, max_length=240)
     permissions: list[str] = Field(default_factory=list)
-    desktop: bool = False
+    desktop: bool | None = None
 
 
 class GrantRequest(BaseModel):

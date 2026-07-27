@@ -42,10 +42,10 @@ def _run(call):
 def start_command(
     task_name: str = typer.Argument(..., help="Name of the task being demonstrated."),
     permission: list[str] = typer.Option([], "--permission", help="Explicit recording permission scope; repeatable."),
-    desktop: bool = typer.Option(
-        False,
-        "--desktop",
-        help="Attach the granted native keyboard, pointer, application and accessibility recorder.",
+    desktop: bool | None = typer.Option(
+        None,
+        "--desktop/--no-desktop",
+        help="Attach desktop recording when grants are ready (default); use --no-desktop for semantic-only capture.",
     ),
 ) -> None:
     """Start visible, local semantic recording."""

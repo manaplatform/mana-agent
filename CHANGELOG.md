@@ -35,6 +35,13 @@ All notable repository changes should be recorded here.
     successfully and the live macOS doctor probe correctly reported dependency
     availability plus the still-unapproved OS Accessibility grant.
 
+- Prevented misleading empty Teach recordings after a user has granted all
+  local desktop scopes: normal `teach start` now selects native monitoring, and
+  startup stops with an actionable OS-permission error if that monitor cannot
+  attach. `--no-desktop` remains the explicit semantic-only path.
+  - Verification: focused Teach Mode suite passed (20 tests); changed files
+    passed Ruff, compilation, and `git diff --check`.
+
 - Bumped the package and documented release version to `v0.1.1`.
   - Verification: `python -m pytest tests/test_package_version.py` passed.
 

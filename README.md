@@ -168,6 +168,10 @@ Printable keyboard content is never stored as a raw keylog; Teach Mode records
 shortcuts, navigation, redacted typing activity, pointer actions, active
 applications/windows, and available accessibility metadata.
 
+Once all local Teach grants exist, ordinary `teach start` automatically selects
+desktop capture. A missing OS grant fails clearly rather than creating an empty
+desktop recording; use `--no-desktop` for intentional semantic-only sessions.
+
 Recordings stay under `~/.mana/teach`, secrets are redacted, sensitive replay
 steps retain confirmations, and imports remain untrusted until dry-run and
 activation. See [Teach Mode](docs/26-teach-mode.md).

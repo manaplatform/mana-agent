@@ -19,7 +19,7 @@ class _Decision(BaseModel):
 class _Start(_Decision):
     task_name: str = Field(min_length=1, max_length=240)
     permissions: list[str] = Field(default_factory=list)
-    desktop: bool = False
+    desktop: bool | None = None
 
 
 class _Session(_Decision):
