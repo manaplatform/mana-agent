@@ -7,8 +7,9 @@ All notable repository changes should be recorded here.
 - Reconciled merged TUI wrapping regressions with the read-only full-card-width
   contract and made the consecutive-message fixture independent of vertical
   scrollbar width changes.
-  - Verification: `.venv/bin/python -m pytest -q
-    tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py` passed.
+  - Verification: the two focused TUI layout files passed five consecutive
+    runs (55 tests total); `.venv/bin/python -m pytest -q` passed (1,363 passed,
+    2 skipped); changed-test Ruff and `git diff --check` passed.
 
 ## 2026-07-27
 
