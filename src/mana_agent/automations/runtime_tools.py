@@ -3,12 +3,35 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from .service import AutomationService, AutomationValidationError
+from .service import (
+    AgentPromptJob,
+    AutomationService,
+    AutomationValidationError,
+    CommandJob,
+    ConnectorActionJob,
+    CronTrigger,
+    IntervalTrigger,
+    MisfirePolicy,
+    OnceTrigger,
+    RetryPolicy,
+    TeachFlowJob,
+    ToolActionJob,
+)
+
+
+_CreateTrigger = Annotated[
+    CronTrigger | IntervalTrigger | OnceTrigger,
+    Field(discriminator="type"),
+]
+_CreateJob = Annotated[
+    AgentPromptJob | ConnectorActionJob | ToolActionJob | TeachFlowJob | CommandJob,
+    Field(discriminator="type"),
+]
 
 
 class _Decision(BaseModel):
@@ -20,13 +43,13 @@ class _Decision(BaseModel):
 class _Create(_Decision):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
-    trigger: dict[str, Any]
-    job: dict[str, Any]
+    trigger: _CreateTrigger
+    job: _CreateJob
     timezone: str
-    target_runtime: str = "local"
+    target_runtime: Literal["local", "github"] = "local"
     permission_references: list[str] = Field(default_factory=list)
-    retry_policy: dict[str, Any] = Field(default_factory=dict)
-    misfire_policy: dict[str, Any] = Field(default_factory=dict)
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    misfire_policy: MisfirePolicy = Field(default_factory=MisfirePolicy)
     idempotency_key: str = ""
 
 
@@ -60,6 +83,8 @@ def build_automation_langchain_tools(root: str | Path) -> list[Any]:
             name="automation_create",
             description=(
                 "Create and deploy a durable automation from a complete typed semantic trigger and job. "
+                "Call this directly when the validated operation is create; do not list existing "
+                "automations first. "
                 "Use interval/every_seconds for exact elapsed intervals, cron only for calendar schedules, "
                 "and once/run_at for one-time jobs. Returns the persisted record and truthful deployment."
             ),
@@ -67,7 +92,8 @@ def build_automation_langchain_tools(root: str | Path) -> list[Any]:
             func=lambda name, description, trigger, job, timezone, target_runtime,
             permission_references, retry_policy, misfire_policy, idempotency_key,
             source_decision_id: _result(lambda: service.create(
-                name=name, description=description, source="teach" if job.get("type") == "teach_flow" else "chat",
+                name=name, description=description,
+                source="teach" if job.type == "teach_flow" else "chat",
                 trigger=trigger, job=job, timezone_name=timezone,
                 target_runtime=target_runtime, permission_references=permission_references,
                 retry_policy=retry_policy, misfire_policy=misfire_policy,
@@ -80,7 +106,11 @@ def build_automation_langchain_tools(root: str | Path) -> list[Any]:
             func=lambda automation_id, source_decision_id: _result(lambda: service.get(automation_id)),
         ),
         StructuredTool.from_function(
-            name="automation_list", description="List canonical persisted automations.",
+            name="automation_list",
+            description=(
+                "List canonical persisted automations only when the validated operation is list. "
+                "Never use this as discovery or a prerequisite for automation creation."
+            ),
             args_schema=_Decision,
             func=lambda source_decision_id: _result(
                 lambda: [item.to_dict() for item in service.list()]
@@ -133,3 +163,15 @@ AUTOMATION_TOOL_NAMES = (
     "automation_update", "automation_delete", "automation_enable",
     "automation_disable", "automation_run_now",
 )
+
+AUTOMATION_OPERATION_TOOLS: dict[str, tuple[str, ...]] = {
+    "create": ("automation_create",),
+    "get": ("automation_get",),
+    "list": ("automation_list",),
+    "status": ("automation_status",),
+    "update": ("automation_update",),
+    "delete": ("automation_delete",),
+    "enable": ("automation_enable",),
+    "disable": ("automation_disable",),
+    "run_now": ("automation_run_now",),
+}

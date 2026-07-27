@@ -6,10 +6,25 @@ All notable repository changes should be recorded here.
 
 - Registered the typed automation chat tools with the Operations lane's explicit
   `automation` capability, so a validated automation route can reach
-  `automation_create` without bypassing lane permission checks. Simplified
-  read-only TUI message cards by suppressing TextArea's inner cursor-line fill.
-  - Verification: focused lane, automation-route, gateway, and TUI tests passed;
-    changed-file Ruff passed.
+  `automation_create` without bypassing lane permission checks. Added regression
+  coverage for dispatching a registered automation route from an isolated
+  `multi_task` child instead of returning `route_executor_unavailable`. Deferred
+  Gmail checks now select the automation route without inspecting the mailbox
+  during authoring, and a singular requested time creates a one-time trigger
+  without asking for recurrence. Automation routing now requires a validated
+  operation and exposes only its exact tool, so creation calls
+  `automation_create` directly instead of repeatedly using `automation_list`;
+  unspecified local output defaults to the automation workspace instead of
+  prompting the user to choose local versus cloud storage. The create tool now
+  exposes discriminated trigger/job schemas plus typed retry and misfire
+  policies, supplies the current timestamp and timezone during authoring, and
+  rejects past one-time schedules instead of persisting an unrunnable record.
+  Simplified read-only TUI message cards by
+  suppressing TextArea's inner cursor-line fill.
+  - Verification: focused automation-route, entry-routing, lane, gateway, and
+    automation-service tests passed (95 tests). Changed-file Ruff,
+    Python compilation, and `git diff --check` passed; focused TUI tests also
+    passed for the card styling change.
 
 ## 2026-07-27
 

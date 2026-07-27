@@ -625,6 +625,11 @@ def create_automation(
     timezone_value = timezone_name or (
         trigger_model.timezone if isinstance(trigger_model, (CronTrigger, OnceTrigger)) else machine_timezone()
     )
+    next_run_at = calculate_next_run(trigger_model, after=now_utc() - timedelta(microseconds=1))
+    if isinstance(trigger_model, OnceTrigger) and next_run_at is None:
+        raise AutomationValidationError(
+            "One-time automation run_at must be strictly in the future."
+        )
     if idempotency_key:
         for existing in list_automations(root):
             if existing.description.endswith(f"[idempotency:{idempotency_key}]"):
@@ -642,7 +647,7 @@ def create_automation(
             job=job_model,
             timezone=timezone_value,
             target_runtime=target_runtime,
-            next_run_at=calculate_next_run(trigger_model, after=now_utc() - timedelta(microseconds=1)),
+            next_run_at=next_run_at,
             permission_references=list(permission_references or []),
             retry_policy=RetryPolicy.model_validate(retry_policy or {}),
             misfire_policy=MisfirePolicy.model_validate(misfire_policy or {}),

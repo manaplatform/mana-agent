@@ -2752,10 +2752,31 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": "automation"},
             )
-        from mana_agent.automations.runtime_tools import AUTOMATION_TOOL_NAMES
-        from mana_agent.automations.service import AutomationService, human_trigger
+        from mana_agent.automations.runtime_tools import AUTOMATION_OPERATION_TOOLS
+        from zoneinfo import ZoneInfo
+        from mana_agent.automations.service import (
+            AutomationService,
+            human_trigger,
+            machine_timezone,
+            now_utc,
+        )
         from mana_agent.config.settings import default_index_dir
         automation_service = AutomationService(self.root)
+        authoring_now_utc = now_utc()
+        authoring_timezone = machine_timezone()
+        authoring_now_local = authoring_now_utc.astimezone(ZoneInfo(authoring_timezone))
+        selected_tools = AUTOMATION_OPERATION_TOOLS.get(decision.automation_operation)
+        if selected_tools is None:
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: automation_operation. No automation tool was executed. "
+                    "Reason: the selected automation operation is missing or invalid."
+                ),
+                error="automation_operation_invalid",
+                mode="route-automation-error",
+                decision=decision,
+                payload={"route": "automation"},
+            )
         before = {item.id: item.to_dict() for item in automation_service.list()}
         teach_context = "No eligible reviewed Teach flows are available."
         try:
@@ -2776,14 +2797,34 @@ class AgentChatGateway:
 
         system_prompt = (
             "You are Mana-Agent's dedicated automation authoring executor. Use only automation_* "
-            "tools. Every create/update/manage claim in your response must come from the tool's "
+            f"tools selected by the validated operation `{decision.automation_operation}`. "
+            "Call the selected operation directly. For create, call automation_create and never "
+            "call automation_list as discovery, confirmation, or a prerequisite. For list, call "
+            "automation_list only because the validated user intent is to view existing records. "
+            "Every create/update/manage claim in your response must come from the tool's "
             "persisted result. Convert elapsed recurrence to an interval trigger with exact "
             "every_seconds and a timezone-aware anchor_at; use cron only for calendar schedules "
-            "and once for one absolute occurrence. Use the configured user timezone supplied in "
-            "context, or the machine IANA timezone; never ask for cron syntax or internal action "
+            "and once for one absolute occurrence. A singular requested execution time with no "
+            "recurrence means a one-time automation; recurrence is not a missing field and you "
+            "must not ask whether it should be once or recurring. When only a clock time is given, "
+            "resolve run_at to its next future occurrence in the supplied timezone. Ask about time "
+            "only when the future instant itself cannot be resolved safely, such as a genuinely "
+            "ambiguous meridiem or timezone. Creating a connector automation must only persist and "
+            "deploy the job; never execute the connector action during the authoring turn. "
+            f"For requested local output with no explicit destination, use the automation workspace "
+            f"`{self.root}` with a descriptive relative basename; do not ask the user to choose "
+            "between local storage and a cloud destination. Ask about an output destination only "
+            "when the user explicitly requires an external destination but has not identified it. "
+            f"Authoring context: current_utc={authoring_now_utc.isoformat()}, "
+            f"machine_timezone={authoring_timezone}, "
+            f"current_local={authoring_now_local.isoformat()}. Use an explicitly requested IANA "
+            "timezone or this machine timezone and always resolve one-time run_at strictly after "
+            "current_utc. Never ask for cron syntax or internal action "
             "names. Command jobs are allowed only when the user explicitly requested a command. "
-            "Connector jobs use connector_action and must retain permission/account references, "
-            "never credentials. Teach jobs must pin flow_id and flow_version and will be rejected "
+            "Connector jobs use connector_action with `arguments` (never `input`) and may use "
+            "`prompt` for output instructions. Retry policy uses `maximum_attempts`; misfire "
+            "policy uses `mode` with skip, run_once, or catch_up. Retain permission/account "
+            "references, never credentials. Teach jobs must pin flow_id and flow_version and will be rejected "
             "unless the exact version is reviewed and verified. If a material field is missing, "
             "ask one focused clarification and do not call automation_create. After a successful "
             "write, state the automation ID, interpreted trigger, timezone, next run, source, "
@@ -2800,7 +2841,7 @@ class AgentChatGateway:
                 callbacks=callbacks,
                 system_prompt=system_prompt,
                 tool_policy={
-                    "allowed_tools": list(AUTOMATION_TOOL_NAMES),
+                    "allowed_tools": list(selected_tools),
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },

@@ -66,6 +66,26 @@ def test_calendar_cron_preserves_timezone() -> None:
     assert result.astimezone(service.ZoneInfo("Asia/Tehran")).weekday() == 0
 
 
+def test_create_rejects_a_past_one_time_trigger(tmp_path: Path) -> None:
+    with pytest.raises(
+        service.AutomationValidationError,
+        match="run_at must be strictly in the future",
+    ):
+        create_automation(
+            tmp_path,
+            name="Expired one-time task",
+            trigger=OnceTrigger(
+                run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                timezone="UTC",
+            ),
+            job=AgentPromptJob(prompt="Do not run an expired task."),
+            timezone_name="UTC",
+            deploy=False,
+        )
+
+    assert AutomationService(tmp_path).list() == []
+
+
 def test_local_deployment_uses_id_executor_and_one_managed_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
