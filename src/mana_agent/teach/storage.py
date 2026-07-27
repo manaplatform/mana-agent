@@ -14,6 +14,13 @@ from pydantic import ValidationError
 from .models import ManaFlow, RecordedEvent, TeachError, TeachSession
 
 
+def _restrict_descriptor_to_owner(fd: int) -> None:
+    """Apply POSIX permissions when the operating system supports them."""
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is not None:
+        fchmod(fd, 0o600)
+
+
 class LocalTeachStorage:
     def __init__(self, root: Path):
         self.root = root.expanduser().resolve()
@@ -29,7 +36,7 @@ class LocalTeachStorage:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         try:
-            os.fchmod(fd, 0o600)
+            _restrict_descriptor_to_owner(fd)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
                 handle.flush()

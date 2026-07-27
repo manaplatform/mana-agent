@@ -29,6 +29,13 @@ DESKTOP_GRANTS: tuple[TeachGrantScope, ...] = (
 )
 
 
+def _restrict_descriptor_to_owner(fd: int) -> None:
+    """Apply POSIX permissions when the operating system supports them."""
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is not None:
+        fchmod(fd, 0o600)
+
+
 class GrantStatus(BaseModel):
     scope: TeachGrantScope
     mana_granted: bool
@@ -69,7 +76,7 @@ class TeachGrantStore:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, temporary = tempfile.mkstemp(prefix=".teach-grants.", dir=self.path.parent)
         try:
-            os.fchmod(fd, 0o600)
+            _restrict_descriptor_to_owner(fd)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.write("\n")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,6 +253,19 @@ def test_cli_doctor_and_start_status(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     status = runner.invoke(app, ["teach", "status", "--json"])
     assert status.exit_code == 0
     assert '"state": "recording"' in status.stdout
+
+
+def test_teach_storage_and_grants_work_without_posix_fchmod(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Windows does not expose os.fchmod for temporary-file permissions."""
+    monkeypatch.delattr(os, "fchmod", raising=False)
+
+    service = _service(tmp_path)
+    session = service.start("Portable Teach session")
+    assert service.storage.load_session(session.id).id == session.id
+
+    store = TeachGrantStore(tmp_path / "teach" / "grants.json")
+    store.grant(list(DESKTOP_GRANTS))
+    assert all(store.is_granted(scope) for scope in DESKTOP_GRANTS)
 
 
 def test_desktop_grants_are_explicit_owner_only_and_reported(tmp_path: Path) -> None:

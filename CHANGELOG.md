@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-27
 
+- Fixed Teach Mode atomic persistence on Windows: temporary-file writes now
+  conditionally apply POSIX-only descriptor permissions, allowing descriptors
+  to close before replacement and cleanup. Docker secret environment files use
+  the same portability guard.
+  - Verification: `PYTHONPATH=src .venv/bin/pytest -q tests/test_teach_mode.py`
+    passed (22 tests); changed-file Ruff, Python 3.12 compilation, and
+    `git diff --check` passed.
+
 - Corrected native Teach Mode text events: printable input is now reconstructed
   in memory into one semantic event (including spaces and backspace edits)
   instead of persisting the literal `{{ typed_text }}` placeholder. Secure
