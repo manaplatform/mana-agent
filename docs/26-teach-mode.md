@@ -16,6 +16,41 @@ mana-agent teach status
 mana-agent teach stop
 ```
 
+For native desktop monitoring, install the optional adapter, record local
+consent, open the OS privacy panes, and start a new desktop-enabled session:
+
+```bash
+pip install "mana-agent[teach-desktop]"
+mana-agent teach grant --scope full --allow --open-settings
+mana-agent teach doctor
+mana-agent teach start "Export my weekly report" --desktop
+```
+
+On macOS, approve the exact terminal/Python/Mana-Agent executable under
+**Privacy & Security → Accessibility** and **Input Monitoring**. Mana stores its
+own grants separately under `~/.mana/teach/grants.json`; it cannot and does not
+edit the operating system privacy database. Local consent can be revoked with:
+
+```bash
+mana-agent teach grant --scope full --revoke
+```
+
+`--desktop` launches a persisted background recorder bound to the session, so
+capture continues after the start command exits. Pause, resume, stop, and cancel
+control that process through the persisted session. The recorder captures:
+
+- active application and window changes;
+- focused accessibility role, label/title, and native identifier when exposed;
+- keyboard shortcuts and navigation keys;
+- printable typing as a redacted character count and review placeholder;
+- pointer buttons and normalized screen-relative fallback position.
+
+It never stores printable keys as a raw keylog. Text reconstruction must come
+from a permitted semantic accessibility value-change source or be supplied
+during review. Sensitive/redacted typing steps are always marked for review.
+Continuous screenshots, clipboard contents, passwords, cookies, and tokens are
+not captured.
+
 Recording is local, visible in CLI/event surfaces, and limited to enabled event
 sources. It does not capture continuous video, screenshots, clipboard contents,
 or raw password text. Browser and computer-control integrations may submit
@@ -140,6 +175,7 @@ coordinate_fallback = true
 voice_enabled = false
 browser_capture = true
 excluded_applications = []
+allowed_applications = []
 excluded_domains = []
 recording_allowed_paths = []
 sensitive_detection = true
@@ -148,6 +184,7 @@ replay_retry_limit = 1
 correction_checkpoints = true
 flow_cards = true
 experimental_sharing = false
+desktop_capture = false
 ```
 
 Secure defaults disable screenshot and voice persistence, enable redaction,
@@ -159,14 +196,17 @@ keep sharing private, and require imported flows to dry-run.
 | --- | --- | --- | --- |
 | Semantic events from Mana tools | Yes | Yes | Yes |
 | Browser DOM events | With Playwright extra | With Playwright extra | With Playwright extra |
-| Native accessibility | Optional Quartz adapter | Optional UI Automation adapter | Optional AT-SPI adapter |
-| Coordinate fallback contract | Yes | Yes | Display required |
+| Native accessibility | ApplicationServices adapter | Optional UI Automation adapter | Optional AT-SPI adapter |
+| Keyboard/pointer monitor | `pynput` + OS grants | `pynput` + OS grants | `pynput` + desktop session |
+| Active app/window | AppKit/ApplicationServices | Win32 foreground window | `xdotool` when installed |
+| Coordinate fallback contract | AppKit screen-relative | Win32 screen-relative | Tk/display-relative |
 | Voice | Optional adapter; off by default | Optional adapter; off by default | Optional adapter; off by default |
 
 Native adapter imports are delayed, so missing OS packages never break core CLI
-or tests. The current foundation exposes stable capture protocols and capability
-diagnostics; native OS event-loop adapters and voice transcription remain
-extension work.
+or tests. macOS has the complete native path. Windows and Linux provide global
+keyboard/pointer capture plus active-window metadata where the listed local
+facilities exist; richer platform accessibility event streams and voice
+transcription remain extension work.
 
 ## Safe demonstration
 

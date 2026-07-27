@@ -9,6 +9,11 @@ and voice persistence default off, redaction defaults on, and imports always
 require dry run. The complete typed keys are documented in
 [Teach Mode](26-teach-mode.md#configuration).
 
+`desktop_capture` defaults to false. `allowed_applications`,
+`excluded_applications`, and event-source settings bound native monitoring; OS
+privacy approval and the separate Teach grant store are still required when the
+configuration enables it.
+
 ## Mana Fleet
 
 Fleet is disabled by default with `MANA_FLEET_ENABLED=false`. Worker, timeout,

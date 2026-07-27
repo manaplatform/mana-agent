@@ -24,11 +24,13 @@ from .models import (
 )
 from .normalizer import SemanticNormalizer
 from .packaging import ManaFlowPackager
+from .permissions import TeachGrantStore, grant_status, require_desktop_grants
 from .platform import doctor_report, platform_name
 from .recorder import SemanticEventRecorder
 from .redaction import Redactor
 from .replay import SafeReplayExecutor
 from .storage import LocalTeachStorage
+from .monitor_process import DesktopMonitorProcess
 
 
 class TeachService:
@@ -47,23 +49,47 @@ class TeachService:
         self.packager = ManaFlowPackager(self.redactor)
         self.replay_executor = replay_executor or SafeReplayExecutor()
         self.recorder = SemanticEventRecorder()
+        self.grants = TeachGrantStore(self.storage.root / "grants.json")
+        self.monitor = DesktopMonitorProcess(self.storage)
 
-    def start(self, task_name: str, *, permissions: list[str] | None = None) -> TeachSession:
+    def start(
+        self,
+        task_name: str,
+        *,
+        permissions: list[str] | None = None,
+        desktop: bool = False,
+    ) -> TeachSession:
         if not self.settings.enabled:
             raise TeachError("Teach Mode is disabled in ~/.mana/config.toml.")
         report = self.doctor()
         active = [name for name, item in report["recorders"].items() if item["available"]]
         if not active:
             raise TeachError("No Teach Mode recorder is available.")
+        desktop = desktop or self.settings.desktop_capture
+        if desktop:
+            require_desktop_grants(self.grants)
+        granted_permissions = list(permissions or [])
+        if desktop:
+            granted_permissions.extend(
+                item.scope for item in grant_status(self.grants) if item.mana_granted
+            )
         session = TeachSession(
             task_name=task_name.strip(),
-            permission_grants=list(permissions or []),
+            permission_grants=list(dict.fromkeys(granted_permissions)),
             recorder_capabilities=active,
             platform_metadata={"platform": platform_name(), "doctor": report},
         )
         session.transition(SessionState.RECORDING, "Recording explicitly started by the user.")
         self.storage.save_session(session)
         self.recorder.start(session, self.record_event)
+        if desktop:
+            self.monitor.start(session)
+            publish_teach_event(
+                "recorder_attached",
+                session_id=session.id,
+                title="Native desktop recorder attached",
+                metadata={"sources": ["accessibility", "application", "keyboard", "pointer"]},
+            )
         publish_teach_event("session_started", session_id=session.id, title=f"Recording: {session.task_name}")
         return session
 
@@ -112,6 +138,11 @@ class TeachService:
             raise TeachError(f"Event source is disabled: {event.source.value}")
         if event.application.id in self.settings.excluded_applications:
             raise TeachError("The active application is excluded from Teach Mode.")
+        if (
+            self.settings.allowed_applications
+            and event.application.id not in self.settings.allowed_applications
+        ):
+            raise TeachError("The active application is outside the Teach Mode application allowlist.")
         domain = str(event.context.get("domain", "")).lower()
         if domain and any(domain == item or domain.endswith(f".{item}") for item in self.settings.excluded_domains):
             raise TeachError("The active browser domain is excluded from Teach Mode.")
@@ -153,6 +184,7 @@ class TeachService:
 
     def stop(self, session_id: str | None = None) -> tuple[TeachSession, ManaFlow]:
         session = self._session(session_id)
+        session = self.monitor.stop(session)
         session.transition(SessionState.COMPILING)
         session.compilation_status = "running"
         self.storage.save_session(session)
@@ -236,6 +268,7 @@ class TeachService:
 
     def cancel(self, session_id: str | None = None) -> TeachSession:
         session = self._session(session_id)
+        session = self.monitor.stop(session)
         session.transition(SessionState.CANCELLED)
         self.recorder.stop()
         self.storage.save_session(session)
@@ -287,7 +320,24 @@ class TeachService:
         )
 
     def doctor(self) -> dict[str, Any]:
-        return doctor_report(browser_enabled=self.settings.browser_capture, voice_enabled=self.settings.voice_enabled)
+        report = doctor_report(browser_enabled=self.settings.browser_capture, voice_enabled=self.settings.voice_enabled)
+        statuses = grant_status(self.grants)
+        report["grants"] = [item.model_dump(mode="json") for item in statuses]
+        desktop_available = all(
+            item.mana_granted and item.available and item.os_granted is not False
+            for item in statuses
+        )
+        report["recorders"]["native_desktop"] = {
+            "available": desktop_available,
+            "reason": (
+                ""
+                if desktop_available
+                else "Native desktop recording requires every Teach grant, optional dependency, and OS permission."
+            ),
+        }
+        if not desktop_available:
+            report["limitations"].append(report["recorders"]["native_desktop"]["reason"])
+        return report
 
     def _session(self, session_id: str | None) -> TeachSession:
         return self.storage.load_session(session_id) if session_id else self.active_session()

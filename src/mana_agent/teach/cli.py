@@ -9,6 +9,12 @@ from typing import Any
 import typer
 
 from .models import RecordedEvent, SelectorCandidate, TeachError
+from .permissions import (
+    DESKTOP_GRANTS,
+    TeachGrantScope,
+    grant_status,
+    open_permission_settings,
+)
 from .service import TeachService
 
 
@@ -36,9 +42,14 @@ def _run(call):
 def start_command(
     task_name: str = typer.Argument(..., help="Name of the task being demonstrated."),
     permission: list[str] = typer.Option([], "--permission", help="Explicit recording permission scope; repeatable."),
+    desktop: bool = typer.Option(
+        False,
+        "--desktop",
+        help="Attach the granted native keyboard, pointer, application and accessibility recorder.",
+    ),
 ) -> None:
     """Start visible, local semantic recording."""
-    session = _run(lambda: _service().start(task_name, permissions=permission))
+    session = _run(lambda: _service().start(task_name, permissions=permission, desktop=desktop))
     typer.echo(f"● REC  {session.task_name}\nSession: {session.id}")
 
 
@@ -69,6 +80,7 @@ def status_command(
             f"Session: {session.id}\n"
             f"Events: {session.raw_event_count} raw / {session.normalized_event_count} normalized\n"
             f"Sources: {', '.join(session.recorder_capabilities) or 'none'}"
+            f"\nDesktop monitor PID: {session.monitor_pid or 'not attached'}"
         )
 
 
@@ -186,6 +198,50 @@ def doctor_command(json_output: bool = typer.Option(False, "--json")) -> None:
     for name, item in report["recorders"].items():
         marker = "✓" if item["available"] else "✗"
         typer.echo(f"{marker} {name}: {item['reason'] or 'available'}")
+    typer.echo("Desktop recording grants:")
+    for item in report["grants"]:
+        os_value = "unknown until attach" if item["os_granted"] is None else str(item["os_granted"]).lower()
+        typer.echo(
+            f"{'✓' if item['mana_granted'] else '✗'} {item['scope']}: "
+            f"mana={str(item['mana_granted']).lower()} os={os_value}"
+        )
+
+
+@teach_app.command("grant")
+def grant_command(
+    scope: list[str] = typer.Option(
+        ["full"],
+        "--scope",
+        help="full, accessibility, keyboard, pointer, or applications; repeatable.",
+    ),
+    allow: bool = typer.Option(False, "--allow", help="Persist explicit local Mana recording consent."),
+    revoke: bool = typer.Option(False, "--revoke", help="Revoke the selected local Mana grants."),
+    open_settings: bool = typer.Option(
+        False,
+        "--open-settings",
+        help="Open OS-owned privacy settings; Mana never edits the OS privacy database.",
+    ),
+) -> None:
+    """Inspect or explicitly change local desktop-recording grants."""
+    if allow and revoke:
+        raise typer.BadParameter("Choose only one of --allow or --revoke.")
+    selected = _grant_scopes(scope)
+    service = _service()
+    if allow:
+        service.grants.grant(selected)
+    elif revoke:
+        service.grants.revoke(selected)
+    opened = open_permission_settings(selected) if open_settings else []
+    _json(
+        {
+            "grants": [item.model_dump(mode="json") for item in grant_status(service.grants)],
+            "opened_settings": opened,
+            "notice": (
+                "Local consent does not grant OS permission. Approve only the Mana-Agent executable "
+                "you intend to run, then verify with `mana-agent teach doctor`."
+            ),
+        }
+    )
 
 
 @teach_app.command("schedule")
@@ -240,3 +296,22 @@ def _parse_inputs(values: list[str]) -> dict[str, str]:
             raise typer.BadParameter("Flow input name cannot be empty.")
         result[key] = item
     return result
+
+
+def _grant_scopes(values: list[str]) -> list[TeachGrantScope]:
+    mapping: dict[str, TeachGrantScope] = {
+        "accessibility": "teach.record.accessibility",
+        "keyboard": "teach.record.keyboard",
+        "pointer": "teach.record.pointer",
+        "applications": "teach.record.applications",
+    }
+    selected: list[TeachGrantScope] = []
+    for value in values:
+        normalized = value.strip().lower()
+        if normalized == "full":
+            selected.extend(DESKTOP_GRANTS)
+        elif normalized in mapping:
+            selected.append(mapping[normalized])
+        else:
+            raise typer.BadParameter(f"Unknown Teach grant scope: {value}")
+    return list(dict.fromkeys(selected))

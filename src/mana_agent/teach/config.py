@@ -12,7 +12,10 @@ from mana_agent.workspaces.paths import mana_home
 
 class TeachSettings(BaseModel):
     enabled: bool = True
-    event_sources: set[str] = Field(default_factory=lambda: {"browser", "accessibility", "application", "filesystem"})
+    event_sources: set[str] = Field(
+        default_factory=lambda: {"browser", "accessibility", "application", "filesystem", "keyboard", "pointer"}
+    )
+    desktop_capture: bool = False
     storage_path: Path = Field(default_factory=lambda: mana_home() / "teach")
     retention_days: int = Field(default=30, ge=1, le=3650)
     screenshot_policy: str = "never"
@@ -20,6 +23,7 @@ class TeachSettings(BaseModel):
     voice_enabled: bool = False
     browser_capture: bool = True
     excluded_applications: set[str] = Field(default_factory=set)
+    allowed_applications: set[str] = Field(default_factory=set)
     excluded_domains: set[str] = Field(default_factory=set)
     recording_allowed_paths: list[Path] = Field(default_factory=list)
     sensitive_detection: bool = True

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header
 from pydantic import BaseModel, Field
 
 from mana_agent.api.exceptions import ManaApiError
 from mana_agent.teach import TeachError, TeachService
+from mana_agent.teach.permissions import DESKTOP_GRANTS, TeachGrantScope, grant_status
 
 router = APIRouter(prefix="/api/v1/teach", tags=["teach"])
 
@@ -16,6 +17,12 @@ router = APIRouter(prefix="/api/v1/teach", tags=["teach"])
 class StartRequest(BaseModel):
     task_name: str = Field(min_length=1, max_length=240)
     permissions: list[str] = Field(default_factory=list)
+    desktop: bool = False
+
+
+class GrantRequest(BaseModel):
+    scopes: list[TeachGrantScope] = Field(default_factory=lambda: list(DESKTOP_GRANTS))
+    action: Literal["allow", "revoke"]
 
 
 class ExplainRequest(BaseModel):
@@ -56,10 +63,33 @@ def flows() -> list[dict[str, Any]]:
     return [item.model_dump(mode="json", by_alias=True) for item in TeachService().storage.list_flows()]
 
 
+@router.get("/grants")
+def grants() -> list[dict[str, Any]]:
+    service = TeachService()
+    return [item.model_dump(mode="json") for item in grant_status(service.grants)]
+
+
+@router.post("/grants")
+def update_grants(payload: GrantRequest, authorization: str | None = Header(None)) -> list[dict[str, Any]]:
+    _require(authorization)
+    service = TeachService()
+    if payload.action == "allow":
+        service.grants.grant(payload.scopes)
+    else:
+        service.grants.revoke(payload.scopes)
+    return [item.model_dump(mode="json") for item in grant_status(service.grants)]
+
+
 @router.post("/sessions")
 def start(payload: StartRequest, authorization: str | None = Header(None)) -> dict[str, Any]:
     _require(authorization)
-    return _call(lambda: TeachService().start(payload.task_name, permissions=payload.permissions)).model_dump(mode="json")
+    return _call(
+        lambda: TeachService().start(
+            payload.task_name,
+            permissions=payload.permissions,
+            desktop=payload.desktop,
+        )
+    ).model_dump(mode="json")
 
 
 @router.post("/sessions/{session_id}/pause")

@@ -52,6 +52,7 @@ class EventSource(StrEnum):
     ACCESSIBILITY = "accessibility"
     BROWSER = "browser"
     KEYBOARD = "keyboard"
+    POINTER = "pointer"
     FILESYSTEM = "filesystem"
     APPLICATION = "application"
     VOICE = "voice"
@@ -149,6 +150,7 @@ class TeachSession(BaseModel):
     audit_trail: list[AuditEntry] = Field(default_factory=list)
     raw_event_count: int = 0
     normalized_event_count: int = 0
+    monitor_pid: int | None = None
 
     def transition(self, target: SessionState, detail: str = "") -> None:
         if target not in ALLOWED_TRANSITIONS[self.state]:

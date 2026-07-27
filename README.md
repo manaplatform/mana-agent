@@ -156,6 +156,18 @@ mana-agent teach stop
 mana-agent teach replay export-my-weekly-report --mode dry_run
 ```
 
+Optional native desktop monitoring uses explicit local and OS grants:
+
+```bash
+pip install "mana-agent[teach-desktop]"
+mana-agent teach grant --scope full --allow --open-settings
+mana-agent teach start "Export my weekly report" --desktop
+```
+
+Printable keyboard content is never stored as a raw keylog; Teach Mode records
+shortcuts, navigation, redacted typing activity, pointer actions, active
+applications/windows, and available accessibility metadata.
+
 Recordings stay under `~/.mana/teach`, secrets are redacted, sensitive replay
 steps retain confirmations, and imports remain untrusted until dry-run and
 activation. See [Teach Mode](docs/26-teach-mode.md).

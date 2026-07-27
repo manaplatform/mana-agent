@@ -19,6 +19,7 @@ class _Decision(BaseModel):
 class _Start(_Decision):
     task_name: str = Field(min_length=1, max_length=240)
     permissions: list[str] = Field(default_factory=list)
+    desktop: bool = False
 
 
 class _Session(_Decision):
@@ -62,8 +63,8 @@ def build_teach_langchain_tools() -> list[Any]:
             name="teach_start",
             description="Start an explicit visible local Teach Mode recording for a user-named task.",
             args_schema=_Start,
-            func=lambda task_name, permissions, source_decision_id: _response(
-                lambda: TeachService().start(task_name, permissions=permissions)
+            func=lambda task_name, permissions, desktop, source_decision_id: _response(
+                lambda: TeachService().start(task_name, permissions=permissions, desktop=desktop)
             ),
         ),
         StructuredTool.from_function(

@@ -8,6 +8,10 @@
 side effects, and real success requires observable verification. See
 [Teach Mode](26-teach-mode.md) for examples and safety behavior.
 
+`teach grant` manages separate, explicit local grants and may open OS-owned
+privacy settings. `teach start --desktop` attaches the optional persistent
+native recorder only after every required grant and dependency validates.
+
 ## Fleet
 
 `mana-agent fleet` lists and manages trusted workers, inspects jobs/logs/

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from mana_agent.automations.service import AutomationValidationError, ScheduleDe
 from mana_agent.commands.cli import app
 from mana_agent.teach.config import TeachSettings
 from mana_agent.teach.correction import TargetedSelectorRepair
+from mana_agent.teach.desktop_recorder import NativeDesktopRecorder
 from mana_agent.teach.models import (
     EventApplication,
     EventSource,
@@ -24,10 +26,12 @@ from mana_agent.teach.models import (
     SelectorCandidate,
     SessionState,
     TeachError,
+    TeachSession,
     VerificationRule,
 )
 from mana_agent.teach.normalizer import SemanticNormalizer, rank_selectors
 from mana_agent.teach.packaging import ManaFlowPackager
+from mana_agent.teach.permissions import DESKTOP_GRANTS, TeachGrantStore, grant_status
 from mana_agent.teach.replay import SafeReplayExecutor
 from mana_agent.teach.service import TeachService
 from mana_agent.teach.storage import LocalTeachStorage
@@ -248,3 +252,118 @@ def test_cli_doctor_and_start_status(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     status = runner.invoke(app, ["teach", "status", "--json"])
     assert status.exit_code == 0
     assert '"state": "recording"' in status.stdout
+
+
+def test_desktop_grants_are_explicit_owner_only_and_reported(tmp_path: Path) -> None:
+    store = TeachGrantStore(tmp_path / "teach" / "grants.json")
+    assert all(not item.mana_granted for item in grant_status(store))
+    store.grant(list(DESKTOP_GRANTS))
+    assert all(item.mana_granted for item in grant_status(store))
+    if store.path.stat().st_mode & 0o777:
+        assert store.path.stat().st_mode & 0o777 == 0o600
+    store.revoke(["teach.record.keyboard"])
+    assert store.is_granted("teach.record.keyboard") is False
+
+
+def test_native_keyboard_recorder_never_persists_printable_keys() -> None:
+    session = TeachSession(task_name="Desktop", state=SessionState.RECORDING)
+    captured: list[RecordedEvent] = []
+    recorder = NativeDesktopRecorder()
+    recorder._session = session
+    recorder._emit = captured.append
+
+    class Printable:
+        def __init__(self, char: str):
+            self.char = char
+
+        def __str__(self) -> str:
+            return self.char
+
+    class Enter:
+        char = None
+
+        def __str__(self) -> str:
+            return "Key.enter"
+
+    class Shift:
+        char = None
+
+        def __str__(self) -> str:
+            return "Key.shift"
+
+    recorder._on_press(Printable("s"))
+    recorder._on_press(Printable("e"))
+    recorder._on_press(Printable("c"))
+    recorder._on_press(Shift())
+    recorder._on_press(Printable("R"))
+    recorder._on_release(Shift())
+    recorder._on_press(Enter())
+    serialized = "".join(item.model_dump_json() for item in captured)
+    assert '"character_count":4' in serialized
+    assert '"content_captured":false' in serialized
+    assert "sec" not in serialized
+    assert '"r"' not in serialized.lower()
+    assert captured[0].sensitive is True
+
+
+def test_cli_grant_records_local_consent_without_claiming_os_grant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    result = CliRunner().invoke(
+        app,
+        ["teach", "grant", "--scope", "keyboard", "--allow"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    keyboard = next(
+        item for item in payload["grants"] if item["scope"] == "teach.record.keyboard"
+    )
+    assert keyboard["mana_granted"] is True
+    assert "Local consent does not grant OS permission" in payload["notice"]
+
+
+def test_desktop_start_fails_closed_without_explicit_grants(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    with pytest.raises(TeachError, match="explicit Mana grants"):
+        service.start("Monitor desktop", desktop=True)
+    assert service.storage.list_sessions() == []
+
+
+def test_desktop_start_persists_grants_and_monitor_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = _service(tmp_path)
+    service.grants.grant(list(DESKTOP_GRANTS))
+    monkeypatch.setattr("mana_agent.teach.service.require_desktop_grants", lambda _store: None)
+
+    def attach(session: TeachSession) -> int:
+        session.monitor_pid = 4321
+        service.storage.save_session(session)
+        return 4321
+
+    monkeypatch.setattr(service.monitor, "start", attach)
+    session = service.start("Monitor desktop", desktop=True)
+    assert session.monitor_pid == 4321
+    assert set(DESKTOP_GRANTS).issubset(session.permission_grants)
+
+
+def test_redacted_typing_compiles_to_mandatory_review(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    session = service.start("Type into form")
+    service.record_event(
+        RecordedEvent(
+            session_id=session.id,
+            source=EventSource.KEYBOARD,
+            action="type",
+            data={
+                "value": "{{ typed_text }}",
+                "character_count": 8,
+                "content_captured": False,
+            },
+            sensitive=True,
+        )
+    )
+    _, flow = service.stop(session.id)
+    assert flow.steps[0].requires_review is True
+    assert flow.steps[0].with_["value"] == "{{ typed_text }}"

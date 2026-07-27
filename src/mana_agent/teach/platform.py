@@ -19,11 +19,11 @@ def doctor_report(*, browser_enabled: bool = True, voice_enabled: bool = False) 
     reason = ""
     if current == "macos":
         try:
-            import Quartz  # type: ignore[import-not-found]
-            accessibility_available = bool(Quartz.AXIsProcessTrusted())
+            import ApplicationServices  # type: ignore[import-not-found]
+            accessibility_available = bool(ApplicationServices.AXIsProcessTrusted())
             if not accessibility_available:
                 reason = "Grant Mana-Agent Accessibility permission in macOS System Settings."
-        except ImportError:
+        except (ImportError, AttributeError):
             reason = "Install the optional macOS accessibility dependency and grant Accessibility permission."
     elif current == "windows":
         try:

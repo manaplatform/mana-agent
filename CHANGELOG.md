@@ -19,6 +19,22 @@ All notable repository changes should be recorded here.
     `python -m compileall -q src`, and `git diff --check`. Repository-wide Ruff
     remains non-clean with 792 unrelated pre-existing findings.
 
+- Extended Teach Mode with an explicit native desktop-monitoring path:
+  separately persisted owner-only Mana grants, OS privacy status/settings
+  handoff, a session-bound background recorder, active application/window and
+  accessibility metadata, shortcut/navigation capture, pointer events with
+  normalized fallback positions, redacted typing activity, application
+  allowlists, API/chat/CLI integration, and the `teach-desktop` optional
+  dependency group. Printable keyboard content is never persisted as a raw
+  keylog, and native recording fails closed when a dependency or OS grant is
+  missing.
+  - Verification: Teach Mode and integration checks passed (35 tests), the
+    Teach-specific suite passed (18 tests), and the full suite passed (1,372
+    passed, 2 skipped). Changed files passed Ruff, `python -m compileall -q
+    src`, and `git diff --check`. The optional desktop extra installed
+    successfully and the live macOS doctor probe correctly reported dependency
+    availability plus the still-unapproved OS Accessibility grant.
+
 - Bumped the package and documented release version to `v0.1.1`.
   - Verification: `python -m pytest tests/test_package_version.py` passed.
 
