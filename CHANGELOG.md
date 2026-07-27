@@ -554,6 +554,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-20
 
+- Clarified the gateway entry-router decision contract so tool-free prompts such as `ping` must emit `required_sources: ["none"]` instead of an omitted or empty source list.
+  - Strict validation remains intact: missing model-selected sources stop safely and never trigger a fallback route.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py -k 'ping or missing_required_sources'` passed (3 tests); Python compilation and `git diff --check` passed.
+
+- Fixed Textual chat-message wrapping to measure read-only message cards against their full available content width instead of reserving an invisible editing-cursor cell.
+  - Existing and newly mounted messages now reflow correctly for terminal resizes and surrounding-panel width changes without stale per-widget wrap widths.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_multiline_input.py tests/test_tui_live_tools_scroll.py tests/test_tui_auto_chat_tool_events.py` passed (19 tests); `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui*.py` passed (34 tests); Python compilation and `git diff --check` passed. Ruff and mypy are not installed in the repository environment.
 - Added webhook-driven GitHub App Autopilot with signed raw-body ingress, durable delivery/job persistence, deterministic validated event routing, actor authorization, installation-scoped authentication, persistent task sessions, isolated worktrees, Codex-only execution, verification gates, deterministic branches, and draft pull-request lifecycle support.
   - Added `mana-agent github-app` operational commands, health/readiness endpoints, least-privilege manifest/setup documentation, security-alert redaction, idempotency/coalescing, subject locks, bounded retry/cancellation controls, and structured lifecycle metrics.
   - Verification: `.venv/bin/ruff check src/mana_agent/github_autopilot src/mana_agent/commands/github_app_cli.py tests/test_github_autopilot.py src/mana_agent/integrations/codex/backend.py src/mana_agent/integrations/codex/coding_agent_shim.py tests/test_codex_integration.py` passed; `.venv/bin/python -m pytest tests/test_github_autopilot.py tests/test_codex_integration.py tests/test_api_analyze.py tests/test_api_conversations.py tests/test_package_version.py -q` passed (40 tests). Full-suite verification was not completed because the existing external-memory test configuration causes unrelated `MemoryConfigurationError` failures in `tests/test_ask_agent.py`.
