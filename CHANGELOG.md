@@ -7,7 +7,8 @@ All notable repository changes should be recorded here.
 - Fixed Teach Mode atomic persistence on Windows: temporary-file writes now
   conditionally apply POSIX-only descriptor permissions, allowing descriptors
   to close before replacement and cleanup. Docker secret environment files use
-  the same portability guard.
+  the same portability guard. The owner-only mode assertion is now correctly
+  limited to platforms whose filesystem mode bits support that guarantee.
   - Verification: `PYTHONPATH=src .venv/bin/pytest -q tests/test_teach_mode.py`
     passed (22 tests); changed-file Ruff, Python 3.12 compilation, and
     `git diff --check` passed.

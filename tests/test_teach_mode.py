@@ -273,7 +273,7 @@ def test_desktop_grants_are_explicit_owner_only_and_reported(tmp_path: Path) -> 
     assert all(not item.mana_granted for item in grant_status(store))
     store.grant(list(DESKTOP_GRANTS))
     assert all(item.mana_granted for item in grant_status(store))
-    if store.path.stat().st_mode & 0o777:
+    if hasattr(os, "fchmod"):
         assert store.path.stat().st_mode & 0o777 == 0o600
     store.revoke(["teach.record.keyboard"])
     assert store.is_granted("teach.record.keyboard") is False
