@@ -1,5 +1,15 @@
 # Architecture
 
+## Teach Mode pipeline
+
+Teach Mode follows `explicit start → semantic raw events → redaction →
+normalization → parameterization → typed flow → review → safe replay →
+observable verification`. It reuses the shared user data directory,
+computer-control permission scopes, execution event hub, model tool selection,
+API, and persistent automation service. It does not introduce a separate
+executor or scheduler. Typed extension protocols and trust boundaries are
+described in [Teach Mode](26-teach-mode.md#architecture-and-extension-points).
+
 ## Fleet verification boundary
 
 `mana_agent.fleet` owns worker capability inventory, health, deterministic

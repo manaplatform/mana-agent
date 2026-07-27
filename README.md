@@ -27,6 +27,7 @@
 - [Troubleshooting](#troubleshooting)
 - [Configuration](#configuration)
 - [Computer control](docs/22-computer-control.md)
+- [Teach Mode](docs/26-teach-mode.md)
 - [Reverse workers](docs/23-reverse-workers.md)
 - [Telegram connector](#telegram-connector)
 - [Web dashboard](#web-dashboard)
@@ -144,6 +145,20 @@ Local computer control is an explicit `computer` route and remains disabled
 until configured. It exposes narrow tools rather than raw OS command execution,
 keeps remote control off separately, and truthfully reports unsupported desktop
 capabilities. See [Computer Control and Desktop Automation](docs/22-computer-control.md).
+
+Teach Mode turns one explicitly recorded, semantic demonstration into a
+reviewed and verification-driven reusable Mana Flow:
+
+```bash
+mana-agent teach start "Export my weekly report"
+mana-agent teach explain "This date changes every week"
+mana-agent teach stop
+mana-agent teach replay export-my-weekly-report --mode dry_run
+```
+
+Recordings stay under `~/.mana/teach`, secrets are redacted, sensitive replay
+steps retain confirmations, and imports remain untrusted until dry-run and
+activation. See [Teach Mode](docs/26-teach-mode.md).
 
 ---
 
@@ -1103,6 +1118,7 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/21-entry-routing-and-chat-sessions.md`](docs/21-entry-routing-and-chat-sessions.md) | Typed entry routing, connector availability, and chat-session lifecycle. |
 | [`docs/24-fleet.md`](docs/24-fleet.md) | Fleet architecture, trust, workers, CLI, permissions, and operations. |
 | [`docs/25-cross-platform-verification.md`](docs/25-cross-platform-verification.md) | Verification matrices, outcomes, Eval configuration, and recovery. |
+| [`docs/26-teach-mode.md`](docs/26-teach-mode.md) | Demonstration recording, flow compilation, verification, replay, scheduling, privacy, and packages. |
 | [`docs/05-configuration.md`](docs/05-configuration.md) | Provider, model, search, and runtime settings. |
 | [`docs/06-workflows.md`](docs/06-workflows.md) | Common analysis and coding workflows. |
 | [`docs/07-diagram.md`](docs/07-diagram.md) | Standalone Mermaid architecture diagram. |

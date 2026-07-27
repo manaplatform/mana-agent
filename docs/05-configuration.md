@@ -1,5 +1,14 @@
 # Configuration
 
+## Teach Mode
+
+The optional `[teach]` table controls semantic event sources, user-data storage,
+retention, browser/native capture, exclusions, redaction, verification, replay,
+correction checkpoints, private Flow Cards, and experimental sharing. Screenshot
+and voice persistence default off, redaction defaults on, and imports always
+require dry run. The complete typed keys are documented in
+[Teach Mode](26-teach-mode.md#configuration).
+
 ## Mana Fleet
 
 Fleet is disabled by default with `MANA_FLEET_ENABLED=false`. Worker, timeout,

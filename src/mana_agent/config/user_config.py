@@ -208,6 +208,24 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
             "notes": "auto",
         },
     },
+    "teach": {
+        "enabled": True,
+        "event_sources": ["browser", "accessibility", "application", "filesystem"],
+        "retention_days": 30,
+        "screenshot_policy": "never",
+        "coordinate_fallback": True,
+        "voice_enabled": False,
+        "browser_capture": True,
+        "excluded_applications": [],
+        "excluded_domains": [],
+        "recording_allowed_paths": [],
+        "sensitive_detection": True,
+        "automatic_verification": True,
+        "replay_retry_limit": 1,
+        "correction_checkpoints": True,
+        "flow_cards": True,
+        "experimental_sharing": False,
+    },
     # Empty is the compatibility sentinel; the configuration TUI persists an
     # explicit value when the user saves its coding-runtime screen.
     "MANA_CODING_BACKEND": "",
@@ -713,6 +731,13 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw_computer, dict):
             raise UserConfigError("computer_control must be a TOML table.")
         cleaned["computer_control"] = ComputerControlSettings.model_validate(raw_computer).model_dump(mode="json")
+    if "teach" in cleaned:
+        from mana_agent.teach.config import TeachSettings
+
+        raw_teach = cleaned["teach"]
+        if not isinstance(raw_teach, dict):
+            raise UserConfigError("teach must be a TOML table.")
+        cleaned["teach"] = TeachSettings.model_validate(raw_teach).model_dump(mode="json")
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
     if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):

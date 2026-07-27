@@ -1,5 +1,14 @@
 # Computer Control and Desktop Automation
 
+## Teach Mode
+
+Teach Mode consumes semantic application/accessibility events through optional,
+capability-detected platform adapters. Recording permission is distinct from
+replay permission: learned steps retain the existing computer-control scopes,
+risk checks, and exact-action confirmations. Missing Quartz, UI Automation, or
+AT-SPI support produces an explicit doctor limitation and never breaks imports
+or claims successful capture. See [Teach Mode](26-teach-mode.md).
+
 Mana-Agent has an optional, provider-neutral computer-control integration for
 local desktop and installed-application actions. It is **disabled by default**.
 All clients use the same `ComputerControlService`; CLI chat, Textual, dashboard,

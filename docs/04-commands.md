@@ -1,5 +1,13 @@
 # Commands
 
+## Teach Mode
+
+`mana-agent teach` provides `start`, `pause`, `resume`, `status`, `explain`,
+`stop`, `cancel`, `review`, `replay`, `edit`, `repair`, `export`, `import`,
+`card`, `schedule`, and `doctor`. Drafts require review, dry runs never commit
+side effects, and real success requires observable verification. See
+[Teach Mode](26-teach-mode.md) for examples and safety behavior.
+
 ## Fleet
 
 `mana-agent fleet` lists and manages trusted workers, inspects jobs/logs/

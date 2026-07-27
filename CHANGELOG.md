@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-27
 
+- Added the local-first Mana Teach Mode foundation: recoverable recording
+  sessions, versioned semantic events, optional cross-platform capture
+  protocols and diagnostics, redaction, selector ranking, conservative input
+  inference, typed workflow compilation with provenance, safe dry/guided/normal
+  replay, observable verification, targeted selector repair, versioned local
+  storage, deterministic validated `.mana-flow` packages, private Flow Cards,
+  CLI/API/chat-tool/live-event integration, and persistent version-policy-aware
+  scheduling. Imported flows remain untrusted and sensitive actions retain
+  existing permission and confirmation requirements.
+  - Verification: focused Teach Mode, automation, chat-tool, API/WebSocket,
+    configuration, and CLI compatibility checks passed (49 tests); the full
+    suite passed (1,366 passed, 2 skipped). Changed files passed Ruff,
+    `python -m compileall -q src`, and `git diff --check`. Repository-wide Ruff
+    remains non-clean with 792 unrelated pre-existing findings.
+
 - Bumped the package and documented release version to `v0.1.1`.
   - Verification: `python -m pytest tests/test_package_version.py` passed.
 

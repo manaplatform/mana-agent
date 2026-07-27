@@ -200,6 +200,7 @@ CATEGORY_ORDER: tuple[str, ...] = (
     "search",
     "email",
     "computer",
+    "teach",
     "mcp",
     "browser",
     "repository",
@@ -214,6 +215,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "search": "Search & research",
     "email": "Email",
     "computer": "Computer control",
+    "teach": "Teach Mode",
     "mcp": "MCP connectors",
     "browser": "Browser",
     "repository": "Repository",
@@ -240,6 +242,8 @@ def _category_for_name(name: str) -> str:
         return "email"
     if n.startswith(("computer_", "calendar_", "media_", "notes_", "clipboard_")):
         return "computer"
+    if n.startswith("teach_"):
+        return "teach"
     if n in {"browser_get_active_page", "browser_read_page", "browser_list_tabs", "browser_open_url", "browser_activate_tab", "browser_close_tab"}:
         return "computer"
     if n.startswith("browser_"):
@@ -315,6 +319,18 @@ def _add_computer_tools(by_name: dict[str, ToolCatalogEntry]) -> None:
 
     for contract in computer_tool_contracts():
         _merge_entry(by_name, contract.name, contract.description, "computer")
+
+
+def _add_teach_tools(by_name: dict[str, ToolCatalogEntry]) -> None:
+    from mana_agent.config.user_config import get_setting
+
+    settings = get_setting("teach", {})
+    if isinstance(settings, dict) and not bool(settings.get("enabled", True)):
+        return
+    from mana_agent.teach.tool_contracts import teach_tool_contracts
+
+    for contract in teach_tool_contracts():
+        _merge_entry(by_name, contract.name, contract.description, "teach")
 
 
 def _resolve_mcp_overrides(mcp_overrides: list[str] | None) -> list[str]:
@@ -434,6 +450,7 @@ def list_auto_chat_tools(
 
     _add_browser_tools(by_name)
     _add_computer_tools(by_name)
+    _add_teach_tools(by_name)
     _add_mcp_entries(
         by_name,
         include_mcp_discovery=include_mcp_discovery,

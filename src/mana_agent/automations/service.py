@@ -22,7 +22,7 @@ from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
 
 
 ScheduleTarget = Literal["local", "github"]
-BUILTIN_ACTIONS = frozenset({"analyze", "daily_report", "self_improvement", "fleet-verify"})
+BUILTIN_ACTIONS = frozenset({"analyze", "daily_report", "self_improvement", "fleet-verify", "teach-flow"})
 CONFIG_VERSION = 2
 _CRON_FIELDS = re.compile(r"^[0-9*/?,\-]+$")
 _WORKFLOW_PREFIX = "mana-agent-schedule-"
@@ -120,6 +120,17 @@ class ScheduleDefinition:
                 raise AutomationValidationError(
                     "fleet-verify schedules require at least one explicit command."
                 )
+        elif self.action == "teach-flow":
+            flow_id = self.action_config.get("flow_id")
+            policy = self.action_config.get("version_policy")
+            if not isinstance(flow_id, str) or not flow_id:
+                raise AutomationValidationError("teach-flow schedules require a stable flow_id.")
+            if policy not in {"pinned", "latest"}:
+                raise AutomationValidationError("teach-flow version_policy must be pinned or latest.")
+            if policy == "pinned" and not isinstance(self.action_config.get("flow_version"), int):
+                raise AutomationValidationError("Pinned teach-flow schedules require flow_version.")
+            if not isinstance(self.action_config.get("inputs", {}), dict):
+                raise AutomationValidationError("teach-flow schedule inputs must be an object.")
         elif self.action_config:
             raise AutomationValidationError(
                 "Action configuration is supported only for fleet-verify schedules."
@@ -213,6 +224,13 @@ def schedule_command(schedule: ScheduleDefinition, root: Path) -> str:
     root_text = str(root.resolve()).replace("'", "'\\''")
     if schedule.action == "fleet-verify":
         return shlex.join(_fleet_verify_argv(schedule, str(root.resolve())))
+    if schedule.action == "teach-flow":
+        argv = ["mana-agent", "teach", "replay", str(schedule.action_config["flow_id"]), "--mode", "normal"]
+        if schedule.action_config.get("version_policy") == "pinned":
+            argv += ["--version", str(schedule.action_config["flow_version"])]
+        for key, value in sorted(schedule.action_config.get("inputs", {}).items()):
+            argv += ["--input", f"{key}={value}"]
+        return shlex.join(argv)
     return f"mana-agent automation execute --action {schedule.action} --root-dir '{root_text}'"
 
 
@@ -275,6 +293,8 @@ def render_workflow(schedule: ScheduleDefinition) -> str:
         command = schedule.command
     elif schedule.action == "fleet-verify":
         command = shlex.join(_fleet_verify_argv(schedule, "."))
+    elif schedule.action == "teach-flow":
+        command = schedule_command(schedule, Path("."))
     else:
         command = f"mana-agent automation execute --action {schedule.action} --root-dir ."
     assert command
@@ -437,6 +457,19 @@ def execute_builtin_action(
             "stdout": (result.stdout or "")[-4000:],
             "stderr": (result.stderr or "")[-2000:],
         }
+    if action == "teach-flow":
+        from mana_agent.teach.service import TeachService
+        config = dict(action_config or {})
+        flow_id = str(config.get("flow_id", ""))
+        if not flow_id:
+            raise AutomationValidationError("teach-flow requires a persisted flow_id.")
+        result = TeachService().replay(
+            flow_id,
+            version=config.get("flow_version") if config.get("version_policy") == "pinned" else None,
+            mode="normal",
+            inputs=dict(config.get("inputs") or {}),
+        )
+        return result.model_dump(mode="json")
     from mana_agent.ui.streamlit_helpers import trigger_automation
     return trigger_automation("analyze" if action in {"analyze", "daily_report"} else action, root=root)
 
