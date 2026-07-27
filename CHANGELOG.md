@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-27
 
+- Corrected native Teach Mode text events: printable input is now reconstructed
+  in memory into one semantic event (including spaces and backspace edits)
+  instead of persisting the literal `{{ typed_text }}` placeholder. Secure
+  fields remain content-free, and the existing redaction layer still masks
+  detected secrets before storage.
+  - Verification: `PYTHONPATH=src .venv/bin/pytest -q tests/test_teach_mode.py`,
+    changed-file Ruff, `python -m compileall -q src/mana_agent/teach`, and
+    `git diff --check` passed.
+
 - Added the local-first Mana Teach Mode foundation: recoverable recording
   sessions, versioned semantic events, optional cross-platform capture
   protocols and diagnostics, redaction, selector ranking, conservative input

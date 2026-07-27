@@ -265,7 +265,7 @@ def test_desktop_grants_are_explicit_owner_only_and_reported(tmp_path: Path) -> 
     assert store.is_granted("teach.record.keyboard") is False
 
 
-def test_native_keyboard_recorder_never_persists_printable_keys() -> None:
+def test_native_keyboard_recorder_aggregates_printable_keys_and_edits() -> None:
     session = TeachSession(task_name="Desktop", state=SessionState.RECORDING)
     captured: list[RecordedEvent] = []
     recorder = NativeDesktopRecorder()
@@ -291,18 +291,39 @@ def test_native_keyboard_recorder_never_persists_printable_keys() -> None:
         def __str__(self) -> str:
             return "Key.shift"
 
+    class Space:
+        char = None
+
+        def __str__(self) -> str:
+            return "Key.space"
+
     recorder._on_press(Printable("s"))
     recorder._on_press(Printable("e"))
     recorder._on_press(Printable("c"))
-    recorder._on_press(Shift())
-    recorder._on_press(Printable("R"))
-    recorder._on_release(Shift())
+    recorder._on_press(Space())
+    recorder._on_press(Printable("r"))
+    recorder._on_press(Printable("x"))
+    recorder._on_press(type("Backspace", (), {"char": None, "__str__": lambda self: "Key.backspace"})())
     recorder._on_press(Enter())
     serialized = "".join(item.model_dump_json() for item in captured)
-    assert '"character_count":4' in serialized
-    assert '"content_captured":false' in serialized
-    assert "sec" not in serialized
-    assert '"r"' not in serialized.lower()
+    assert '"character_count":5' in serialized
+    assert '"content_captured":true' in serialized
+    assert captured[0].data["value"] == "sec r"
+    assert captured[0].sensitive is False
+
+
+def test_native_keyboard_recorder_never_captures_secure_field_text() -> None:
+    session = TeachSession(task_name="Desktop", state=SessionState.RECORDING)
+    captured: list[RecordedEvent] = []
+    recorder = NativeDesktopRecorder()
+    recorder._session = session
+    recorder._emit = captured.append
+    recorder._typing_target = EventTarget(role="AXSecureTextField", name="Password")
+    recorder._typing_application = EventApplication(name="Login")
+    recorder._typed_count = 3
+    recorder._typed_characters = list("abc")
+    recorder._flush_typing()
+    assert captured[0].data == {"character_count": 3, "content_captured": False}
     assert captured[0].sensitive is True
 
 
@@ -395,7 +416,7 @@ def test_redacted_typing_compiles_to_mandatory_review(tmp_path: Path) -> None:
             source=EventSource.KEYBOARD,
             action="type",
             data={
-                "value": "{{ typed_text }}",
+                "value": "sk-live-abcdefghijklmnopqrstuvwxyz",
                 "character_count": 8,
                 "content_captured": False,
             },
@@ -404,4 +425,4 @@ def test_redacted_typing_compiles_to_mandatory_review(tmp_path: Path) -> None:
     )
     _, flow = service.stop(session.id)
     assert flow.steps[0].requires_review is True
-    assert flow.steps[0].with_["value"] == "{{ typed_text }}"
+    assert flow.steps[0].with_["value"] == "{{ redacted_token }}"

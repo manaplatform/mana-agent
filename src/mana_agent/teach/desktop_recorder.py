@@ -1,4 +1,4 @@
-"""Optional global desktop recorder with redacted keyboard aggregation."""
+"""Optional global desktop recorder with privacy-aware keyboard aggregation."""
 
 from __future__ import annotations
 
@@ -22,10 +22,11 @@ from .models import (
 
 
 class NativeDesktopRecorder:
-    """Capture shortcuts, navigation, redacted typing activity and pointer clicks.
+    """Capture shortcuts, navigation, typed text and pointer clicks.
 
-    Printable key content is never retained. Text values must come from a
-    permitted accessibility value-change event or be supplied during review.
+    Characters are buffered only in memory and emitted as one semantic input
+    event. Secure accessibility controls never expose their value, and the
+    service redacts known secrets before an event reaches local storage.
     """
 
     recorder_id = "native-desktop"
@@ -39,6 +40,9 @@ class NativeDesktopRecorder:
         self._lock = threading.RLock()
         self._modifiers: set[str] = set()
         self._typed_count = 0
+        self._typed_characters: list[str] = []
+        self._typing_target: EventTarget | None = None
+        self._typing_application: EventApplication | None = None
         self._last_desktop_context: tuple[str, str] | None = None
 
     def capabilities(self) -> set[str]:
@@ -88,6 +92,9 @@ class NativeDesktopRecorder:
             self._session = None
             self._emit = None
             self._modifiers.clear()
+            self._typed_characters.clear()
+            self._typing_target = None
+            self._typing_application = None
             self._last_desktop_context = None
             self._paused = False
 
@@ -123,7 +130,15 @@ class NativeDesktopRecorder:
                 and character.isprintable()
                 and self._modifiers.issubset({"shift"})
             ):
-                self._typed_count += 1
+                self._append_typed_character(character)
+                return
+            if name == "space" and self._modifiers.issubset({"shift"}):
+                self._append_typed_character(" ")
+                return
+            if name == "backspace" and not self._modifiers:
+                if self._typed_count:
+                    self._typed_count -= 1
+                    self._typed_characters.pop()
                 return
             self._flush_typing()
             action = "shortcut" if self._modifiers else "navigate"
@@ -160,13 +175,34 @@ class NativeDesktopRecorder:
         if not self._typed_count:
             return
         count = self._typed_count
+        value = "".join(self._typed_characters)
+        target = self._typing_target
+        application = self._typing_application
         self._typed_count = 0
+        self._typed_characters.clear()
+        self._typing_target = None
+        self._typing_application = None
+        if _is_secure_target(target):
+            data: dict[str, Any] = {"character_count": count, "content_captured": False}
+            sensitive = True
+        else:
+            data = {"value": value, "character_count": count, "content_captured": True}
+            sensitive = False
         self._publish(
             EventSource.KEYBOARD,
             "type",
-            data={"value": "{{ typed_text }}", "character_count": count, "content_captured": False},
-            sensitive=True,
+            data=data,
+            sensitive=sensitive,
+            application=application,
+            target=target,
         )
+
+    def _append_typed_character(self, character: str) -> None:
+        if not self._typed_count:
+            self._typing_application = _active_application()
+            self._typing_target = _focused_accessibility_target()
+        self._typed_count += 1
+        self._typed_characters.append(character)
 
     def _publish(
         self,
@@ -177,11 +213,13 @@ class NativeDesktopRecorder:
         context: dict[str, Any] | None = None,
         fallback: RelativePosition | None = None,
         sensitive: bool = False,
+        application: EventApplication | None = None,
+        target: EventTarget | None = None,
     ) -> None:
         if self._session is None or self._emit is None:
             return
-        application = _active_application()
-        target = _focused_accessibility_target()
+        application = application or _active_application()
+        target = target or _focused_accessibility_target()
         try:
             self._emit(
                 RecordedEvent(
@@ -205,6 +243,17 @@ class NativeDesktopRecorder:
 
 def _key_name(key: Any) -> str:
     return str(key).replace("Key.", "").strip("'").lower()
+
+
+def _is_secure_target(target: EventTarget | None) -> bool:
+    if target is None:
+        return False
+    details = " ".join(
+        value for value in (target.role, target.name, target.label, target.automation_id) if value
+    ).lower()
+    return "secure" in details or any(
+        marker in details for marker in ("password", "passcode", "secret", "token", "pin", "credit card")
+    )
 
 
 def _active_application() -> EventApplication:
