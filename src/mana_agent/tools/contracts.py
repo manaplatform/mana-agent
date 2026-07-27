@@ -115,6 +115,19 @@ def _document_create_content_schema() -> dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "subtitle": {"type": "string"},
+            "sections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "heading": {"type": "string"},
+                        "paragraphs": {"type": "array", "items": {"type": "string"}},
+                        "bullets": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "additionalProperties": False,
+                },
+            },
             "tables": {
                 "type": "array",
                 "items": {},
@@ -278,7 +291,8 @@ def _document_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]
         (
             "document_create",
             (
-                "Create a DOCX, XLSX/XLSM, CSV, or simple text PDF artifact without overwriting by default. "
+                "Create a DOCX, XLSX/XLSM, CSV, or styled PDF artifact without overwriting by default. "
+                "Before PDF creation, load the pdf-create skill with read_skill. "
                 "For Excel, content.sheets must be an object keyed by sheet name. "
                 "Do not pass sheets as a list."
             ),

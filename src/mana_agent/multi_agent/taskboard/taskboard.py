@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Any
 
 from mana_agent.multi_agent.core.ids import new_task_id
@@ -30,6 +31,7 @@ def _append_unique(target: list[str], values: list[str]) -> None:
 class TaskBoard:
     def __init__(self, root: str | Path = ".", *, memory_service: MultiAgentMemoryService | None = None) -> None:
         self.store = JsonStateStore(root)
+        self._save_lock = threading.RLock()
         self.memory_service = memory_service
         self.tasks: dict[str, TaskBoardItem] = {}
         self.load()
@@ -124,7 +126,19 @@ class TaskBoard:
         self.save()
         return task
 
-    def create_child_task(self, parent_task_id: str, *, title: str, user_request: str, owner_agent_id: str | None = None) -> TaskBoardItem:
+    def create_child_task(
+        self,
+        parent_task_id: str,
+        *,
+        title: str,
+        user_request: str,
+        owner_agent_id: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        plan: list[str] | None = None,
+        depends_on: list[str] | None = None,
+        decomposition_local_id: str = "",
+        preferred_parallelism: str = "automatic",
+    ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
         task_id = new_task_id()
         task = TaskBoardItem(
@@ -142,6 +156,16 @@ class TaskBoard:
             primary_repository_id=parent.primary_repository_id,
             repository_ids=list(parent.repository_ids),
             owner_agent_id=owner_agent_id,
+            supervisor_agent_id=parent.owner_agent_id,
+            delegated_by_agent_id=parent.owner_agent_id,
+            budget_reserved_tokens=parent.budget_reserved_tokens,
+            budget_remaining_tokens=parent.budget_remaining_tokens,
+            budget_reserved_ms=parent.budget_reserved_ms,
+            acceptance_criteria=list(acceptance_criteria or []),
+            plan=list(plan or []),
+            depends_on=list(depends_on or []),
+            decomposition_local_id=decomposition_local_id,
+            preferred_parallelism=preferred_parallelism,
             memory_status={
                 "duplicate_checked": False,
                 "duplicate_of": None,
@@ -152,9 +176,46 @@ class TaskBoard:
             },
         )
         self.tasks[task_id] = task
+        _append_unique(parent.child_task_ids, [task_id])
+        if decomposition_local_id:
+            parent.decomposition_id_map[decomposition_local_id] = task_id
+        parent.updated_at = utc_now()
         self._record("task.created", task)
         self.save()
         return task
+
+    def update_orchestration(
+        self,
+        task_id: str,
+        *,
+        entry_route: str | None = None,
+        owning_lane: str | None = None,
+        routing_evidence: dict[str, Any] | None = None,
+        result_summary: str | None = None,
+        verification_status: str | None = None,
+        output_artifacts: list[str] | None = None,
+        approval_request_ids: list[str] | None = None,
+        aggregate_progress: str | None = None,
+    ) -> None:
+        task = self.get_task(task_id)
+        for name, value in (
+            ("entry_route", entry_route),
+            ("owning_lane", owning_lane),
+            ("result_summary", result_summary),
+            ("verification_status", verification_status),
+            ("aggregate_progress", aggregate_progress),
+        ):
+            if value is not None:
+                setattr(task, name, str(value))
+        if routing_evidence is not None:
+            task.routing_evidence = dict(routing_evidence)
+        if output_artifacts is not None:
+            task.output_artifacts = list(output_artifacts)
+        if approval_request_ids is not None:
+            task.approval_request_ids = list(approval_request_ids)
+        task.updated_at = utc_now()
+        self._record("task.orchestration_updated", {"task_id": task_id})
+        self.save()
 
     def get_task(self, task_id: str) -> TaskBoardItem:
         return self.tasks[task_id]
@@ -296,7 +357,8 @@ class TaskBoard:
         return text[: max(200, int(token_budget) * 4)]
 
     def save(self) -> None:
-        self.store.save_state({"tasks": {key: serialize(value) for key, value in self.tasks.items()}})
+        with self._save_lock:
+            self.store.save_state({"tasks": {key: serialize(value) for key, value in self.tasks.items()}})
 
     def load(self) -> None:
         payload = self.store.load_state()

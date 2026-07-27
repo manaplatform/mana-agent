@@ -12,6 +12,7 @@ from mana_agent.skills.adaptive import RepositoryIdentityService, SkillStorage
 DEFAULT_SKILL_NAMES = (
     "cli",
     "planning",
+    "pdf-create",
     "coding-agent",
     "django",
     "vue",

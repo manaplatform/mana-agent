@@ -2,6 +2,94 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-27
+
+- Bumped the package and documented release version to `v0.1.1`.
+  - Verification: `python -m pytest tests/test_package_version.py` passed.
+
+## 2026-07-27
+
+- Added first-class `multi_task` gateway routing for compound prompts, with
+  strict model-driven decomposition, persisted root/child TaskBoard lineage and
+  dependencies, independent child routing, bounded DAG execution through the
+  existing specialist lanes and locks, child-scoped capability/approval state,
+  cancellation propagation, idempotent child materialization, aggregate task
+  inspection fields, and truthful partial-result summaries. No keyword router,
+  fallback route, separate task store, scheduler, or frontend entry point was
+  added.
+  - Verification: targeted gateway, entry-routing, multi-task orchestration, and
+    lane-coordinator tests passed (77 tests), with a final orchestration/lane
+    rerun passing 31 tests; the full suite passed (1,344 passed, 3 skipped).
+    Changed-file Ruff, `python -m compileall -q src tests`, and `git diff
+    --check` passed. Repository-wide Ruff remains non-clean with 792 unrelated
+    pre-existing findings.
+
+- Fixed compound-root lane reservation to retain an explicitly persisted
+  TaskBoard root and child instead of creating a replacement root task. Explicit
+  TaskBoard identities are also excluded from unrelated active-task duplicate
+  reuse, preventing child-parent lineage validation failures such as compound
+  research followed by PDF creation.
+  - Verification: focused lane-coordinator, multi-task, gateway, and entry-route
+    tests passed (80 tests); changed files passed Ruff, compilation, and `git
+    diff --check`.
+
+- Fixed independently routed compound children to execute with their validated
+  child request instead of expanding it back into the entire parent conversation.
+  This prevents web-search providers from rejecting oversized compound-context
+  queries (observed as Tavily HTTP 400) while retaining normal conversational
+  context behavior for ordinary single-task turns.
+  - Verification: a live bounded Tavily request returned HTTP 200; focused
+    entry-routing, gateway, lane, and multi-task tests passed; changed files
+    passed Ruff, compilation, and `git diff --check`.
+
+- Added a typed `artifact_family` entry-decision field for artifact creation
+  without an existing filename or attachment, and injects persisted successful
+  prerequisite summaries into dependent child execution. Research-to-PDF DAGs
+  can now ground the PDF in the completed research while artifact preflight uses
+  the model-selected `pdf` handler instead of failing for missing file evidence.
+  - Verification: focused entry-routing, artifact-routing, gateway, lane, and
+    multi-task tests passed; changed files passed Ruff, compilation, and `git
+    diff --check`.
+
+- Fixed attachment-free artifact creation to pass AskAgent a concrete inert
+  index path inside the isolated artifact workspace. AskAgent requires a path
+  even under a document-only tool policy, so passing `None` previously caused
+  research-to-PDF children to fail before `document_create` with a `NoneType`
+  `os.PathLike` error.
+  - Verification: focused attachment-free PDF and artifact-routing regressions,
+    gateway, lane, and multi-task tests passed; changed files passed Ruff,
+    compilation, and `git diff --check`.
+
+- Added typed atomic-child routing constraints to compound execution. The entry
+  model now receives a child-specific route registry that excludes recursive
+  `multi_task`, while strict validation still stops safely if the model violates
+  the constraint. Parent conversation context remains available for continuity
+  without allowing an already-decomposed research child to become a nested
+  compound plan.
+  - Verification: focused entry-routing, gateway, artifact-routing,
+    lane-coordinator, and multi-task orchestration tests passed (87 tests);
+    changed files passed Ruff, compilation, and `git diff --check`.
+
+- Added `OpenClaw_Research_Overview.pdf` at the repository root as requested.
+  The supplied one-page export was visually clipped and ended mid-sentence, so
+  the readable material was reformatted into a wrapped, paginated two-page
+  report and the incomplete trailing claim was explicitly omitted.
+  - Verification: Poppler reported a valid two-page Letter PDF; both rendered
+    pages were visually inspected for clipping, overlap, and legibility.
+
+- Added the project and packaged `pdf-create` skill, required successful
+  `read_skill("pdf-create")` before PDF `document_create`, and moved
+  attachment-free artifact creation to the Mana-Agent launch root while
+  retaining isolated staging for attached documents. Replaced the former
+  single-line, 3,000-character PDF writer with a structured ReportLab renderer
+  supporting titles, subtitles, sections, bullets, tables, pagination, and page
+  footers; added ReportLab as a runtime dependency.
+  - Verification: the skill validator passed; focused document, AskAgent,
+    skill-loading, prompt, entry-routing, gateway, artifact-routing, and
+    multi-task tests passed (136 tests); a two-page structured PDF was rendered
+    with Poppler and both pages passed visual inspection; changed files passed
+    Ruff, compilation, dependency checks, and `git diff --check`.
+
 ## 2026-07-26
 
 - Fixed standalone API coordinators to initialize a persistent Fleet registry

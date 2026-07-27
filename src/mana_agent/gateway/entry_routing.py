@@ -14,6 +14,7 @@ from mana_agent.evals.recorder import record_current
 
 
 EntryRouteName = Literal[
+    "multi_task",
     "conversation",
     "coding",
     "gmail",
@@ -73,6 +74,8 @@ class EntryRouteContext:
     previous_route: str = ""
     conversation_summary: str = ""
     artifact_evidence: dict[str, Any] = field(default_factory=dict)
+    atomic_child: bool = False
+    orchestration_parent_task_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,6 +95,7 @@ class EntryRoutingDecision:
     command_name: str = ""
     command_arguments: tuple[str, ...] = ()
     remote_request: dict[str, Any] = field(default_factory=dict)
+    artifact_family: str = ""
     source: str = "model"
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,6 +151,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     command_name: str = ""
     command_arguments: list[str] = Field(default_factory=list)
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
+    artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
 
 
 class EntryRoutingError(RuntimeError):
@@ -201,6 +206,12 @@ return the registry's truthful setup or authorization error; do not send a suppo
 request to conversation merely because its connector is unavailable.
 
 Route semantics:
+- multi_task: two or more actionable goals that need distinct execution lifecycles, different
+  routes, independent verification, or an explicit dependency order. It is orchestration-only and
+  requires exactly ["none"]. Do not select it for several implementation steps that naturally
+  form one atomic coding workflow, such as changing one function and running its tests. The
+  complete prompt, conversation context, registry, and capabilities decide this; never count
+  keywords or conjunctions.
 - command: a request equivalent to one command exposed by the supplied command route tools. Return
   its canonical command_name and structured string command_arguments; never execute it directly.
   Remote-worker lifecycle requests must select the `remote-worker` command with exactly
@@ -218,7 +229,7 @@ Route semantics:
   For an approved analysis request, choose a bounded command that emits the
   requested concise findings (counts, top entries, and relevant samples) rather
   than streaming an entire log; its stdout is shown back in chat after approval.
-- artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit.
+- artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
 - gmail: inspect or act on the user's Gmail/email account through registered email tools.
 - calendar: calendar account operations through a registered account/cloud calendar connector.
 - computer: permission-aware control of the local desktop, installed applications, native calendar,
@@ -243,6 +254,10 @@ availability fallback for a cloud calendar or isolated public-browser request.
 
 Use previous_route and conversation_summary only for continuity. Reuse the active route for a true
 follow-up; reroute when the user's intent changes. Do not route by isolated keywords alone.
+When routing_constraints.atomic_child is true, the request is a validated atomic child of an
+existing compound plan. Select its exact executable, capability-error, or unsupported route and
+never select multi_task. The parent conversation summary provides continuity only; it must not
+cause the already-decomposed child to be orchestrated again.
 
 The required_sources array is an execution contract: every listed tool source is mandatory and
 must complete successfully before response generation. Never substitute a source or provider.
@@ -256,7 +271,7 @@ fallback. Direct URL signals are supplied separately; do not treat them as repos
 
 Return JSON only:
 {
-  "route": "conversation|coding|remote_execution|artifact|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|unsupported|capability_error",
+  "route": "multi_task|conversation|coding|remote_execution|artifact|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|unsupported|capability_error",
   "confidence": 0.0,
   "reason": "short routing reason",
   "required_sources": ["browser"],
@@ -267,10 +282,17 @@ Return JSON only:
   "reuse_active_route": false,
   "command_name": "sessions",
   "command_arguments": ["list"],
-  "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true}
+  "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
+  "artifact_family": ""
 }
 
 Examples:
+- “Change this function and run its tests” -> coding, ["repository"] (one atomic workflow).
+- “Check open GitHub issues and update the README” -> multi_task, ["none"] (independent routes).
+- “Research the current API, then update the implementation from those findings” -> multi_task,
+  ["none"] (the coding child depends on the research child).
+- “Read my email, add its meeting to my calendar, create a summary document, and verify a remote
+  service” -> multi_task, ["none"] (mixed connectors, artifact, and remote execution).
 - “Review https://example.com/about” -> browser, ["browser"], that URL.
 - “Check https://example.com and prepare a complete SEO report” -> browser with search only when
   public indexing/discovery is independently required; both sources are mandatory if selected.
@@ -299,12 +321,24 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: routing model is unavailable."
             )
+        routes = self.registry.snapshot()
+        atomic_child = bool(getattr(context, "atomic_child", False))
+        parent_task_id = str(getattr(context, "orchestration_parent_task_id", ""))
+        disallowed_routes = ["multi_task"] if atomic_child else []
+        if disallowed_routes:
+            routes = [row for row in routes if row["name"] not in disallowed_routes]
         payload = {
             "user_prompt": str(user_prompt or "").strip(),
             "context": context.to_dict(),
-            "routes": self.registry.snapshot(),
+            "routes": routes,
+            "routing_constraints": {
+                "atomic_child": atomic_child,
+                "disallowed_routes": disallowed_routes,
+                "orchestration_parent_task_id": parent_task_id,
+            },
             "required_source_vocabulary": sorted(REQUIRED_SOURCES),
             "required_source_rules": {
+                "multi_task": [["none"]],
                 "conversation": [["none"]],
                 "command": [["none"]],
                 "unsupported": [["none"]],
@@ -347,7 +381,7 @@ class EntryRouter:
                         for part in content
                     )
                 decision_payload = _extract_json(str(content))
-            decision = self._validate(decision_payload)
+            decision = self._validate(decision_payload, context=context)
             record_current(
                 "model.decision",
                 {
@@ -370,12 +404,22 @@ class EntryRouter:
                 f"Reason: {exc}"
             ) from exc
 
-    def _validate(self, payload: dict[str, Any]) -> EntryRoutingDecision:
+    def _validate(
+        self,
+        payload: dict[str, Any],
+        *,
+        context: EntryRouteContext | None = None,
+    ) -> EntryRoutingDecision:
         route = str(payload.get("route") or "").strip()
         if route not in self.registry.names:
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 f"Reason: unknown route {route or '<missing>'}."
+            )
+        if context is not None and bool(getattr(context, "atomic_child", False)) and route == "multi_task":
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: an atomic compound child cannot select recursive multi_task routing."
             )
         try:
             confidence = float(payload.get("confidence"))
@@ -411,11 +455,11 @@ class EntryRouter:
             )
         if len(set(sources)) != len(sources) or ("none" in sources and len(sources) != 1):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: invalid required_sources combination.")
-        if route in {"conversation", "command", "unsupported"} and sources != ("none",):
+        if route in {"multi_task", "conversation", "command", "unsupported"} and sources != ("none",):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: tool-free routes require required_sources=[\"none\"].")
         if route == "capability_error" and not any(source in TOOL_SOURCES for source in sources):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: capability_error requires an unavailable tool source.")
-        if route not in {"conversation", "command", "unsupported", "capability_error"} and not any(source in TOOL_SOURCES for source in sources):
+        if route not in {"multi_task", "conversation", "command", "unsupported", "capability_error"} and not any(source in TOOL_SOURCES for source in sources):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: executable route requires a tool source.")
         target_urls = tuple(str(item).strip() for item in (payload.get("target_urls") or []) if str(item).strip())
         if not isinstance(payload.get("target_urls") or [], list) or any(not url.startswith(("http://", "https://")) for url in target_urls):
@@ -459,6 +503,24 @@ class EntryRouter:
                     "Reason: command route selected an unknown command."
                 )
         remote_request = payload.get("remote_request") or {}
+        artifact_family = str(payload.get("artifact_family") or "").strip().lower()
+        allowed_artifact_families = {
+            "spreadsheet", "document", "presentation", "pdf", "image",
+        }
+        if artifact_family and artifact_family not in allowed_artifact_families:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: artifact_family is invalid."
+            )
+        if route == "artifact" and not artifact_family and context is not None:
+            evidence_families = list(context.artifact_evidence.get("artifact_families") or [])
+            if len(evidence_families) == 1:
+                artifact_family = str(evidence_families[0])
+        if route == "artifact" and not artifact_family:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: artifact route requires artifact_family when evidence does not resolve it."
+            )
         if route == "remote_execution" and not isinstance(remote_request, dict):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: remote_execution requires structured remote_request.")
         if route == "remote_execution":
@@ -518,6 +580,7 @@ class EntryRouter:
                 else ()
             ),
             remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
+            artifact_family=artifact_family,
         )
 
 

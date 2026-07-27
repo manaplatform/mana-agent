@@ -47,6 +47,7 @@ class _RouteModel:
                     "reason_code": "TEST_ROUTE",
                     "error_code": "GMAIL_NOT_AVAILABLE" if route == "capability_error" else "",
                     "reuse_active_route": len(self.payloads) > 1,
+                    "artifact_family": "pdf" if route == "artifact" else "",
                 }
             )
         )
@@ -61,8 +62,11 @@ class _AskAgent:
             trace=[{"tool_name": "email_search", "status": "ok"}],
         )
         self.calls: list[dict[str, Any]] = []
+        self.project_roots: list[Path] = []
 
     def run(self, **kwargs: Any) -> Any:
+        if hasattr(self, "project_root"):
+            self.project_roots.append(Path(self.project_root).resolve())
         self.calls.append(kwargs)
         return self.response
 
@@ -115,6 +119,7 @@ class _CodingAgent:
 def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
     registry = EntryRouteRegistry()
     for name, description in (
+        ("multi_task", "compound task orchestration"),
         ("conversation", "ordinary conversation"),
         ("coding", "Codex coding"),
         ("gmail", "Gmail inbox"),
@@ -185,7 +190,8 @@ def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_p
     upload.parent.mkdir()
     upload.write_bytes(b"worksheet")
     coding = _CodingAgent()
-    gateway, _chat, _ask = _gateway(tmp_path, _RouteModel("artifact"), coding_agent=coding)
+    gateway, _chat, ask = _gateway(tmp_path, _RouteModel("artifact"), coding_agent=coding)
+    ask.project_root = tmp_path
 
     result = gateway.process_turn(
         gateway.create_session(frontend="test"),
@@ -197,6 +203,32 @@ def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_p
     assert result.payload["lane_id"] == "artifact"
     assert result.payload["routing_evidence"]["artifact_families"] == ["spreadsheet"]
     assert coding.calls == []
+    assert ask.calls[0]["index_dir"] is not None
+    assert Path(ask.calls[0]["index_dir"]).name == ".artifact-index"
+
+
+def test_pdf_creation_without_attachment_uses_isolated_concrete_index_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, ask = _gateway(tmp_path, _RouteModel("artifact"))
+    ask.project_root = tmp_path
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Create a PDF from the completed research.",
+    )
+
+    assert result.mode == "route-artifact"
+    assert ask.calls[0]["index_dir"] is not None
+    assert Path(ask.calls[0]["index_dir"]).name == ".artifact-index"
+    assert Path(ask.calls[0]["index_dir"]).parent.name.startswith("turn_")
+    assert ask.project_roots == [tmp_path.resolve()]
+    assert ask.calls[0]["tool_policy"]["skill_root"] == str(tmp_path.resolve())
+    assert ask.calls[0]["tool_policy"]["allowed_tools"][0] == "read_skill"
+    assert "read_skill(skill_name='pdf-create')" in ask.calls[0]["question"]
+    assert "Mana-Agent launch directory" in ask.calls[0]["question"]
 
 
 def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path, monkeypatch) -> None:
@@ -438,8 +470,120 @@ def test_router_exposes_exact_required_source_contract_to_model() -> None:
 
     assert decision.required_sources == ("none",)
     assert captured["required_source_rules"]["command"] == [["none"]]
+    assert captured["required_source_rules"]["multi_task"] == [["none"]]
     assert "command" not in captured["required_source_vocabulary"]
     assert "repository" in captured["required_source_vocabulary"]
+
+
+def test_multi_task_route_is_registered_and_requires_no_parent_sources() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "multi_task",
+            "confidence": 0.97,
+            "reason": "The request has separately routed work.",
+            "required_sources": ["none"],
+            "target_urls": [],
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Inspect GitHub issues, then update the repository.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.route == "multi_task"
+    assert decision.required_sources == ("none",)
+
+
+def test_multi_task_route_rejects_claimed_child_source() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "multi_task",
+            "confidence": 0.97,
+            "reason": "Invalid parent source claim.",
+            "required_sources": ["repository"],
+            "target_urls": [],
+        }))
+    )
+
+    with pytest.raises(EntryRoutingError, match="tool-free routes"):
+        EntryRouter(llm=model, registry=registry).route(
+            user_prompt="Inspect GitHub issues and update the repository.",
+            context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+        )
+
+
+def test_atomic_child_excludes_recursive_orchestration_from_model_registry() -> None:
+    registry = _registry()
+    model = _RouteModel("search")
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Research OpenClaw.",
+        context=EntryRouteContext(
+            session_id="s",
+            conversation_id="s",
+            turn_id="t:research_openclaw",
+            conversation_summary="Research OpenClaw and create a PDF.",
+            atomic_child=True,
+            orchestration_parent_task_id="task-root",
+        ),
+    )
+
+    assert decision.route == "search"
+    assert "multi_task" not in {row["name"] for row in model.payloads[0]["routes"]}
+    assert model.payloads[0]["routing_constraints"] == {
+        "atomic_child": True,
+        "disallowed_routes": ["multi_task"],
+        "orchestration_parent_task_id": "task-root",
+    }
+
+
+def test_atomic_child_rejects_model_attempt_to_select_recursive_orchestration() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "multi_task",
+            "confidence": 0.97,
+            "reason": "Incorrectly reconsidered the parent compound request.",
+            "required_sources": ["none"],
+            "target_urls": [],
+        }))
+    )
+
+    with pytest.raises(EntryRoutingError, match="atomic compound child"):
+        EntryRouter(llm=model, registry=registry).route(
+            user_prompt="Research OpenClaw.",
+            context=EntryRouteContext(
+                session_id="s",
+                conversation_id="s",
+                turn_id="t:research_openclaw",
+                atomic_child=True,
+                orchestration_parent_task_id="task-root",
+            ),
+        )
+
+
+def test_artifact_creation_uses_model_selected_family_without_file_evidence() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "artifact",
+            "confidence": 0.98,
+            "reason": "Create a PDF artifact.",
+            "required_sources": ["artifact"],
+            "target_urls": [],
+            "artifact_family": "pdf",
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Create a PDF from the supplied research.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.artifact_family == "pdf"
 
 
 def test_router_unknown_source_error_identifies_invalid_model_value() -> None:
@@ -558,6 +702,43 @@ def test_failed_required_browser_source_stops_multi_source_plan(tmp_path: Path, 
         "browser": {"status": "failed", "error": "browser returned no evidence"}
     }
     assert len(failing_browser.calls) == 1
+
+
+def test_compound_child_search_uses_only_its_validated_child_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _RouteModel("conversation"))
+    captured: dict[str, str] = {}
+
+    def execute_required_sources(**kwargs: Any):
+        captured["text"] = kwargs["text"]
+        from mana_agent.gateway.turn_engine import ChatTurnResult
+
+        return ChatTurnResult(answer="research complete", payload={"route": "search"})
+
+    monkeypatch.setattr(gateway, "_execute_required_sources", execute_required_sources)
+    child_prompt = "Research current public information about Hermes Agent."
+    decision = EntryRoutingDecision(
+        route="search",
+        confidence=0.98,
+        reason="Current public research is required.",
+        required_sources=("search",),
+    )
+
+    gateway._execute_entry_route(
+        decision=decision,
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t:research"),
+        text=child_prompt,
+        state={"messages": [{"role": "user", "content": "unrelated parent conversation"}]},
+        ask_service=gateway.get_ask_service(),
+        sink=None,
+        options={"_isolated_child_prompt": True},
+    )
+
+    assert captured["text"] == child_prompt
+    assert "unrelated parent conversation" not in captured["text"]
 
 
 def test_session_close_new_history_and_stale_finalization(tmp_path: Path, monkeypatch) -> None:

@@ -271,6 +271,7 @@ INTENT_LANES: dict[str, LaneId] = {
 }
 
 ENTRY_ROUTE_LANES: dict[str, LaneId] = {
+    "multi_task": LaneId.RESEARCH,
     "artifact": LaneId.ARTIFACT,
     "coding": LaneId.CODING,
     "browser": LaneId.RESEARCH,
