@@ -335,9 +335,7 @@ def test_mem0_key_becomes_keyring_reference_not_plain_config(monkeypatch: pytest
 def test_low_level_config_writer_never_persists_mem0_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from mana_agent.config import user_config
 
-    monkeypatch.setattr(user_config, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(user_config, "CONFIG_FILE", tmp_path / "config.toml")
-    monkeypatch.setattr(user_config, "SECRETS_FILE", tmp_path / "secrets.toml")
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
     user_config.save_effective_user_config(
         {"MANA_MEMORY_MODE": "external", "MANA_MEMORY_PROVIDER": "mem0", "MEM0_API_KEY": "never-write-this"},
         merge=False,

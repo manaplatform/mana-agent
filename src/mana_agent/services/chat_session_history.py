@@ -52,6 +52,7 @@ class ChatSessionHistory:
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
         conversation_id: str | None = None,
+        created_at: str | None = None,
     ) -> ChatSessionMessage:
         sid = str(session_id or "").strip()
         if not sid:
@@ -63,6 +64,7 @@ class ChatSessionHistory:
             turn_id=str(turn_id or ""),
             role=str(role or "system").strip().lower(),
             content=redact_json_line(str(content or "")),
+            created_at=created_at or _utc_now(),
             metadata=dict(redact_secrets(dict(metadata or {}))),
         )
         path = self.path(sid)

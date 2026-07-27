@@ -2,6 +2,556 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-27
+
+- Bumped the package and documented release version to `v0.1.1`.
+  - Verification: `python -m pytest tests/test_package_version.py` passed.
+
+## 2026-07-27
+
+- Added first-class `multi_task` gateway routing for compound prompts, with
+  strict model-driven decomposition, persisted root/child TaskBoard lineage and
+  dependencies, independent child routing, bounded DAG execution through the
+  existing specialist lanes and locks, child-scoped capability/approval state,
+  cancellation propagation, idempotent child materialization, aggregate task
+  inspection fields, and truthful partial-result summaries. No keyword router,
+  fallback route, separate task store, scheduler, or frontend entry point was
+  added.
+  - Verification: targeted gateway, entry-routing, multi-task orchestration, and
+    lane-coordinator tests passed (77 tests), with a final orchestration/lane
+    rerun passing 31 tests; the full suite passed (1,344 passed, 3 skipped).
+    Changed-file Ruff, `python -m compileall -q src tests`, and `git diff
+    --check` passed. Repository-wide Ruff remains non-clean with 792 unrelated
+    pre-existing findings.
+
+- Fixed compound-root lane reservation to retain an explicitly persisted
+  TaskBoard root and child instead of creating a replacement root task. Explicit
+  TaskBoard identities are also excluded from unrelated active-task duplicate
+  reuse, preventing child-parent lineage validation failures such as compound
+  research followed by PDF creation.
+  - Verification: focused lane-coordinator, multi-task, gateway, and entry-route
+    tests passed (80 tests); changed files passed Ruff, compilation, and `git
+    diff --check`.
+
+- Fixed independently routed compound children to execute with their validated
+  child request instead of expanding it back into the entire parent conversation.
+  This prevents web-search providers from rejecting oversized compound-context
+  queries (observed as Tavily HTTP 400) while retaining normal conversational
+  context behavior for ordinary single-task turns.
+  - Verification: a live bounded Tavily request returned HTTP 200; focused
+    entry-routing, gateway, lane, and multi-task tests passed; changed files
+    passed Ruff, compilation, and `git diff --check`.
+
+- Added a typed `artifact_family` entry-decision field for artifact creation
+  without an existing filename or attachment, and injects persisted successful
+  prerequisite summaries into dependent child execution. Research-to-PDF DAGs
+  can now ground the PDF in the completed research while artifact preflight uses
+  the model-selected `pdf` handler instead of failing for missing file evidence.
+  - Verification: focused entry-routing, artifact-routing, gateway, lane, and
+    multi-task tests passed; changed files passed Ruff, compilation, and `git
+    diff --check`.
+
+- Fixed attachment-free artifact creation to pass AskAgent a concrete inert
+  index path inside the isolated artifact workspace. AskAgent requires a path
+  even under a document-only tool policy, so passing `None` previously caused
+  research-to-PDF children to fail before `document_create` with a `NoneType`
+  `os.PathLike` error.
+  - Verification: focused attachment-free PDF and artifact-routing regressions,
+    gateway, lane, and multi-task tests passed; changed files passed Ruff,
+    compilation, and `git diff --check`.
+
+- Added typed atomic-child routing constraints to compound execution. The entry
+  model now receives a child-specific route registry that excludes recursive
+  `multi_task`, while strict validation still stops safely if the model violates
+  the constraint. Parent conversation context remains available for continuity
+  without allowing an already-decomposed research child to become a nested
+  compound plan.
+  - Verification: focused entry-routing, gateway, artifact-routing,
+    lane-coordinator, and multi-task orchestration tests passed (87 tests);
+    changed files passed Ruff, compilation, and `git diff --check`.
+
+- Added `OpenClaw_Research_Overview.pdf` at the repository root as requested.
+  The supplied one-page export was visually clipped and ended mid-sentence, so
+  the readable material was reformatted into a wrapped, paginated two-page
+  report and the incomplete trailing claim was explicitly omitted.
+  - Verification: Poppler reported a valid two-page Letter PDF; both rendered
+    pages were visually inspected for clipping, overlap, and legibility.
+
+- Added the project and packaged `pdf-create` skill, required successful
+  `read_skill("pdf-create")` before PDF `document_create`, and moved
+  attachment-free artifact creation to the Mana-Agent launch root while
+  retaining isolated staging for attached documents. Replaced the former
+  single-line, 3,000-character PDF writer with a structured ReportLab renderer
+  supporting titles, subtitles, sections, bullets, tables, pagination, and page
+  footers; added ReportLab as a runtime dependency.
+  - Verification: the skill validator passed; focused document, AskAgent,
+    skill-loading, prompt, entry-routing, gateway, artifact-routing, and
+    multi-task tests passed (136 tests); a two-page structured PDF was rendered
+    with Poppler and both pages passed visual inspection; changed files passed
+    Ruff, compilation, dependency checks, and `git diff --check`.
+
+## 2026-07-26
+
+- Fixed standalone API coordinators to initialize a persistent Fleet registry
+  for reverse-worker capability updates. Authenticated workers can now publish
+  their inventory when the server is started with `mana-agent api` or
+  `mana_agent.api.app:app`, instead of being rejected because no ChatGateway
+  was supplied.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/fleet/test_fleet_core.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (36 passed); `git diff --check`
+    passed. Ruff was not run because it is not installed in the local virtual
+    environment.
+
+- Updated stable release publishing to retain the triggering Git tag (including
+  calendar tags such as `v2026.07.26`) while using the application version for
+  the GitHub Release title and package metadata validation.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/test_publish_pypi_workflow.py` passed (9 passed); the release
+    validator accepted `v2026.07.26` with explicit mismatch opt-in; targeted
+    Ruff and `git diff --check` passed.
+
+- Fixed reverse workers enrolled against HTTPS coordinators to connect through
+  `wss://` rather than passing an invalid `https://` URL to the WebSocket
+  client.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py` passed (23 passed); targeted Ruff and
+    `git diff --check` passed.
+
+- Updated the stable GitHub Release workflow to derive its tag, title, and
+  release-notes version from `pyproject.toml` instead of the GitHub event tag.
+  A mismatched version-tag trigger now stops publication before any release is
+  created.
+  - Verification: `venv/bin/python -m pytest -q
+    tests/test_publish_pypi_workflow.py` passed (8 passed); release and PyPI
+    workflow YAML parsed with PyYAML; `git diff --check` passed.
+
+- Fixed Windows Python 3.12 CI for macOS LaunchAgent lifecycle tests by making
+  the launchd user ID an explicit injectable boundary. Production macOS still
+  resolves its real POSIX UID, while cross-platform tests no longer call the
+  unavailable Windows `os.getuid`.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py tests/fleet/test_fleet_core.py` passed
+    (34 passed); an explicit `os.getuid`-unavailable simulation produced the
+    expected injected `gui/501` launchd domain; targeted Ruff, compilation, and
+    `git diff --check` passed.
+  - Verification note: Windows is not available locally, so GitHub Actions
+    remains the authoritative native Windows Python 3.12 run.
+
+- Added worker-gateway settings to the typed Mana user configuration and made
+  API startup read `MANA_WORKER_GATEWAY_*` values from `~/.mana/config.toml`,
+  with environment variables filling keys not explicitly configured.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/commands/test_worker_cli.py tests/test_chat_first_configuration.py
+    tests/test_tui_user_config.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (60 passed); targeted Ruff,
+    compilation, and `git diff --check` passed. A live local configuration load
+    resolved the gateway as enabled at the configured HTTP public URL.
+
+- Fixed coordinator enrollment failures to display bounded API error details
+  without urllib tracebacks. Disabled or invalid worker-gateway configuration
+  now identifies the exact environment variables required, and the HTTP setup
+  documentation enables the gateway before enrollment.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py
+    tests/remote_execution/test_reverse_worker_protocol.py
+    tests/gateway/test_chat_gateway.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (51 passed); targeted Ruff,
+    compilation, and `git diff --check` passed.
+
+- Added Linux `worker start`, `stop`, and `restart` through the installed
+  `systemd --user` unit, with install-state validation and concise bounded
+  systemctl errors.
+- Made worker service-control errors render through explicit stderr output and
+  exit code 1, avoiding version-dependent `ClickException` handling in direct
+  Typer sub-app invocation.
+- Made `worker enrollment create --worker-id` optional so the coordinator
+  generates and returns a unique worker ID. Generated install commands now
+  include the reserved `--worker-id` (and HTTP opt-in when required), while
+  `worker install` requires that ID to prevent token/registration mismatches.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/remote_execution
+    tests/fleet/test_fleet_core.py tests/gateway/test_chat_gateway.py
+    tests/test_api_conversations.py tests/test_api_workspaces.py` passed (76
+    passed); targeted Ruff, compilation, CLI help checks, and `git diff
+    --check` passed.
+  - CI rendering regression verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/test_cli_smoke.py
+    tests/remote_execution` passed (99 passed); the real missing-service command
+    printed the expected stderr error and exited 1.
+
+- Added explicit `--allow-insecure-http` reverse-worker enrollment for trusted
+  development networks, including persisted `ws://` reconnect behavior and a
+  backward-compatible `--insecure-local-development` CLI alias. HTTPS remains
+  the default and HTTP without explicit opt-in fails safely.
+  - Added matching coordinator opt-in through
+    `MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP`.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_worker_cli.py tests/remote_execution
+    tests/gateway/test_chat_gateway.py tests/test_api_conversations.py
+    tests/test_api_workspaces.py` passed (58 passed); targeted Ruff,
+    compilation, and `git diff --check` passed.
+
+- Fixed macOS `worker start` to report an actionable install-first error when
+  the LaunchAgent is absent, bootstrap an installed but unloaded LaunchAgent,
+  and present bounded `launchctl` failures without a Python traceback.
+  - Verification: `.venv/bin/python -m pytest -q
+    tests/commands/test_fleet_cli.py tests/remote_execution
+    tests/commands/test_worker_cli.py` passed (23 passed); the real
+    `.venv/bin/mana-agent worker start` missing-install path exited 1 with the
+    expected concise error; targeted Ruff, compilation, and `git diff --check`
+    passed.
+
+- Updated the package and documented release version to `v0.1.0`.
+  - Verification: `.venv/bin/python -m pytest -q tests/test_package_version.py` passed.
+
+- Fixed package installation by replacing nonexistent LangChain `0.3.50`
+  minimum versions with the mutually compatible published `0.3.27` baseline
+  and synchronizing `pyproject.toml` with `requirements.txt`.
+  - Verification: isolated `pip install --dry-run --ignore-installed .`
+    resolved the project and selected `langchain==0.3.30`,
+    `langchain-community==0.3.31`, and `langchain-openai==0.3.35`; the built
+    wheel contains all three corrected dependency declarations; packaging,
+    LangChain compatibility, dependency-service, and CLI smoke tests passed (84
+    passed); targeted Ruff and `git diff --check` passed.
+
+- Fixed the remaining Ubuntu Python 3.10 failures by catching
+  `asyncio.TimeoutError` explicitly, using the conditional `tomli` backport in
+  the standalone release validator, and intercepting `Path.open` writes in the
+  pytest real-home safety guard for Python versions whose pathlib accessor
+  bypasses a patched `io.open`.
+  - Verification: `.venv/bin/python -m pytest -q` passed (1311 passed, 2
+    skipped); all affected computer-control, release-validation,
+    runtime-isolation, and package tests passed (56 passed); the forced Python
+    3.10 release-validator TOML path passed; targeted Ruff, source/script
+    compilation, and `git diff --check` passed.
+  - Verification note: Python 3.10 is not installed locally, so the GitHub
+    Actions Ubuntu Python 3.10 job remains the authoritative native run.
+
+- Made Fleet capability fingerprints and signed inventory payloads deterministic
+  across operating systems and Python hash seeds by recursively sorting all
+  unordered capability values before JSON serialization.
+  - Verification: `PYTHONHASHSEED=4 .venv/bin/python -m pytest -q` passed
+    (1310 passed, 2 skipped); the Fleet, Fleet CLI, and Fleet Eval suites passed
+    under the same seed (14 passed); the focused macOS failure cases and
+    cross-seed regression passed (3 passed); targeted Ruff, Fleet source
+    compilation, and `git diff --check` passed.
+
+- Fixed Windows CI interruption during stale session and lane-lock recovery by
+  replacing destructive Windows `os.kill(pid, 0)` liveness probes with a
+  read-only process-handle query shared by recovery and connector-status paths.
+  - Verification: `.venv/bin/python -m pytest -q` passed (1309 passed, 2
+    skipped); targeted Windows-process, stale-session, lane-lock, and Telegram
+    tests passed (16 passed); targeted Ruff, source compilation, and
+    `git diff --check` passed.
+  - Verification note: the native Windows process-handle branch requires the
+    GitHub Actions Windows runner for authoritative execution.
+
+- Fixed Python 3.10 CI collection by routing TOML parsing through a shared
+  compatibility import, adding the conditional `tomli` backport dependency,
+  and making package-version and test TOML reads use the same supported
+  fallback. Added a Python 3.10-compatible `StrEnum` boundary for computer
+  control, preventing the next standard-library compatibility failure in the
+  expanded CI matrix.
+  - Verification: forced `tomllib`-unavailable and `StrEnum`-unavailable
+    import checks passed; `.venv/bin/python -m pytest -q
+    tests/connectors/test_telegram_cli_config.py tests/test_codex_runtime.py
+    tests/test_package_version.py tests/commands/test_analyze_slash_command.py
+    tests/commands/test_fleet_cli.py tests/evals tests/execution tests/fleet
+    tests/gateway` passed (182 passed); computer-control tests passed (43
+    passed); the built wheel contains
+    `Requires-Dist: tomli<3.0,>=2.0; python_version < "3.11"`; targeted Ruff,
+    source compilation, and `git diff --check` passed.
+  - Verification note: an actual Python 3.10 interpreter is not installed in
+    the local environment; the conditional branches were forced explicitly and
+    the GitHub Actions Python 3.10 job remains the authoritative matrix run.
+
+- Added the disabled-by-default Mana Fleet distributed verification foundation:
+  strict versioned worker/capability/selection/plan/job/result/run models,
+  authenticated bounded capability updates, deterministic fail-closed worker
+  selection, persistent health and revocation, atomic owner-only run storage,
+  ordered replayable events, cross-process cancellation, restart recovery,
+  immutable completed results, matrix aggregation, and exact-action Fleet
+  permission bindings.
+  - Fleet jobs create an isolated detached Git worktree, verify the exact commit
+    and clean starting state, and delegate provisioning, argv execution,
+    artifacts, timeouts, and cleanup to the existing `ExecutionManager`.
+    Required platform coverage is never weakened and infrastructure failure is
+    not reported as test failure.
+  - Added `mana-agent fleet` worker/job/doctor/verify/compare/log/artifact/
+    cancellation commands, canonical `/fleet` chat registration, shared Fleet
+    API/event replay endpoints, a read-only Fleet dashboard page, and a global
+    doctor check.
+  - Added persistent `fleet-verify` automation schedules with explicit
+    platforms, commands, worker limits, and timeouts; deployed schedules invoke
+    the same Fleet CLI/service instead of a scheduler-specific runner.
+  - Extended authenticated reverse workers with signed runtime capability
+    messages and coordinator-assigned trust labels. Added owner-scoped Linux
+    `systemd --user` and Windows Task Scheduler installers while preserving the
+    macOS LaunchAgent.
+  - Added Fleet Eval configuration validation, cross-platform CI coverage,
+    Fleet architecture/operations documentation, updated repository URLs and
+    project layout, and removed the duplicated saved-workflow documentation.
+  - Verification: `.venv/bin/python -m pytest tests/fleet -q` passed (11
+    passed); `.venv/bin/python -m pytest tests/fleet
+    tests/test_automation_service.py tests/test_doctor.py
+    tests/remote_execution tests/gateway tests/evals
+    tests/commands/test_fleet_cli.py tests/test_api_workspaces.py
+    tests/test_api_conversations.py -q` passed (155 passed);
+    `.venv/bin/python -m ruff check src/mana_agent/fleet
+    src/mana_agent/remote_execution/installers
+    src/mana_agent/remote_execution/daemon.py
+    src/mana_agent/remote_execution/gateway.py
+    src/mana_agent/commands/worker_cli.py
+    src/mana_agent/api/routes/fleet.py
+    src/mana_agent/doctor/checks/fleet.py tests/fleet
+    tests/commands/test_fleet_cli.py tests/evals/test_fleet_eval_config.py`
+    passed; `.venv/bin/python -m compileall -q src` passed; `git diff --check`
+    passed; `.venv/bin/python -m pytest -q` passed (1304 passed, 2 skipped).
+    Workflow YAML parsed with PyYAML, and help smoke checks passed for
+    `mana-agent fleet`, `fleet list`, `fleet verify`, `eval`, and `doctor`.
+  - Verification note: `.venv/bin/python -m ruff check .` remains blocked by
+    792 pre-existing violations in unrelated modules and tests; those files
+    were not modified as part of Fleet.
+
+## 2026-07-25
+
+- Made public-web search a fully validated entry-routing capability. Search is
+  now advertised only when its selected provider has the required configuration
+  and credentials; route execution applies the same validation so unavailable
+  search produces a truthful setup result instead of an invalid
+  `capability_error` decision.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q
+    tests/gateway/test_entry_routing.py tests/test_search_config.py` passed
+    (22 passed); `git diff --check` passed.
+
+- Fixed reverse-worker credential loading on Windows by enforcing POSIX mode
+  bits only on POSIX platforms.
+  - Verification: `venv/bin/python -m pytest -q tests/remote_execution/test_reverse_worker_protocol.py`
+    passed (3 passed); `git diff --check` passed.
+
+- Bumped the package and documented release version to `v0.0.20`.
+  - Verification: `tests/test_package_version.py` and `git diff --check` passed.
+
+- Updated chat remote execution to use direct SSH when a selected managed worker
+  is missing or offline, including when it disappears before approval; preserved
+  the direct-SSH completion message and authorized the registered remote SSH
+  tool through the operations lane.
+  - Updated entry routing with live managed-worker availability, provider and
+    worker-ID validation, and explicit direct-SSH selection when no worker is
+    connected.
+  - Kept remote-execution lane tasks waiting for approval and resumed/finished
+    them from the actual approved SSH job result.
+  - Returned bounded approved SSH stdout/stderr to chat and instructed remote
+    analysis routing to request concise command-level findings.
+  - Added a strict typed structured-output contract for entry routing whenever
+    the selected model exposes structured-output support, preventing malformed
+    text JSON from reaching route validation.
+  - Replaced the untyped remote-request schema field with strict nested SSH
+    request models accepted by OpenAI's strict response-format validation.
+  - Verification: targeted gateway, entry-routing, and remote-execution tests
+    passed; strict response schema validation passed.
+
+- Made remote-worker credential permission assertions platform-aware: POSIX mode
+  bits are checked on POSIX only, while Windows continues to verify credential
+  persistence without asserting unsupported permission metadata.
+  - Verification: `python3 -m compileall -q src/mana_agent/remote_execution tests/remote_execution`
+    and `git diff --check` passed. Targeted pytest was not run because the
+    available Python runtime does not have pytest installed.
+
+- Added the reverse-connected worker runtime: a typed, versioned and bounded JSON protocol; one-time enrollment with generated Ed25519 worker identities; owner-only/Keychain credential storage; authenticated coordinator WebSocket gateway; heartbeat/offline tracking; message de-duplication; revocation and rotation primitives; and execution-event integration with the existing remote-execution service.
+  - Added macOS LaunchAgent installation, lifecycle/diagnostic CLI commands, a standalone reconnecting worker daemon, HTTPS-only production defaults, and API worker enrollment/connection routes. Bootstrap tokens are never written to worker configuration, logs, or LaunchAgent plist files.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/remote_execution/test_remote_execution.py` passed (12 passed); Python compilation and targeted Ruff checks run.
+
+- Added sandbox-safe remote SSH execution contracts, transport failure classification, exact remote target/action approvals, reverse-worker enrolment and owner-only credentials, streamed event de-duplication, and model-selected chat lifecycle actions for registering, starting, and stopping workers.
+  - Verification: focused remote execution tests added; no real SSH connection was attempted.
+
+- Changed coding and Codex SSH policy so sandboxed processes never invoke `ssh` directly; remote SSH now requires a connected external worker and fails explicitly without a local fallback.
+  - Entry routing now requires a model-selected structured `remote_execution` request rather than sending SSH work to the coding/Codex lane.
+  - Remote execution is coordinated by the explicit operations specialist lane.
+  - Added exact-job remote SSH permission request IDs and explicit approval/resume handling.
+  - Remote SSH model decisions can now select the sole trusted connected worker automatically.
+
+- Enabled model-selected chat execution of explicit, user-authorized SSH tasks through the validated coding workflow.
+  - Clarified that workers may pass an authorized identity-file path to SSH while never reading key material or accepting passphrases in chat.
+  - Added SSH to the shell policy and documented SSH-agent handling for passphrase-protected keys.
+  - Verification: targeted gateway and shell-permission tests.
+
+- Prevented entry routing from reporting `SEARCH_NOT_AVAILABLE` (or another
+  capability error) when the declared source is available in the live route
+  registry.
+  - Verification: `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py`
+    passed (17 passed); Python compilation and `git diff --check` passed.
+
+## 2026-07-24
+
+- Fixed macOS Music playback false positives. A play request now selects a
+  random local-library track when no query is supplied (or searches the library
+  using an argv-bound query), then reads Music's player state and reports success
+  only when it is actually `playing`.
+  - Verification: focused macOS provider and computer-control tests,
+    affected-file Ruff, Python compilation, AppleScript compilation, and
+    `git diff --check` passed.
+
+- Bridged structured `permission_required` results from isolated computer-tool
+  workers back into the owning gateway process. Every computer permission scope
+  can now open the same TUI/dashboard chat approval UI even when the provider
+  action executes outside the frontend process.
+  - Verification: focused computer-control, gateway, and Textual tests,
+    affected-file Ruff, Python compilation, and `git diff --check` passed.
+
+- Fixed computer-route permission probing so an `ask` status is explicitly
+  reported as having created no prompt. The model is now instructed to submit
+  the exact requested action—which creates the bound in-chat request—and cannot
+  tell users to approve a nonexistent prompt.
+  - Verification: focused computer-control and gateway tests, affected-file
+    Ruff, Python compilation, and `git diff --check` passed.
+
+- Fixed Textual computer-permission prompts to use the non-blocking UI message
+  pump. Permission events emitted on a gateway/tool worker thread now open the
+  in-chat modal instead of deadlocking in a synchronous cross-thread callback.
+  - Verification: real worker-thread permission execution opened
+    `ComputerPermissionScreen`; focused computer-control and Textual tests,
+    affected-file Ruff, Python compilation, and `git diff --check` passed.
+
+- Added the default-off, provider-neutral computer-control framework with typed
+  actions/results/capabilities/content models, strict provider and application
+  adapter contracts, macOS/Windows/Linux auto-selection, truthful discovery,
+  fine-grained allow-once/session/persistent permissions, remote-client policy,
+  exact-action expiring confirmations, bounded execution/cancellation, sanitized
+  live events, and owner-only retention-aware audit records.
+  - Added narrow model-selected tools for application, calendar, media, notes,
+    desktop browser, clipboard, allowed-path filesystem, screenshots,
+    notifications, and system operations; raw OS automation program input is
+    not exposed, invalid model decisions fail closed, personal content is not
+    copied into events/audit, and removal uses Trash/Recycle Bin.
+  - Integrated the explicit `computer` route and authenticated frontend context
+    with the shared gateway, tool catalog, lane coordinator, `/cancel`, Textual
+    configuration, dashboard settings/capability matrix, user configuration,
+    security/architecture/tool/configuration documentation, and README.
+  - Added a desktop-safe fake provider and cross-platform mocked tests covering
+    discovery, unavailable/headless behavior, permissions, exact/expired
+    confirmation, remote restrictions, adapter selection, calendar/media/notes/
+    browser/clipboard flows, screenshots, timeout/cancellation, audit redaction,
+    allowed paths, Trash/Recycle Bin, command injection, Windows paths, macOS
+    identifiers, and Linux command construction.
+  - Added interactive pending-permission requests for `ask` scopes: Textual
+    displays an in-chat once/session/always/deny modal, Dashboard chat displays
+    the same actionable card (also mirrored on its Computer Control page), and
+    approval resumes the immutable stored action immediately instead of returning
+    a dead-end permission message.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` passed
+    (1,263 passed, 2 skipped); the focused computer-control, API, dashboard-chat,
+    WebSocket, Textual, and gateway pass passed (70 tests); all 8 browser reducer
+    tests passed; affected-file Ruff, Python compilation, and `git diff --check`
+    passed.
+
+## 2026-07-23
+
+- Fixed Gmail search/read/thread tools in dashboard and API chat so synchronous
+  LangChain tool invocation safely executes provider coroutines outside the
+  already-running event loop, preventing `asyncio.run()` failures and leaked
+  un-awaited coroutine warnings.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/connectors/test_email_core.py` passed (18 tests); AskAgent and gateway regression tests passed (64 tests); targeted Ruff, Python compilation, and `git diff --check` passed.
+
+- Fixed the dashboard's live API base control to remain initialized while navigating between Streamlit pages by rendering it in the shared entrypoint frame instead of inside route-specific callbacks.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_dashboard_navigation.py` passed.
+
+- Rebuilt dashboard chat delivery around the shared persisted `ChatEvent` stream: browser-side optimistic messages now reconcile by stable client ID, assistant/log/status events render as they arrive, correlated tool cards update in place, and ordered cursor replay restores missed events without duplication after reconnect or reload.
+  - Added a deterministic dashboard event reducer, live REST/WebSocket component, gateway event forwarding, per-conversation sequence IDs, exact-delivery deduplication, lifecycle revision persistence, recursive event redaction, and an automatically managed local API when launching `mana-agent dashboard`.
+  - Removed the dashboard gateway-to-classic-ask fallback; invalid or failed model execution now remains visible as a persisted failed run without executing a backup route.
+  - Verification: The repository suite passed (1,220 passed, 2 skipped); the broader dashboard/socket/gateway/TUI/Codex compatibility pass passed (114 tests); the final dashboard/event/API pass passed (31 tests), and all 7 Node.js reducer tests passed. Affected-file Ruff, Python compilation, `git diff --check`, and local browser submit/socket/failure/reload plus final hosted-component smoke checks passed. Repository-wide Ruff was also run and still reports 798 unrelated pre-existing findings.
+
+- Fixed the dashboard chat page's misleading default socket connection. The standalone Streamlit dashboard now uses durable event recovery by default, and external WebSockets are opt-in only after configuring a running FastAPI endpoint.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_dashboard_navigation.py tests/test_chat_websocket.py` passed.
+
+- Fixed observability span persistence to keep truncated attributes as valid JSON, and made dashboard reads tolerate malformed historical telemetry rows.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_observability.py` passed.
+
+- Fixed the Textual multiline composer to resize immediately after programmatic text assignment, including on Windows' Proactor event loop where the queued change event may arrive after the next layout cycle.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_tui_multiline_input.py` passed.
+
+- Fixed Textual `/new` timeline replacement to clear mounted chat cards as well as stored events, reset transient tool/token presentation state, and display the newly activated empty conversation immediately.
+  - Verification: TUI command/rendering, gateway, and unified session regressions passed (42 tests); affected-file Ruff, Python compilation, and `git diff --check` passed.
+
+- Bumped the package and documented release version to `v0.0.19`.
+  - Verification: `tests/test_package_version.py` and `git diff --check` passed.
+
+- Fixed `/new` in dashboard/API conversation submission and plain CLI presentation so it deletes the active canonical session, creates and activates one replacement, and clears an empty replacement timeline without persisting `/new` as chat content.
+  - Verification: Conversation service, API conversation, TUI, gateway, and unified session/command regressions passed (41 tests); affected-module Ruff, Python compilation, and `git diff --check` passed. The legacy `chat_cli.py` file still reports its existing star-import Ruff findings.
+
+- Clarified the entry-routing model contract with an explicit required-source vocabulary and per-route source rules, preventing route/tool names from being mistaken for source identifiers while preserving strict fail-closed validation.
+  - Unknown source errors now identify the rejected model value and list the permitted identifiers; no alias or fallback route is executed.
+  - Verification: Entry-router, gateway, and unified command/session regression tests passed (46 tests); affected-file Ruff, Python compilation, and `git diff --check` passed.
+
+- Unified chat lifecycle around canonical workspace sessions, with destructive `/new`, `/sessions` management and exact history switching, title generation, safe physical deletion, memory tombstones, and one-time dashboard-conversation migration.
+  - Added the shared typed command registry across gateway, CLI chat, Textual, API, and Telegram, connector setup/management, API session/command/connector/process endpoints, and a generated CLI capability matrix with explicit unsupported reasons.
+  - Added a persistent registered-worker process manager with atomic metadata, identity-checked stop/restart, stale recovery, singleton prevention, bounded log reads, lifecycle events, and background Telegram startup without PID-file or arbitrary-shell execution.
+  - Removed the TUI `/new` history message, the Telegram-only command implementation, dashboard-only chat identity, and dashboard-managed daemon chat thread.
+  - Added Textual session/setup modals plus dashboard chat rename/delete, connector setup, and background-process health/log/control pages.
+  - Verification: `PATH="$PWD/venv/bin:$PATH" venv/bin/python -m pytest -q` passed (1,208 passed, 2 skipped); focused unified-session/command/process, gateway, natural-language routing, TUI, Telegram, and API conversation tests passed (60 tests), with a final focused UI/session/API pass (36 tests); new/affected-module Ruff, Python compilation, and `git diff --check` passed. The required repository-wide `ruff check .` was run and still reports 800 unrelated pre-existing findings in legacy files/tests.
+
+## 2026-07-22
+
+- Added explicit, shared `codex`/`internal` coding-backend selection across the gateway-owned CLI, TUI, API, and dashboard stack. Disabling Codex now activates Mana-Agent's existing model-driven internal coding tools without starting or authenticating Codex, while a selected Codex turn remains fail-closed with no runtime fallback.
+  - Added a backend-neutral, ordered live coding event contract with Codex notification normalization, internal tool lifecycle emission, duplicate suppression, bounded/redacted output, durable session events, turn-scoped delivery, and a responsive Textual execution panel for backend/model, activity, output, timing, and token usage.
+  - Added the coding-runtime configuration controls and documented the backward-compatible default rule: missing backend settings select Codex when enabled and internal when disabled; contradictory explicit Codex settings fail validation.
+  - Verification: the affected backend-selection, internal-agent, Codex, gateway, TUI layout/live-tool, user-config, conversation persistence, WebSocket, and API suite passed (220 tests); the isolated full suite passed (1,201 passed, 2 skipped); touched-file Ruff, Python source/test compilation, and `git diff --check` passed with the repository Python 3.12 environment.
+
+- Fixed the normal-mode two-turn chat smoke test to use its isolated temporary workspace, preventing the Windows CI checkout from being used for session and telemetry state.
+  - Verification: targeted CLI smoke regression passed locally.
+
+- Fixed the tool-backed chat rendering smoke test to use its isolated temporary workspace instead of the CI checkout, preventing Windows checkout-permission failures while preserving its telemetry assertion.
+  - Verification: targeted CLI smoke regression passed locally.
+
+- Made Git subprocess output decoding deterministic with UTF-8 and lossless surrogate handling, preventing Windows code-page corruption of Unicode filenames during repository preparation and Git inspection.
+  - Verification: repository-preparation and Git-tool regression tests, touched-file Ruff, and Python compilation passed; the isolated full suite is running.
+
+- Fixed coding runs for valid user-selected directories that have not yet been initialized as Git repositories. The gateway and multi-agent runtimes now use one locked workspace/repository preparation boundary that preserves existing files, initializes new repositories on `main` without staging or committing, reconciles canonical persistence records, recognizes Git worktrees, and avoids nested repositories when a valid parent repository owns the selected subdirectory. Bare, corrupt, stale, unsafe, unavailable-Git, permission, initialization, and persistence failures now stop before Codex with phase-specific errors.
+  - Verification: focused repository-preparation, gateway, Codex, workspace, and multi-agent tests passed (129 tests); the required repository/workspace/gateway/Codex selection passed (170 tests, 1,023 deselected); the full suite passed (1,192 passed, 2 skipped); touched-file Ruff, `python -m compileall src tests`, `git diff --check`, and manual non-Git/repeated-run/parent-repository coding-start checks passed. Repository-wide Ruff still reports 807 unrelated pre-existing findings outside this change.
+
+- Added a shared, provenance-aware artifact routing registry to the gateway. It recognizes spreadsheet (`.xls`, `.xlsx`, `.xlsm`, `.csv`, `.ods`), document, presentation, PDF, and image categories; user attachments and explicitly named targets now supply family, MIME/extension, repository-membership, and handler evidence to the model before lane selection. The new artifact lane is lock-free for standalone user files, validates handler availability before dispatch, stages user inputs in an isolated artifact workspace, and invokes local document tools without requiring Codex. Repository-member source edits remain eligible for the coding route.
+  - Verification: focused artifact, entry-routing, lane-coordinator, chat-gateway, and routing-authority tests passed (66 tests); Python compilation and `git diff --check` passed. Ruff is not installed in the repository virtual environment.
+
+- Isolated pytest runtime state in a per-run temporary Mana home, added a write guard for the real `~/.mana`, and removed import-time user-config path snapshots so repository, session, workspace, cache, database, and configuration artifacts are cleaned without touching user data.
+  - Verification: focused isolation, configuration, repository, session, workspace, CLI, and subprocess tests passed (70 direct focused tests plus the persistence-focused run); Python compilation and `git diff --check` passed. A full-suite attempt started successfully but could not be completed in the local terminal integration, which detached from its still-running pytest processes; those test processes and their temporary Mana homes were then removed. Ruff is not installed in the repository virtual environment.
+
+- Isolated every Mana-managed Codex app-server run behind a generated per-run `CODEX_HOME` and a validated `mana_runtime` Responses API provider using the model, API key, base URL, and safe headers selected by Mana's provider/model routing.
+  - API keys now travel only in the child environment; inherited global Codex/OpenAI authentication is removed, runtime configuration is owner-only and cleaned on shutdown/startup failure, global `~/.codex` state remains untouched, and unsupported or incomplete provider decisions stop without login or provider fallback. Removed the obsolete `mana-agent codex login` and `logout` commands.
+  - Verification: Focused Codex/provider/doctor/CLI tests passed (48 tests, 65 deselected); affected TUI/config/coding/model-routing tests passed (97 tests); affected gateway/CLI tests passed (40 tests, 217 deselected); Python compilation and `git diff --check` passed. The full suite completed with 1,162 passed and 1 skipped; two unrelated multi-agent tests failed because bare `python` was absent from the subprocess `PATH`, then passed when rerun with the repository virtual environment on `PATH` (38-test rerun). Ruff was unavailable in the repository and bundled environments.
+
+- Extended the deployed evidence-based model router across gateway, CLI, TUI, and Codex task dispatch with persisted task-aware requests/decisions, explicit routing modes, single-model default policy, evidence-gated multi-agent/parallel approval, and fail-closed decision persistence.
+  - Added gateway-owned live task control with validated pause/resume/cancel/reprioritize/block/verify transitions, task-tree cancellation, routing identity, budgets, evidence, ownership locks, restoration-safe state, structured events, shared CLI/TUI control commands, and expanded doctor diagnostics.
+  - Verification: `MANA_HOME=/tmp/mana-routing-full-3 PYTHONPATH=src .venv/bin/python -m pytest -q` passed (1,145 passed, 1 skipped); the focused routing/gateway/Codex/doctor/TUI suite passed (116 tests); focused Ruff, Python compilation, and `git diff --check` passed. A configured type checker was unavailable. The system `python` command points to a legacy interpreter and was not used; verification used the repository Python 3.12 virtual environment.
+
+## 2026-07-21
+
+- Fixed adaptive gateway model selection to tolerate legacy and test settings objects that omit the optional `mana_codex_model` field while still honoring it when configured.
+  - Verification: `MANA_HOME=/tmp/mana-agent-ci-final PYTHONPATH=src .venv/bin/python -m pytest -q` passed (1,141 passed, 1 skipped); the focused planning/CLI regression suite passed (73 tests); focused Ruff, Python compilation, and `git diff --check` passed.
+
+- Replaced fixed role-to-model resolution with a centralized evidence-based adaptive router using typed requests/profiles/decisions, deterministic capability/quality/history/language/cost/latency scoring, cached repository metadata, verification-reserved budgets, decaying provider reliability penalties and circuit breakers, persistent redacted outcome history, independent verifier selection, and fail-closed routing errors.
+  - Added policy-gated two-candidate competition contracts that require isolated roots, normalized diff/test evidence, complete quality criteria, winner-only promotion, and losing-workspace cleanup; legacy `MODEL_LEVEL_*` configuration now migrates into profile hints instead of making the final choice.
+  - Extended `mana-agent doctor` and configuration/architecture/provider documentation with candidate, metadata, evidence-store, circuit, budget, verifier-independence, and isolation diagnostics.
+  - Verification: `MANA_HOME=/tmp/mana-agent-router-final-full PYTHONPATH=src .venv/bin/python -m pytest -q` passed (1,140 passed, 2 skipped); the focused gateway/Codex/config/worktree/doctor compatibility run passed (176 tests); focused Ruff, Python compilation, and `git diff --check` passed. A configured type checker was unavailable.
+
+- Fixed local-process execution output to normalize Windows CRLF line endings to the provider's cross-platform LF text contract.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/execution/test_execution_fabric.py` passed.
+
+- Bumped the package and documented release version to `v0.0.18`.
+  - Verification: Project metadata and source runtime version checks passed; `tests/test_package_version.py` (2 passed) and `git diff --check` passed.
+
+- Changed Codex write turns to use the selected repository root by default instead of creating a managed worktree under Mana state. Worktree isolation remains available through `MANA_CODEX_WORKTREE_ISOLATION=true`; direct-root turns can operate on an existing dirty checkout.
+  - Verification: `MANA_HOME=/tmp/mana-codex-root-tests PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_codex_integration.py tests/test_tui_user_config.py tests/gateway/test_chat_gateway.py` passed (57 tests); focused Ruff and `git diff --check` passed.
+
+- Added a provider-neutral Remote Execution Fabric with typed sandbox, routing, resource, network, secret, artifact, snapshot, health, and lifecycle contracts; atomic handle/lease persistence; restart cleanup; sanitized lifecycle events; bounded concurrency; and fail-closed capability enforcement.
+  - Registered `local-process`, `local-docker`, `remote-ssh`, `kubernetes`, `modal`, and `custom-http-runtime` behind one asynchronous provider interface. Existing trusted local queued shell execution now runs through the gateway-owned `ExecutionManager` and preserves managed-worktree identity, while Docker/SSH use safe argv construction and Kubernetes/Modal/HTTP dependencies remain optional with actionable configuration errors.
+  - Added the reusable provider contract/security tests, provider doctor diagnostics, optional SDK extras, architecture and lifecycle mapping, provider configuration/setup/troubleshooting guidance, the versioned custom HTTP contract, and security enforcement limitations. Real Docker, SSH, Kubernetes, Modal, and HTTP integration tests were not run because corresponding external infrastructure and credentials were not configured.
+  - Verification: `MANA_HOME=/tmp/mana-remote-execution-test-home PYTHONPATH=src .venv/bin/pytest -q` passed (1,129 passed, 1 skipped); the final execution/AskAgent/gateway/tool suite passed (112 tests), and the worktree/doctor compatibility suite passed in the earlier 97-test focused run; focused Ruff, Python compilation, and `git diff --check` passed. The non-isolated full suite was also attempted and exposed the existing external-memory `MemoryConfigurationError`; the isolated full suite above passed.
+
 ## 2026-07-20
 
 - Clarified the gateway entry-router decision contract so tool-free prompts such as `ping` must emit `required_sources: ["none"]` instead of an omitted or empty source list.
@@ -11,6 +561,40 @@ All notable repository changes should be recorded here.
 - Fixed Textual chat-message wrapping to measure read-only message cards against their full available content width instead of reserving an invisible editing-cursor cell.
   - Existing and newly mounted messages now reflow correctly for terminal resizes and surrounding-panel width changes without stale per-widget wrap widths.
   - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_multiline_input.py tests/test_tui_live_tools_scroll.py tests/test_tui_auto_chat_tool_events.py` passed (19 tests); `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui*.py` passed (34 tests); Python compilation and `git diff --check` passed. Ruff and mypy are not installed in the repository environment.
+- Added webhook-driven GitHub App Autopilot with signed raw-body ingress, durable delivery/job persistence, deterministic validated event routing, actor authorization, installation-scoped authentication, persistent task sessions, isolated worktrees, Codex-only execution, verification gates, deterministic branches, and draft pull-request lifecycle support.
+  - Added `mana-agent github-app` operational commands, health/readiness endpoints, least-privilege manifest/setup documentation, security-alert redaction, idempotency/coalescing, subject locks, bounded retry/cancellation controls, and structured lifecycle metrics.
+  - Verification: `.venv/bin/ruff check src/mana_agent/github_autopilot src/mana_agent/commands/github_app_cli.py tests/test_github_autopilot.py src/mana_agent/integrations/codex/backend.py src/mana_agent/integrations/codex/coding_agent_shim.py tests/test_codex_integration.py` passed; `.venv/bin/python -m pytest tests/test_github_autopilot.py tests/test_codex_integration.py tests/test_api_analyze.py tests/test_api_conversations.py tests/test_package_version.py -q` passed (40 tests). Full-suite verification was not completed because the existing external-memory test configuration causes unrelated `MemoryConfigurationError` failures in `tests/test_ask_agent.py`.
+
+- Fixed the Windows release test synchronization for dynamically appended TUI chat messages.
+  - The regression test now waits for Textual's layout cycle and the subsequently posted resize cycle before asserting the new message's wrapped document, matching both Windows Proactor and POSIX event-loop scheduling without changing chat behavior.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_tui_tool_card_layout.py tests/test_tui_multiline_input.py` passed (6 tests); focused Ruff, Python compilation, and `git diff --check` passed.
+
+- Fixed the eval runner patch-capture test on Windows by replacing its POSIX-only shell assertion with a platform-native Python verification command.
+  - Verification: `PYTHONPATH=src .venv/bin/python -m pytest -q tests/evals` passed (27 tests); focused Ruff, Python compilation, and `git diff --check` passed.
+
+- Added optional ACP v1 and A2A 1.0 protocol gateway adapters around the shared `AgentChatGateway`, durable workspace sessions/history, task board, lane coordinator, memory, and tool policy.
+  - Added ACP stdio initialization, durable new/load/list session mapping and replay, prompts, cancellation, modes/configuration, resource links, per-session MCP forwarding, safe event conversion, editor documentation, and `mana-agent acp serve|doctor|info`.
+  - Added an authenticated A2A server with runtime Agent Cards, JSON-RPC/HTTP+JSON routes, caller-scoped durable task storage, gateway executor, state/artifact streaming, cancellation, remote registry/discovery/invocation, explicit delegation policy, SSRF/path/size controls, and loop protection through `mana-agent a2a` commands.
+  - Added bounded stable SDK extras (`acp`, `a2a`, and `protocols`) and included both in `full`. Push notifications, extended Agent Cards, embedded ACP media, client terminal/filesystem delegation, and unrestricted file artifacts are intentionally not advertised.
+  - Verification: the full repository suite passed (1,112 passed, 1 skipped); the final focused protocol/gateway/MCP/doctor/config/task-board suite passed (156 tests); official ACP/A2A SDK model and authenticated route smoke checks, focused Ruff, Python compilation, and `git diff --check` passed.
+
+- Added Mana Eval Lab for reproducible multi-variant gateway evaluations, immutable redacted run artifacts, isolated Git worktrees, task and trajectory replay, configurable objective scoring, leaderboards, baselines, paired regression reports, and fail-closed CI gates.
+  - Instrumented the existing gateway, routing-model, lane, tool, Codex, reviewer, and verifier boundaries through an optional context-propagated recorder; normal chat continues through the no-op recorder with no evaluation configuration.
+  - Added the `mana-agent eval` command group, protected routing suite, evaluation CI workflow, security and architecture documentation, and stable exit codes. Docker and remote evaluation workspaces remain explicit unsupported backends; P0 fully implements `local-worktree`.
+  - Verification: `PYTHONPATH=src MANA_HOME=/tmp/mana-eval-final-model-home .venv/bin/python -m pytest -q tests/evals` passed (27 tests); the focused gateway/routing/lane/tool/Codex/CLI compatibility suite passed (181 tests); the final full repository suite passed (1,103 passed, 1 skipped); touched-file Ruff, Python compilation, `git diff --check`, source/wheel builds, and `twine check` passed.
+
+- Fixed Windows Textual layout timing for multiline chat input and dynamically mounted selectable chat messages.
+  - Composer sizing now treats explicit newlines as immediately authoritative when the virtual document refresh is delayed, while mounted message cards proactively rewrap after their first layout instead of waiting for a paint callback.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui_multiline_input.py tests/test_tui_tool_card_layout.py` passed (6 tests); `git diff --check` passed.
+
+- Added the deterministic `mana-agent doctor` command with a typed check registry, isolated check modules, stable check IDs, grouped terminal output, redacted JSON output, targeted `--only`/`--skip`, and stable 0/1/2 exit codes.
+  - The initial fast offline checks cover Python/package and executable availability, Git, managed configuration parsing/schema/permissions, Mana state-path availability, and configured Codex binary resolution. Safe state-directory and owner-only configuration-permission repairs are opt-in, backed up where files change, and rechecked after repair.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_doctor.py` passed; CLI help and redacted JSON output were checked with the repository virtual environment.
+
+- Fixed one-character-per-line wrapping in TUI chat-history messages.
+  - Dynamically mounted selectable message `TextArea` widgets now re-wrap when rendering first observes a valid card content width, preserving normal wrapping through history replay, live appends, and terminal resizes without changing input layout or scrolling/selection behavior.
+  - Added regression coverage for user and assistant cards, borders/padding box sizing, narrow/wide resize, Persian/Unicode/emoji text, Markdown, and code blocks.
+  - Verification: `python -m pytest -q tests/test_tui_tool_card_layout.py tests/test_tui_live_tools_scroll.py tests/test_tui_auto_chat_tool_events.py tests/test_tui_multiline_input.py` passed (13 tests); focused Ruff, Python compilation, and `git diff --check` passed. Mypy is not installed in the repository virtual environment.
 
 - Added strict shared-gateway source routing for repository, browser, web search, Gmail, calendar, GitHub, memory, internal knowledge, and tool-free turns.
   - The typed routing decision now carries mandatory sources, live-data requirements, target URLs, reason/error codes, and a capability manifest. Browser, search, and repository evidence plans execute only the model-selected sources; a required-source failure aborts the turn with its exact source error and recorded execution status.
@@ -1197,3 +1781,14 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 - Added `agents.md` with repository instructions for future agent work.
 - Added `CHANGELOG.md` and documented the rule that it must be updated with each repository change.
 - Verification: documentation-only change; no tests run.
+## 2026-07-22
+
+- Added first-class OpenRouter provider configuration, dynamic model catalog metadata, capability-aware selection, and provider-preserving runtime connection construction.
+  - Verification: focused OpenRouter/provider configuration tests.
+
+- Fixed shared OpenRouter fast/tool assignments being rejected by the evidence-based router solely because the same model also serves a higher-reasoning role.
+  - Verification: focused OpenRouter gateway-routing regression test.
+## 2026-07-25
+
+- Added dual remote execution modes: persistent direct-SSH profiles alongside managed reverse workers, with secure OpenSSH-only execution and explicit route preservation.
+  - Verification: focused remote-execution and gateway tests passed (56 tests); Ruff, compilation, CLI help, and `git diff --check` passed.

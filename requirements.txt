@@ -9,11 +9,13 @@ python-multipart>=0.0.9,<1.0
 pydantic>=2.0,<3.0
 pydantic-settings>=2.0,<3.0
 python-dotenv>=1.0,<3.0
+PyYAML>=6.0,<7.0
+tomli>=2.0,<3.0; python_version < "3.11"
 mcp>=1.0,<2.0
 
 # ✅ LangChain (modern, public APIs only)
 langchain>=0.3.27,<1.0.0
-langchain-community>=0.0.10,<1.0.0
+langchain-community>=0.3.27,<1.0.0
 langchain-openai>=0.3.27,<1.0.0
 
 # OpenAI SDK (required by langchain-openai)
@@ -24,6 +26,7 @@ faiss-cpu>=1.7.3,<2.0.0
 
 # Security analysis
 safety>=2.0,<3.0
+cryptography>=42.0,<46.0
 
 # Background jobs / cache
 redis>=4.5.0,<5.0.0

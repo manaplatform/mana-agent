@@ -12,6 +12,7 @@ Each conversation keeps:
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -25,7 +26,8 @@ from mana_agent.services.execution_event_hub import (
     repository_id_for_root,
 )
 from mana_agent.workspaces.paths import repository_id_for_path
-from mana_agent.workspaces.store import atomic_write_json
+from mana_agent.sessions import SessionService
+from mana_agent.sessions.migration import DashboardConversationMigration
 
 
 def _utc_now() -> str:
@@ -80,6 +82,8 @@ class ConversationService:
             raise ValueError("root or repository_id is required")
         self._lock = threading.RLock()
         self._hub = get_execution_event_hub()
+        self._sessions = SessionService()
+        DashboardConversationMigration(self._sessions.workspaces, self._sessions.history).run()
 
     @property
     def base_dir(self) -> Path:
@@ -98,57 +102,36 @@ class ConversationService:
         return self._conversation_dir(conversation_id) / "messages.jsonl"
 
     def create(self, *, title: str = "", metadata: dict[str, Any] | None = None) -> ConversationRecord:
-        conversation_id = _new_id("conv")
-        record = ConversationRecord(
-            conversation_id=conversation_id,
-            repository_id=self.repository_id,
-            root=str(self.root),
-            title=(title or "New conversation").strip() or "New conversation",
-            metadata=dict(metadata or {}),
-        )
-        path = self._meta_path(conversation_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, record.to_dict())
-        self._messages_path(conversation_id).touch(exist_ok=True)
-        return record
+        session = self._sessions.create(self.root, frontend="dashboard")
+        if title:
+            session = self._sessions.rename(session.session_id, title)
+        return self._from_session(session)
 
     def list(self, *, limit: int = 100) -> list[ConversationRecord]:
         limit = max(1, min(int(limit or 100), 500))
-        if not self.base_dir.exists():
-            return []
-        rows: list[ConversationRecord] = []
-        for meta in sorted(self.base_dir.glob("*/meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-            try:
-                payload = json.loads(meta.read_text(encoding="utf-8"))
-                rows.append(ConversationRecord(**{k: payload.get(k) for k in ConversationRecord.__dataclass_fields__}))
-            except Exception:
-                continue
-            if len(rows) >= limit:
-                break
-        return rows
+        return [
+            self._from_session(row)
+            for row in self._sessions.workspaces.store.list_sessions()
+            if row.primary_repository_id == self.repository_id
+        ][:limit]
 
     def get(self, conversation_id: str) -> ConversationRecord:
-        path = self._meta_path(conversation_id)
-        if not path.exists():
+        record = self._sessions.workspaces.store.get_session(conversation_id)
+        if record.primary_repository_id != self.repository_id:
             raise FileNotFoundError(conversation_id)
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return ConversationRecord(
-            conversation_id=str(payload.get("conversation_id") or conversation_id),
-            repository_id=str(payload.get("repository_id") or self.repository_id),
-            root=str(payload.get("root") or self.root),
-            title=str(payload.get("title") or "New conversation"),
-            created_at=str(payload.get("created_at") or _utc_now()),
-            updated_at=str(payload.get("updated_at") or _utc_now()),
-            status=str(payload.get("status") or "idle"),
-            message_count=int(payload.get("message_count") or 0),
-            last_execution_id=str(payload.get("last_execution_id") or ""),
-            metadata=dict(payload.get("metadata") or {}),
-        )
+        return self._from_session(record)
+
+    def rename(self, conversation_id: str, title: str) -> ConversationRecord:
+        self.get_or_raise(conversation_id)
+        return self._from_session(self._sessions.rename(conversation_id, title))
+
+    def delete(self, conversation_id: str) -> None:
+        self.get_or_raise(conversation_id)
+        self._sessions.delete(conversation_id)
 
     def _save(self, record: ConversationRecord) -> ConversationRecord:
-        record.updated_at = _utc_now()
-        atomic_write_json(self._meta_path(record.conversation_id), record.to_dict())
-        return record
+        session = self._sessions.rename(record.conversation_id, record.title)
+        return self._from_session(session, execution_id=record.last_execution_id)
 
     def get_or_raise(self, conversation_id: str) -> ConversationRecord:
         try:
@@ -158,31 +141,10 @@ class ConversationService:
 
     def list_messages(self, conversation_id: str, *, limit: int = 500) -> list[ConversationMessage]:
         self.get_or_raise(conversation_id)
-        path = self._messages_path(conversation_id)
-        if not path.exists():
-            return []
-        limit = max(1, min(int(limit or 500), 5000))
-        lines = path.read_text(encoding="utf-8").splitlines()
-        rows: list[ConversationMessage] = []
-        for line in lines[-limit:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-                rows.append(
-                    ConversationMessage(
-                        message_id=str(payload.get("message_id") or _new_id("msg")),
-                        role=str(payload.get("role") or "system"),
-                        content=str(payload.get("content") or ""),
-                        created_at=str(payload.get("created_at") or _utc_now()),
-                        execution_id=str(payload.get("execution_id") or ""),
-                        metadata=dict(payload.get("metadata") or {}),
-                    )
-                )
-            except Exception:
-                continue
-        return rows
+        return [ConversationMessage(
+            message_id=row.message_id, role=row.role, content=row.content,
+            created_at=row.created_at, execution_id=row.turn_id, metadata=row.metadata,
+        ) for row in self._sessions.history.list(conversation_id, limit=limit)]
 
     def append_message(
         self,
@@ -192,26 +154,20 @@ class ConversationService:
         content: str,
         execution_id: str = "",
         metadata: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> ConversationMessage:
-        record = self.get_or_raise(conversation_id)
-        message = ConversationMessage(
-            message_id=_new_id("msg"),
-            role=str(role or "system").strip().lower(),
-            content=str(content or ""),
-            execution_id=str(execution_id or ""),
-            metadata=dict(metadata or {}),
+        self.get_or_raise(conversation_id)
+        row = self._sessions.history.append(
+            conversation_id, role=role, content=content,
+            turn_id=execution_id, metadata=metadata, message_id=message_id,
         )
-        path = self._messages_path(conversation_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(message.to_dict(), ensure_ascii=False) + "\n")
-        record.message_count = int(record.message_count or 0) + 1
-        if role == "user" and (record.title in {"", "New conversation"} or record.message_count <= 1):
-            record.title = (content.strip().splitlines()[0][:72] if content.strip() else record.title)
-        if execution_id:
-            record.last_execution_id = execution_id
-        self._save(record)
-        return message
+        if role == "user":
+            self._sessions.maybe_title_from_message(conversation_id, content)
+        self._sessions.workspaces.touch_session(conversation_id)
+        return ConversationMessage(
+            message_id=row.message_id, role=row.role, content=row.content,
+            created_at=row.created_at, execution_id=row.turn_id, metadata=row.metadata,
+        )
 
     def list_events(
         self,
@@ -230,10 +186,21 @@ class ConversationService:
 
     def set_status(self, conversation_id: str, status: str, *, execution_id: str = "") -> ConversationRecord:
         record = self.get_or_raise(conversation_id)
-        record.status = str(status or "idle")
+        record.status = "running" if status == "running" else str(status or "idle")
         if execution_id:
             record.last_execution_id = execution_id
         return self._save(record)
+
+    def _from_session(self, session: Any, *, execution_id: str = "") -> ConversationRecord:
+        messages = self._sessions.history.list(session.session_id, limit=5000)
+        count = len(messages)
+        last_execution_id = execution_id or (messages[-1].turn_id if messages else "")
+        return ConversationRecord(
+            conversation_id=session.session_id, repository_id=session.primary_repository_id,
+            root=session.cwd, title=session.title or "New chat", created_at=session.created_at,
+            updated_at=session.updated_at, status="idle" if session.status == "active" else session.status,
+            message_count=count, last_execution_id=last_execution_id,
+        )
 
     def get_full(self, conversation_id: str, *, message_limit: int = 500, event_limit: int = 200) -> dict[str, Any]:
         record = self.get_or_raise(conversation_id)
@@ -250,6 +217,7 @@ class ConversationService:
         *,
         chat_runner: Callable[..., dict[str, Any]] | None = None,
         emit_events: bool = True,
+        client_message_id: str = "",
     ) -> dict[str, Any]:
         """Append a user message, run chat, append assistant reply, emit runtime events.
 
@@ -259,7 +227,69 @@ class ConversationService:
         prompt = str(content or "").strip()
         if not prompt:
             raise ValueError("message content is required")
-        record = self.get_or_raise(conversation_id)
+        self.get_or_raise(conversation_id)
+        requested_message_id = str(client_message_id or "").strip()
+        if requested_message_id and (
+            len(requested_message_id) > 128
+            or re.fullmatch(r"[A-Za-z0-9_-]+", requested_message_id) is None
+        ):
+            raise ValueError("client_message_id must contain only letters, numbers, '_' or '-'")
+        if requested_message_id:
+            existing = next(
+                (
+                    item
+                    for item in self.list_messages(conversation_id, limit=5000)
+                    if item.message_id == requested_message_id
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing.role != "user" or existing.content != prompt:
+                    raise ValueError("client_message_id already belongs to a different message")
+                replies = [
+                    item
+                    for item in self.list_messages(conversation_id, limit=5000)
+                    if item.execution_id == existing.execution_id and item.role == "assistant"
+                ]
+                return {
+                    "ok": True,
+                    "duplicate": True,
+                    "conversation_id": conversation_id,
+                    "execution_id": existing.execution_id,
+                    "user_message": existing.to_dict(),
+                    "assistant_message": replies[-1].to_dict() if replies else None,
+                    "events": self.list_events(
+                        conversation_id,
+                        execution_id=existing.execution_id,
+                        limit=200,
+                    ),
+                }
+        if prompt.startswith("/"):
+            from mana_agent.chat_commands import (
+                CommandContext,
+                CommandDispatcher,
+                build_default_registry,
+            )
+
+            record = self._sessions.workspaces.store.get_session(conversation_id)
+            context = CommandContext(
+                frontend="dashboard",
+                session_id=conversation_id,
+                workspace_id=record.workspace_id,
+                repository_id=record.primary_repository_id,
+                capabilities={"chat", "sessions"},
+                sessions=self._sessions,
+            )
+            command = CommandDispatcher(build_default_registry()).dispatch(prompt, context)
+            if command is not None:
+                active_id = str(command.data.get("session_id") or conversation_id)
+                return {
+                    "ok": command.status == "success",
+                    "conversation_id": active_id,
+                    "execution_id": "",
+                    "command_result": command.model_dump(mode="json"),
+                    "events": command.events,
+                }
         execution_id = _new_id("exec")
         self.set_status(conversation_id, "running", execution_id=execution_id)
         user_message = self.append_message(
@@ -267,18 +297,40 @@ class ConversationService:
             role="user",
             content=prompt,
             execution_id=execution_id,
+            message_id=requested_message_id or None,
+            metadata={"client_message_id": requested_message_id} if requested_message_id else None,
         )
 
         if emit_events:
             self._hub.emit(
-                "turn.started",
-                title="User message",
+                "message.accepted",
+                title="User message accepted",
                 conversation_id=conversation_id,
                 execution_id=execution_id,
                 repository_id=self.repository_id,
                 message=prompt[:240],
                 status="running",
-                metadata={"role": "user"},
+                metadata={
+                    "role": "user",
+                    "message_id": user_message.message_id,
+                    "client_message_id": requested_message_id,
+                    "content": prompt,
+                },
+            )
+            self._hub.emit(
+                "turn.started",
+                title="Run started",
+                conversation_id=conversation_id,
+                execution_id=execution_id,
+                repository_id=self.repository_id,
+                message=prompt[:240],
+                status="running",
+                metadata={
+                    "role": "user",
+                    "message_id": user_message.message_id,
+                    "client_message_id": requested_message_id,
+                    "content": prompt,
+                },
             )
             self._hub.emit(
                 "agent.routing",
@@ -289,17 +341,73 @@ class ConversationService:
                 message="Model decision routing requested",
                 status="running",
             )
+            self._hub.emit(
+                "assistant.started",
+                title="Assistant response",
+                conversation_id=conversation_id,
+                execution_id=execution_id,
+                repository_id=self.repository_id,
+                status="running",
+                metadata={"message_id": f"assistant_{execution_id}"},
+            )
 
         def event_sink(event_type: str, title: str, **kwargs: Any) -> None:
             if not emit_events:
                 return
+            supplied = dict(kwargs)
+            payload = dict(title) if isinstance(title, dict) else {}
+            payload.update(supplied)
+            resolved_title = str(
+                payload.pop("title", "")
+                or (event_type.replace(".", " ").title() if isinstance(title, dict) else title)
+            )
+            message = str(
+                payload.pop("message", "")
+                or payload.pop("summary", "")
+                or payload.pop("output_preview", "")
+            )
+            metadata = dict(payload.pop("metadata", {}) or payload.pop("payload", {}) or {})
+            for key in (
+                "tool_name",
+                "command",
+                "path",
+                "error",
+                "model",
+                "thread_id",
+                "task_id",
+            ):
+                value = payload.pop(key, None)
+                if value not in (None, ""):
+                    metadata[key] = value
+            supplied_execution_id = str(payload.pop("execution_id", "") or "")
+            payload.pop("conversation_id", None)
+            payload.pop("repository_id", None)
+            allowed = {
+                key: payload.pop(key)
+                for key in (
+                    "status",
+                    "agent_id",
+                    "subagent_id",
+                    "step_id",
+                    "session_id",
+                    "event_id",
+                    "parent_event_id",
+                    "duration_ms",
+                    "ended_at",
+                    "persist",
+                )
+                if key in payload
+            }
+            metadata.update(payload)
             self._hub.emit(
                 event_type,
-                title=title,
+                title=resolved_title,
                 conversation_id=conversation_id,
-                execution_id=execution_id,
+                execution_id=supplied_execution_id or execution_id,
                 repository_id=self.repository_id,
-                **kwargs,
+                message=message,
+                metadata=metadata,
+                **allowed,
             )
 
         runner = chat_runner
@@ -316,10 +424,13 @@ class ConversationService:
                 )
 
         try:
-            result = runner(prompt, root=self.root, conversation_id=conversation_id, execution_id=execution_id, event_sink=event_sink)
-        except TypeError:
-            # Older runners without event kwargs.
-            result = runner(prompt, root=self.root) if runner is not None else {}
+            result = runner(
+                prompt,
+                root=self.root,
+                conversation_id=conversation_id,
+                execution_id=execution_id,
+                event_sink=event_sink,
+            )
         except Exception as exc:
             self.set_status(conversation_id, "failed", execution_id=execution_id)
             if emit_events:
@@ -331,6 +442,7 @@ class ConversationService:
                     repository_id=self.repository_id,
                     message=str(exc),
                     status="failed",
+                    metadata={"message_id": user_message.message_id},
                 )
             raise
 
@@ -354,7 +466,11 @@ class ConversationService:
                 repository_id=self.repository_id,
                 message=answer[:240],
                 status="success" if answer else "failed",
-                metadata={"mode": (result or {}).get("mode")},
+                metadata={
+                    "mode": (result or {}).get("mode"),
+                    "message_id": assistant.message_id,
+                    "content": answer,
+                },
             )
         self.set_status(conversation_id, "idle", execution_id=execution_id)
         return {

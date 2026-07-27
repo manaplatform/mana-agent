@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -34,6 +35,28 @@ def test_packaged_dashboard_app_module_is_discoverable() -> None:
     spec = importlib.util.find_spec("mana_agent.dashboard.app")
     assert spec is not None and spec.origin
     assert Path(spec.origin).name == "app.py"
+
+
+def test_live_api_base_control_is_outside_page_callbacks() -> None:
+    """Shared widget state must not acquire a route-specific Streamlit identity."""
+    spec = importlib.util.find_spec("mana_agent.dashboard.app")
+    assert spec is not None and spec.origin
+    source = Path(spec.origin).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    page_factory = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_page"
+    )
+
+    page_text_inputs = [
+        node
+        for node in ast.walk(page_factory)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "text_input"
+    ]
+
+    assert page_text_inputs == []
+    assert source.index("_render_shared_sidebar()") < source.index("nav.run()")
 
 
 @pytest.mark.skipif(importlib.util.find_spec("streamlit") is None, reason="streamlit optional extra not installed")

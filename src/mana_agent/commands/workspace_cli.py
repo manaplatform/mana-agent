@@ -161,6 +161,23 @@ def session_archive(session_id: str) -> None:
     _emit(WorkspaceService().archive_session(session_id).model_dump(mode="json"))
 
 
+@session_app.command("rename")
+def session_rename(session_id: str, title: str) -> None:
+    from mana_agent.sessions import SessionService
+
+    _emit(SessionService().rename(session_id, title).model_dump(mode="json"))
+
+
+@session_app.command("delete")
+def session_delete(session_id: str, yes: bool = typer.Option(False, "--yes", help="Confirm permanent deletion.")) -> None:
+    from mana_agent.sessions import SessionService
+
+    if not yes:
+        raise typer.BadParameter("Permanent session deletion requires --yes.")
+    SessionService().delete(session_id)
+    _emit({"ok": True, "session_id": session_id})
+
+
 @session_app.command("switch")
 def session_switch(session_id: str) -> None:
     session = WorkspaceService().store.get_session(session_id)

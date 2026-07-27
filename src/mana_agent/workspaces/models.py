@@ -109,6 +109,7 @@ class SessionRecord(BaseModel):
     primary_repository_id: str
     attached_repository_ids: list[str] = Field(default_factory=list)
     cwd: str
+    title: str = "New chat"
     status: Literal["active", "closed", "abandoned", "archived"] = "active"
     active_flow_id: str | None = None
     created_at: str = Field(default_factory=utc_iso)

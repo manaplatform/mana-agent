@@ -30,7 +30,9 @@ class SelectableText(TextArea):
 
     BINDINGS = [
         *TextArea.BINDINGS,
-        Binding("ctrl+c", "copy_selection", "Copy selection", show=False, priority=True),
+        Binding(
+            "ctrl+c", "copy_selection", "Copy selection", show=False, priority=True
+        ),
         Binding("ctrl+a", "select_all", "Select all", show=False, priority=True),
     ]
 
@@ -53,6 +55,35 @@ class SelectableText(TextArea):
         if not self.soft_wrap:
             return 0
         return self.scrollable_content_region.width - self.gutter_width
+    def on_mount(self) -> None:
+        """Rewrap dynamically mounted cards after their parent has laid out.
+
+        On Windows a child can be queried before the first paint, so relying on
+        ``render_line`` alone leaves the initial one-column document observable
+        to callers. ``call_after_refresh`` runs after the mount/layout cycle on
+        every supported Textual backend and retains the render-time guard below.
+        """
+        self.call_after_refresh(self._rewrap_after_layout)
+
+    def _rewrap_after_layout(self) -> None:
+        wrap_width = self.wrap_width
+        if wrap_width > 0 and self.wrapped_document._width != wrap_width:
+            self._rewrap_and_refresh_virtual_size()
+
+    def render_line(self, y: int):  # noqa: ANN201
+        """Ensure TextArea wraps only after this card has a real content width.
+
+        Message cards are mounted dynamically.  Textual may create their
+        ``TextArea`` document before the containing ``VerticalScroll`` has been
+        laid out, which gives the initial document a negative wrap width.  The
+        base widget does not necessarily receive a later resize event, so it
+        preserves that one-column wrapping.  Rendering is the first point at
+        which the final content width is guaranteed to be available.
+        """
+        wrap_width = self.wrap_width
+        if wrap_width > 0 and self.wrapped_document._width != wrap_width:
+            self._rewrap_and_refresh_virtual_size()
+        return super().render_line(y)
 
     def action_copy_selection(self) -> None:
         """Copy the selected source text using Textual's terminal clipboard API."""

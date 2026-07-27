@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from types import SimpleNamespace
 
-from mana_agent.chat.events import AssistantMessageEvent, ToolCallEvent, ToolResultEvent, UserMessageEvent
+from mana_agent.chat.events import ToolCallEvent, ToolResultEvent, UserMessageEvent
 from mana_agent.chat.history import ChatHistory
+from mana_agent.chat_commands.models import CommandResult
 from mana_agent.gateway.turn_engine import ChatTurnResult, _serialize_tool_traces
 from mana_agent.tui.app import ManaChatApp
+from mana_agent.tui.widgets.message_input import MessageInput
 
 
 def test_serialize_tool_traces_from_response_objects() -> None:
@@ -97,6 +100,55 @@ def test_tui_new_conversation_uses_gateway_boundary_and_clears_visible_history(t
     assert new_session == "session_new"
     assert app._gateway_session_id == "session_new"
     events = history.get_events()
-    assert len(events) == 1
-    assert isinstance(events[0], AssistantMessageEvent)
-    assert events[0].content == "Started a new conversation."
+    assert events == []
+
+
+def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path: Path) -> None:
+    class Gateway:
+        config = SimpleNamespace(session_id="session_old")
+
+        def __init__(self) -> None:
+            self.deleted_session = ""
+
+        def create_session(self, *, frontend: str, session_id: str | None = None) -> str:
+            assert frontend == "tui"
+            return session_id or "session_old"
+
+        def dispatch_command(
+            self, text: str, *, session_id: str, frontend: str
+        ) -> CommandResult:
+            assert (text, session_id, frontend) == ("/new", "session_old", "tui")
+            self.deleted_session = session_id
+            return CommandResult(
+                status="success",
+                message="",
+                data={"session_id": "session_new"},
+                events=[
+                    {"type": "timeline.replace", "messages": []},
+                    {"type": "session.activated", "session_id": "session_new"},
+                ],
+            )
+
+    gateway = Gateway()
+    history = ChatHistory()
+    history.add(UserMessageEvent(content="old visible history"))
+    app = ManaChatApp(
+        history=history, repo_root=tmp_path, model="gpt-test", gateway=gateway
+    )
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            assert app.chat_log is not None
+            await pilot.pause()
+            assert len(app.chat_log.children) == 1
+            composer = app.query_one(MessageInput)
+            composer.value = "/new"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert gateway.deleted_session == "session_old"
+            assert app._gateway_session_id == "session_new"
+            assert history.get_events() == []
+            assert list(app.chat_log.children) == []
+
+    asyncio.run(run())

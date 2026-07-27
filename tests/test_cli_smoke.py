@@ -487,7 +487,13 @@ def test_chat_tool_backed_response_omits_diagnostic_panels(monkeypatch, tmp_path
 
     result = runner.invoke(
         app,
-        ["chat", "--agent-tools", "--no-coding-agent"],
+        [
+            "chat",
+            "--agent-tools",
+            "--no-coding-agent",
+            "--root-dir",
+            str(tmp_path),
+        ],
         input="read the readme\nquit\n",
     )
     assert result.exit_code == 0
@@ -516,7 +522,13 @@ def test_chat_normal_mode_renders_answer_without_diagnostic_panels(monkeypatch, 
 
     result = runner.invoke(
         app,
-        ["chat", "--no-agent-tools", "--no-coding-agent"],
+        [
+            "chat",
+            "--no-agent-tools",
+            "--no-coding-agent",
+            "--root-dir",
+            str(tmp_path),
+        ],
         input="first question\nsecond question\nquit\n",
     )
     assert result.exit_code == 0

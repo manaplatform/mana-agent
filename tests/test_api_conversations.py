@@ -79,6 +79,28 @@ def test_missing_conversation_returns_404(client: TestClient, tmp_path: Path) ->
     assert response.status_code == 404
 
 
+def test_live_chat_document_hydrates_same_origin_reducer(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    root = str(tmp_path / "repo")
+    created = client.post(
+        "/api/v1/conversations",
+        json={"title": "Live", "root": root},
+    ).json()
+    conversation_id = created["conversation"]["conversation_id"]
+    response = client.get(
+        "/api/v1/dashboard/live-chat",
+        params={"conversation_id": conversation_id, "root": root},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert "Content-Security-Policy" in response.headers
+    assert "ManaLiveChat.init" in response.text
+    assert conversation_id in response.text
+    assert "/api/v1/ws/conversations/" in response.text
+
+
 def test_event_serialization_shape(client: TestClient, tmp_path: Path) -> None:
     root = str(tmp_path / "repo")
     created = client.post("/api/v1/conversations", json={"title": "Events", "root": root}).json()

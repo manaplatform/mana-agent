@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://api.manadev.net/uploads/images/e60304eb-03f0-4342-8ca9-b060899fea35.png" alt="Mana-Agent banner" width="100%" />
+  <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent banner" width="100%" />
 </p>
 
 <h1 align="center">Mana-Agent</h1>
@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.0.17-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.1-purple" />
 </p>
 
 `mana-agent` is an installable Python CLI and optional web dashboard for understanding, operating, and safely changing software repositories. It combines repository indexing, static analysis, semantic retrieval, multi-agent orchestration, constrained tool execution, Git operations, document processing, browser automation, external search, and remote connectors in one traceable workflow.
 
-> **Current documented version:** `v0.0.17`
+> **Current documented version:** `v0.1.1`
 
 ## Quick links
 
@@ -24,11 +24,15 @@
 - [Quick start](#quick-start)
 - [Core capabilities](#core-capabilities)
 - [CLI reference](#cli-reference)
+- [Troubleshooting](#troubleshooting)
 - [Configuration](#configuration)
+- [Computer control](docs/22-computer-control.md)
+- [Reverse workers](docs/23-reverse-workers.md)
 - [Telegram connector](#telegram-connector)
 - [Web dashboard](#web-dashboard)
 - [Documentation](#documentation)
 - [Development](#development)
+- [Mana Eval Lab](#mana-eval-lab)
 
 ---
 
@@ -64,6 +68,7 @@ Use Mana-Agent to:
 | --- | --- |
 | Repository intelligence | Static analysis, dependency discovery, semantic indexing, symbol-aware retrieval, reports, and architecture diagrams. |
 | Interactive chat | Repository-grounded Q&A, planning, coding workflows, tool execution, and verification loops. |
+| Adaptive model routing | Deterministic evidence, repository, capability, reliability, latency, and budget-aware model selection with fail-closed decisions and optional isolated candidate competition. |
 | Multi-agent runtime | Decision agent, planner, taskboard, work queue, tool manager, workers, reviewer, verifier, traces, and summaries. |
 | Managed worktrees | Isolated Git worktrees per coding task under `~/.mana/repositories/.../worktrees/`, recoverable after restart, reviewed as merge candidates (never silent merges). |
 | Safe mutation | Explicit plans, constrained file tools, reviewable patches, command gates, and verification after changes. |
@@ -72,11 +77,27 @@ Use Mana-Agent to:
 | Experience-to-Skill Workshop | Verified task experience becomes redacted, evidence-backed proposals that require explicit review before installation. |
 | Documents | Detect, read, query, analyze, create, update, and delete supported document formats. |
 | Browser automation | Model-selected navigation, clicking, typing, forms, tabs, uploads, downloads, screenshots, and guarded submissions. |
+| Computer control | Optional, default-off, permission-scoped local desktop/application automation with exact-action confirmation, cancellation, audit redaction, and macOS/Windows/Linux providers. |
 | External search | Optional model-selected web and GitHub search with repository-local result caching. |
 | Remote connectors | Gmail access and Telegram bot interaction through the same tool-aware chat runtime. |
+| Protocol gateway | ACP v1 editor access and A2A 1.0 server/client delegation through the shared gateway, sessions, task board, memory, lanes, and tool policy. |
 | Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automations, cron jobs, and settings. |
 | Automations | Persistent scheduled actions deployed to local cron, GitHub Actions, or both. |
 | Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and repository-local runtime data. |
+| Mana Eval Lab | Reproducible multi-variant runs, immutable trajectories, replay, leaderboards, paired regression reports, and fail-closed CI gates. |
+
+## Mana Eval Lab
+
+Mana Eval Lab evaluates the real gateway, router, Codex coding path, tools, lanes, reviewer, and verifier in isolated Git worktrees. It records versioned, redacted artifacts and supports task replay, command-only trajectory replay, leaderboards, baselines, and regression gates.
+
+```bash
+mana-agent eval run evals/suites/routing-smoke.yaml --variant candidate
+mana-agent eval list
+mana-agent eval inspect <run-id>
+mana-agent eval leaderboard --suite routing-smoke
+```
+
+See [the Eval Lab overview](docs/evals/overview.md), [suite format](docs/evals/suites.md), [replay](docs/evals/replay.md), [scoring](docs/evals/scoring.md), [CI gates](docs/evals/ci-gate.md), and [artifact security](docs/evals/artifacts.md).
 
 ---
 
@@ -97,6 +118,7 @@ flowchart LR
     T --> B["Browser tools"]
     T --> S["Web + GitHub search"]
     T --> C["Connector tools"]
+    T --> CC["Computer-control service"]
 
     R --> V["Verifier + reviewer"]
     G --> V
@@ -104,6 +126,7 @@ flowchart LR
     B --> V
     S --> V
     C --> V
+    CC --> V
 
     V --> MC["Merge candidate"]
     MC --> O["Answer, artifact, or explicit merge"]
@@ -115,20 +138,38 @@ flowchart LR
 
 The model chooses capabilities from tool metadata and active policy. Fixed chat keywords should not silently replace model routing for repository, connector, search, or mutation work.
 
-Every chat turn first passes through the gateway's typed entry router. It selects a registered conversation, coding, connector, search, repository, or automation path from live runtime availability before any response is generated. One session is opened per chat, reused for all turns, and explicitly finalized on exit or `/new`; see [entry routing and chat sessions](docs/21-entry-routing-and-chat-sessions.md).
+Every chat turn first passes through the gateway's typed entry router. It selects a registered conversation, coding, connector, search, repository, automation, or `multi_task` orchestration path from live runtime availability before any response is generated. A compound turn creates one root TaskBoard item and independently routed children with explicit dependencies; safe independent work can run concurrently through the existing lanes and locks, while partial failures and child-specific approvals remain visible. One session is opened per chat, reused for all turns, and explicitly finalized on exit or `/new`; see [entry routing and chat sessions](docs/21-entry-routing-and-chat-sessions.md).
+
+Local computer control is an explicit `computer` route and remains disabled
+until configured. It exposes narrow tools rather than raw OS command execution,
+keeps remote control off separately, and truthfully reports unsupported desktop
+capabilities. See [Computer Control and Desktop Automation](docs/22-computer-control.md).
 
 ---
 
 ## Requirements
 
 - Python **3.10 through 3.14**
-- an OpenAI-compatible chat endpoint;
+- OpenAI, OpenRouter, or another configured OpenAI-compatible chat endpoint;
 - an OpenAI-compatible embedding endpoint;
 - local access to the repository being analyzed;
 - provider credentials stored in Mana-Agent's user configuration;
 - optional extras for dashboard, automations, browser, observability, connectors, and document features.
 
 The default dependency set uses CPU FAISS for local vector search. Redis/RQ can be used by optional worker-process execution paths.
+
+## Troubleshooting
+
+Use the deterministic doctor command when a local installation, configuration, state directory, or Codex integration is not behaving as expected. It does not require a configured model and normal mode does not perform network probes.
+
+```bash
+mana-agent doctor
+mana-agent doctor --deep
+mana-agent doctor --fix
+mana-agent doctor --json
+```
+
+`--fix` only runs registered, safe and idempotent repairs (currently Mana state-directory creation and restrictive configuration permissions). It asks before changing user state unless `--yes` is supplied. JSON output is redacted and requires `--yes` for repairs.
 
 ---
 
@@ -137,14 +178,14 @@ The default dependency set uses CPU FAISS for local vector search. Redis/RQ can 
 ### Install with `pipx`
 
 ```bash
-pipx install git+https://github.com/manadevelopment23/mana-agent.git
+pipx install git+https://github.com/manaplatform/mana-agent.git
 mana-agent --help
 ```
 
 ### Install from source
 
 ```bash
-git clone https://github.com/manadevelopment23/mana-agent.git
+git clone https://github.com/manaplatform/mana-agent.git
 cd mana-agent
 
 python3 -m venv .venv
@@ -177,7 +218,7 @@ python -m playwright install chromium
 
 ```bash
 curl -L -o mana-agent \
-  https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-linux-x64
+  https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-linux-x64
 chmod +x mana-agent
 sudo mv mana-agent /usr/local/bin/mana-agent
 mana-agent --help
@@ -187,7 +228,7 @@ mana-agent --help
 
 ```bash
 curl -L -o mana-agent \
-  https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-macos-arm64
+  https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-macos-arm64
 chmod +x mana-agent
 sudo mv mana-agent /usr/local/bin/mana-agent
 mana-agent --help
@@ -197,7 +238,7 @@ mana-agent --help
 
 ```bash
 curl -L -o mana-agent \
-  https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-macos-x64
+  https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-macos-x64
 chmod +x mana-agent
 sudo mv mana-agent /usr/local/bin/mana-agent
 mana-agent --help
@@ -207,7 +248,7 @@ mana-agent --help
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/manadevelopment23/mana-agent/releases/download/latest-dev/mana-agent-windows-x64.exe" `
+  -Uri "https://github.com/manaplatform/mana-agent/releases/download/latest-dev/mana-agent-windows-x64.exe" `
   -OutFile "mana-agent.exe"
 
 .\mana-agent.exe --help
@@ -252,9 +293,9 @@ models. Unknown models are not assumed compatible and remain available only as
 an explicit Advanced manual entry. Canonical selections use provider-qualified
 IDs such as `openai/gpt-4.1`.
 
-### Model-level routing
+### Adaptive model routing
 
-Map runtime roles to model levels rather than hardcoding a provider model throughout the application:
+Mana-Agent centrally scores configured models from task requirements, repository metadata, outcome history, provider health, latency, and reserved budgets. Existing role levels remain migration hints:
 
 ```text
 MODEL_LEVEL_3_HIGH_REASONING=gpt-4.1
@@ -271,6 +312,8 @@ MANA_MODEL_TOOL=MODEL_LEVEL_1_FAST_TOOL
 MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
 ```
 
+See [Evidence-based model routing](docs/model-routing.md) for profile configuration, scoring, budget controls, candidate competition, verifier independence, history, and diagnostics.
+
 ### Common configuration keys
 
 | Key | Purpose |
@@ -284,7 +327,9 @@ MANA_MODEL_SUMMARIZER=MODEL_LEVEL_1_FAST_TOOL
 | `DEFAULT_TOP_K` | Default number of retrieval results. |
 | `MUTATION_MAX_STEPS` | Maximum work items in an approved mutation run. |
 | `MUTATION_VERIFY_ON_CHANGE` | Enables verification after repository changes. |
-| `MANA_MODEL_*` | Maps each runtime role to a model level. |
+| `MANA_MODEL_*` | Legacy role-level mappings migrated into adaptive profile hints. |
+| `MANA_MODEL_PROFILES` | Explicit adaptive provider/model capability and evidence profiles. |
+| `MANA_ROUTING_*` | Scoring thresholds, budgets, competition, reliability decay, language preferences, and evidence retention. |
 | `MANA_SEARCH_*` | Controls optional web/GitHub search behavior. |
 | `MANA_OBSERVABILITY_*` | Controls telemetry retention and OTLP export. |
 
@@ -319,14 +364,40 @@ save a new default, but it cannot collect credentials. Use
 support `/models current`, `/models refresh`, and
 `/models set <provider/model>`.
 
+Both chat frontends also expose gateway routing and live task state:
+
+```text
+/route
+/route explain
+/tasks
+/task <id>
+/task cancel|pause|resume <id>
+/budget
+/candidates
+/models health
+```
+
+Every model-backed turn is routed and persisted. Single-model execution is the
+default; multi-agent or parallel-candidate work starts only when the coordinating
+model requests it and gateway evidence, isolation, verification, ownership,
+latency, concurrency, and budget policy approve it.
+
 Chat messages remain attached to one durable workspace session for the lifetime
-of the conversation. Both the plain CLI and Textual TUI accept `/new` to archive
-the current session and start an isolated conversation; `/models`, UI refreshes,
-tool calls, and model routing reuse that session. Each new chat process creates a
+of the conversation. `/new` permanently deletes the current session, its durable
+history, session memory, browser context, and transient resources before binding
+a fresh session. Use `/sessions` to list, inspect, switch, rename, or explicitly
+delete other chats; `/session` remains an alias. `/models`, UI refreshes,
+tool calls, and model routing reuse the active session. Each new chat process creates a
 fresh session and abandons any active session left by an earlier process. Mana
 still reuses one automatic repository record and one standalone workspace for
 each canonical repository path. A specific stored conversation can be selected
 explicitly with `mana-agent chat --session <session-id>`.
+
+The same typed registry provides `/connect`, `/disconnect`, `/processes`,
+`/tasks`, `/models`, `/plan`, `/analyze`, `/doctor`, and `/help` to CLI chat,
+Textual, dashboard/API clients, and Telegram. Persistent services run as
+registered workers under `~/.mana/runtime/processes/`; no chat command accepts an
+arbitrary operating-system command.
 
 ### Copying TUI text
 
@@ -394,6 +465,10 @@ mana-agent git -- branch
 pip install "mana-agent[dashboard]"
 mana-agent dashboard --root-dir .
 ```
+
+The dashboard command also starts a loopback FastAPI process on the next port
+(`8502` by default) for ordered live chat events. Override it with
+`--api-port`; the child API is stopped with the dashboard.
 
 ---
 
@@ -568,6 +643,9 @@ Document safety rules include:
 - formulas are preserved unless replacement is explicitly requested;
 - macro-enabled workbooks are opened with preservation where supported;
 - updates create backups by default and use atomic writes where possible;
+- new PDFs require the `pdf-create` skill to be loaded before
+  `document_create`, use a structured paginated report layout, and are written
+  to the directory where Mana-Agent was launched;
 - deletion requires explicit intent and remains constrained to the project root.
 
 ### Browser automation
@@ -722,6 +800,17 @@ It does not run the legacy coding planner before Codex or fall back to that
 planner when Codex fails. Underspecified edit requests must be clarified instead
 of producing an arbitrary repository change.
 
+Mana-Agent Codex turns use the provider, model, base URL, and API key selected
+in Mana-Agent; they do not require a separate `codex login`. Each turn receives
+a unique, temporary `CODEX_HOME` under `~/.mana/runtime/codex/` containing a
+generated custom-provider `config.toml`. The API key is passed only in the
+Codex child-process environment and is never written to that file. The runtime
+directory is removed when the app-server exits, and the user's normal
+`~/.codex/config.toml` and `~/.codex/auth.json` are neither read nor changed.
+The selected provider must expose a Responses-compatible API; Mana-Agent stops
+with an actionable configuration error instead of using global Codex login,
+credentials, configuration, another provider, or a default model.
+
 ---
 
 ## Web dashboard
@@ -741,19 +830,32 @@ Dashboard pages include:
 | Chat | Repository-grounded questions and coding-agent workflows. |
 | Analysis | Run analysis and inspect reports and diagrams. |
 | Taskboard | Active and completed tasks, agents, workers, and state. |
+| Processes | Persistent service health, managed logs, stop, and restart controls. |
+| Connectors | Secret-safe Telegram setup and shared connector state. |
 | Traces | Decisions, tool calls, verification results, and runtime events. |
 | Observability | Trace trees, timings, token usage, latency, errors, queue waits, and bottleneck findings. |
 | Automations | Create and manage persistent scheduled actions. |
 | Cron Jobs | Inspect deployment state and enable, disable, or remove schedules. |
 | Settings | Provider, model-role, search, connector, and runtime settings. |
 
-For dashboard development:
+For dashboard development, prefer the command above so the live-chat API and
+ephemeral dashboard credential are managed together. To run Streamlit directly,
+start `mana-agent api` separately and set `MANA_DASHBOARD_API_BASE` to that
+server:
 
 ```bash
-streamlit run dashboard/app.py -- --root-dir .
+MANA_DASHBOARD_API_BASE=http://127.0.0.1:8000 \
+  streamlit run src/mana_agent/dashboard/app.py
 ```
 
 Dashboard operations use the same validation and safety rules as the CLI. Page navigation alone never authorizes destructive actions.
+Dashboard chats are canonical workspace sessions, not dashboard-only
+conversations. Existing dashboard conversations are migrated once; switching a
+chat replaces the visible timeline from the canonical chronological history.
+Messages render optimistically, while assistant deltas, tools, logs, agent
+activity, failures, and completion states update from the shared WebSocket
+stream. Sequence-cursor replay restores missed persisted events after reconnect
+or reload without duplicating the timeline.
 
 ### Observability and OTLP export
 
@@ -958,8 +1060,17 @@ src/mana_agent/
   connectors/     Email, Telegram, and external service adapters
   dependencies/   Dependency graph support
   describe/       Repository description services
+  evals/          Eval Lab suites, storage, scoring, replay, and gates
+  execution/      Provider-neutral sandbox execution fabric
+  fleet/          Trusted cross-platform verification orchestration
+  gateway/        Typed entry routing and shared chat runtime boundary
+  github_autopilot/ Authorized GitHub event automation
+  integrations/   Codex and computer-control integrations
+  memory/         Scoped internal and external memory providers
   multi_agent/    Decisions, agents, taskboard, queues, tools, traces
   parsers/        Language and document parser entry points
+  protocols/      ACP, A2A, and common protocol adapters
+  remote_execution/ Direct SSH and authenticated reverse workers
   renderers/      Report and diagram rendering
   services/       Analyze, ask, index, report, security, and workflows
   tools/          Repository, Git, document, browser, and connector tools
@@ -976,6 +1087,8 @@ docs/             User and developer documentation
 
 Optional packages are lazy-loaded. Install only the extras required by the active deployment.
 
+Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip install "mana-agent[a2a]"`, or `pip install "mana-agent[protocols]"`. ACP connects editors to Mana-Agent, A2A connects autonomous agents, and MCP connects Mana-Agent to tools/resources. See [the protocol gateway](docs/protocol-gateway.md), [ACP setup](docs/acp.md), and [A2A deployment/delegation](docs/a2a.md).
+
 ---
 
 ## Documentation
@@ -988,6 +1101,8 @@ Optional packages are lazy-loaded. Install only the extras required by the activ
 | [`docs/04-commands.md`](docs/04-commands.md) | CLI command reference. |
 | [`docs/19-experience-to-skill-workshop.md`](docs/19-experience-to-skill-workshop.md) | Verified experience, proposal review, installation, and quarantine. |
 | [`docs/21-entry-routing-and-chat-sessions.md`](docs/21-entry-routing-and-chat-sessions.md) | Typed entry routing, connector availability, and chat-session lifecycle. |
+| [`docs/24-fleet.md`](docs/24-fleet.md) | Fleet architecture, trust, workers, CLI, permissions, and operations. |
+| [`docs/25-cross-platform-verification.md`](docs/25-cross-platform-verification.md) | Verification matrices, outcomes, Eval configuration, and recovery. |
 | [`docs/05-configuration.md`](docs/05-configuration.md) | Provider, model, search, and runtime settings. |
 | [`docs/06-workflows.md`](docs/06-workflows.md) | Common analysis and coding workflows. |
 | [`docs/07-diagram.md`](docs/07-diagram.md) | Standalone Mermaid architecture diagram. |

@@ -5,15 +5,16 @@ from mana_agent.multi_agent.core.types import TaskBoardItem, TaskStatus
 
 _TERMINAL = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED}
 _ALLOWED: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
-    TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
+    TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
     TaskStatus.DISCUSSING: {TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.ROUTED: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.WAITING_FOR_TOOLS: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.QUEUED: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
-    TaskStatus.IN_PROGRESS: {TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.IN_PROGRESS: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.NEEDS_REVIEW: {TaskStatus.VERIFYING, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.VERIFYING: {TaskStatus.DONE, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.BLOCKED: {TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.SKIPPED},
 }
 
 

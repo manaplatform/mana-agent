@@ -224,6 +224,7 @@ def collect_contributors(notes: str, sections: dict[str, list[str]]) -> list[str
 def build_body(
     *,
     tag: str,
+    display_tag: str,
     version: str,
     previous: str | None,
     repo: str,
@@ -239,7 +240,7 @@ def build_body(
     summary = short_summary(sections, changelog_highlights)
 
     lines: list[str] = [
-        f"# 🚀 mana-agent `{tag}`",
+        f"# 🚀 mana-agent `{display_tag}`",
         "",
         f"**{summary}**",
         "",
@@ -371,6 +372,11 @@ def release_exists(repo: str, tag: str, token: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True, help="Git tag name, e.g. v0.0.15")
+    parser.add_argument(
+        "--display-tag",
+        default="",
+        help="release title shown in the generated notes; defaults to --tag",
+    )
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument(
         "--token",
@@ -406,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     tag = args.tag.strip()
+    display_tag = args.display_tag.strip() or tag
     version = normalize_version(tag)
     previous = previous_tag(tag)
     target = args.target_commitish.strip() or None
@@ -422,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     contributors = collect_contributors(generated, sections)
     body = build_body(
         tag=tag,
+        display_tag=display_tag,
         version=version,
         previous=previous,
         repo=args.repo,
@@ -442,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         f"PREVIOUS_TAG={previous or ''}",
         f"RELEASE_EXISTS={'true' if exists else 'false'}",
         f"RELEASE_BODY_PATH={output_path.as_posix()}",
-        f"RELEASE_NAME={tag}",
+        f"RELEASE_NAME={display_tag}",
     ]
     meta_path.write_text("\n".join(meta_lines) + "\n", encoding="utf-8")
 

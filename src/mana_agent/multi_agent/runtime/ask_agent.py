@@ -50,6 +50,9 @@ from mana_agent.tools.repository import (
 from mana_agent.skills.manager import SkillManager
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.mcp.tools import discovered_mcp_langchain_tools
+from mana_agent.execution.manager import ExecutionManager
+from mana_agent.execution.models import ExecutionRequest, RoutingRequest, SandboxSpec
+from mana_agent.execution.errors import ExecutionTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +258,7 @@ class AskAgent:
         project_root: str | Path,
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
+        execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
         self.model = model
@@ -263,6 +267,7 @@ class AskAgent:
         self.search_service = search_service
         self.project_root = Path(project_root).resolve()
         self.coding_memory_service = coding_memory_service
+        self.execution_manager = execution_manager
         self._resolved_index = default_index_dir(self.project_root)
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
@@ -1050,6 +1055,7 @@ class AskAgent:
         read_telemetry: dict[str, int] | None = None,
         required_mcp_server: str | None = None,
         enable_run_evidence: bool = True,
+        skill_root: str | Path | None = None,
     ) -> tuple[list[BaseTool], list[ToolInvocationTrace], list[SearchHit], list[str]]:
         traces: list[ToolInvocationTrace] = []
         sources: list[SearchHit] = []
@@ -1311,35 +1317,65 @@ class AskAgent:
                 if self._is_blocked_command(executed_cmd):
                     raise PermissionError("command blocked by safety policy")
                 shlex.split(executed_cmd)
-                completed = subprocess.run(
-                    executed_cmd,
-                    cwd=self.project_root,
-                    shell=True,
-                    check=False,
-                    timeout=timeout_seconds,
-                    capture_output=True,
-                    text=True,
-                )
+                execution_manager = getattr(self, "execution_manager", None)
+                if execution_manager is None:
+                    completed = subprocess.run(
+                        executed_cmd,
+                        cwd=self.project_root,
+                        shell=True,
+                        check=False,
+                        timeout=timeout_seconds,
+                        capture_output=True,
+                        text=True,
+                    )
+                    returncode = completed.returncode
+                    stdout = completed.stdout
+                    stderr = completed.stderr
+                    sandbox_id = ""
+                    provider = "legacy-test-injection"
+                else:
+                    shell_argv = ["cmd.exe", "/d", "/s", "/c", executed_cmd] if os.name == "nt" else ["/bin/sh", "-lc", executed_cmd]
+                    execution = execution_manager.execute_once_sync(
+                        SandboxSpec(
+                            provider_override=execution_manager.config.default_provider,
+                            repository_source=self.project_root,
+                            execution_timeout_seconds=timeout_seconds,
+                        ),
+                        RoutingRequest(
+                            decision_id=f"ask:{run_id}",
+                            explicit_provider=execution_manager.config.default_provider,
+                            trust_level="trusted",
+                            risk_level="low",
+                        ),
+                        ExecutionRequest(argv=shell_argv, timeout_seconds=timeout_seconds),
+                    )
+                    returncode = execution.exit_code
+                    stdout = execution.stdout
+                    stderr = execution.stderr
+                    sandbox_id = execution.sandbox_id
+                    provider = execution.provider
                 payload = {
-                    "returncode": completed.returncode,
-                    "stdout": completed.stdout[:4000],
-                    "stderr": completed.stderr[:4000],
+                    "returncode": returncode,
+                    "stdout": stdout[:4000],
+                    "stderr": stderr[:4000],
                     "original_cmd": str(cmd or ""),
                     "executed_cmd": executed_cmd,
                     "interpreter_rewritten": bool(rewritten),
+                    "sandbox_id": sandbox_id,
+                    "execution_provider": provider,
                 }
                 encoded = json.dumps(payload)
                 output_preview = json.dumps(
                     {
-                        "returncode": completed.returncode,
-                        "stdout": completed.stdout,
-                        "stderr": completed.stderr,
+                        "returncode": returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
                         "executed_cmd": executed_cmd,
                         "interpreter_rewritten": bool(rewritten),
                     }
                 )
                 return encoded
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, ExecutionTimeoutError):
                 status = "timeout"
                 output_preview = "command timed out"
                 return json.dumps({"error": f"command timed out after {timeout_seconds}s"})
@@ -1390,10 +1426,14 @@ class AskAgent:
         def apply_patch_batch(patches: list[dict[str, Any]]) -> str:
             return dumps_tool_result(repo_apply_patch_batch(self.project_root, patches=patches))
 
-        skill_manager = SkillManager(project_root=self.project_root)
+        skill_manager = SkillManager(project_root=skill_root or self.project_root)
+        loaded_skill_names: set[str] = set()
 
         def read_skill(skill_name: str) -> str:
-            return skill_manager.read_skill(skill_name)
+            content = skill_manager.read_skill(skill_name)
+            if not content.startswith("Error:"):
+                loaded_skill_names.add(str(skill_name).strip().lower().replace("_", "-"))
+            return content
 
         def list_files(glob: str = "**/*", limit: int = 200) -> str:
             return dumps_tool_result(repo_list_files(self.project_root, glob=glob, limit=limit))
@@ -1481,6 +1521,17 @@ class AskAgent:
             )
 
         def document_create(path: str, content: dict[str, Any], file_type: str | None = None, overwrite: bool = False) -> str:
+            document_type = str(file_type or Path(path).suffix.lstrip(".")).strip().lower()
+            if document_type == "pdf" and "pdf-create" not in loaded_skill_names:
+                return dumps_tool_result({
+                    "ok": False,
+                    "error": "required_skill_not_loaded",
+                    "required_skill": "pdf-create",
+                    "message": (
+                        "PDF document_create requires read_skill(skill_name='pdf-create') "
+                        "to complete successfully before creation."
+                    ),
+                })
             return dumps_tool_result(document_service.create(path, content=content, file_type=file_type, overwrite=overwrite))
 
         def document_update(path: str, operation: str, payload: dict[str, Any], backup: bool = True) -> str:
@@ -1695,7 +1746,10 @@ class AskAgent:
             StructuredTool.from_function(
                 func=document_create,
                 name="document_create",
-                description="Create DOCX, XLSX/XLSM, CSV, or simple text PDF artifacts without overwriting by default.",
+                description=(
+                    "Create DOCX, XLSX/XLSM, CSV, or styled PDF artifacts without overwriting by default. "
+                    "PDF creation requires a successful read_skill('pdf-create') call first."
+                ),
                 args_schema=_DocumentCreateInput,
             ),
             StructuredTool.from_function(
@@ -1740,12 +1794,24 @@ class AskAgent:
             else:
                 browser_tools = build_browser_langchain_tools()
 
+        computer_tools = []
+        computer_settings = get_setting("computer_control", {})
+        computer_enabled = (
+            isinstance(computer_settings, dict)
+            and bool(computer_settings.get("enabled", False))
+        ) or bool(get_setting("MANA_COMPUTER_CONTROL_ENABLED", False))
+        if computer_enabled:
+            from mana_agent.integrations.computer_control.runtime_tools import build_computer_langchain_tools
+
+            computer_tools = build_computer_langchain_tools()
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
             *base_tools,
             *build_email_langchain_tools(),
             *browser_tools,
+            *computer_tools,
             *mcp_tools,
             *list(getattr(self, "tools", []) or []),
         ]
@@ -1862,6 +1928,7 @@ class AskAgent:
             read_telemetry=read_telemetry,
             required_mcp_server=required_mcp_server,
             enable_run_evidence=use_run_evidence,
+            skill_root=policy.get("skill_root"),
         )
         pending_external_traces = list(getattr(self, "_pending_external_search_traces", []) or [])
         if pending_external_traces:

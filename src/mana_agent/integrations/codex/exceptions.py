@@ -17,4 +17,8 @@ class CodexExecutionError(CodexError):
     pass
 
 
-__all__ = ["CodexError", "CodexExecutionError", "CodexProtocolError", "CodexUnavailableError"]
+class CodexConfigurationError(CodexError):
+    pass
+
+
+__all__ = ["CodexConfigurationError", "CodexError", "CodexExecutionError", "CodexProtocolError", "CodexUnavailableError"]

@@ -27,6 +27,7 @@ from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
+from mana_agent.workspaces.preparation import RepositoryPreparationError
 
 logger = logging.getLogger(__name__)
 
@@ -460,6 +461,7 @@ def process_chat_turn(
     event_sink: Callable[..., None] | None = None,
     callbacks: list[Any] | None = None,
     agent_decision: AgentDecision | None = None,
+    coding_workspace_preparer: Callable[[], Any] | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -739,6 +741,18 @@ def process_chat_turn(
         )
 
     # Coding agent path
+    if coding_workspace_preparer is not None:
+        try:
+            coding_workspace_preparer()
+        except RepositoryPreparationError as exc:
+            logger.exception("gateway repository preparation failed before coding turn")
+            return ChatTurnResult(
+                answer="",
+                error=str(exc),
+                decision=agent_decision,
+                auto_chat_mode=auto_chat_mode.value,
+                used_coding_agent=False,
+            )
     execute_plan_now = bool(
         auto_execute_plan
         and not force_plan_only

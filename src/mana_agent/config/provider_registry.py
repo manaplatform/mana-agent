@@ -16,8 +16,12 @@ class ProviderDefinition:
     auth_method: AuthenticationMethod
     default_base_url: str
     api_key_env: str
+    default_headers: tuple[tuple[str, str], ...] = ()
+    default_env_headers: tuple[tuple[str, str], ...] = ()
+    default_query_params: tuple[tuple[str, str], ...] = ()
     supports_model_refresh: bool = True
     supports_validation: bool = True
+    supports_responses_api: bool = False
     custom: bool = False
 
 
@@ -37,6 +41,16 @@ class ProviderRegistry:
                 auth_method=AuthenticationMethod.API_KEY,
                 default_base_url="https://api.openai.com/v1",
                 api_key_env="OPENAI_API_KEY",
+                supports_responses_api=True,
+            ),
+            ProviderDefinition(
+                id="openrouter",
+                display_name="OpenRouter",
+                auth_method=AuthenticationMethod.API_KEY,
+                default_base_url="https://openrouter.ai/api/v1",
+                api_key_env="OPENROUTER_API_KEY",
+                default_headers=(("HTTP-Referer", "https://github.com/mana-agent/mana-agent"), ("X-OpenRouter-Title", "Mana-Agent")),
+                supports_responses_api=True,
             ),
             ProviderDefinition(
                 id="nvidia",

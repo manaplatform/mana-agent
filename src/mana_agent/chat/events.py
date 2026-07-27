@@ -129,6 +129,23 @@ class StreamTokenEvent:
     assistant_event_id: str | None = None
 
 
+@dataclass(slots=True)
+class CodingActivityEvent:
+    """A backend-neutral coding lifecycle update for an active turn."""
+
+    activity: dict[str, Any]
+    timestamp: str = field(default_factory=_utc_now)
+    event_id: str = field(default_factory=lambda: _new_id("coding"))
+    turn_id: str = ""
+
+    def __post_init__(self) -> None:
+        provider_id = str(self.activity.get("event_id") or "").strip()
+        if provider_id:
+            self.event_id = provider_id
+        if not self.turn_id:
+            self.turn_id = str(self.activity.get("turn_id") or "") or _new_id("turn")
+
+
 # Union type for convenience (runtime checks use isinstance)
 ChatEvent = (
     UserMessageEvent
@@ -136,6 +153,7 @@ ChatEvent = (
     | ToolCallEvent
     | ToolResultEvent
     | StreamTokenEvent
+    | CodingActivityEvent
 )
 
 __all__ = [
@@ -144,6 +162,7 @@ __all__ = [
     "ToolCallEvent",
     "ToolResultEvent",
     "StreamTokenEvent",
+    "CodingActivityEvent",
     "ChatEvent",
     "_utc_now",
     "_new_id",

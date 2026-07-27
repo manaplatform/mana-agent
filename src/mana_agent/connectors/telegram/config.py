@@ -56,6 +56,7 @@ class TelegramConfig(BaseModel):
     enabled: bool = False
     transport: Literal["auto", "polling", "webhook"] = "polling"
     bot_token_env: str = "TELEGRAM_BOT_TOKEN"
+    bot_token_secret_ref: str = ""
     allowed_users: list[int] = Field(default_factory=list)
     allowed_chats: list[int] = Field(default_factory=list)
     admin_users: list[int] = Field(default_factory=list)
@@ -94,7 +95,15 @@ class TelegramConfig(BaseModel):
 
     @property
     def bot_token(self) -> str:
-        return str(os.getenv(self.bot_token_env, "")).strip()
+        value = str(os.getenv(self.bot_token_env, "")).strip()
+        if value or not self.bot_token_secret_ref:
+            return value
+        try:
+            import keyring
+
+            return str(keyring.get_password("mana-agent.connector", self.bot_token_secret_ref) or "").strip()
+        except Exception:
+            return ""
 
     @property
     def webhook_secret(self) -> str:

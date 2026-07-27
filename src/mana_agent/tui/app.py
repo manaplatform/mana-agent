@@ -42,8 +42,6 @@ This guarantees tool visibility on *every* turn, not just the first message.
 from __future__ import annotations
 
 import asyncio
-import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +54,7 @@ from textual.widgets import Footer, Header, Static
 
 from mana_agent.chat.events import (
     AssistantMessageEvent,
+    CodingActivityEvent,
     StreamTokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -158,6 +157,8 @@ class ManaChatApp(App):
         self._planning_questions: list[str] = []
         self._planning_answers: list[str] = []
         self._turn_in_progress = False
+        self._computer_permission_requests_shown: set[str] = set()
+        self._unsubscribe_computer_permissions = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -176,7 +177,8 @@ class ManaChatApp(App):
                 )
                 yield self.input
                 yield Static(
-                    "Enter sends · Shift+Enter adds a line · Ctrl+J / Alt+Enter also add a line",
+                    "Enter sends · Tab completes commands · Shift+Enter adds a line · "
+                    "Ctrl+J / Alt+Enter also add a line",
                     id="input-help",
                 )
 
@@ -186,7 +188,15 @@ class ManaChatApp(App):
     def on_mount(self) -> None:
         """Focus input and show a welcome message. Seed initial prompt if provided by CLI."""
         if self.input:
+            registry = getattr(self.gateway, "command_registry", None)
+            if registry is not None:
+                self.input.set_command_completions(
+                    [definition.canonical_name for definition in registry.definitions()]
+                )
             self.input.focus()
+        self._unsubscribe_computer_permissions = self.history.subscribe(
+            self._handle_computer_permission_event
+        )
 
         # Safe immediate footer (avoids any early watcher issues)
         self.sub_title = "Ready"
@@ -229,6 +239,86 @@ class ManaChatApp(App):
         if self.initial_prompt:
             self.run_worker(self._send_initial_prompt(), exclusive=True)
 
+    def _handle_computer_permission_event(self, event: Any) -> None:
+        if not isinstance(event, CodingActivityEvent):
+            return
+        activity = event.activity
+        if activity.get("event_type") not in {"computer.waiting_permission", "remote_execution.waiting_permission"}:
+            return
+        metadata = activity.get("metadata") or {}
+        request_id = str(metadata.get("permission_request_id") or "")
+        if not request_id or request_id in self._computer_permission_requests_shown:
+            return
+        self._computer_permission_requests_shown.add(request_id)
+        from mana_agent.tui.computer_permission import ComputerPermissionRequested
+
+        # Chat history listeners run synchronously on the gateway/tool thread.
+        # Posting a Textual message is thread-safe and non-blocking; call_from_thread
+        # would wait for the UI callback and can deadlock the active tool turn.
+        self.post_message(ComputerPermissionRequested(
+            request_id=request_id,
+            scope=str(metadata.get("permission_scope") or ""),
+            preview=str(metadata.get("preview") or activity.get("title") or ""),
+            remote=bool(metadata.get("remote_permission")),
+        ))
+
+    def on_computer_permission_requested(self, event: Any) -> None:
+        from mana_agent.tui.computer_permission import ComputerPermissionScreen
+
+        self.push_screen(
+            ComputerPermissionScreen(
+                request_id=event.request_id,
+                scope=event.scope,
+                preview=event.preview,
+                remote=event.remote,
+            ),
+            self._apply_computer_permission,
+        )
+
+    def _apply_computer_permission(self, choice: Any) -> None:
+        if choice is None:
+            return
+        self.run_worker(
+            self._complete_computer_permission(choice),
+            name=f"computer-permission-{choice.request_id}",
+        )
+
+    async def _complete_computer_permission(self, choice: Any) -> None:
+        from mana_agent.integrations.computer_control.cancellation import (
+            decide_computer_permission,
+            deny_computer_permission,
+        )
+
+        try:
+            if choice.remote:
+                if choice.decision is None:
+                    self.notify("Remote SSH request denied.", severity="warning")
+                    return
+                result = await asyncio.to_thread(self.gateway.remote_permission_command, choice.request_id)
+                self.notify(result["message"])
+                self.history.add(AssistantMessageEvent(content=result["message"]))
+                return
+            if choice.decision is None:
+                await asyncio.to_thread(
+                    deny_computer_permission,
+                    choice.request_id,
+                    client_type="tui",
+                )
+                self.notify("Computer action denied.", severity="warning")
+                return
+            result = await asyncio.to_thread(
+                decide_computer_permission,
+                choice.request_id,
+                decision=choice.decision,
+                client_type="tui",
+            )
+            self.notify(result.message)
+            self.history.add(AssistantMessageEvent(
+                content=f"Computer action completed after permission approval: {result.message}"
+            ))
+        except Exception as exc:
+            self.notify(f"Computer permission action failed: {exc}", severity="error")
+
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
         self.status_text = text
@@ -247,7 +337,12 @@ class ManaChatApp(App):
         model = self.model or "default"
         root = self.repo_root.name if self.repo_root else ""
         tokens = f"tokens: {self.token_count}"
-        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}"
+        process_status = ""
+        manager = getattr(self.gateway, "background_processes", None)
+        if manager is not None:
+            active = sum(1 for row in manager.list() if row.state in {"starting", "running"})
+            process_status = f"  |  processes: {active}"
+        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}{process_status}"
 
     def action_clear_log(self) -> None:
         if self.chat_log:
@@ -378,6 +473,35 @@ class ManaChatApp(App):
                 self.input.reset()
             return
 
+        if text.startswith("/") and self.gateway is not None and hasattr(self.gateway, "dispatch_command"):
+            if not self._gateway_session_id:
+                self._gateway_session_id = self.gateway.create_session(frontend="tui")
+            result = self.gateway.dispatch_command(
+                text, session_id=self._gateway_session_id, frontend="tui"
+            )
+            if result is not None:
+                new_session_id = str(result.data.get("session_id") or "")
+                if new_session_id:
+                    self._gateway_session_id = new_session_id
+                    self.active_flow_id = None
+                for event in result.events:
+                    if event.get("type") == "timeline.replace":
+                        self._replace_timeline(event.get("messages") or [])
+                    elif event.get("type") == "session.picker":
+                        from mana_agent.tui.session_management import SessionPickerScreen
+
+                        self.push_screen(SessionPickerScreen(event.get("sessions") or []), self._apply_session_action)
+                if result.status == "input_required" and (result.next_prompt or {}).get("kind") == "connector.telegram.setup":
+                    from mana_agent.tui.session_management import TelegramSetupScreen
+
+                    self.push_screen(TelegramSetupScreen(self.repo_root), self._apply_telegram_setup)
+                if result.message:
+                    self.history.add(AssistantMessageEvent(content=result.message))
+                if self.input:
+                    self.input.reset()
+                self.update_status("Ready")
+                return
+
         if text == "/new":
             if self._turn_in_progress:
                 self.notify("Wait for the current turn to finish before starting a new conversation.", severity="warning")
@@ -422,9 +546,82 @@ class ManaChatApp(App):
             self._gateway_session_id, frontend="tui"
         )
         self.active_flow_id = None
-        self.history.clear()
-        self.history.add(AssistantMessageEvent(content="Started a new conversation."))
+        self._clear_conversation_view()
         return self._gateway_session_id
+
+    def _replace_timeline(self, messages: list[dict[str, Any]]) -> None:
+        """Replace visible state from canonical chronological durable messages."""
+        self._clear_conversation_view()
+        for message in messages:
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "")
+            turn_id = str(message.get("turn_id") or "")
+            if role == "user":
+                self.history.add(UserMessageEvent(content=content, turn_id=turn_id))
+            elif role == "assistant":
+                self.history.add(AssistantMessageEvent(content=content, turn_id=turn_id))
+
+    def _clear_conversation_view(self) -> None:
+        """Clear both canonical TUI events and already-mounted timeline widgets."""
+        self.history.clear()
+        if self.chat_log is not None:
+            self.chat_log.clear_log()
+        self._tool_cid_map.clear()
+        self.token_count = 0
+
+    def _apply_session_action(self, action: Any | None) -> None:
+        if action is None or self.gateway is None or not self._gateway_session_id:
+            return
+        import shlex
+
+        command = f"/sessions {action.action} {shlex.quote(action.session_id)}"
+        if action.action == "rename":
+            command += " " + shlex.quote(action.title)
+        result = self.gateway.dispatch_command(
+            command,
+            session_id=self._gateway_session_id,
+            frontend="tui",
+            confirmed=action.action == "delete",
+        )
+        if result.status == "error":
+            self.notify(result.message, severity="error")
+            return
+        replacement_id = str(result.data.get("session_id") or "")
+        if replacement_id:
+            self._gateway_session_id = replacement_id
+        elif action.action == "switch":
+            self._gateway_session_id = action.session_id
+        for event in result.events:
+            if event.get("type") == "timeline.replace":
+                self._replace_timeline(event.get("messages") or [])
+        if result.message:
+            self.notify(result.message)
+
+    def _apply_telegram_setup(self, setup: Any | None) -> None:
+        if setup is None:
+            return
+        self.run_worker(self._complete_telegram_setup(setup), exclusive=True)
+
+    async def _complete_telegram_setup(self, setup: Any) -> None:
+        from mana_agent.connectors.service import TelegramConnectRequest
+
+        self.update_status("Validating Telegram…")
+        try:
+            result = await asyncio.to_thread(
+                self.gateway.connector_service.connect_telegram,
+                TelegramConnectRequest(
+                    transport=setup.transport, repository=setup.repository,
+                    allowed_users=setup.allowed_users, allowed_chats=setup.allowed_chats,
+                    webhook_url=setup.webhook_url, secret_source=setup.secret_source,
+                ),
+                token=setup.token,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.notify(str(exc), severity="error")
+        else:
+            self.notify(result.message)
+        finally:
+            self.update_status("Ready")
 
     async def _handle_real_turn_guarded(self, user_event: UserMessageEvent) -> None:
         try:
@@ -602,6 +799,9 @@ class ManaChatApp(App):
                     row = None
             if not isinstance(row, dict):
                 continue
+            if row.get("backend") in {"codex", "internal"} and row.get("event_type"):
+                # Already rendered live in the backend-neutral execution panel.
+                continue
             tname = str(row.get("tool_name") or row.get("tool") or "tool")
             args_summary = str(row.get("args_summary") or row.get("args") or tname)[:120]
             cid = str(row.get("call_id") or row.get("event_id") or f"gw-{tname}-{turn_id}-{idx}")
@@ -647,6 +847,12 @@ class ManaChatApp(App):
         """
         question = user_event.content
         turn_id = user_event.turn_id
+
+        def _on_coding_event(event: Any) -> None:
+            payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else dict(event)
+            # The frontend turn is authoritative for presentation. Provider turn
+            # IDs remain available inside the normalized activity payload.
+            self.history.add(CodingActivityEvent(activity=payload, turn_id=turn_id))
 
         # --- Planning collection state machine (mirrors console pre-generate logic) ---
         if self._in_planning_collection and self._planning_request:
@@ -723,13 +929,33 @@ class ManaChatApp(App):
 
                     tools_before = self._count_tool_events_for_turn(turn_id)
                     self.update_status("Routing via gateway (auto-chat / coding)…")
-                    result = await asyncio.to_thread(_run_gateway_turn)
+                    from mana_agent.coding.live_events import coding_event_scope
+
+                    with coding_event_scope(_on_coding_event):
+                        result = await asyncio.to_thread(_run_gateway_turn)
                     answer = str(getattr(result, "answer", "") or "")
+                    result_payload = dict(getattr(result, "payload", {}) or {})
+                    if str(getattr(result, "mode", "") or "") == "command":
+                        active_session_id = str(result_payload.get("session_id") or "")
+                        if active_session_id:
+                            self._gateway_session_id = active_session_id
+                        command_result = dict(result_payload.get("command_result") or {})
+                        for command_event in command_result.get("events") or []:
+                            if command_event.get("type") == "timeline.replace":
+                                self._replace_timeline(command_event.get("messages") or [])
                     if getattr(result, "error", None) and not answer:
                         answer = f"(Gateway error: {result.error})"
                     flow_id = getattr(result, "flow_id", None)
                     if isinstance(flow_id, str) and flow_id.strip():
                         self.active_flow_id = flow_id.strip()
+
+                    routing = dict((getattr(result, "payload", {}) or {}).get("routing_decision") or {})
+                    if routing:
+                        self.update_status(
+                            f"{routing.get('provider')}/{routing.get('model')} · "
+                            f"{routing.get('routing_mode', 'single')} · "
+                            f"{float(routing.get('confidence') or 0):.0%}"
+                        )
 
                     # Surface tool/mode hints when auto-chat (e.g. gmail) was used
                     route_mode = str(getattr(result, "mode", "") or "")
@@ -744,20 +970,23 @@ class ManaChatApp(App):
                     if self._count_tool_events_for_turn(turn_id) <= tools_before:
                         self._replay_tool_traces_from_result(result, turn_id=turn_id)
 
-                    self.history.add(
-                        AssistantMessageEvent(
-                            content=answer or "(No response)",
-                            turn_id=turn_id,
+                    if answer or str(getattr(result, "mode", "") or "") != "command":
+                        self.history.add(
+                            AssistantMessageEvent(
+                                content=answer or "(No response)",
+                                turn_id=turn_id,
+                            )
                         )
-                    )
                     if not route_mode:
                         self.update_status("Ready")
                     else:
                         self.update_status(f"Ready ({route_mode})")
                     return
                 except Exception as exc:
-                    # Fall through to direct coding_agent / chat_service path
-                    self.update_status(f"Gateway turn failed, trying direct path… ({exc})")
+                    answer = f"Gateway execution failed: {exc}. No direct model fallback was executed."
+                    self.history.add(AssistantMessageEvent(content=answer, turn_id=turn_id))
+                    self.update_status("Gateway routing failed")
+                    return
 
             # ==========================================================
             # Decide whether to use the full CodingAgent + strict planner checklist path.
@@ -803,7 +1032,6 @@ class ManaChatApp(App):
                     self.coding_agent is not None
                     and self.auto_execute_plan
                 )
-                auto_planning_turn = False  # extend with planning_request detection if full Q loop desired
                 execute_plan_now = bool(
                     self.auto_execute_plan
                     and not force_plan_only_response
@@ -817,9 +1045,6 @@ class ManaChatApp(App):
 
                 # State for full-auto resume cycles (mirrors console)
                 turn_full_auto_resume_cycles = 0
-                turn_full_auto_passes_total = 0
-                turn_full_auto_pass_checkpoints_emitted = 0
-                turn_resumed_from_pass_cap = False
                 turn_resume_run_id: str | None = None
                 active_flow_id = self.active_flow_id
 
@@ -955,7 +1180,10 @@ class ManaChatApp(App):
                 # and worker errors do not crash the TUI worker with traceback.
                 while True:
                     try:
-                        payload = await asyncio.to_thread(_run_coding_generation)
+                        from mana_agent.coding.live_events import coding_event_scope
+
+                        with coding_event_scope(_on_coding_event):
+                            payload = await asyncio.to_thread(_run_coding_generation)
                     except Exception as gen_exc:  # includes ExecutionScopeDecisionError, ToolWorkerProcessError etc.
                         # Surface gracefully (mirrors console except blocks).
                         # The emit bridge may have emitted ToolCards for work done before the decision failure.
@@ -984,7 +1212,6 @@ class ManaChatApp(App):
                         turn_resume_run_id = r.strip()
                     if term != "pass_cap_reached":
                         break
-                    turn_resumed_from_pass_cap = True
                     turn_full_auto_resume_cycles += 1
                     # In real console a new resume request is built; here we simply loop once more
                     # with the same request (the agent itself manages state via flow_id/run_id).
@@ -1041,6 +1268,8 @@ class ManaChatApp(App):
                 if isinstance(result, dict):
                     for row in (result.get("actions_taken") or []):
                         if not isinstance(row, dict):
+                            continue
+                        if row.get("backend") in {"codex", "internal"} and row.get("event_type"):
                             continue
                         tname = str(row.get("tool_name") or row.get("tool") or row.get("name") or "tool")
                         args_val = row.get("args") or row.get("input") or row.get("tool_args") or {}
@@ -1226,6 +1455,9 @@ class ManaChatApp(App):
 
     def on_unmount(self) -> None:
         """Use the same idempotent finalization path for all TUI shutdowns."""
+        if self._unsubscribe_computer_permissions is not None:
+            self._unsubscribe_computer_permissions()
+            self._unsubscribe_computer_permissions = None
         if self.gateway is not None and hasattr(self.gateway, "close_session"):
             self.gateway.close_session(self._gateway_session_id)
 

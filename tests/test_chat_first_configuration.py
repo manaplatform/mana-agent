@@ -23,10 +23,7 @@ from mana_agent.tui.configuration_app import validate_github_connection, validat
 
 @pytest.fixture()
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(user_config, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(user_config, "CONFIG_FILE", tmp_path / "config.toml")
-    monkeypatch.setattr(user_config, "SECRETS_FILE", tmp_path / "secrets.toml")
-    monkeypatch.setattr(user_config, "MODEL_CACHE_FILE", tmp_path / "model_cache.json")
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
     return tmp_path
 
 
@@ -128,24 +125,24 @@ def test_unchanged_masked_secret_is_preserved_and_removal_is_explicit(isolated_c
 
 def test_atomic_write_preserves_previous_file_on_replace_failure(isolated_config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     user_config.save_user_config({"OPENAI_CHAT_MODEL": "old"}, merge=False)
-    previous = user_config.CONFIG_FILE.read_text(encoding="utf-8")
+    previous = user_config.config_file().read_text(encoding="utf-8")
     monkeypatch.setattr(user_config.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("disk")))
 
     with pytest.raises(user_config.UserConfigError):
         user_config.save_user_config({"OPENAI_CHAT_MODEL": "new"}, merge=False)
 
-    assert user_config.CONFIG_FILE.read_text(encoding="utf-8") == previous
+    assert user_config.config_file().read_text(encoding="utf-8") == previous
 
 
 def test_legacy_migration_is_idempotent_and_moves_secrets(isolated_config: Path) -> None:
-    user_config.CONFIG_FILE.write_text('OPENAI_API_KEY = "legacy-secret"\nOPENAI_CHAT_MODEL = "legacy-model"\nUNKNOWN = "keep"\n')
+    user_config.config_file().write_text('OPENAI_API_KEY = "legacy-secret"\nOPENAI_CHAT_MODEL = "legacy-model"\nUNKNOWN = "keep"\n')
 
     first = user_config.migrate_legacy_config()
-    once = user_config.CONFIG_FILE.read_text(encoding="utf-8")
+    once = user_config.config_file().read_text(encoding="utf-8")
     second = user_config.migrate_legacy_config()
 
     assert first and second == []
-    assert user_config.CONFIG_FILE.read_text(encoding="utf-8") == once
+    assert user_config.config_file().read_text(encoding="utf-8") == once
     assert "OPENAI_API_KEY" not in user_config.load_user_config()
     assert user_config.load_user_secrets()["OPENAI_API_KEY"] == "legacy-secret"
     assert user_config.load_user_config()["UNKNOWN"] == "keep"
@@ -156,7 +153,7 @@ def test_catalog_service_uses_mock_adapter_without_network(isolated_config: Path
     service = ModelCatalogService(fetcher=lambda **_kwargs: ["gpt-4.1-mini", "text-embedding-3-small"])
     models = service.refresh(provider="openai", base_url="https://example.test/v1", api_key="secret")
     assert {model.id for model in models} == {"gpt-4.1-mini", "text-embedding-3-small"}
-    assert json.loads(user_config.MODEL_CACHE_FILE.read_text(encoding="utf-8"))
+    assert json.loads(user_config.model_cache_file().read_text(encoding="utf-8"))
 
 
 def test_models_plain_set_allows_only_configured_compatible_models(isolated_config: Path) -> None:

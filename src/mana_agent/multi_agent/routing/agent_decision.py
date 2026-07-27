@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import json
 import re
+import time
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from mana_agent.tools.contracts import coding_tool_contracts
+from mana_agent.evals.ids import stable_hash
+from mana_agent.evals.recorder import record_current
 
 
 AgentIntent = Literal[
@@ -290,6 +293,7 @@ class AgentDecisionEngine:
             "tools": self.tool_descriptions,
         }
         try:
+            started = time.perf_counter()
             response = self.llm.invoke(
                 [
                     SystemMessage(content=AGENT_DECISION_PROMPT),
@@ -324,8 +328,22 @@ class AgentDecisionEngine:
                     str(part.get("text", part)) if isinstance(part, dict) else str(part)
                     for part in review_content
                 )
-            return self._decision_from_payload(_extract_json(str(review_content)))
-        except Exception:
+            reviewed = self._decision_from_payload(_extract_json(str(review_content)))
+            record_current(
+                "model.decision",
+                {
+                    "boundary": "agent_decision",
+                    "prompt_template": "AGENT_DECISION_PROMPT+REVIEW",
+                    "prompt_hash": stable_hash(AGENT_DECISION_PROMPT + AGENT_DECISION_REVIEW_PROMPT),
+                    "request_hash": stable_hash(payload),
+                    "response": reviewed.to_dict(),
+                    "usage": [getattr(response, "usage_metadata", None), getattr(review_response, "usage_metadata", None)],
+                    "latency_seconds": time.perf_counter() - started,
+                },
+            )
+            return reviewed
+        except Exception as exc:
+            record_current("model.call.failed", {"boundary": "agent_decision", "error_type": type(exc).__name__, "error": str(exc)})
             return None
 
     def _decision_from_payload(self, data: dict[str, Any]) -> AgentDecision:

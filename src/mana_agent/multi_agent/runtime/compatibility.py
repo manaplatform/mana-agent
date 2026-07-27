@@ -8,11 +8,15 @@ preserving LangChain's tool adapter and response parsing.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Iterator, Literal
 
 from langchain_openai import ChatOpenAI
 from mana_agent.config.user_config import get_setting
+from mana_agent.evals.ids import stable_hash
+from mana_agent.evals.recorder import record_current
+from mana_agent.telemetry.tokens import token_usage_from_provider
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +53,7 @@ def _api_mode_from_config() -> ApiMode:
     return value  # type: ignore[return-value]
 
 
-def resolve_model_capabilities(*, base_url: str | None) -> tuple[ApiMode, ModelCapabilities]:
+def resolve_model_capabilities(*, base_url: str | None, provider: str | None = None) -> tuple[ApiMode, ModelCapabilities]:
     """Resolve safe defaults, with explicit environment overrides for gateways.
 
     A custom OpenAI-compatible URL is intentionally *not* presumed to implement
@@ -57,7 +61,7 @@ def resolve_model_capabilities(*, base_url: str | None) -> tuple[ApiMode, ModelC
     """
 
     normalized_url = str(base_url or "https://api.openai.com/v1").rstrip("/").lower()
-    is_openai = normalized_url in {"https://api.openai.com/v1", "https://api.openai.com"}
+    is_openai = (provider or "").lower() == "openai" or normalized_url in {"https://api.openai.com/v1", "https://api.openai.com"}
     defaults = ModelCapabilities(
         supports_responses_api=is_openai,
         supports_tools=True,
@@ -170,9 +174,21 @@ class CompatibleChatOpenAI(ChatOpenAI):
         )
 
     def _generate(self, messages: list[Any], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        metadata = self._eval_request_metadata(messages, kwargs)
         try:
-            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as exc:
+            record_current(
+                "model.call.failed",
+                {
+                    **metadata,
+                    "latency_seconds": time.perf_counter() - started,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "retry_attempt": int(self.compatibility_retry_attempted),
+                },
+            )
             if self.compatibility_retry_attempted or not _has_tools(kwargs) or not _is_tools_reasoning_error(exc):
                 raise
             logger.warning(
@@ -183,14 +199,43 @@ class CompatibleChatOpenAI(ChatOpenAI):
             return self._retry_without_chat_reasoning()._generate(
                 messages, stop=stop, run_manager=run_manager, **kwargs
             )
+        llm_output = getattr(result, "llm_output", None)
+        raw_usage = llm_output.get("token_usage") if isinstance(llm_output, dict) else None
+        usage = token_usage_from_provider(raw_usage)
+        record_current(
+            "model.call",
+            {
+                **metadata,
+                "latency_seconds": time.perf_counter() - started,
+                "usage": usage.as_dict(),
+                "retry_attempt": int(self.compatibility_retry_attempted),
+            },
+        )
+        return result
 
     def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
         yielded = False
+        started = time.perf_counter()
+        messages = args[0] if args and isinstance(args[0], list) else kwargs.get("messages", [])
+        metadata = self._eval_request_metadata(messages, kwargs)
+        usage: Any = None
         try:
             for chunk in super()._stream(*args, **kwargs):
                 yielded = True
+                usage = getattr(chunk, "usage_metadata", None) or usage
                 yield chunk
         except Exception as exc:
+            record_current(
+                "model.call.failed",
+                {
+                    **metadata,
+                    "latency_seconds": time.perf_counter() - started,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "streaming": True,
+                    "retry_attempt": int(self.compatibility_retry_attempted),
+                },
+            )
             if yielded or self.compatibility_retry_attempted or not _has_tools(kwargs) or not _is_tools_reasoning_error(exc):
                 raise
             logger.warning(
@@ -199,12 +244,49 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 self.model_name,
             )
             yield from self._retry_without_chat_reasoning()._stream(*args, **kwargs)
+            return
+        normalized = token_usage_from_provider(usage)
+        record_current(
+            "model.call",
+            {
+                **metadata,
+                "latency_seconds": time.perf_counter() - started,
+                "usage": normalized.as_dict(),
+                "streaming": True,
+                "retry_attempt": int(self.compatibility_retry_attempted),
+            },
+        )
+
+    def _eval_request_metadata(self, messages: list[Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+        roles = [str(getattr(message, "type", type(message).__name__)) for message in messages]
+        prompt_material = [
+            {"role": role, "content": str(getattr(message, "content", ""))}
+            for role, message in zip(roles, messages)
+        ]
+        tools = []
+        for item in kwargs.get("tools") or []:
+            if isinstance(item, dict):
+                function = item.get("function") if isinstance(item.get("function"), dict) else item
+                tools.append(str(function.get("name") or ""))
+        base_url = str(getattr(self, "openai_api_base", "") or "").lower()
+        return {
+            "boundary": "compatible_chat_model",
+            "provider": "openai" if not base_url or "api.openai.com" in base_url else "openai-compatible",
+            "model": self.model_name,
+            "prompt_hash": stable_hash(prompt_material),
+            "safe_request_metadata": {
+                "message_count": len(messages),
+                "roles": roles,
+                "tool_names": [name for name in tools if name],
+                "streaming": bool(kwargs.get("stream")),
+            },
+        }
 
 
-def create_chat_model(*, api_key: str, model: str, base_url: str | None = None, **kwargs: Any) -> CompatibleChatOpenAI:
+def create_chat_model(*, api_key: str, model: str, base_url: str | None = None, provider: str | None = None, default_headers: dict[str, str] | None = None, **kwargs: Any) -> CompatibleChatOpenAI:
     """Create the shared compatibility-aware LLM client used by every runtime role."""
 
-    api_mode, capabilities = resolve_model_capabilities(base_url=base_url)
+    api_mode, capabilities = resolve_model_capabilities(base_url=base_url, provider=provider)
     reasoning_effort = str(get_setting("MANA_LLM_REASONING_EFFORT", "") or "").strip() or None
     init_kwargs: dict[str, Any] = {
         "api_key": api_key,
@@ -215,6 +297,8 @@ def create_chat_model(*, api_key: str, model: str, base_url: str | None = None, 
     }
     if base_url:
         init_kwargs["base_url"] = base_url
+    if default_headers:
+        init_kwargs["default_headers"] = default_headers
     if reasoning_effort and "reasoning_effort" not in init_kwargs and "reasoning" not in init_kwargs:
         init_kwargs["reasoning_effort"] = reasoning_effort
     return CompatibleChatOpenAI(**init_kwargs)

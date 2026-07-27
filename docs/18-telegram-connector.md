@@ -74,7 +74,11 @@ Supported environment overrides are `MANA_TELEGRAM_ENABLED`, `MANA_TELEGRAM_TRAN
 
 Polling calls `deleteWebhook` before `getUpdates`, uses Telegram long polling, and stores each update in SQLite before committing its offset. A per-token process lock prevents concurrent pollers. The collector and model workers are separate, so a long-running task does not block incoming updates.
 
-For a VPS, run the foreground `start` command under systemd, launchd, Docker, or another supervisor. Send SIGTERM for graceful shutdown, or use `mana-agent connector telegram stop` when the recorded process belongs to the current user.
+`mana-agent connector telegram start` and `/connect telegram start` launch the
+registered connector worker through Mana-Agent's persistent background-process
+manager. The worker survives CLI, Textual, dashboard, and API frontend shutdown;
+use `/processes` or either Telegram stop command for identity-checked graceful
+shutdown and bounded forced cleanup.
 
 ## Webhook deployments
 
@@ -112,7 +116,11 @@ Telegram does not permit `getUpdates` while a webhook is active. Polling startup
 
 ## Commands and groups
 
-The registry provides `/start`, `/help`, `/status`, `/new`, `/cancel`, and `/id`. `/new` replaces only the session bound to the current bot/chat/topic/sender context. `/cancel` reports honestly when the underlying chat runtime cannot cooperatively cancel an active model call.
+Telegram delegates `/help`, `/status`, `/new`, `/sessions`, `/tasks`, `/models`,
+`/processes`, `/connect`, `/cancel`, and other supported commands to the shared
+chat-command registry after access authorization. `/id` is a Telegram-only
+shared definition. `/new` destructively replaces only the canonical session
+bound to the current bot/chat/topic/sender context and persists the new mapping.
 
 Group activation can require an explicit bot mention, a reply to the bot, any bot command, or `always`. Prefer mention or reply activation. Forum topics have independent ordered execution lanes and sessions. Independent chats can execute concurrently up to the configured queue concurrency.
 
@@ -139,6 +147,11 @@ mana-agent run --root-dir /path/to/project --plan-id mp_e0dac3f34151
 When enabled, attachments are checked by declared size and MIME type, downloaded through Telegram's file API, given a sanitized filename, parsed through Mana-Agent's document service in an isolated session directory, and removed after the turn. Files are never executed. Repository access remains limited to `default_repository` inside `allowed_repository_roots`; Telegram does not provide an unrestricted path selector.
 
 Long responses are escaped for the configured parse mode and split below Telegram's 4096-character limit. If Telegram rejects formatting, the connector retries that response as plain text. Tokens, secrets, full messages, internal prompts, chain-of-thought, and unrestricted tool arguments are excluded from connector logs and status output.
+
+`/connect telegram` uses a frontend secret field, validates `getMe` before
+saving configuration, and stores only a keyring reference or explicit
+environment-variable name. Raw tokens are excluded from history, events,
+process records, command lines, exception rendering, and dashboard state.
 
 ## Operations and troubleshooting
 

@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+import shutil
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -64,8 +65,19 @@ class WorkspaceStore:
         return rows
 
     def find_repository_by_path(self, path: str | Path) -> RepositoryRecord | None:
-        canonical = str(Path(path).expanduser().resolve())
-        return next((item for item in self.list_repositories() if item.canonical_path == canonical or item.git_root == canonical), None)
+        canonical = os.path.normcase(str(Path(path).expanduser().resolve()))
+        return next(
+            (
+                item
+                for item in self.list_repositories()
+                if canonical
+                in {
+                    os.path.normcase(str(item.canonical_path or "")),
+                    os.path.normcase(str(item.git_root or "")),
+                }
+            ),
+            None,
+        )
 
     def save_workspace(self, record: WorkspaceRecord) -> WorkspaceRecord:
         atomic_write_json(workspace_dir(record.workspace_id) / "workspace.json", record.model_dump(mode="json"))
@@ -103,3 +115,23 @@ class WorkspaceStore:
             except Exception:
                 continue
         return sorted(rows, key=lambda item: item.updated_at, reverse=True)
+
+    def delete_session(self, session_id: str) -> None:
+        """Physically delete a session after proving its path is below Mana home.
+
+        A session is a directory, rather than an archive marker.  Refuse symlinked
+        or malformed targets so a corrupt record can never widen deletion scope.
+        """
+
+        sid = str(session_id or "").strip()
+        if not sid or not sid.startswith("session_") or not sid.replace("_", "").isalnum():
+            raise ValueError("invalid session id")
+        sessions_root = (self.home / "sessions").resolve()
+        target = self.home / "sessions" / sid
+        if target.is_symlink():
+            raise ValueError("refusing to delete a symlinked session directory")
+        resolved = target.resolve(strict=False)
+        if resolved.parent != sessions_root:
+            raise ValueError("session deletion target is outside Mana home")
+        if resolved.exists():
+            shutil.rmtree(resolved)

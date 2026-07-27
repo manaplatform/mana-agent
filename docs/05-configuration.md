@@ -1,5 +1,23 @@
 # Configuration
 
+## Mana Fleet
+
+Fleet is disabled by default with `MANA_FLEET_ENABLED=false`. Worker, timeout,
+concurrency, capability TTL, log/artifact limit, retention, repair, and trust
+settings are listed in [the Fleet guide](24-fleet.md#configuration). Enabling
+Fleet does not register or trust a worker; enrollment and a fresh authenticated
+capability inventory are still required.
+
+## Computer control
+
+Computer control is disabled by default and configured through the Textual
+Settings → Computer control tab, Dashboard → Computer Control, or the
+`[computer_control]` table. Permission scopes, allowed filesystem roots, remote
+restrictions, exact-action confirmations, audit retention, defaults, and the
+complete example are documented in
+[`22-computer-control.md`](22-computer-control.md). `MANA_COMPUTER_CONTROL_ENABLED`
+is a compatibility flat switch; the validated table is authoritative.
+
 ## Experience-to-Skill Workshop
 
 The workshop reads the `[experience_to_skill]` table from the existing user
@@ -169,7 +187,7 @@ MANA_CODEX_ENABLED=true
 MANA_CODEX_BIN=codex
 MANA_CODEX_MAX_WORKERS=2
 MANA_CODEX_STREAM_EVENTS=true
-MANA_CODEX_WORKTREE_ISOLATION=true
+MANA_CODEX_WORKTREE_ISOLATION=false
 MANA_CODEX_TASK_TIMEOUT_SECONDS=1800
 MANA_CODEX_ALLOW_NETWORK=false
 MANA_CODEX_MODEL=
@@ -249,9 +267,40 @@ MANA_LLM_SUPPORTS_TOOLS_WITH_CHAT_REASONING=false
 
 Only enable Responses API support when that gateway implements `/v1/responses`.
 
-## Model Role Levels
+## Adaptive model routing
 
-`MODEL_LEVEL_*` variables contain actual model IDs. `MANA_MODEL_*` variables map each Mana role to one of those model levels.
+Adaptive routing is enabled by default. Explicit profiles can be supplied as a JSON/TOML list in `MANA_MODEL_PROFILES`; see [Evidence-based model routing](model-routing.md) for its schema, scoring, history, budget, verifier, and competition behavior.
+
+```bash
+MANA_ADAPTIVE_ROUTING_ENABLED=true
+MANA_ROUTING_COMPLEXITY_THRESHOLD=high
+MANA_ROUTING_RISK_THRESHOLD=high
+MANA_ROUTING_MAX_CANDIDATES=2
+MANA_ROUTING_MIN_CONFIDENCE=0.55
+MANA_ROUTING_TASK_TOKEN_BUDGET=32000
+MANA_ROUTING_TASK_COST_BUDGET=
+MANA_ROUTING_SESSION_COST_BUDGET=
+MANA_ROUTING_COMPETITION_COST_BUDGET=
+MANA_ROUTING_VERIFICATION_COST_BUDGET=
+MANA_ROUTING_RETRY_COST_BUDGET=
+MANA_ROUTING_VERIFICATION_RESERVE_RATIO=0.15
+MANA_ROUTING_BENCHMARK_WEIGHTS={}
+MANA_ROUTING_LANGUAGE_PREFERENCES={}
+MANA_ROUTING_EVIDENCE_RETENTION_DAYS=90
+MANA_ROUTING_CIRCUIT_BREAKER_FAILURES=3
+MANA_ROUTING_CIRCUIT_BREAKER_WINDOW_SECONDS=900
+MANA_ROUTING_RELIABILITY_DECAY_SECONDS=3600
+MANA_ROUTING_MODEL_FAILURE_PENALTY_WEIGHT=0.08
+MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT=0.04
+```
+
+Invalid profile, capability, latency, or budget configuration stops selection. Disabling adaptive routing also stops model execution; it does not restore static routing.
+
+An explicit profile includes `provider`, `model_id`, `supported_roles`, `supported_tools`, `reasoning_settings`, `context_window`, `latency_class`, input/output pricing or `logical_cost_per_1k_tokens`, `reliability_score`, `supported_languages`, `benchmark_scores`, and the `can_patch`, `can_structured_output`, `can_tool_call`, `can_verify`, and `available` flags. Duplicate provider/model IDs and invalid ranges fail validation.
+
+### Legacy model-level migration
+
+`MODEL_LEVEL_*` variables contain actual model IDs. `MANA_MODEL_*` variables remain accepted and seed adaptive candidate profiles. Levels contribute initial cost, latency, reliability, and benchmark hints but do not lock a role to a model.
 
 ```bash
 MODEL_LEVEL_3_HIGH_REASONING=gpt-4.1

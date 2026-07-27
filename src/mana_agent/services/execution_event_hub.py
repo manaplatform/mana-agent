@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 import threading
 import uuid
 from collections import defaultdict
@@ -16,9 +17,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from mana_agent.cli.events import ChatEvent, make_event, utc_now_iso
-from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
-from mana_agent.workspaces.store import atomic_write_json
+from mana_agent.cli.events import ChatEvent, make_event, normalize_event_kind, utc_now_iso
+from mana_agent.utils.redaction import redact_json_line, redact_secrets
+from mana_agent.workspaces.paths import repository_dir, repository_id_for_path, session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ def conversations_root(repository_id: str) -> Path:
 
 
 def conversation_events_path(repository_id: str, conversation_id: str) -> Path:
+    if str(conversation_id).startswith("session_"):
+        return session_dir(conversation_id) / "events.jsonl"
     return conversations_root(repository_id) / conversation_id / "events.jsonl"
 
 
@@ -84,8 +87,37 @@ def normalize_execution_event(
     payload.setdefault("timestamp", payload["started_at"])
     payload.setdefault("status", "running")
     payload.setdefault("type", "step.updated")
-    payload.setdefault("kind", meta.get("kind") or "reasoning")
-    return payload
+    payload.setdefault(
+        "kind",
+        meta.get("kind") or normalize_event_kind(str(payload.get("type") or "")),
+    )
+    structurally_redacted = redact_secrets(payload)
+    return dict(
+        json.loads(
+            redact_json_line(
+                json.dumps(structurally_redacted, ensure_ascii=False, default=str)
+            )
+        )
+    )
+
+
+def _event_fingerprint(payload: dict[str, Any]) -> str:
+    """Identify an exact delivery while allowing correlated lifecycle updates."""
+    metadata = payload.get("metadata") or payload.get("details") or {}
+    comparable = {
+        "conversation_id": payload.get("conversation_id"),
+        "event_id": payload.get("event_id") or payload.get("id"),
+        "type": payload.get("type"),
+        "status": payload.get("status"),
+        "summary": payload.get("summary") or payload.get("message"),
+        "output_preview": payload.get("output_preview"),
+        "delta": payload.get("delta") or metadata.get("delta"),
+        "progress": metadata.get("progress"),
+        "result_summary": metadata.get("result_summary"),
+        "error": payload.get("error") or metadata.get("error"),
+    }
+    encoded = json.dumps(comparable, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -95,6 +127,10 @@ class ExecutionEventHub:
     keep_memory: int = 4000
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _memory: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _seen_fingerprints: dict[str, dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _sequences: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _subscribers: dict[str, list[Subscriber]] = field(
         default_factory=lambda: defaultdict(list), init=False, repr=False
     )
@@ -117,11 +153,25 @@ class ExecutionEventHub:
         )
         conversation = str(payload.get("conversation_id") or "").strip()
         repository = str(payload.get("repository_id") or "").strip()
+        fingerprint = _event_fingerprint(payload)
 
         with self._lock:
+            duplicate = self._seen_fingerprints.get(fingerprint)
+            if duplicate is not None:
+                return dict(duplicate)
+            requested_sequence = int(payload.get("sequence") or 0)
+            current_sequence = self._sequence_base(repository, conversation)
+            sequence = requested_sequence if requested_sequence > current_sequence else current_sequence + 1
+            if conversation:
+                self._sequences[conversation] = sequence
+            payload["sequence"] = sequence
+            self._seen_fingerprints[fingerprint] = dict(payload)
             self._memory.append(payload)
             if len(self._memory) > self.keep_memory:
+                removed = self._memory[: len(self._memory) - self.keep_memory]
                 del self._memory[: len(self._memory) - self.keep_memory]
+                for row in removed:
+                    self._seen_fingerprints.pop(_event_fingerprint(row), None)
             subscribers = list(self._global_subscribers)
             if conversation:
                 subscribers.extend(self._subscribers.get(conversation, []))
@@ -139,6 +189,21 @@ class ExecutionEventHub:
                 logger.debug("execution event subscriber raised", exc_info=True)
         return payload
 
+    def _sequence_base(self, repository_id: str, conversation_id: str) -> int:
+        if not conversation_id:
+            return 0
+        if conversation_id in self._sequences:
+            return self._sequences[conversation_id]
+        maximum = 0
+        if repository_id:
+            for row in self.load_durable(repository_id, conversation_id, limit=5000):
+                try:
+                    maximum = max(maximum, int(row.get("sequence") or 0))
+                except (TypeError, ValueError):
+                    continue
+        self._sequences[conversation_id] = maximum
+        return maximum
+
     def emit(
         self,
         event_type: str,
@@ -154,8 +219,20 @@ class ExecutionEventHub:
         step_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         session_id: str = "",
+        event_id: str | None = None,
+        parent_event_id: str | None = None,
+        duration_ms: int | None = None,
+        ended_at: str | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
+        event_metadata = {
+            **(metadata or {}),
+            "conversation_id": conversation_id,
+            "execution_id": execution_id,
+            "repository_id": repository_id,
+        }
+        if event_id and event_type.startswith("tool."):
+            event_metadata.setdefault("tool_call_id", event_id)
         event = make_event(
             event_type,
             title=title,
@@ -166,13 +243,15 @@ class ExecutionEventHub:
             agent_id=agent_id,
             subagent_id=subagent_id,
             step_id=step_id,
-            metadata={
-                **(metadata or {}),
-                "conversation_id": conversation_id,
-                "execution_id": execution_id,
-                "repository_id": repository_id,
-            },
+            parent_event_id=parent_event_id,
+            metadata=event_metadata,
         )
+        if event_id:
+            event.event_id = str(event_id)
+        if duration_ms is not None:
+            event.duration_ms = max(0, int(duration_ms))
+        if ended_at:
+            event.ended_at = str(ended_at)
         return self.publish(
             event,
             conversation_id=conversation_id,
@@ -216,6 +295,7 @@ class ExecutionEventHub:
         execution_id: str = "",
         limit: int = 200,
         repository_id: str = "",
+        after_sequence: int = 0,
     ) -> list[dict[str, Any]]:
         conversation = str(conversation_id or "").strip()
         execution = str(execution_id or "").strip()
@@ -234,13 +314,27 @@ class ExecutionEventHub:
                 continue
             if execution and str(row.get("execution_id") or row.get("turn_id") or "") != execution:
                 continue
+            try:
+                sequence = int(row.get("sequence") or 0)
+            except (TypeError, ValueError):
+                sequence = 0
+            if sequence <= max(0, int(after_sequence or 0)):
+                continue
             event_id = str(row.get("event_id") or row.get("id") or "")
+            merge_key = f"seq:{sequence}" if sequence else f"id:{event_id}"
             if not event_id:
                 continue
-            merged[event_id] = row
+            merged[merge_key] = row
         ordered = sorted(
             merged.values(),
-            key=lambda item: str(item.get("started_at") or item.get("timestamp") or ""),
+            key=lambda item: (
+                (
+                    int(item.get("sequence") or 0)
+                    if str(item.get("sequence") or "0").lstrip("-").isdigit()
+                    else 0
+                ),
+                str(item.get("started_at") or item.get("timestamp") or ""),
+            ),
         )
         return ordered[-limit:]
 
@@ -267,7 +361,7 @@ class ExecutionEventHub:
         path = conversation_events_path(repository_id, conversation_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            handle.write(redact_json_line(json.dumps(payload, ensure_ascii=False, default=str)) + "\n")
 
 
 _HUB: ExecutionEventHub | None = None

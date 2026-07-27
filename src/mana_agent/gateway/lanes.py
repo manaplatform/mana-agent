@@ -13,6 +13,7 @@ class _ValueEnum(str, Enum):
 
 
 class LaneId(_ValueEnum):
+    ARTIFACT = "artifact"
     CODING = "coding"
     RESEARCH = "research"
     REVIEW = "review"
@@ -50,19 +51,33 @@ class LockMode(_ValueEnum):
 
 
 class LaneTaskState(_ValueEnum):
+    CREATED = "created"
+    ROUTING = "routing"
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING = "waiting"
+    BLOCKED = "blocked"
+    PAUSED = "paused"
+    CANCELLING = "cancelling"
     HANDOFF = "handoff"
+    VERIFYING = "verifying"
+    SELECTING_WINNER = "selecting_winner"
+    APPLYING = "applying"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    REJECTED = "rejected"
     TIMED_OUT = "timed_out"
     INTERRUPTED = "interrupted"
     BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 ACTIVE_LANE_STATES = frozenset(
-    {LaneTaskState.QUEUED, LaneTaskState.RUNNING, LaneTaskState.HANDOFF}
+    {
+        LaneTaskState.ROUTING, LaneTaskState.QUEUED, LaneTaskState.RUNNING,
+        LaneTaskState.WAITING, LaneTaskState.HANDOFF, LaneTaskState.VERIFYING,
+        LaneTaskState.SELECTING_WINNER, LaneTaskState.APPLYING,
+    }
 )
 
 
@@ -132,7 +147,7 @@ class LaneContract:
 
 READ_CAPABILITIES = (
     "repository_read", "shell_read", "web_search", "browser", "git_read",
-    "test_execution", "email", "calendar",
+    "test_execution", "email", "calendar", "computer",
 )
 WRITE_CAPABILITIES = (
     "repository_write", "shell_write", "git_write", "release", "deployment",
@@ -141,6 +156,14 @@ WRITE_CAPABILITIES = (
 
 def default_lane_contracts() -> dict[LaneId, LaneContract]:
     contracts = {
+        LaneId.ARTIFACT: LaneContract(
+            lane_id=LaneId.ARTIFACT, display_name="Artifact", description="Creates and updates user artifacts outside repository workflows.",
+            owns=("document artifacts", "spreadsheet artifacts", "PDF artifacts"), handoff_targets=(),
+            allowed_tools=("artifact_read", "artifact_write"), denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
+            max_concurrent_jobs=2, max_subagents=0, token_budget=30_000, cost_budget=10.0,
+            default_priority=LanePriority.INTERACTIVE, can_create_subagents=False, requires_repository=False,
+            requires_write_access=False, lock_policy=LockMode.NONE, timeout_seconds=900,
+        ),
         LaneId.CODING: LaneContract(
             lane_id=LaneId.CODING, display_name="Coding", description="Implements repository changes.",
             owns=("implementation", "repository mutations"),
@@ -196,7 +219,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.OPERATIONS, display_name="Operations", description="Handles deployment, infrastructure, and monitoring.",
             owns=("deployment", "infrastructure checks", "monitoring"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("shell_read", "shell_write", "deployment", "browser", "git_read"),
+            allowed_tools=("shell_read", "shell_write", "deployment", "browser", "git_read", "computer", "remote_ssh_execute"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
             max_concurrent_jobs=1, max_subagents=0, token_budget=25_000, cost_budget=12.0,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
@@ -248,6 +271,8 @@ INTENT_LANES: dict[str, LaneId] = {
 }
 
 ENTRY_ROUTE_LANES: dict[str, LaneId] = {
+    "multi_task": LaneId.RESEARCH,
+    "artifact": LaneId.ARTIFACT,
     "coding": LaneId.CODING,
     "browser": LaneId.RESEARCH,
     "search": LaneId.RESEARCH,
@@ -256,7 +281,9 @@ ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "memory": LaneId.RESEARCH,
     "gmail": LaneId.RESEARCH,
     "calendar": LaneId.RESEARCH,
+    "computer": LaneId.OPERATIONS,
     "automation": LaneId.OPERATIONS,
+    "remote_execution": LaneId.OPERATIONS,
     "conversation": LaneId.RESEARCH,
     "unsupported": LaneId.RESEARCH,
     "capability_error": LaneId.RESEARCH,
@@ -292,6 +319,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "run_lint": frozenset({"test_execution"}), "web_search": frozenset({"web_search"}),
     "github_search": frozenset({"web_search"}), "git_status": frozenset({"git_read"}),
     "git_diff": frozenset({"git_read"}),
+    "remote_ssh_execute": frozenset({"remote_ssh_execute"}),
 }
 
 for _git_read_tool in (
@@ -308,6 +336,13 @@ for _document_read_tool in ("document_detect", "document_read", "document_analyz
     TOOL_CAPABILITIES[_document_read_tool] = frozenset({"repository_read"})
 for _document_write_tool in ("document_create", "document_update", "document_delete"):
     TOOL_CAPABILITIES[_document_write_tool] = frozenset({"repository_write"})
+try:
+    from mana_agent.integrations.computer_control.tool_contracts import computer_tool_contracts
+except ImportError:  # optional integration packaging failure remains fail-closed
+    pass
+else:
+    for _computer_tool in computer_tool_contracts():
+        TOOL_CAPABILITIES[_computer_tool.name] = frozenset({"computer"})
 
 
 class LanePermissionError(PermissionError):

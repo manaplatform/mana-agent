@@ -5,26 +5,45 @@ import json
 import os
 import stat
 import tempfile
-import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
+from mana_agent.compat import tomllib
 from mana_agent.workspaces.paths import mana_home
 
-CONFIG_DIR = mana_home()
-CONFIG_FILE = CONFIG_DIR / "config.toml"
-SECRETS_FILE = CONFIG_DIR / "secrets.toml"
-MODEL_CACHE_FILE = CONFIG_DIR / "model_cache.json"
+
+def config_dir() -> Path:
+    """Resolve the user configuration directory at use time.
+
+    Resolving this dynamically is important for managed runtimes and test
+    processes, which set ``MANA_HOME`` before invoking Mana-Agent.
+    """
+
+    return mana_home()
+
+
+def config_file() -> Path:
+    return config_dir() / "config.toml"
+
+
+def secrets_file() -> Path:
+    return config_dir() / "secrets.toml"
+
+
+def model_cache_file() -> Path:
+    return config_dir() / "model_cache.json"
 
 SECRET_KEYS = {
     "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
     "MANA_GITHUB_TOKEN",
     "MANA_WEB_SEARCH_API_KEY",
     "MANA_API_TOKEN",
     "MANA_MCP_SERVER_TOKEN",
+    "MANA_A2A_SERVER_TOKEN",
+    "MANA_GITHUB_WEBHOOK_SECRET",
 }
 NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY"}
 
@@ -36,10 +55,35 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_EMBEDDING_MODEL": "openai/text-embedding-3-small",
     "MANA_CONFIGURED_PROVIDERS": ["openai"],
     "OPENAI_BASE_URL": "https://api.openai.com/v1",
+    "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+    "OPENROUTER_HTTP_REFERER": "https://github.com/mana-agent/mana-agent",
+    "OPENROUTER_TITLE": "Mana-Agent",
+    "OPENROUTER_PROVIDER_PREFERENCES": {},
     "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
     "OPENAI_TOOL_WORKER_MODEL": "",
     "OPENAI_CODING_PLANNER_MODEL": "",
     "OPENAI_EMBED_MODEL": "",
+    "MANA_ADAPTIVE_ROUTING_ENABLED": True,
+    "MANA_MODEL_PROFILES": [],
+    "MANA_ROUTING_COMPLEXITY_THRESHOLD": "high",
+    "MANA_ROUTING_RISK_THRESHOLD": "high",
+    "MANA_ROUTING_MAX_CANDIDATES": 2,
+    "MANA_ROUTING_MIN_CONFIDENCE": 0.55,
+    "MANA_ROUTING_TASK_TOKEN_BUDGET": 32000,
+    "MANA_ROUTING_TASK_COST_BUDGET": "",
+    "MANA_ROUTING_SESSION_COST_BUDGET": "",
+    "MANA_ROUTING_COMPETITION_COST_BUDGET": "",
+    "MANA_ROUTING_VERIFICATION_COST_BUDGET": "",
+    "MANA_ROUTING_RETRY_COST_BUDGET": "",
+    "MANA_ROUTING_VERIFICATION_RESERVE_RATIO": 0.15,
+    "MANA_ROUTING_BENCHMARK_WEIGHTS": {},
+    "MANA_ROUTING_LANGUAGE_PREFERENCES": {},
+    "MANA_ROUTING_EVIDENCE_RETENTION_DAYS": 90,
+    "MANA_ROUTING_CIRCUIT_BREAKER_FAILURES": 3,
+    "MANA_ROUTING_CIRCUIT_BREAKER_WINDOW_SECONDS": 900,
+    "MANA_ROUTING_RELIABILITY_DECAY_SECONDS": 3600,
+    "MANA_ROUTING_MODEL_FAILURE_PENALTY_WEIGHT": 0.08,
+    "MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT": 0.04,
     "MODEL_LEVEL_1_FAST_TOOL": "",
     "MODEL_LEVEL_2_CODING": "",
     "MODEL_LEVEL_3_HIGH_REASONING": "",
@@ -92,6 +136,29 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_WORKSPACE_ALLOWED_ROOTS": "",
     "MANA_API_TOKEN": "",
     "MANA_MCP_SERVER_TOKEN": "",
+    "MANA_WORKER_GATEWAY_ENABLED": False,
+    "MANA_WORKER_GATEWAY_PUBLIC_URL": "",
+    "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP": False,
+    "MANA_WORKER_GATEWAY_LOCAL_DEV": False,
+    "MANA_ACP_ENABLED": True,
+    "MANA_ACP_ALLOWED_ROOTS": "",
+    "MANA_ACP_MCP_FORWARDING": True,
+    "MANA_ACP_SESSION_LOAD": True,
+    "MANA_ACP_SESSION_RETENTION_DAYS": 30,
+    "MANA_A2A_SERVER_ENABLED": False,
+    "MANA_A2A_HOST": "127.0.0.1",
+    "MANA_A2A_PORT": 8766,
+    "MANA_A2A_PUBLIC_BASE_URL": "",
+    "MANA_A2A_SERVER_TOKEN": "",
+    "MANA_A2A_ENABLED_SKILLS": "",
+    "MANA_A2A_STREAMING": True,
+    "MANA_A2A_PUSH_NOTIFICATIONS": False,
+    "MANA_A2A_TASK_RETENTION_DAYS": 30,
+    "MANA_A2A_MAX_REQUEST_BYTES": 1048576,
+    "MANA_A2A_MAX_ARTIFACT_BYTES": 10485760,
+    "MANA_A2A_MAX_CONCURRENT_TASKS": 4,
+    "MANA_A2A_DELEGATION_ENABLED": False,
+    "MANA_A2A_MAX_DELEGATION_DEPTH": 3,
     "MANA_BROWSER_ENABLED": True,
     "MANA_BROWSER_HEADLESS": True,
     "MANA_BROWSER_TIMEOUT_SECONDS": 30,
@@ -100,10 +167,54 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_BROWSER_UPLOAD_ROOTS": "",
     "MANA_BROWSER_ARTIFACT_DIR": "",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": 30,
+    "MANA_COMPUTER_CONTROL_ENABLED": False,
+    "computer_control": {
+        "enabled": False,
+        "provider": "auto",
+        "allowed_clients": ["local_cli", "tui", "dashboard"],
+        "allow_remote_control": False,
+        "remote_sensitive_scopes": [],
+        "require_local_confirmation_for_high_risk": True,
+        "require_confirmation": True,
+        "audit_enabled": True,
+        "audit_retention_days": 30,
+        "timeout_seconds": 30,
+        "allowed_paths": [],
+        "permissions": {
+            "computer.apps.read": "ask",
+            "computer.apps.control": "ask",
+            "computer.calendar.read": "ask",
+            "computer.calendar.write": "ask",
+            "computer.media.read": "ask",
+            "computer.media.control": "ask",
+            "computer.notes.read": "ask",
+            "computer.notes.write": "ask",
+            "computer.browser.tabs.read": "ask",
+            "computer.browser.page.read": "ask",
+            "computer.browser.control": "ask",
+            "computer.clipboard.read": "ask",
+            "computer.clipboard.write": "ask",
+            "computer.files.read": "ask",
+            "computer.files.write": "ask",
+            "computer.screenshot.capture": "ask",
+            "computer.notifications.send": "ask",
+            "computer.system.read": "ask",
+            "computer.system.control": "ask",
+        },
+        "defaults": {
+            "browser": "auto",
+            "calendar": "auto",
+            "music": "auto",
+            "notes": "auto",
+        },
+    },
+    # Empty is the compatibility sentinel; the configuration TUI persists an
+    # explicit value when the user saves its coding-runtime screen.
+    "MANA_CODING_BACKEND": "",
     "MANA_CODEX_ENABLED": True,
     "MANA_CODEX_MAX_WORKERS": 2,
     "MANA_CODEX_STREAM_EVENTS": True,
-    "MANA_CODEX_WORKTREE_ISOLATION": True,
+    "MANA_CODEX_WORKTREE_ISOLATION": False,
     "MANA_CODEX_TASK_TIMEOUT_SECONDS": 1800,
     "MANA_CODEX_ALLOW_NETWORK": False,
     "MANA_CODEX_MODEL": "",
@@ -113,6 +224,14 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_LANE_PROVIDER_LIMITS": {},
     "MANA_LANE_SESSION_TOKEN_BUDGET": 0,
     "MANA_LANE_GLOBAL_TOKEN_BUDGET": 0,
+    "MANA_EXECUTION_DEFAULT_PROVIDER": "local-process",
+    "MANA_EXECUTION_ALLOWED_PROVIDERS": ["local-process", "local-docker", "remote-ssh", "kubernetes", "modal", "custom-http-runtime"],
+    "MANA_EXECUTION_CLEANUP_ON_EXIT": True,
+    "MANA_EXECUTION_IDLE_TIMEOUT_SECONDS": 900,
+    "MANA_EXECUTION_MAX_LIFETIME_SECONDS": 7200,
+    "MANA_EXECUTION_GLOBAL_CONCURRENCY": 16,
+    "MANA_EXECUTION_ROUTING": {},
+    "MANA_EXECUTION_PROVIDERS": {},
     "experience_to_skill": {
         "enabled": True,
         "auto_propose": True,
@@ -134,10 +253,36 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_EMBEDDING_MODEL": "mana_embedding_model",
     "OPENAI_API_KEY": "openai_api_key",
     "OPENAI_BASE_URL": "openai_base_url",
+    "OPENROUTER_API_KEY": "openrouter_api_key",
+    "OPENROUTER_BASE_URL": "openrouter_base_url",
+    "OPENROUTER_HTTP_REFERER": "openrouter_http_referer",
+    "OPENROUTER_TITLE": "openrouter_title",
+    "OPENROUTER_PROVIDER_PREFERENCES": "openrouter_provider_preferences",
     "OPENAI_CHAT_MODEL": "openai_chat_model",
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
     "OPENAI_CODING_PLANNER_MODEL": "openai_coding_planner_model",
     "OPENAI_EMBED_MODEL": "openai_embed_model",
+    "MANA_ADAPTIVE_ROUTING_ENABLED": "mana_adaptive_routing_enabled",
+    "MANA_MODEL_PROFILES": "mana_model_profiles",
+    "MANA_ROUTING_COMPLEXITY_THRESHOLD": "mana_routing_complexity_threshold",
+    "MANA_ROUTING_RISK_THRESHOLD": "mana_routing_risk_threshold",
+    "MANA_ROUTING_MAX_CANDIDATES": "mana_routing_max_candidates",
+    "MANA_ROUTING_MIN_CONFIDENCE": "mana_routing_min_confidence",
+    "MANA_ROUTING_TASK_TOKEN_BUDGET": "mana_routing_task_token_budget",
+    "MANA_ROUTING_TASK_COST_BUDGET": "mana_routing_task_cost_budget",
+    "MANA_ROUTING_SESSION_COST_BUDGET": "mana_routing_session_cost_budget",
+    "MANA_ROUTING_COMPETITION_COST_BUDGET": "mana_routing_competition_cost_budget",
+    "MANA_ROUTING_VERIFICATION_COST_BUDGET": "mana_routing_verification_cost_budget",
+    "MANA_ROUTING_RETRY_COST_BUDGET": "mana_routing_retry_cost_budget",
+    "MANA_ROUTING_VERIFICATION_RESERVE_RATIO": "mana_routing_verification_reserve_ratio",
+    "MANA_ROUTING_BENCHMARK_WEIGHTS": "mana_routing_benchmark_weights",
+    "MANA_ROUTING_LANGUAGE_PREFERENCES": "mana_routing_language_preferences",
+    "MANA_ROUTING_EVIDENCE_RETENTION_DAYS": "mana_routing_evidence_retention_days",
+    "MANA_ROUTING_CIRCUIT_BREAKER_FAILURES": "mana_routing_circuit_breaker_failures",
+    "MANA_ROUTING_CIRCUIT_BREAKER_WINDOW_SECONDS": "mana_routing_circuit_breaker_window_seconds",
+    "MANA_ROUTING_RELIABILITY_DECAY_SECONDS": "mana_routing_reliability_decay_seconds",
+    "MANA_ROUTING_MODEL_FAILURE_PENALTY_WEIGHT": "mana_routing_model_failure_penalty_weight",
+    "MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT": "mana_routing_provider_failure_penalty_weight",
     "DEFAULT_TOP_K": "default_top_k",
     "LLM_MODEL": "llm_model",
     "MANA_LLM_LOG_FILE": "mana_llm_log_file",
@@ -171,6 +316,29 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_WORKSPACE_ALLOWED_ROOTS": "mana_workspace_allowed_roots",
     "MANA_API_TOKEN": "mana_api_token",
     "MANA_MCP_SERVER_TOKEN": "mana_mcp_server_token",
+    "MANA_WORKER_GATEWAY_ENABLED": "mana_worker_gateway_enabled",
+    "MANA_WORKER_GATEWAY_PUBLIC_URL": "mana_worker_gateway_public_url",
+    "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP": "mana_worker_gateway_allow_insecure_http",
+    "MANA_WORKER_GATEWAY_LOCAL_DEV": "mana_worker_gateway_local_dev",
+    "MANA_ACP_ENABLED": "mana_acp_enabled",
+    "MANA_ACP_ALLOWED_ROOTS": "mana_acp_allowed_roots",
+    "MANA_ACP_MCP_FORWARDING": "mana_acp_mcp_forwarding",
+    "MANA_ACP_SESSION_LOAD": "mana_acp_session_load",
+    "MANA_ACP_SESSION_RETENTION_DAYS": "mana_acp_session_retention_days",
+    "MANA_A2A_SERVER_ENABLED": "mana_a2a_server_enabled",
+    "MANA_A2A_HOST": "mana_a2a_host",
+    "MANA_A2A_PORT": "mana_a2a_port",
+    "MANA_A2A_PUBLIC_BASE_URL": "mana_a2a_public_base_url",
+    "MANA_A2A_SERVER_TOKEN": "mana_a2a_server_token",
+    "MANA_A2A_ENABLED_SKILLS": "mana_a2a_enabled_skills",
+    "MANA_A2A_STREAMING": "mana_a2a_streaming",
+    "MANA_A2A_PUSH_NOTIFICATIONS": "mana_a2a_push_notifications",
+    "MANA_A2A_TASK_RETENTION_DAYS": "mana_a2a_task_retention_days",
+    "MANA_A2A_MAX_REQUEST_BYTES": "mana_a2a_max_request_bytes",
+    "MANA_A2A_MAX_ARTIFACT_BYTES": "mana_a2a_max_artifact_bytes",
+    "MANA_A2A_MAX_CONCURRENT_TASKS": "mana_a2a_max_concurrent_tasks",
+    "MANA_A2A_DELEGATION_ENABLED": "mana_a2a_delegation_enabled",
+    "MANA_A2A_MAX_DELEGATION_DEPTH": "mana_a2a_max_delegation_depth",
     "MANA_BROWSER_ENABLED": "mana_browser_enabled",
     "MANA_BROWSER_HEADLESS": "mana_browser_headless",
     "MANA_BROWSER_TIMEOUT_SECONDS": "mana_browser_timeout_seconds",
@@ -179,6 +347,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_BROWSER_UPLOAD_ROOTS": "mana_browser_upload_roots",
     "MANA_BROWSER_ARTIFACT_DIR": "mana_browser_artifact_dir",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": "mana_browser_profile_max_age_days",
+    "MANA_COMPUTER_CONTROL_ENABLED": "mana_computer_control_enabled",
+    "MANA_CODING_BACKEND": "mana_coding_backend",
     "MANA_CODEX_ENABLED": "mana_codex_enabled",
     "MANA_CODEX_MAX_WORKERS": "mana_codex_max_workers",
     "MANA_CODEX_STREAM_EVENTS": "mana_codex_stream_events",
@@ -192,6 +362,14 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_LANE_PROVIDER_LIMITS": "mana_lane_provider_limits",
     "MANA_LANE_SESSION_TOKEN_BUDGET": "mana_lane_session_token_budget",
     "MANA_LANE_GLOBAL_TOKEN_BUDGET": "mana_lane_global_token_budget",
+    "MANA_EXECUTION_DEFAULT_PROVIDER": "mana_execution_default_provider",
+    "MANA_EXECUTION_ALLOWED_PROVIDERS": "mana_execution_allowed_providers",
+    "MANA_EXECUTION_CLEANUP_ON_EXIT": "mana_execution_cleanup_on_exit",
+    "MANA_EXECUTION_IDLE_TIMEOUT_SECONDS": "mana_execution_idle_timeout_seconds",
+    "MANA_EXECUTION_MAX_LIFETIME_SECONDS": "mana_execution_max_lifetime_seconds",
+    "MANA_EXECUTION_GLOBAL_CONCURRENCY": "mana_execution_global_concurrency",
+    "MANA_EXECUTION_ROUTING": "mana_execution_routing",
+    "MANA_EXECUTION_PROVIDERS": "mana_execution_providers",
 }
 
 CONFIG_WRITE_ORDER = [
@@ -253,6 +431,28 @@ CONFIG_WRITE_ORDER = [
     "MANA_SEARCH_MAX_SUMMARY_WORDS",
     "MANA_SEARCH_ENABLE_ASK_AGENT",
     "MANA_BROWSER_ENABLED",
+    "MANA_WORKER_GATEWAY_ENABLED",
+    "MANA_WORKER_GATEWAY_PUBLIC_URL",
+    "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP",
+    "MANA_WORKER_GATEWAY_LOCAL_DEV",
+    "MANA_ACP_ENABLED",
+    "MANA_ACP_ALLOWED_ROOTS",
+    "MANA_ACP_MCP_FORWARDING",
+    "MANA_ACP_SESSION_LOAD",
+    "MANA_ACP_SESSION_RETENTION_DAYS",
+    "MANA_A2A_SERVER_ENABLED",
+    "MANA_A2A_HOST",
+    "MANA_A2A_PORT",
+    "MANA_A2A_PUBLIC_BASE_URL",
+    "MANA_A2A_ENABLED_SKILLS",
+    "MANA_A2A_STREAMING",
+    "MANA_A2A_PUSH_NOTIFICATIONS",
+    "MANA_A2A_TASK_RETENTION_DAYS",
+    "MANA_A2A_MAX_REQUEST_BYTES",
+    "MANA_A2A_MAX_ARTIFACT_BYTES",
+    "MANA_A2A_MAX_CONCURRENT_TASKS",
+    "MANA_A2A_DELEGATION_ENABLED",
+    "MANA_A2A_MAX_DELEGATION_DEPTH",
     "MANA_BROWSER_HEADLESS",
     "MANA_BROWSER_TIMEOUT_SECONDS",
     "MANA_BROWSER_PERSIST_AUTH",
@@ -260,6 +460,9 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_UPLOAD_ROOTS",
     "MANA_BROWSER_ARTIFACT_DIR",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
+    "MANA_COMPUTER_CONTROL_ENABLED",
+    "computer_control",
+    "MANA_CODING_BACKEND",
     "MANA_CODEX_ENABLED",
     "MANA_CODEX_MAX_WORKERS",
     "MANA_CODEX_STREAM_EVENTS",
@@ -281,12 +484,13 @@ class UserConfigError(RuntimeError):
 
 
 def ensure_user_config_dir() -> Path:
-    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = config_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        CONFIG_DIR.chmod(0o700)
+        directory.chmod(0o700)
     except OSError:
         pass
-    return CONFIG_DIR
+    return directory
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -300,11 +504,11 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def load_user_config() -> dict[str, Any]:
-    return _read_toml(CONFIG_FILE)
+    return _read_toml(config_file())
 
 
 def load_user_secrets() -> dict[str, Any]:
-    return _read_toml(SECRETS_FILE)
+    return _read_toml(secrets_file())
 
 
 def _toml_scalar(value: Any) -> str:
@@ -316,6 +520,13 @@ def _toml_scalar(value: Any) -> str:
         return "[" + ", ".join(_toml_scalar(item) for item in value) + "]"
     text = str(value)
     return json.dumps(text)
+
+
+def _toml_key(value: str) -> str:
+    """Quote dotted/special keys so permission scopes remain literal TOML keys."""
+    import re
+
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else json.dumps(value)
 
 
 def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> None:
@@ -330,7 +541,7 @@ def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> Non
             if lines and lines[-1] != "":
                 lines.append("")
             lines.append(f"[{prefix}]")
-            lines.extend(f"{key} = {_toml_scalar(value)}" for key, value in scalar_items)
+            lines.extend(f"{_toml_key(key)} = {_toml_scalar(value)}" for key, value in scalar_items)
         for key, value in table.items():
             if isinstance(value, dict):
                 append_tables(f"{prefix}.{key}", value)
@@ -369,13 +580,13 @@ def save_user_config(values: dict[str, Any], *, merge: bool = True) -> None:
             if key not in SECRET_KEYS and key not in NON_PERSISTED_SECRET_KEYS
         }
     )
-    _write_toml(CONFIG_FILE, current, mode=0o600)
+    _write_toml(config_file(), current, mode=0o600)
 
 
 def save_user_secrets(values: dict[str, Any], *, merge: bool = True) -> None:
     current = load_user_secrets() if merge else {}
     current.update({key: value for key, value in values.items() if key in SECRET_KEYS})
-    _write_toml(SECRETS_FILE, current, mode=0o600)
+    _write_toml(secrets_file(), current, mode=0o600)
 
 
 def save_effective_user_config(values: dict[str, Any], *, merge: bool = True) -> None:
@@ -384,7 +595,7 @@ def save_effective_user_config(values: dict[str, Any], *, merge: bool = True) ->
 
 
 def has_user_config() -> bool:
-    return CONFIG_FILE.exists() or SECRETS_FILE.exists()
+    return config_file().exists() or secrets_file().exists()
 
 
 def is_user_config_valid() -> bool:
@@ -495,8 +706,19 @@ def validate_model_level(value: str) -> str:
 
 def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(values)
+    if "computer_control" in cleaned:
+        from mana_agent.integrations.computer_control.config import ComputerControlSettings
+
+        raw_computer = cleaned["computer_control"]
+        if not isinstance(raw_computer, dict):
+            raise UserConfigError("computer_control must be a TOML table.")
+        cleaned["computer_control"] = ComputerControlSettings.model_validate(raw_computer).model_dump(mode="json")
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
+    if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
+        cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"] = validate_base_url(
+            str(cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"])
+        )
     for name in (
         "DEFAULT_TOP_K",
         "MANA_SEARCH_MAX_RESULTS",
@@ -523,6 +745,9 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         "MANA_LLM_SUPPORTS_REASONING",
         "MANA_LLM_SUPPORTS_TOOLS_WITH_CHAT_REASONING",
         "MANA_MEMORY_FALLBACK_TO_INTERNAL",
+        "MANA_WORKER_GATEWAY_ENABLED",
+        "MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP",
+        "MANA_WORKER_GATEWAY_LOCAL_DEV",
     ):
         if name in cleaned:
             if str(cleaned[name] or "").strip():
@@ -569,7 +794,7 @@ class CachedModels:
     provider: str
     base_url: str
     created_at: str
-    models: list[str]
+    models: list[str | dict[str, Any]]
 
 
 def provider_cache_key(provider: str, base_url: str) -> str:
@@ -578,16 +803,17 @@ def provider_cache_key(provider: str, base_url: str) -> str:
 
 
 def load_model_cache(provider: str, base_url: str) -> CachedModels | None:
-    if not MODEL_CACHE_FILE.exists():
+    cache_file = model_cache_file()
+    if not cache_file.exists():
         return None
     try:
-        data = json.loads(MODEL_CACHE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     item = data.get(provider_cache_key(provider, base_url))
     if not isinstance(item, dict):
         return None
-    models = [str(model) for model in item.get("models", []) if str(model).strip()]
+    models = [model for model in item.get("models", []) if (isinstance(model, dict) and str(model.get("id") or "").strip()) or (not isinstance(model, dict) and str(model).strip())]
     return CachedModels(
         provider=str(item.get("provider") or provider),
         base_url=str(item.get("base_url") or base_url),
@@ -596,12 +822,13 @@ def load_model_cache(provider: str, base_url: str) -> CachedModels | None:
     )
 
 
-def save_model_cache(provider: str, base_url: str, models: list[str]) -> None:
+def save_model_cache(provider: str, base_url: str, models: list[str | dict[str, Any]]) -> None:
     ensure_user_config_dir()
+    cache_file = model_cache_file()
     data: dict[str, Any] = {}
-    if MODEL_CACHE_FILE.exists():
+    if cache_file.exists():
         try:
-            loaded = json.loads(MODEL_CACHE_FILE.read_text(encoding="utf-8"))
+            loaded = json.loads(cache_file.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 data = loaded
         except (OSError, json.JSONDecodeError):
@@ -610,10 +837,13 @@ def save_model_cache(provider: str, base_url: str, models: list[str]) -> None:
         "provider": provider,
         "base_url": base_url.rstrip("/"),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "models": sorted(dict.fromkeys(models)),
+        "models": sorted(
+            {str(item.get("id")) if isinstance(item, dict) else str(item): item for item in models if (isinstance(item, dict) and item.get("id")) or (not isinstance(item, dict) and str(item).strip())}.values(),
+            key=lambda item: str(item.get("id")) if isinstance(item, dict) else str(item),
+        ),
     }
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=".model_cache.", suffix=".tmp", dir=str(CONFIG_DIR))
+    fd, temp_name = tempfile.mkstemp(prefix=".model_cache.", suffix=".tmp", dir=str(config_dir()))
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -621,18 +851,18 @@ def save_model_cache(provider: str, base_url: str, models: list[str]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         temp_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        os.replace(temp_path, MODEL_CACHE_FILE)
+        os.replace(temp_path, cache_file)
     except OSError:
         temp_path.unlink(missing_ok=True)
         raise
     try:
-        MODEL_CACHE_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        cache_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         pass
 
 
 def invalidate_model_cache() -> None:
-    MODEL_CACHE_FILE.unlink(missing_ok=True)
+    model_cache_file().unlink(missing_ok=True)
 
 
 def migrate_legacy_config() -> list[str]:
@@ -642,7 +872,9 @@ def migrate_legacy_config() -> list[str]:
     removed from the normal configuration file, which is the sole destructive
     schema change.
     """
-    if not CONFIG_FILE.exists():
+    current_config_file = config_file()
+    current_secrets_file = secrets_file()
+    if not current_config_file.exists():
         return []
     config = load_user_config()
     secrets = load_user_secrets()
@@ -669,14 +901,14 @@ def migrate_legacy_config() -> list[str]:
     config.setdefault("MANA_CONFIGURED_PROVIDERS", [provider])
     config["MANA_CONFIG_SCHEMA_VERSION"] = 2
     if destructive:
-        backup = CONFIG_FILE.with_suffix(".toml.bak")
+        backup = current_config_file.with_suffix(".toml.bak")
         if not backup.exists():
-            backup.write_bytes(CONFIG_FILE.read_bytes())
+            backup.write_bytes(current_config_file.read_bytes())
             try:
                 backup.chmod(0o600)
             except OSError:
                 pass
-        messages.append(f"Moved legacy credentials to {SECRETS_FILE.name}; backup: {backup.name}.")
+        messages.append(f"Moved legacy credentials to {current_secrets_file.name}; backup: {backup.name}.")
     save_user_config(config, merge=False)
     if secrets:
         save_user_secrets(secrets, merge=False)

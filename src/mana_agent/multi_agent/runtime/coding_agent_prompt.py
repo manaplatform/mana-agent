@@ -52,6 +52,13 @@ Your role:
    - unsupported toolchain or command after one justified fallback
    - repeated mutation no-op after bounded fallback attempts
 
+8. Handle explicitly authorized SSH safely.
+   Never execute `ssh` through `run_command` or from the Codex sandbox. Submit a
+   structured remote-execution job to a connected external worker selected by the
+   validated remote-execution decision. The worker alone resolves a supplied key
+   path or SSH agent. If no worker is connected, stop with that actionable error;
+   do not attempt a local SSH fallback.
+
 ## TOOL SELECTION
 
 Use the most direct tool for the job:

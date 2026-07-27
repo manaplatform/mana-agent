@@ -10,8 +10,8 @@ Launch:
 
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
 
 try:
     import streamlit as st
@@ -23,10 +23,14 @@ from mana_agent.dashboard.pages import (
     analyze,
     automations,
     chat,
+    computer_control,
+    connectors,
     cron,
+    fleet,
     metrics,
     observability,
     overview,
+    processes,
     reports,
     skills,
     taskboard,
@@ -42,18 +46,22 @@ st.set_page_config(
 
 root = find_mana_root()
 st.session_state.setdefault("mana_dashboard_root", str(root))
-st.session_state.setdefault("mana_api_base", "http://127.0.0.1:8000")
+st.session_state.setdefault("mana_api_base", str(os.getenv("MANA_DASHBOARD_API_BASE") or ""))
 
 
 def _page(fn, *, title: str, icon: str, url_path: str, default: bool = False):
     def _runner() -> None:
-        st.sidebar.markdown("## 🧠 Mana Agent")
-        st.sidebar.caption(f"Root: `{root.name}`")
-        st.sidebar.text_input("API base (for sockets)", key="mana_api_base")
-        st.sidebar.caption("Navigation uses Streamlit page routes with active highlighting.")
         fn(root)
 
     return st.Page(_runner, title=title, icon=icon, url_path=url_path, default=default)
+
+
+def _render_shared_sidebar() -> None:
+    """Render controls whose state must survive Streamlit page navigation."""
+    st.sidebar.markdown("## 🧠 Mana Agent")
+    st.sidebar.caption(f"Root: `{root.name}`")
+    st.sidebar.text_input("Live API base", key="mana_api_base")
+    st.sidebar.caption("Navigation uses Streamlit page routes with active highlighting.")
 
 
 pages = {
@@ -68,12 +76,17 @@ pages = {
         _page(taskboard.render, title="Taskboard & Traces", icon="🗂️", url_path="taskboard"),
         _page(observability.render, title="Observability", icon="📡", url_path="observability"),
         _page(metrics.render, title="Metrics", icon="📊", url_path="metrics"),
+        _page(processes.render, title="Processes", icon="⚙️", url_path="processes"),
     ],
     "Operations": [
+        _page(fleet.render, title="Fleet", icon="🛰️", url_path="fleet"),
+        _page(computer_control.render, title="Computer Control", icon="🖥️", url_path="computer-control"),
+        _page(connectors.render, title="Connectors", icon="🔌", url_path="connectors"),
         _page(automations.render, title="Automations", icon="⚡", url_path="automations"),
         _page(cron.render, title="Cron Jobs", icon="⏰", url_path="cron"),
     ],
 }
 
 nav = st.navigation(pages, position="sidebar")
+_render_shared_sidebar()
 nav.run()

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
 from pathlib import Path
 from typing import Any
 
@@ -97,46 +95,24 @@ def info() -> None:
 
 @telegram_app.command("start")
 def start() -> None:
-    config = _config()
-    config.validate_runtime()
-    pid_path = config.database_path.parent / "connector.pid"
-    pid_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    pid_path.write_text(str(os.getpid()), encoding="ascii")
     try:
-        if config.effective_transport == "webhook":
-            import uvicorn
-            from mana_agent.api.app import create_app
-            typer.echo(f"Starting Telegram webhook listener on {config.webhook.listen_host}:{config.webhook.listen_port}.")
-            uvicorn.run(create_app(telegram_config=config), host=config.webhook.listen_host, port=config.webhook.listen_port)
-        else:
-            from mana_agent.connectors.telegram.connector import TelegramConnector
-            async def polling() -> None:
-                connector = TelegramConnector(config)
-                await connector.start()
-                typer.echo("Telegram polling started.")
-                try:
-                    assert connector._transport_task is not None
-                    await connector._transport_task
-                finally:
-                    await connector.stop()
-            asyncio.run(polling())
-    finally:
-        pid_path.unlink(missing_ok=True)
+        from mana_agent.connectors.service import ConnectorService
+
+        record = ConnectorService().start_telegram()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Telegram connector started in background: {record.process_id}.")
 
 
 @telegram_app.command("stop")
 def stop() -> None:
-    config = _config()
-    pid_path = config.database_path.parent / "connector.pid"
     try:
-        pid = int(pid_path.read_text(encoding="ascii").strip())
-        os.kill(pid, signal.SIGTERM)
-    except FileNotFoundError as exc:
-        raise typer.BadParameter("No running Telegram connector was recorded.") from exc
-    except (ValueError, ProcessLookupError, PermissionError) as exc:
-        pid_path.unlink(missing_ok=True)
-        raise typer.BadParameter("The recorded Telegram connector process is not running.") from exc
-    typer.echo("Telegram connector stop requested.")
+        from mana_agent.connectors.service import ConnectorService
+
+        record = ConnectorService().stop_telegram()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Telegram connector stopped: {record.process_id}.")
 
 
 @webhook_app.command("set")

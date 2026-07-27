@@ -5,18 +5,35 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 from mana_agent._version import get_version
 from mana_agent.integrations.codex.exceptions import CodexProtocolError, CodexUnavailableError
+from mana_agent.utils.redaction import redact_json_line
 
 
 class AsyncCodexAppServer:
     """Own one Codex app-server subprocess and its request/notification stream."""
 
-    def __init__(self, command: Sequence[str], *, request_timeout_seconds: int = 30) -> None:
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        environment: Mapping[str, str] | None = None,
+        provider_name: str = "",
+        model: str = "",
+        request_timeout_seconds: int = 30,
+    ) -> None:
         self.command = tuple(str(part) for part in command)
+        self._environment = dict(environment) if environment is not None else None
+        self._secrets = tuple(
+            value
+            for key, value in (self._environment or {}).items()
+            if key == "MANA_CODEX_API_KEY" and value
+        )
+        self._provider_name = str(provider_name or "selected provider")
+        self._model = str(model or "selected model")
         self.request_timeout_seconds = max(1, int(request_timeout_seconds))
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -42,6 +59,7 @@ class AsyncCodexAppServer:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._environment,
             )
         except (FileNotFoundError, OSError) as exc:
             raise CodexUnavailableError(f"Unable to start Codex app-server: {exc}") from exc
@@ -153,6 +171,7 @@ class AsyncCodexAppServer:
                 continue
             if not isinstance(payload, dict):
                 continue
+            payload = self._sanitize_payload(payload)
             if "id" in payload and ("result" in payload or "error" in payload):
                 self._resolve_response(payload)
                 continue
@@ -175,7 +194,7 @@ class AsyncCodexAppServer:
         while line := await process.stderr.readline():
             text = line.decode("utf-8", errors="replace").strip()
             if text:
-                self._stderr.append(text[:1000])
+                self._stderr.append(self._redact(text)[:1000])
                 del self._stderr[:-20]
 
     def _resolve_response(self, payload: dict[str, Any]) -> None:
@@ -188,7 +207,7 @@ class AsyncCodexAppServer:
             return
         error = payload.get("error")
         if error:
-            future.set_exception(CodexProtocolError(f"Codex JSON-RPC error: {error}"))
+            future.set_exception(CodexProtocolError(self._format_provider_error(str(error))))
             return
         result = payload.get("result")
         future.set_result(dict(result) if isinstance(result, dict) else {"value": result})
@@ -205,6 +224,40 @@ class AsyncCodexAppServer:
         if isinstance(thread, dict) and thread.get("id"):
             return str(thread["id"])
         return ""
+
+    def _redact(self, value: str) -> str:
+        redacted = redact_json_line(value)
+        for secret in self._secrets:
+            redacted = redacted.replace(secret, "***REDACTED***")
+        return redacted
+
+    def _format_provider_error(self, value: str) -> str:
+        detail = self._redact(value)
+        lowered = detail.lower()
+        if "401" in lowered or "unauthorized" in lowered or "authentication" in lowered:
+            return f"Provider authentication failed for {self._provider_name}. Codex detail: {detail}"
+        if "model_not_found" in lowered or "model not found" in lowered or "does not exist" in lowered:
+            return (
+                f"Provider {self._provider_name} could not find configured model {self._model}. "
+                f"Codex detail: {detail}"
+            )
+        return f"Codex JSON-RPC error: {detail}"
+
+    def _sanitize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        encoded = self._redact(json.dumps(payload, ensure_ascii=False))
+        try:
+            sanitized = json.loads(encoded)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(sanitized, dict):
+            return {}
+        if str(sanitized.get("method") or "") == "turn/failed":
+            params = sanitized.get("params")
+            if isinstance(params, dict):
+                for key in ("message", "error"):
+                    if isinstance(params.get(key), str):
+                        params[key] = self._format_provider_error(params[key])
+        return sanitized
 
 
 __all__ = ["AsyncCodexAppServer"]

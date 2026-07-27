@@ -1,7 +1,9 @@
+"""Telegram adapter for the shared chat-command registry."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any
 
 from .models import TelegramUpdate
 
@@ -11,67 +13,37 @@ class CommandContext:
     update: TelegramUpdate
     conversation_key: str
     session_id: str
-    router: object
-    gateway: object
-
-
-CommandHandler = Callable[[CommandContext], Awaitable[str]]
-
-
-@dataclass(frozen=True, slots=True)
-class CommandDefinition:
-    name: str
-    description: str
-    handler: CommandHandler
+    router: Any
+    gateway: Any
 
 
 class TelegramCommandRegistry:
-    def __init__(self) -> None:
-        self._commands: dict[str, CommandDefinition] = {}
-        for definition in (
-            CommandDefinition("start", "Connect this conversation to Mana-Agent", self._start),
-            CommandDefinition("help", "Show available commands", self._help),
-            CommandDefinition("status", "Show this conversation's task status", self._status),
-            CommandDefinition("new", "Start a new conversation", self._new),
-            CommandDefinition("cancel", "Request cancellation of the active task", self._cancel),
-            CommandDefinition("id", "Show Telegram user, chat, and topic IDs", self._id),
-        ):
-            self._commands[definition.name] = definition
-
-    @property
-    def definitions(self) -> tuple[CommandDefinition, ...]:
-        return tuple(self._commands.values())
+    """Compatibility facade; command definitions live in chat_commands."""
 
     def parse(self, text: str) -> str | None:
-        first = str(text or "").strip().split(maxsplit=1)[0]
-        if not first.startswith("/"):
+        raw = str(text or "").strip()
+        if not raw.startswith("/"):
             return None
-        return first[1:].split("@", 1)[0].casefold()
+        head, separator, tail = raw.partition(" ")
+        command = head.split("@", 1)[0]
+        return command + (separator + tail if separator else "")
 
-    async def dispatch(self, name: str, context: CommandContext) -> str:
-        definition = self._commands.get(name)
-        if definition is None:
-            return "Unknown command. Use /help to list available commands."
-        return await definition.handler(context)
-
-    async def _start(self, _context: CommandContext) -> str:
-        return "This bot connects this Telegram conversation to Mana-Agent. Send a task or use /help."
-
-    async def _help(self, _context: CommandContext) -> str:
-        return "Available commands:\n" + "\n".join(f"/{item.name} — {item.description}" for item in self.definitions)
-
-    async def _status(self, context: CommandContext) -> str:
-        value = await context.gateway.status(context.session_id)
-        return f"Mana-Agent session status: {value}."
-
-    async def _new(self, context: CommandContext) -> str:
-        context.router.reset(context.conversation_key)
-        return "Started a new Mana-Agent conversation for this Telegram context."
-
-    async def _cancel(self, context: CommandContext) -> str:
-        cancelled = await context.gateway.cancel(context.session_id)
-        return "Cancellation requested." if cancelled else "The active runtime does not support cooperative cancellation."
-
-    async def _id(self, context: CommandContext) -> str:
-        topic = context.update.message_thread_id if context.update.message_thread_id is not None else "none"
-        return f"User ID: {context.update.sender_user_id}\nChat ID: {context.update.chat_id}\nTopic ID: {topic}"
+    async def dispatch(self, command: str, context: CommandContext) -> str:
+        core = getattr(context.gateway, "_core", None) or context.gateway
+        dispatch = getattr(core, "dispatch_command", None)
+        if dispatch is None:
+            return "Shared command service is unavailable. No fallback action was executed."
+        result = dispatch(
+            command, session_id=context.session_id, frontend="telegram",
+            frontend_data={
+                "user_id": context.update.sender_user_id,
+                "chat_id": context.update.chat_id,
+                "topic_id": context.update.message_thread_id if context.update.message_thread_id is not None else "none",
+            },
+        )
+        if result is None:
+            return "Unsupported command. Use /help to list available commands."
+        new_session_id = str(result.data.get("session_id") or "")
+        if new_session_id:
+            context.router.store.bind_session(context.conversation_key, new_session_id)
+        return result.message or ("Started a new Mana-Agent conversation." if new_session_id else "Command completed.")

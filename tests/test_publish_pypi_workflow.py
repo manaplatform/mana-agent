@@ -10,6 +10,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_PATH = _ROOT / ".github" / "workflows" / "publish-pypi.yml"
+_RELEASE_WORKFLOW_PATH = _ROOT / ".github" / "workflows" / "release.yml"
 _VALIDATOR_PATH = _ROOT / ".github" / "scripts" / "validate_release_version.py"
 
 
@@ -49,6 +50,26 @@ def test_publish_job_uses_verified_artifact_oidc_and_production_guardrails() -> 
     assert "packages-dir: dist/" in workflow
 
 
+def test_stable_github_release_keeps_its_trigger_tag_and_uses_the_application_version_as_title() -> None:
+    workflow = _RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "name: Resolve stable release metadata" in workflow
+    assert 'release_tag = os.environ["GITHUB_REF_NAME"]' not in workflow
+    assert 'trigger_tag = os.environ["GITHUB_REF_NAME"]' in workflow
+    assert 'env_file.write(f"RELEASE_TAG={trigger_tag}\\n")' in workflow
+    assert 'env_file.write(f"RELEASE_TITLE=v{version}\\n")' in workflow
+    assert "tag_name: ${{ env.RELEASE_TAG }}" in workflow
+    assert "name: ${{ env.RELEASE_TITLE }}" in workflow
+    assert '--tag "${RELEASE_TAG}"' in workflow
+    assert '--display-tag "${RELEASE_TITLE}"' in workflow
+
+
+def test_pypi_release_validation_allows_the_explicit_release_tag_mismatch() -> None:
+    workflow = _workflow_text()
+
+    assert "--allow-tag-version-mismatch --check-pypi" in workflow
+
+
 def test_release_version_validator_requires_exact_canonical_version(tmp_path: Path) -> None:
     validator = _load_validator()
     pyproject = tmp_path / "pyproject.toml"
@@ -60,6 +81,10 @@ def test_release_version_validator_requires_exact_canonical_version(tmp_path: Pa
 
     with pytest.raises(ValueError, match="defines '0.0.15'"):
         validator.validate_tag("v0.0.14", version)
+
+    validator.validate_tag_name("v2026.07.26")
+    with pytest.raises(ValueError, match="must start with 'v'"):
+        validator.validate_tag_name("2026.07.26")
 
 
 @pytest.mark.parametrize("version", ["", "not-a-version", "0.0.15.dev1", "0.0.15+local"])

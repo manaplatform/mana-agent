@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "routing-smoke",
+  "suite_name": "routing-smoke",
+  "suite_version": "1",
+  "variant_fingerprint": "initial-protected-baseline-v1",
+  "mana_agent_commit": "b451499dca38dc2b890625d36ef1a0e9d8b4933d",
+  "environment_fingerprint": "initial-linux-python312",
+  "aggregate_metrics": {"task_count": 10, "pass_rate": 1.0, "mean_score": 100.0},
+  "tasks": [
+    {"task_id":"conversational-answer","score":100.0,"success":true,"route":"conversation","selected_tools":[],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-conversation"},
+    {"task_id":"local-repository-search","score":100.0,"success":true,"route":"repository","selected_tools":["repo_search"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-repository"},
+    {"task_id":"public-web-research","score":100.0,"success":true,"route":"search","selected_tools":["web_search"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-web"},
+    {"task_id":"github-research","score":100.0,"success":true,"route":"github","selected_tools":["github_search"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-github"},
+    {"task_id":"connector-email","score":100.0,"success":true,"route":"gmail","selected_tools":["email_search"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-email"},
+    {"task_id":"website-browser","score":100.0,"success":true,"route":"browser","selected_tools":["browser_open","browser_inspect"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-browser"},
+    {"task_id":"plan-only","score":100.0,"success":true,"route":"coding","selected_tools":[],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-plan"},
+    {"task_id":"verification-only","score":100.0,"success":true,"route":"coding","selected_tools":["verify_project"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-verify"},
+    {"task_id":"review-only","score":100.0,"success":true,"route":"repository","selected_tools":["repo_search"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-review"},
+    {"task_id":"mutation-policy","score":100.0,"success":true,"route":"repository","selected_tools":["read_file"],"latency_seconds":1.0,"cost":null,"policy_violations":[],"artifact_hash":"baseline-policy"}
+  ],
+  "created_at": "2026-07-20T00:00:00Z"
+}

@@ -93,12 +93,17 @@ class MemoryService:
         logger.info("Memory service initialized: mode=%s provider=%s", self.config.mode, self.config.provider)
 
     async def add(self, request: MemoryWriteRequest) -> MemoryRecord:
+        self._reject_deleted_scope(request.scope)
         return await self.backend.add(request)
 
     async def search(self, request: MemorySearchRequest) -> list[MemoryRecord]:
+        if self._scope_deleted(request.scope):
+            return []
         return await self.backend.search(request)
 
     async def get(self, memory_id: str, scope: MemoryScope) -> MemoryRecord | None:
+        if self._scope_deleted(scope):
+            return None
         return await self.backend.get(memory_id, scope)
 
     async def update(self, memory_id: str, request: MemoryUpdateRequest) -> MemoryRecord:
@@ -160,6 +165,19 @@ class MemoryService:
 
     def status(self) -> dict[str, str]:
         return {"mode": self.config.mode, "provider": self.config.provider}
+
+    @staticmethod
+    def _scope_deleted(scope: MemoryScope) -> bool:
+        session_id = str(scope.session_id or "").strip()
+        if not session_id:
+            return False
+        from mana_agent.workspaces.paths import mana_home
+
+        return (mana_home() / "runtime" / "session-tombstones" / f"{session_id}.json").is_file()
+
+    def _reject_deleted_scope(self, scope: MemoryScope) -> None:
+        if self._scope_deleted(scope):
+            raise MemoryConfigurationError("The requested session was deleted; memory writes are permanently disabled for that scope.")
 
     def session_payload(self) -> dict[str, Any]:
         """Return legacy session evidence through the shared compatibility boundary."""

@@ -19,10 +19,7 @@ from mana_agent.tui.wizard import ensure_setup
 def isolated_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_dir = tmp_path / ".mana"
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(user_config, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(user_config, "CONFIG_FILE", config_dir / "config.toml")
-    monkeypatch.setattr(user_config, "SECRETS_FILE", config_dir / "secrets.toml")
-    monkeypatch.setattr(user_config, "MODEL_CACHE_FILE", config_dir / "model_cache.json")
+    monkeypatch.setenv("MANA_HOME", str(config_dir))
     for key in set(user_config.DEFAULT_USER_CONFIG) | set(user_config.FIELD_NAME_BY_ENV):
         monkeypatch.delenv(key, raising=False)
     for key in user_config.SECRET_KEYS:

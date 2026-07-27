@@ -8,7 +8,7 @@ MCP servers unless ``include_mcp_discovery`` is explicitly requested.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable
+from typing import Iterable
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +199,7 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
 CATEGORY_ORDER: tuple[str, ...] = (
     "search",
     "email",
+    "computer",
     "mcp",
     "browser",
     "repository",
@@ -212,6 +213,7 @@ CATEGORY_ORDER: tuple[str, ...] = (
 CATEGORY_LABELS: dict[str, str] = {
     "search": "Search & research",
     "email": "Email",
+    "computer": "Computer control",
     "mcp": "MCP connectors",
     "browser": "Browser",
     "repository": "Repository",
@@ -236,6 +238,10 @@ def _category_for_name(name: str) -> str:
         return "other"
     if n.startswith("email_"):
         return "email"
+    if n.startswith(("computer_", "calendar_", "media_", "notes_", "clipboard_")):
+        return "computer"
+    if n in {"browser_get_active_page", "browser_read_page", "browser_list_tabs", "browser_open_url", "browser_activate_tab", "browser_close_tab"}:
+        return "computer"
     if n.startswith("browser_"):
         return "browser"
     if n.startswith("document_"):
@@ -294,6 +300,21 @@ def _add_browser_tools(by_name: dict[str, ToolCatalogEntry]) -> None:
         return
     for contract in browser_tool_contracts():
         _merge_entry(by_name, contract.name, contract.description, "browser")
+
+
+def _add_computer_tools(by_name: dict[str, ToolCatalogEntry]) -> None:
+    from mana_agent.integrations.computer_control.config import ComputerControlSettings
+
+    try:
+        settings = ComputerControlSettings.load()
+    except ValueError:
+        return
+    if not settings.enabled:
+        return
+    from mana_agent.integrations.computer_control.tool_contracts import computer_tool_contracts
+
+    for contract in computer_tool_contracts():
+        _merge_entry(by_name, contract.name, contract.description, "computer")
 
 
 def _resolve_mcp_overrides(mcp_overrides: list[str] | None) -> list[str]:
@@ -412,6 +433,7 @@ def list_auto_chat_tools(
         pass
 
     _add_browser_tools(by_name)
+    _add_computer_tools(by_name)
     _add_mcp_entries(
         by_name,
         include_mcp_discovery=include_mcp_discovery,

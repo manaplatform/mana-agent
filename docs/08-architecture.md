@@ -1,5 +1,13 @@
 # Architecture
 
+## Fleet verification boundary
+
+`mana_agent.fleet` owns worker capability inventory, health, deterministic
+selection, persisted runs, matrices, and ordered Fleet events. It does not own
+a second command runner: every selected provider is validated and executed by
+`ExecutionManager`. Authenticated reverse-worker transport supplies worker
+identity and signed capabilities. See [Mana Fleet](24-fleet.md).
+
 `mana-agent` is a Python CLI + service stack that performs repository analysis and
 LLM-driven “agentic” workflows. The architecture is organized around three
 axes:
@@ -13,6 +21,18 @@ the planner produces a sequence of gated tool jobs, and a queue runner executes
 them while a sniffer steers follow-up reads/edits/verification.
 
 ## Major Components
+
+### Computer-control integration boundary
+
+`mana_agent.integrations.computer_control` is the sole desktop automation
+boundary for every frontend. Typed model actions pass through operation schema
+validation, client policy, independent Mana/OS permissions, action-bound
+confirmation, an application adapter or OS provider, cooperative
+timeout/cancellation, live events, and sanitized audit logging. Platform
+providers contain platform behavior; the core service contains no
+platform-specific conditional tree. Unknown or invalid model decisions stop
+without a default tool/provider/action. See
+[`22-computer-control.md`](22-computer-control.md).
 
 ### Pluggable memory boundary
 
@@ -50,6 +70,13 @@ types must not escape the adapter.
   artifact filenames under `.mana/`.
   See: `src/mana_agent/commands/analyze_formats.py:1-174`.
 
+Interactive commands are defined once in `mana_agent.chat_commands` and rendered
+by CLI, Textual, dashboard/API, and connector adapters. `SessionService` owns the
+canonical workspace-session identity and `BackgroundProcessManager` owns
+persistent registered services. The dashboard `ConversationService` is now a
+compatibility adapter over canonical sessions; its legacy storage is migrated
+once and is not maintained in parallel.
+
 ### Chat gateway (runtime owner)
 
 All chat frontends connect through **`src/mana_agent/gateway/`**:
@@ -60,9 +87,28 @@ All chat frontends connect through **`src/mana_agent/gateway/`**:
   CodingAgent, ToolWorker, QueueManager (same stack the old chat CLI built).
 - **`process_chat_turn`** (`turn_engine.py`): model decision routing, auto-chat
   modes, coding agent / auto-execute, web research, and classic ask path.
+- **`GatewayRoutingAuthority`** (`routing.py`): the sole task-aware wrapper around
+  the deployed evidence router; persists each request/decision and emits events.
+- **`LaneCoordinator`** (`lane_coordinator.py`): the authoritative live task
+  state machine, budget/concurrency owner, and repository/file lock manager.
+
+Before a coding stack or multi-agent coding runtime starts, the shared
+`WorkspaceService.prepare_repository` boundary resolves the selected working
+directory and actual Git root, validates persisted workspace ownership, reuses
+normal repositories and worktrees, or safely initializes an authorized non-Git
+directory without staging or committing files. Repository persistence is
+reconciled under the same preparation lock. Codex receives the repository root
+and selected working directory separately and only performs defensive Git
+validation; it does not initialize repositories itself.
 
 Frontends (CLI flags/I/O, TUI, Telegram, dashboard) collect config and render
 results; they should not rebuild CodingAgent independently.
+
+### Adaptive model-routing boundary
+
+All inference lanes resolve through the gateway-owned instance of `mana_agent.model_routing.ModelRouter`. Every invocation has a persisted request and decision. The gateway inventories repository language/framework/build and changed-scope metadata once per fingerprint, then the router validates profile capabilities, context, availability, latency, budget and verification reserve before applying its deterministic evidence score. Legacy logical levels seed profiles but never bypass the router. Invalid or missing decisions stop execution.
+
+Simple single-model execution is the default. The main model may request decomposition or candidate competition, but the router can reject or reduce that request. Parallel candidates require positive evidence, two materially qualified models, isolation, an independent verifier, ownership safety, concurrency, latency, and reserved budget. Candidate executors use separate managed worktrees or patch roots; normalized diffs and executed check evidence go to the independently routed verifier. The winner alone may be promoted. See [Evidence-based model routing](model-routing.md).
 
 ### Prompting and flow context
 

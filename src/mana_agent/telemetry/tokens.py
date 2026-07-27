@@ -177,6 +177,21 @@ class TokenUsageTracker:
             token_usage = TokenUsage(input_tokens=estimate_tokens(estimated_text), estimated=True)
         token_usage.provider = provider or token_usage.provider
         token_usage.model = model or token_usage.model
+        from mana_agent.evals.recorder import record_current
+
+        record_current(
+            "model.usage",
+            {
+                "call_id": call_id,
+                "provider": token_usage.provider,
+                "model": token_usage.model,
+                "agent_id": agent_id,
+                "subagent_id": subagent_id,
+                "step_id": step_id,
+                "turn_id": turn_id or self.current_turn_id,
+                "usage": token_usage.as_dict(),
+            },
+        )
         self._record(
             token_usage,
             bucket=self.by_model_call,

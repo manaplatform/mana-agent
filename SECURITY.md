@@ -1,5 +1,17 @@
 # Security Policy
 
+## Remote execution fabric
+
+Task commands execute through a capability-checked sandbox provider. The local
+provider explicitly reports that it cannot isolate networks; requests requiring
+isolation fail closed. Routing decisions and persisted sandbox specifications
+contain secret references only. Values are resolved at the provider boundary,
+redacted from captured output where known, and excluded from events, snapshots,
+artifacts, and errors. SSH host-key verification is enabled by default, artifact
+paths are workspace-confined and symlink-safe, and cleanup failures never erase
+the original task failure. See `docs/execution-providers.md` for enforcement
+limitations that must be considered when enabling remote providers.
+
 Mana-Agent takes security seriously. We appreciate responsible disclosure of security issues and will work to investigate, validate, and resolve legitimate vulnerabilities as quickly as possible.
 
 This document describes how to report vulnerabilities, how reports are handled, and the security principles followed by Mana-Agent.
@@ -166,6 +178,31 @@ Security principles include:
 - Human approval for sensitive operations
 
 Agent outputs are never treated as trusted authority.
+
+## Computer Control Security
+
+Computer control is disabled by default, local-client-only by default, and
+implemented through narrow typed tools. It never exposes a raw shell,
+AppleScript, PowerShell, D-Bus, COM, JavaScript, accessibility-script, mouse
+coordinate, or keyboard command input to the model. All action decisions,
+arguments, application/resource identifiers, HTTP(S) URLs, and configured file
+roots are validated before execution.
+
+Calendar, notes, browser page, clipboard, and screenshot access have independent
+scopes. An `ask` decision creates a short-lived, exact-action request in the
+active trusted-local Textual/dashboard screen; remote clients cannot approve it,
+and an allow choice resumes the stored action without a second model decision.
+High and critical operations require a separate short-lived, single-use token
+bound to the exact action and—when requested remotely—a trusted local
+confirmation. Remote sessions retain their connector identity and cannot
+inherit local permission. Unsupported and headless capabilities fail closed.
+
+Audit and live events contain access metadata but never full note/page/clipboard
+content, browser secrets/private storage, form values, tokens, cookies,
+passwords, payment data, or screenshot pixels. File removal uses operating
+system Trash/Recycle Bin; permanent deletion is not exposed. Full limitations
+and revocation instructions are in
+[`docs/22-computer-control.md`](docs/22-computer-control.md).
 
 ---
 

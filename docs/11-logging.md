@@ -1,5 +1,10 @@
 # Logging
 
+Fleet command output is bounded by `MANA_FLEET_MAX_LOG_BYTES`, redacted before
+persistence, and emitted through ordered identity-bearing events. Dashboard/API
+replay uses a sequence cursor so reconnects do not duplicate events. Complete
+unbounded remote logs are not passed to model analysis.
+
 `mana-agent` should use logging to make repository activity, decisions, and
 failures observable without overwhelming the user.
 

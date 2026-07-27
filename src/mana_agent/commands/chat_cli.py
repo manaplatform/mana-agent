@@ -893,6 +893,10 @@ def chat(
     effective_model = stack.effective_model or resolve_model_for_role(
         AgentRole.MAIN,
         global_model=model or settings.openai_chat_model,
+        routing_authority=stack.routing_authority,
+        session_id=stack.session_id,
+        workspace_id=str(stack.workspace_id or ""),
+        repository_id=str(stack.repository_id or ""),
     ).resolved_model
     coding_agent_max_steps = stack.coding_agent_max_steps
     chat_agent_max_steps = stack.chat_agent_max_steps
@@ -904,6 +908,10 @@ def chat(
     tool_worker_model_assignment = resolve_model_for_role(
         AgentRole.TOOL_WORKER,
         global_model=settings.openai_tool_worker_model or effective_model,
+        routing_authority=stack.routing_authority,
+        session_id=stack.session_id,
+        workspace_id=str(stack.workspace_id or ""),
+        repository_id=str(stack.repository_id or ""),
     )
     effective_tool_worker_model = tool_worker_model_assignment.resolved_model
     chat_log_path = stack.log_path or (
@@ -2048,6 +2056,13 @@ def chat(
 
             if not question:
                 continue
+            control_response = gateway.handle_control_command(
+                question,
+                session_id=chat_ui_state.session_id,
+            )
+            if control_response is not None:
+                console.print(control_response)
+                continue
             if question.lower() in {"exit", "quit", "/exit", "/quit"}:
                 console.print("Goodbye!")
                 logger.info("Chat session ended by user command", extra={"command": question.lower()})
@@ -2066,6 +2081,40 @@ def chat(
                 else:
                     console.print("[green]Browser action approved for this exact page and target. Ask Mana-Agent to continue.[/green]")
                 continue
+            shared_prefixes = ("/new", "/sessions", "/session", "/processes", "/connect", "/disconnect", "/help")
+            if question.strip().lower().startswith(shared_prefixes):
+                result = gateway.dispatch_command(
+                    question, session_id=chat_ui_state.session_id, frontend="cli"
+                )
+                if result is not None and result.status == "confirmation_required":
+                    try:
+                        confirmed = input(f"{result.message} Type 'yes' to confirm: ").strip().lower() == "yes"
+                    except (EOFError, KeyboardInterrupt):
+                        confirmed = False
+                    if confirmed:
+                        result = gateway.dispatch_command(
+                            question, session_id=chat_ui_state.session_id,
+                            frontend="cli", confirmed=True,
+                        )
+                    else:
+                        console.print("[yellow]Command cancelled.[/yellow]")
+                        continue
+                if result is not None:
+                    new_session_id = str(result.data.get("session_id") or "")
+                    if new_session_id:
+                        chat_ui_state.activate_session(new_session_id)
+                        session_turns.clear()
+                        active_flow_id = None
+                    for event in result.events:
+                        if event.get("type") == "timeline.replace":
+                            console.clear()
+                            for message in event.get("messages") or []:
+                                role = str(message.get("role") or "").capitalize()
+                                if role in {"User", "Assistant"}:
+                                    console.print(f"[bold]{role}:[/bold] {message.get('content') or ''}")
+                    if result.message:
+                        console.print(result.message)
+                    continue
             if _is_new_topic_command(question):
                 if question.strip().lower() == "/new":
                     from mana_agent.connectors.browser.session import default_browser_manager

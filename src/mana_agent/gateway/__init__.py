@@ -20,12 +20,19 @@ from .entry_routing import (
 )
 from .stack import ChatStack, build_chat_stack
 from .lane_coordinator import LaneCoordinator
+from .routing import GatewayRoutingAuthority, GatewayRoutingError
 from .lanes import LaneContract, LaneId, LanePriority, LaneTaskState, LockMode
 from .turn_engine import (
     ChatTurnResult,
     is_auto_chat_connector_turn,
     process_chat_turn,
     should_use_coding_agent_turn,
+)
+from mana_agent.multi_agent.runtime.multi_task_orchestrator import (
+    MultiTaskError,
+    MultiTaskItem,
+    MultiTaskOrchestrator,
+    MultiTaskPlan,
 )
 
 __all__ = [
@@ -42,11 +49,17 @@ __all__ = [
     "ChatStack",
     "build_chat_stack",
     "LaneCoordinator",
+    "GatewayRoutingAuthority",
+    "GatewayRoutingError",
     "LaneContract",
     "LaneId",
     "LanePriority",
     "LaneTaskState",
     "LockMode",
+    "MultiTaskError",
+    "MultiTaskItem",
+    "MultiTaskOrchestrator",
+    "MultiTaskPlan",
     "ChatTurnResult",
     "process_chat_turn",
     "should_use_coding_agent_turn",

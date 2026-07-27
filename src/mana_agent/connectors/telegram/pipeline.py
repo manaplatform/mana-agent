@@ -56,6 +56,10 @@ class TelegramUpdateProcessor:
             started = time.monotonic()
             try:
                 response = await self.gateway.send(session_id, prompt)
+                core = getattr(self.gateway, "_core", None)
+                active_session_id = str(getattr(core, "_chat_session_id", "") or "")
+                if active_session_id and active_session_id != session_id:
+                    self.router.store.bind_session(conversation_key, active_session_id)
             finally:
                 if attachment_dir is not None:
                     self.attachments.cleanup(attachment_dir)

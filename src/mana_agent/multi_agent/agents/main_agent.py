@@ -82,13 +82,30 @@ class MainAgent:
         session_id: str | None = None,
         workspace_id: str | None = None,
     ) -> None:
-        self.root = Path(root).resolve()
+        requested_root = Path(root).resolve()
         self.routing_llm = routing_llm
         self.workspace_service = WorkspaceService()
         try:
             self.workspace_context = self.workspace_service.context_for_session(str(session_id)) if session_id else None
         except (FileNotFoundError, ValueError):
             self.workspace_context = None
+        preparation_path = (
+            Path(self.workspace_context.session.cwd)
+            if self.workspace_context is not None
+            else requested_root
+        )
+        prepared = self.workspace_service.prepare_repository(
+            preparation_path,
+            allow_create=self.workspace_context is None,
+            initialize_if_missing=True,
+            expected_workspace_id=(
+                self.workspace_context.workspace.workspace_id
+                if self.workspace_context is not None
+                else workspace_id
+            ),
+            entry_point="multi-agent-main",
+        )
+        self.root = prepared.working_directory
         if self.workspace_context is None:
             session = (
                 self.workspace_service.create_session(
@@ -134,16 +151,19 @@ class MainAgent:
             hierarchy_policy=self.hierarchy_policy,
         )
         settings = Settings()
-        self.managed_worktrees_enabled = bool(getattr(settings, "mana_managed_worktrees_enabled", True))
+        self.managed_worktrees_enabled = bool(
+            getattr(settings, "mana_managed_worktrees_enabled", True)
+            and prepared.repository.head_sha
+        )
         try:
             self.workspace_manager = WorkspaceManager(
-                self.root,
+                prepared.repository_root,
                 repository_id=self.workspace_context.session.primary_repository_id,
                 enabled=self.managed_worktrees_enabled,
             )
             if self.managed_worktrees_enabled:
                 self.workspace_manager.reconcile()
-        except Exception:
+        except WorkspaceError:
             self.workspace_manager = None  # type: ignore[assignment]
         self.decision_room = DecisionRoom(self.root, self.taskboard, self.message_bus)
         self.agents = self._build_agents()

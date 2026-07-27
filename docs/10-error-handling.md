@@ -1,5 +1,11 @@
 # Error Handling
 
+Fleet errors preserve the distinction between test/setup failures and
+infrastructure, worker, provider, permission, capability, timeout, transfer,
+artifact, cleanup, and model/routing failures. Missing coverage is
+`infrastructure_incomplete`; it is never reported as cross-platform success.
+Invalid selection stops without a provider or local fallback.
+
 `mana-agent` should handle failures in a way that is clear, recoverable, and
 traceable for users and developers.
 

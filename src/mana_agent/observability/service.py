@@ -73,6 +73,23 @@ def redact_summary(value: Any, *, limit: int = _MAX_SUMMARY) -> str:
     return rendered[:limit] + ("…" if len(rendered) > limit else "")
 
 
+def _redacted_json(value: Any, *, limit: int = _MAX_SUMMARY) -> str:
+    """Serialize redacted structured data without truncating invalid JSON."""
+    rendered = redact_summary(value, limit=limit)
+    if len(rendered) <= limit:
+        return rendered
+    return json.dumps({"truncated": True, "summary": rendered}, ensure_ascii=False)
+
+
+def _decode_json_object(value: str | None) -> dict[str, Any]:
+    """Read stored JSON defensively so corrupt historical telemetry is queryable."""
+    try:
+        decoded = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
 def _epoch_ns(value: str | None) -> int:
     try:
         return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1_000_000_000)
@@ -145,7 +162,7 @@ class ObservabilityStore:
             redact_summary(metadata.get("input") or metadata.get("args") or ""),
             redact_summary(metadata.get("output") or metadata.get("result_summary") or payload.get("summary") or ""),
             redact_summary(error), json.dumps(usage, ensure_ascii=False, default=str),
-            redact_summary(metadata),
+            _redacted_json(metadata),
         )
         with self._connect() as db:
             db.execute(
@@ -221,8 +238,8 @@ class ObservabilityStore:
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        item["token_usage"] = json.loads(item.pop("token_usage_json") or "{}")
-        item["attributes"] = json.loads(item.pop("attributes_json") or "{}")
+        item["token_usage"] = _decode_json_object(item.pop("token_usage_json"))
+        item["attributes"] = _decode_json_object(item.pop("attributes_json"))
         return item
 
     def overview(self, *, since: str = "") -> dict[str, Any]:

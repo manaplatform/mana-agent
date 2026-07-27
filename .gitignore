@@ -17,6 +17,10 @@ dist/
 **/faiss/index.pkl
 logs/
 .mana/
+.mana/evals/runs/
+.mana/evals/workspaces/
+.mana/evals/evals.sqlite3
+.mana/evals/evals.lock
 .ruff_cache/
 *.py[cod]
 *.pyc

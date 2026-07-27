@@ -1,5 +1,41 @@
 # Commands
 
+## Fleet
+
+`mana-agent fleet` lists and manages trusted workers, inspects jobs/logs/
+artifacts, compares immutable matrices, and starts explicit cross-platform
+verification. Run `mana-agent fleet --help` and
+`mana-agent fleet verify --help` for the complete options. Verification requires
+at least one explicit `--platform` and `--command`; no platform, provider, or
+local fallback is inferred. See [Mana Fleet](24-fleet.md).
+
+## Computer permission and confirmation
+
+When a computer permission is configured as `ask`, the active Textual chat opens
+a decision modal and the Dashboard chat timeline displays an actionable card
+with deny, once, session, and always choices. A local terminal can make the same
+decision explicitly:
+
+```text
+/computer-permission list
+/computer-permission <permission-request-id> deny|once|session|always
+```
+
+An allow choice executes the already stored exact action immediately.
+
+When an enabled computer-control tool proposes a high-risk or critical action,
+it stops with a preview and short-lived request ID. A trusted local CLI or
+Textual client can inspect and approve it explicitly:
+
+```text
+/computer-confirm list
+/computer-confirm <confirmation-request-id>
+```
+
+Approval remains bound to the exact action and expires quickly. The model and
+remote connectors cannot run this command. See
+[`22-computer-control.md`](22-computer-control.md).
+
 ## Skill proposal workshop
 
 ```bash
@@ -134,13 +170,12 @@ Implementation: [src/mana_agent/commands/worktree_cli.py](../src/mana_agent/comm
 ```bash
 mana-agent codex status --repo .
 mana-agent codex doctor --repo .
-mana-agent codex login
-mana-agent codex logout
 ```
 
 `status` and `doctor` perform read-only executable, version, enablement, and
-repository checks. Authentication is delegated to the official Codex CLI;
-Mana-Agent never reads Codex credentials. See
+repository checks. Mana-Agent supplies its selected provider credential only to
+the isolated Codex child process; this command group does not mutate the user's
+normal Codex authentication. See
 [`20-codex-integration.md`](20-codex-integration.md).
 
 Example:

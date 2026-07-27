@@ -9,14 +9,23 @@ permission enforcement, and result normalization.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.coding.live_events import publish_coding_event
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
+from mana_agent.evals.recorder import record_current
+from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
+from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
+from mana_agent.workspaces.preparation import validate_prepared_repository
+
+if TYPE_CHECKING:
+    from mana_agent.gateway.routing import GatewayRoutingAuthority
 
 BackendFactory = Callable[[], CodexCodingBackend]
 WorkspaceManagerFactory = Callable[[], WorkspaceManager]
@@ -29,21 +38,37 @@ class CodexCodingAgentShim:
         self,
         *,
         repo_root: str | Path,
+        working_directory: str | Path | None = None,
         codex_settings: CodexSettings,
         repository_id: str | None = None,
         session_id: str = "",
         event_sink: Callable[..., Any] | None = None,
         backend_factory: BackendFactory | None = None,
         workspace_manager_factory: WorkspaceManagerFactory | None = None,
+        workspace_task_id: str = "",
+        resume_thread_id: str = "",
+        routing_authority: "GatewayRoutingAuthority | None" = None,
+        workspace_id: str | None = None,
         **_legacy_kwargs: Any,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
+        self.working_directory = Path(
+            working_directory if working_directory is not None else self.repo_root
+        ).expanduser().resolve()
         self.codex_settings = codex_settings
         self.repository_id = str(repository_id or "").strip() or None
         self.session_id = str(session_id or "").strip()
         self.event_sink = event_sink
+        self.workspace_task_id = str(workspace_task_id or "").strip()
+        self.resume_thread_id = str(resume_thread_id or "").strip()
+        self.workspace_id = str(workspace_id or "").strip()
+        if routing_authority is None:
+            from mana_agent.gateway.routing import GatewayRoutingAuthority
+
+            routing_authority = GatewayRoutingAuthority(self.repo_root, event_sink=event_sink)
+        self.routing_authority = routing_authority
         self._backend_factory = backend_factory or (
-            lambda: CodexCodingBackend(self.codex_settings)
+            lambda: CodexCodingBackend(self.codex_settings, resume_thread_id=self.resume_thread_id)
         )
         self._workspace_manager_factory = workspace_manager_factory or (
             lambda: WorkspaceManager(
@@ -142,7 +167,60 @@ class CodexCodingAgentShim:
         goal = str(request or "").strip()
         if not goal:
             raise ValueError("Codex coding request is required")
+        validate_prepared_repository(self.repo_root, self.working_directory)
         task_id = f"codex_task_{uuid.uuid4().hex[:16]}"
+        routing_decision = self.routing_authority.route(RoutingRequest(
+            role="coding",
+            task_description=goal,
+            task_type="coding" if requires_repository_write else "planning",
+            complexity=Complexity.MEDIUM,
+            risk=RiskLevel.MEDIUM if requires_repository_write else RiskLevel.LOW,
+            required_capabilities=frozenset({"patch", "tool_calls"} if requires_repository_write else {"structured_output"}),
+            required_tools=frozenset({"repository_read", "repository_write", "test_execution"} if requires_repository_write else {"repository_read"}),
+            latency_requirement=LatencyClass.STANDARD,
+            budgets=routing_budgets_from_settings(self.routing_authority.settings),
+            task_id=task_id,
+            parent_task_id=self.workspace_task_id or None,
+            session_id=self.session_id,
+            workspace_id=self.workspace_id,
+            repository_id=str(self.repository_id or ""),
+            execution_lane="coding",
+            expected_output_type="repository_patch" if requires_repository_write else "implementation_plan",
+            isolation_available=bool(self.codex_settings.worktree_isolation),
+            independent_verifier_available=any(
+                profile.can_verify and ("verifier" in profile.supported_roles or "*" in profile.supported_roles)
+                for profile in self.routing_authority.router.profiles
+            ),
+        ))
+        routed_settings = CodexSettings.from_mana_settings(
+            self.routing_authority.settings,
+            provider=routing_decision.provider,
+        )
+        self.codex_settings = self.codex_settings.model_copy(
+            update={
+                "model": routing_decision.selected_model,
+                "provider": routed_settings.provider,
+                "provider_display_name": routed_settings.provider_display_name,
+                "api_key": routed_settings.api_key,
+                "base_url": routed_settings.base_url,
+                "http_headers": routed_settings.http_headers,
+                "env_http_headers": routed_settings.env_http_headers,
+                "query_params": routed_settings.query_params,
+                "supports_responses_api": routed_settings.supports_responses_api,
+            }
+        )
+        record_current(
+            "codex.turn.started",
+            {
+                "task_id": task_id,
+                "model": self.codex_settings.model,
+                "sandbox": "workspaceWrite" if requires_repository_write else "readOnly",
+                "approval_policy": self.codex_settings.approval_policy,
+                "repository_identity": str(self.repo_root),
+                "routing_decision_id": routing_decision.decision_id,
+                "routing_mode": routing_decision.routing_mode.value,
+            },
+        )
         task = CodingTask(
             task_id=task_id,
             goal=goal,
@@ -171,27 +249,47 @@ class CodexCodingAgentShim:
 
         manager: WorkspaceManager | None = None
         managed_workspace: Any = None
-        if requires_repository_write:
+        has_head = self._repository_has_head()
+        if requires_repository_write and self.codex_settings.worktree_isolation and has_head:
             manager = self._workspace_manager_factory()
+            workspace_task_id = self.workspace_task_id or task_id
             managed_workspace = manager.create_for_task(
-                task_id,
+                workspace_task_id,
                 title=goal,
                 assigned_agent_id="codex",
                 session_id=self.session_id,
-                reuse_existing=False,
+                reuse_existing=bool(self.workspace_task_id),
             )
-            manager.transition(task_id, WorkspaceStatus.RUNNING, agent_id="codex")
+            manager.transition(
+                workspace_task_id,
+                WorkspaceStatus.RUNNING,
+                agent_id="codex",
+                force=bool(self.workspace_task_id),
+            )
+            selected_relative = self.working_directory.relative_to(self.repo_root)
+            selected_worktree = Path(managed_workspace.worktree_path) / selected_relative
             workspace = WorkspaceContext(
                 repository_path=self.repo_root,
                 worktree_path=Path(managed_workspace.worktree_path),
+                working_directory=(selected_worktree if selected_worktree.is_dir() else None),
                 branch_name=managed_workspace.branch_name,
                 sandbox="workspaceWrite",
                 approval_policy=self.codex_settings.approval_policy,
+            )
+        elif requires_repository_write:
+            workspace = WorkspaceContext(
+                repository_path=self.repo_root,
+                worktree_path=self.repo_root,
+                working_directory=self.working_directory,
+                sandbox="workspaceWrite",
+                approval_policy=self.codex_settings.approval_policy,
+                allow_in_place_write=True,
             )
         else:
             workspace = WorkspaceContext(
                 repository_path=self.repo_root,
                 worktree_path=self.repo_root,
+                working_directory=self.working_directory,
                 sandbox="readOnly",
                 approval_policy=self.codex_settings.approval_policy,
             )
@@ -211,9 +309,10 @@ class CodexCodingAgentShim:
         try:
             result = asyncio.run(run())
         except Exception as exc:
+            record_current("codex.turn.failed", {"task_id": task_id, "error_type": type(exc).__name__, "error": str(exc)})
             if manager is not None:
                 manager.transition(
-                    task_id,
+                    self.workspace_task_id or task_id,
                     WorkspaceStatus.FAILED,
                     agent_id="codex",
                     error=str(exc),
@@ -223,16 +322,16 @@ class CodexCodingAgentShim:
         if manager is not None:
             if result.status == "completed":
                 manager.transition(
-                    task_id,
+                    self.workspace_task_id or task_id,
                     WorkspaceStatus.MERGE_CANDIDATE,
                     agent_id="codex",
                     notes=["Codex completed planning, implementation, and verification."],
                 )
             elif result.status == "cancelled":
-                manager.transition(task_id, WorkspaceStatus.INTERRUPTED, agent_id="codex")
+                manager.transition(self.workspace_task_id or task_id, WorkspaceStatus.INTERRUPTED, agent_id="codex")
             else:
                 manager.transition(
-                    task_id,
+                    self.workspace_task_id or task_id,
                     WorkspaceStatus.FAILED,
                     agent_id="codex",
                     error="; ".join(result.errors),
@@ -247,9 +346,36 @@ class CodexCodingAgentShim:
         payload["flow_id"] = selected_flow_id
         self._active_flow_id = selected_flow_id
         self._flow_results[selected_flow_id] = dict(payload)
+        record_current("codex.turn.finished", {"task_id": task_id, "result": result.model_dump(mode="json"), "workspace_path": str(workspace.worktree_path)})
         return payload
 
+    def _repository_has_head(self) -> bool:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return completed.returncode == 0
+
     def _emit_event(self, event: AgentEvent) -> None:
+        record_current(event.event_type, event.model_dump(mode="json"))
+        publish_coding_event(event)
+        if self.session_id and self.repository_id:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            get_execution_event_hub().publish(
+                {
+                    **event.model_dump(mode="json"),
+                    "type": event.event_type,
+                    "event_id": event.event_id,
+                    "metadata": event.payload,
+                },
+                conversation_id=self.session_id,
+                execution_id=event.task_id,
+                repository_id=self.repository_id,
+            )
         if self.event_sink is None:
             return
         payload = event.model_dump(mode="json")

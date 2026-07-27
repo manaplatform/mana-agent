@@ -1,5 +1,21 @@
 # Tool System
 
+Fleet verification is an orchestration service, not a broad remote-command
+tool. CLI and chat inputs compile into typed selection and verification
+contracts. Provider execution, argv validation, artifact confinement, and
+cleanup remain within the existing execution tool boundary.
+
+## Computer tools
+
+When `[computer_control].enabled` is true, the normal model-selected tool loop
+loads narrow `computer_*`, `calendar_*`, `media_*`, `notes_*`, desktop
+`browser_*`, and `clipboard_*` contracts. No raw computer-command tool exists.
+Every call carries the validated source decision ID; the runtime supplies the
+authenticated gateway client identity outside model arguments. High/critical
+calls require an exact-action token. See
+[`22-computer-control.md`](22-computer-control.md) for the full tool, permission,
+risk, and provider contract.
+
 `mana-agent` includes a repository-aware tool system for search, inspection, and
 controlled file changes during agent workflows.
 
@@ -21,11 +37,17 @@ inspection, file patching, file writing, and verification steps.
 
 ## Dashboard Chat and Events
 
-The optional Streamlit dashboard uses multipage navigation and persistent
-conversations under `~/.mana/repositories/<id>/dashboard/conversations/`.
+The optional Streamlit dashboard uses multipage navigation and canonical
+workspace session history under `~/.mana/sessions/<session_id>/`.
 Runtime activity is the same normalized `ChatEvent` model used by the CLI/TUI,
-published through `ExecutionEventHub` and delivered over FastAPI WebSocket
-(`/api/v1/ws/conversations/{id}`) with durable JSONL replay for reconnects.
+published through `ExecutionEventHub` and persisted for durable timeline
+recovery. `mana-agent dashboard` starts a loopback API beside Streamlit and
+serves the live chat reducer from that same origin. The reducer subscribes
+before submission, renders optimistic user messages, updates correlated tool
+cards in place, and resumes the WebSocket
+(`/api/v1/ws/conversations/{id}`) from its last persisted sequence after
+reconnect. Direct `streamlit run` development requires a separately configured
+API through `MANA_DASHBOARD_API_BASE`.
 Analyze from the dashboard starts `ProjectAnalyzeService` jobs (not a separate
 pipeline) and surfaces repository analysis artifacts.
 

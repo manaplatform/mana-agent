@@ -27,6 +27,7 @@ from textual.widgets import Static
 from mana_agent.chat.events import (
     AssistantMessageEvent,
     ChatEvent,
+    CodingActivityEvent,
     StreamTokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -34,6 +35,7 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.history import ChatHistory
 from mana_agent.tui.widgets.tool_card import ToolCard
+from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.selectable_text import SelectableText
 
 
@@ -99,6 +101,7 @@ class ChatLog(VerticalScroll):
         self._unsubscribe: Callable[[], None] | None = None
         self._assistant_widgets: dict[str, SelectableText] = {}  # event_id -> widget
         self._tool_cards: dict[str, ToolCard] = {}  # call_id -> card
+        self._execution_panels: dict[str, ExecutionPanel] = {}
         self._current_turn_id: str | None = None
         # Deduplicate live + replay so the same event_id is only painted once
         self._rendered_ids: set[str] = set()
@@ -186,6 +189,7 @@ class ChatLog(VerticalScroll):
 
     def _render_event(self, event: ChatEvent) -> None:
         """Create appropriate visual representation and mount it."""
+        was_near_bottom = self.max_scroll_y - self.scroll_y <= 2
         focus_widget = None
         if isinstance(event, UserMessageEvent):
             focus_widget = self._add_user_message(event)
@@ -197,10 +201,13 @@ class ChatLog(VerticalScroll):
             focus_widget = self._add_tool_result(event)
         elif isinstance(event, StreamTokenEvent):
             focus_widget = self._handle_stream_token(event)
+        elif isinstance(event, CodingActivityEvent):
+            focus_widget = self._add_coding_activity(event)
 
         self.message_count = len(self._history.get_events()) if self._history else self.message_count + 1
         # Always pin the viewport to the newest content (user requirement).
-        self._scroll_to_latest(focus_widget)
+        if was_near_bottom:
+            self._scroll_to_latest(focus_widget)
 
     def _scroll_to_latest(self, focus_widget: Static | SelectableText | ToolCard | None = None) -> None:
         """Keep chat history pinned to the latest message / tool card.
@@ -292,6 +299,15 @@ class ChatLog(VerticalScroll):
             return last
         return None
 
+    def _add_coding_activity(self, event: CodingActivityEvent) -> ExecutionPanel:
+        panel = self._execution_panels.get(event.turn_id)
+        if panel is None:
+            panel = ExecutionPanel(turn_id=event.turn_id)
+            self._execution_panels[event.turn_id] = panel
+            self.mount(panel)
+        panel.update_event(event.activity)
+        return panel
+
     def _append_to_assistant_widget(self, widget: SelectableText, token: str) -> None:
         """Append streaming content without invalidating an active selection."""
         try:
@@ -307,6 +323,7 @@ class ChatLog(VerticalScroll):
             child.remove()
         self._assistant_widgets.clear()
         self._tool_cards.clear()
+        self._execution_panels.clear()
         self._rendered_ids.clear()
 
     def on_mount(self) -> None:

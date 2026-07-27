@@ -71,6 +71,7 @@ def test_lane_selection_uses_decision_intent_and_invalid_model_lane_uses_valid_r
     assert select_lane(entry_route="coding") == LaneId.CODING
     assert select_lane(intent="verify") == LaneId.VERIFY
     assert select_lane(entry_route="search", model_lane="not-a-lane") == LaneId.RESEARCH
+    assert select_lane(entry_route="remote_execution") == LaneId.OPERATIONS
     with pytest.raises(ValueError, match="No valid specialist lane decision"):
         select_lane(entry_route="missing", model_lane="not-a-lane")
 
@@ -87,6 +88,9 @@ def test_tool_permissions_are_enforced_by_capability() -> None:
 
     assert validate_tool_permission(contracts[LaneId.CODING], "edit_file") == {"repository_write"}
     assert validate_tool_permission(contracts[LaneId.RESEARCH], "web_search") == {"web_search"}
+    assert validate_tool_permission(
+        contracts[LaneId.OPERATIONS], "remote_ssh_execute", task_capabilities=("remote_ssh_execute",)
+    ) == {"remote_ssh_execute"}
     with pytest.raises(LanePermissionError):
         validate_tool_permission(contracts[LaneId.REVIEW], "edit_file")
 
@@ -97,6 +101,50 @@ def test_duplicate_active_task_reuses_existing_reference(coordinator: LaneCoordi
 
     assert second.duplicate is True
     assert second.execution.task_id == first.execution.task_id
+
+
+def test_explicit_taskboard_root_and_child_keep_their_persisted_lineage(
+    coordinator: LaneCoordinator,
+) -> None:
+    board = coordinator.taskboard
+    root_task = board.create_task(title="Compound", user_request="Research and create PDF")
+    child_task = board.create_child_task(
+        root_task.task_id,
+        title="Research",
+        user_request="Research Hermes Agent",
+        decomposition_local_id="research_hermes_agent",
+        acceptance_criteria=["Research is sourced"],
+    )
+    root = coordinator.reserve(
+        normalized_intent="Research Hermes Agent and create a PDF",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-1",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        requested_input_tokens=100,
+        requested_output_tokens=2_000,
+        task_type="multi_task_root",
+        taskboard_task_id=root_task.task_id,
+    )
+    coordinator.start(root)
+
+    child = coordinator.reserve(
+        normalized_intent="Research Hermes Agent",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-1",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=100,
+        requested_output_tokens=200,
+        task_type="multi_task_child",
+        taskboard_task_id=child_task.task_id,
+    )
+
+    assert root.execution.taskboard_task_id == root_task.task_id
+    assert child.execution.taskboard_task_id == child_task.task_id
+    assert board.get_task(child_task.task_id).parent_task_id == root_task.task_id
 
 
 def test_non_overlapping_file_locks_can_coexist(coordinator: LaneCoordinator) -> None:

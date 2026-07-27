@@ -6,11 +6,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from mana_agent.api.exceptions import ManaApiError
-from mana_agent.services.conversation_service import ConversationService, conversation_service_for_root
+from mana_agent.services.conversation_service import ConversationService
 from mana_agent.services.execution_event_hub import get_execution_event_hub
 from mana_agent.ui.streamlit_helpers import find_mana_root
 from mana_agent.workspaces.paths import repository_id_for_path
@@ -57,6 +58,13 @@ class ConversationListQuery(BaseModel):
 
 class MessageCreateRequest(BaseModel):
     content: str = Field(min_length=1)
+    client_message_id: str = Field(default="", max_length=128)
+    root: str | None = None
+    repository_id: str | None = None
+
+
+class ComputerPermissionDecisionRequest(BaseModel):
+    decision: str = Field(pattern=r"^(deny|allow_once|allow_session|always)$")
     root: str | None = None
     repository_id: str | None = None
 
@@ -75,6 +83,48 @@ def list_conversations(
         "root": str(service.root),
         "conversations": [item.to_dict() for item in rows],
     }
+
+
+@router.get("/dashboard/live-chat", response_class=HTMLResponse)
+def dashboard_live_chat(
+    request: Request,
+    conversation_id: str,
+    root: str | None = None,
+    repository_id: str | None = None,
+    height: int = 680,
+) -> HTMLResponse:
+    """Serve the same-origin dashboard reducer without a second event model."""
+    service = _service(root=root, repository_id=repository_id)
+    try:
+        payload = service.get_full(
+            conversation_id,
+            message_limit=500,
+            event_limit=1000,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+    from mana_agent.dashboard.components.live_chat import live_chat_html
+
+    base = str(request.base_url).rstrip("/")
+    html = live_chat_html(
+        conversation_id=conversation_id,
+        root=service.root,
+        api_base=base,
+        messages=payload["messages"],
+        events=payload["events"],
+        height=max(320, min(int(height or 680), 1200)),
+    )
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; script-src 'unsafe-inline'; "
+                "style-src 'unsafe-inline'; connect-src 'self' ws: wss:"
+            ),
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 @router.post("/conversations", status_code=201)
@@ -149,7 +199,11 @@ def send_message(
     _require_mutation_token(authorization)
     service = _service(root=payload.root, repository_id=payload.repository_id)
     try:
-        result = service.send_message(conversation_id, payload.content)
+        result = service.send_message(
+            conversation_id,
+            payload.content,
+            client_message_id=payload.client_message_id,
+        )
     except FileNotFoundError as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
     except ValueError as exc:
@@ -157,6 +211,106 @@ def send_message(
     except Exception as exc:  # noqa: BLE001
         raise ManaApiError(500, "Chat execution failed.", error=str(exc)) from exc
     return {"ok": True, **result}
+
+
+@router.post(
+    "/conversations/{conversation_id}/computer-permissions/{permission_request_id}"
+)
+def decide_computer_permission_in_chat(
+    conversation_id: str,
+    permission_request_id: str,
+    payload: ComputerPermissionDecisionRequest,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Apply a trusted dashboard-chat decision and resume the stored exact action."""
+    _require_mutation_token(authorization)
+    service = _service(root=payload.root, repository_id=payload.repository_id)
+    try:
+        service.get_or_raise(conversation_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+
+    from mana_agent.integrations.computer_control.cancellation import (
+        decide_computer_permission,
+        deny_computer_permission,
+    )
+    from mana_agent.integrations.computer_control.errors import ComputerControlError
+    from mana_agent.integrations.computer_control.events import computer_event_scope
+    from mana_agent.integrations.computer_control.models import PermissionDecision
+
+    hub = get_execution_event_hub()
+
+    def event_sink(event_type: str, title: str, **kwargs: Any) -> None:
+        values = dict(kwargs)
+        metadata = dict(values.pop("metadata", {}) or {})
+        hub.emit(
+            event_type,
+            title=title,
+            conversation_id=conversation_id,
+            execution_id=str(values.pop("execution_id", "") or ""),
+            repository_id=service.repository_id,
+            message=title,
+            status=str(values.pop("status", "running") or "running"),
+            metadata=metadata,
+        )
+
+    if payload.decision == "deny":
+        try:
+            deny_computer_permission(permission_request_id, client_type="dashboard")
+        except ComputerControlError as exc:
+            raise ManaApiError(409, str(exc), error=exc.code) from exc
+        hub.emit(
+            "computer.permission_decided",
+            title="Computer permission denied",
+            conversation_id=conversation_id,
+            repository_id=service.repository_id,
+            status="cancelled",
+            metadata={
+                "permission_request_id": permission_request_id,
+                "decision": "deny",
+            },
+        )
+        return {"ok": True, "decision": "deny", "executed": False}
+
+    decisions = {
+        "allow_once": PermissionDecision.ALLOW_ONCE,
+        "allow_session": PermissionDecision.ALLOW_SESSION,
+        "always": PermissionDecision.ALWAYS_ALLOW,
+    }
+    try:
+        with computer_event_scope(event_sink):
+            result = decide_computer_permission(
+                permission_request_id,
+                decision=decisions[payload.decision],
+                client_type="dashboard",
+            )
+    except ComputerControlError as exc:
+        if exc.code != "confirmation_required":
+            raise ManaApiError(409, str(exc), error=exc.code) from exc
+        result_payload: dict[str, Any] = exc.payload()
+        executed = False
+    else:
+        result_payload = result.model_dump(mode="json")
+        executed = True
+    hub.emit(
+        "computer.permission_decided",
+        title="Computer permission approved",
+        conversation_id=conversation_id,
+        execution_id=str(result_payload.get("execution_id") or ""),
+        repository_id=service.repository_id,
+        status="success",
+        metadata={
+            "permission_request_id": permission_request_id,
+            "decision": payload.decision,
+            "executed": executed,
+        },
+    )
+    return {
+        "ok": True,
+        "decision": payload.decision,
+        "executed": executed,
+        "result": result_payload,
+    }
 
 
 @router.get("/conversations/{conversation_id}/execution")

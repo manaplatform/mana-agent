@@ -76,3 +76,35 @@ def test_websocket_missing_conversation(setup_env: Path) -> None:
     with client.websocket_connect(f"/api/v1/ws/conversations/conv_missing000000?root={setup_env}") as ws:
         msg = ws.receive_json()
         assert msg["type"] == "error"
+
+
+def test_websocket_cursor_replays_only_missed_events(setup_env: Path) -> None:
+    service = ConversationService(root=setup_env)
+    conversation = service.create(title="Resume")
+    hub = get_execution_event_hub()
+    first = hub.emit(
+        "log.info",
+        title="first",
+        conversation_id=conversation.conversation_id,
+        repository_id=service.repository_id,
+        status="success",
+    )
+    second = hub.emit(
+        "log.info",
+        title="second",
+        conversation_id=conversation.conversation_id,
+        repository_id=service.repository_id,
+        status="success",
+    )
+    client = TestClient(create_app())
+    with client.websocket_connect(
+        f"/api/v1/ws/conversations/{conversation.conversation_id}"
+        f"?root={setup_env}&after_sequence={first['sequence']}&replay_limit=50"
+    ) as ws:
+        assert ws.receive_json()["type"] == "socket.ready"
+        replay = ws.receive_json()
+        assert replay["type"] == "event.replay"
+        assert replay["event"]["sequence"] == second["sequence"]
+        complete = ws.receive_json()
+        assert complete["type"] == "socket.replay_complete"
+        assert complete["last_sequence"] == second["sequence"]

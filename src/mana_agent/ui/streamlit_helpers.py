@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os  # used for MANA_DASHBOARD_ROOT env and safe paths
-import uuid
 import atexit
 from pathlib import Path
 from typing import Any
@@ -66,6 +65,18 @@ __all__ = [
 
 DEFAULT_ROOT = Path.cwd().resolve()
 _DASHBOARD_GATEWAYS: dict[tuple[str, str], Any] = {}
+_DASHBOARD_EVENT_FORWARDERS: dict[tuple[str, str], "_DashboardEventForwarder"] = {}
+
+
+class _DashboardEventForwarder:
+    """Stable sink object for cached gateways; its per-run target is replaceable."""
+
+    def __init__(self) -> None:
+        self.target: Any | None = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        if callable(self.target):
+            self.target(*args, **kwargs)
 
 
 def _dashboard_gateway_cache() -> dict[tuple[str, str], Any]:
@@ -77,6 +88,7 @@ def close_dashboard_chat_session(conversation_id: str, root: Path | None = None)
     resolved = find_mana_root(root)
     key = (str(resolved.resolve()), str(conversation_id or "dashboard-default"))
     gateway = _DASHBOARD_GATEWAYS.pop(key, None)
+    _DASHBOARD_EVENT_FORWARDERS.pop(key, None)
     if gateway is not None and hasattr(gateway, "close_session"):
         gateway.close_session()
 
@@ -86,6 +98,7 @@ def _close_all_dashboard_chat_sessions() -> None:
         if hasattr(gateway, "close_session"):
             gateway.close_session()
     _DASHBOARD_GATEWAYS.clear()
+    _DASHBOARD_EVENT_FORWARDERS.clear()
 
 
 atexit.register(_close_all_dashboard_chat_sessions)
@@ -471,18 +484,7 @@ def run_dashboard_chat(
     event_sink: Any | None = None,
     **_: Any,
 ) -> dict[str, Any]:
-    """Real model-routed chat response, using the exact same service/ask stack as CLI chat.
-
-    Tries hard to give responses "routed via models" like the full CLI experience:
-    - Uses Settings + build_ask_service (entry router decides route)
-    - Prefers ask_with_tools for agentic/tool-using behavior (closer to rich chat)
-    - Falls back gracefully to preview if no key / no index / import error.
-
-    Optional ``event_sink(event_type, title, **kwargs)`` publishes normalized runtime
-    events for dashboard sockets (same ChatEvent vocabulary as the CLI/TUI).
-
-    Returns dict with "answer", "mode" ("real"|"preview"), "sources", "warnings", etc.
-    """
+    """Run one model-routed gateway turn with the shared live event sink."""
     root = find_mana_root(root)
     prompt = (prompt or "").strip()
     if not prompt:
@@ -490,161 +492,55 @@ def run_dashboard_chat(
 
     def _emit(event_type: str, title: str, **kwargs: Any) -> None:
         if callable(event_sink):
-            try:
-                event_sink(event_type, title, **kwargs)
-            except Exception:
-                pass
+            event_sink(event_type, title, **kwargs)
 
-    try:
-        from mana_agent.config.settings import Settings
-        from mana_agent.commands.cli_internal import build_ask_service
-        from mana_agent.gateway import AgentChatGateway
+    from mana_agent.config.settings import Settings
+    from mana_agent.gateway import AgentChatGateway
 
-        settings = Settings()
-        api_key = getattr(settings, "openai_api_key", "")
-        if not api_key:
-            _emit("warning", "Missing API key", message="OPENAI_API_KEY not configured", status="failed")
-            return {
-                "answer": "(No OPENAI_API_KEY configured) Routed via model decision layer would happen here. "
-                          "Save the key in ~/.mana/secrets.toml and ensure the index is built (run chat in CLI first).",
-                "mode": "preview",
-                "sources": [],
-                "conversation_id": conversation_id,
-                "execution_id": execution_id,
-            }
+    settings = Settings()
+    if not getattr(settings, "openai_api_key", ""):
+        message = "OPENAI_API_KEY is not configured. No model action was executed."
+        _emit("error", "Missing API key", message=message, status="failed")
+        raise RuntimeError(message)
 
-        # Use the central gateway so dashboard connections go through the gateway to agents.
-        # process_turn provides auto-chat + coding agent + model-driven routing when available.
-        gw = None
-        ask_service = None
-        try:
-            cache_key = (str(root.resolve()), str(conversation_id or "dashboard-default"))
-            gw = _dashboard_gateway_cache().get(cache_key)
-            if gw is None:
-                gw = AgentChatGateway(root, coding_agent=True, agent_tools=True)
-                _dashboard_gateway_cache()[cache_key] = gw
-            ask_service = getattr(gw, "get_ask_service", lambda: None)()
-        except Exception:
-            ask_service = None
-
-        idx_dir = repository_index_dir(repository_id_for_path(root))
-        _emit("agent.planning", "Planning", message="Preparing repository answer", status="running")
-        tool_exec_id = f"dash-tool-{uuid.uuid4().hex[:12]}"
-        _emit(
-            "tool.started",
-            "repo_search",
-            message=f"Gathering evidence for: {prompt[:80]}",
-            status="running",
-            metadata={"tool_name": "repo_search", "args_summary": prompt[:80]},
-            execution_id=execution_id,
-            step_id="tool-01",
-            # pass through id so WS + history can correlate start/update
-            event_id=tool_exec_id,
+    cache_key = (str(root.resolve()), str(conversation_id or "dashboard-default"))
+    gw = _dashboard_gateway_cache().get(cache_key)
+    forwarder = _DASHBOARD_EVENT_FORWARDERS.get(cache_key)
+    if gw is None:
+        forwarder = _DashboardEventForwarder()
+        gw = AgentChatGateway(
+            root,
+            coding_agent=True,
+            agent_tools=True,
+            event_sink=forwarder,
         )
+        _dashboard_gateway_cache()[cache_key] = gw
+        _DASHBOARD_EVENT_FORWARDERS[cache_key] = forwarder
+    if forwarder is None:
+        raise RuntimeError("Dashboard gateway event forwarder is unavailable.")
+    forwarder.target = _emit
 
-        service = ask_service or build_ask_service(settings, None, project_root=root)
-        answer_text = ""
-        used_gateway_turn = False
-
-        try:
-            if gw is not None and hasattr(gw, "process_turn"):
-                try:
-                    if hasattr(gw, "set_index_dirs"):
-                        gw.set_index_dirs(index_dir=idx_dir)
-                    sid = (
-                        gw.create_session(frontend="dashboard", session_id=conversation_id)
-                        if hasattr(gw, "create_session")
-                        else conversation_id
-                    )
-                    turn = gw.process_turn(sid, prompt, index_dir=str(idx_dir))
-                    answer_text = str(getattr(turn, "answer", "") or "")
-                    if getattr(turn, "error", None) and not answer_text:
-                        raise RuntimeError(str(turn.error))
-                    used_gateway_turn = True
-                    _emit(
-                        "tool.finished",
-                        "gateway.process_turn",
-                        message="Gateway turn complete",
-                        status="success",
-                        metadata={
-                            "tool_name": "gateway.process_turn",
-                            "result_summary": str(getattr(turn, "mode", "") or "turn"),
-                        },
-                        event_id=tool_exec_id,
-                    )
-                except Exception:
-                    used_gateway_turn = False
-
-            if not used_gateway_turn:
-                if hasattr(service, "ask_with_tools"):
-                    resp = service.ask_with_tools(str(idx_dir), prompt, k=k, max_steps=5, timeout_seconds=45)
-                else:
-                    resp = service.ask(str(idx_dir), prompt, k=k)
-                answer_text = str(getattr(resp, "answer", resp) or "")
-                _emit(
-                    "tool.finished",
-                    "ask_with_tools" if hasattr(service, "ask_with_tools") else "ask",
-                    message="Tool-assisted answer complete",
-                    status="success",
-                    metadata={"tool_name": "ask_with_tools" if hasattr(service, "ask_with_tools") else "ask", "result_summary": "tool-assisted"},
-                    event_id=tool_exec_id,
-                )
-        except Exception as tool_exc:
-            _emit(
-                "tool.failed",
-                "ask_with_tools",
-                message=str(tool_exc)[:200],
-                status="failed",
-                metadata={"tool_name": "ask_with_tools"},
-                event_id=tool_exec_id,
-            )
-            resp = service.ask(str(idx_dir), prompt, k=k) if hasattr(service, "ask") else {"answer": str(tool_exc)}
-            answer_text = str(getattr(resp, "answer", resp) if not isinstance(resp, dict) else resp.get("answer") or resp)
-            if isinstance(resp, dict):
-                answer_text = str(resp.get("answer") or resp)
-            else:
-                answer_text = str(getattr(resp, "answer", resp) or "")
-            _emit(
-                "tool.finished",
-                "ask",
-                message="Classic ask complete",
-                status="success",
-                metadata={"tool_name": "ask"},
-            )
-
-        answer = str(answer_text or "").strip()
-        sources: list[Any] = []
-        mode = "gateway" if used_gateway_turn else "real"
-        warnings: list[Any] = []
-
-        if not answer or answer.startswith("Selected route failed"):
-            mode = "preview"
-            answer = answer or "(Model route produced no answer. Try again or use CLI for full session.)"
-            _emit("warning", "Preview mode", message="Model route produced no full answer", status="failed")
-
-        for source in (sources or [])[:5]:
-            path = str(source.get("file_path") or source.get("path") or source) if isinstance(source, dict) else str(source)
-            if path:
-                _emit("file.read", "read_file", message=path, status="success", metadata={"tool_name": "read_file", "path": path})
-
-        _emit("agent.decision", "Routing complete", message=f"mode={mode}", status="success")
-        return {
-            "answer": answer,
-            "mode": mode,
-            "sources": sources[:5] if sources else [],
-            "warnings": warnings,
-            "root": str(root),
-            "conversation_id": conversation_id,
-            "execution_id": execution_id,
-        }
-    except Exception as e:
-        _emit("error", "Chat failed", message=str(e)[:200], status="failed")
-        return {
-            "answer": f"(Preview - real routing failed: {str(e)[:120]}) Evidence would be collected by AskAgent/MainAgent. "
-                      "Run `mana-agent chat` in terminal for full CLI experience.",
-            "mode": "preview",
-            "error": str(e),
-            "sources": [],
-            "conversation_id": conversation_id,
-            "execution_id": execution_id,
-        }
+    idx_dir = repository_index_dir(repository_id_for_path(root))
+    gw.set_index_dirs(index_dir=idx_dir)
+    sid = gw.create_session(frontend="dashboard", session_id=conversation_id)
+    turn = gw.process_turn(
+        sid,
+        prompt,
+        index_dir=str(idx_dir),
+        event_sink=_emit,
+        turn_id=execution_id,
+    )
+    answer = str(getattr(turn, "answer", "") or "").strip()
+    if getattr(turn, "error", None):
+        raise RuntimeError(str(turn.error))
+    if not answer:
+        raise RuntimeError("Model decision completed without an assistant response.")
+    return {
+        "answer": answer,
+        "mode": str(getattr(turn, "mode", "") or "gateway"),
+        "sources": list(getattr(turn, "sources", []) or [])[:5],
+        "warnings": list(getattr(turn, "warnings", []) or []),
+        "root": str(root),
+        "conversation_id": conversation_id,
+        "execution_id": execution_id,
+    }

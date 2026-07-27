@@ -1,0 +1,31 @@
+{
+  "name": "Mana-Agent",
+  "url": "https://YOUR_MANA_HOST.example",
+  "hook_attributes": {
+    "url": "https://YOUR_MANA_HOST.example/integrations/github/webhooks",
+    "active": true
+  },
+  "redirect_url": "https://YOUR_MANA_HOST.example/integrations/github/callback",
+  "public": false,
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "issues": "write",
+    "pull_requests": "write",
+    "actions": "read",
+    "checks": "read",
+    "dependabot_alerts": "read",
+    "code_scanning_alerts": "read",
+    "secret_scanning_alerts": "read"
+  },
+  "default_events": [
+    "issues",
+    "issue_comment",
+    "workflow_run",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "dependabot_alert",
+    "code_scanning_alert",
+    "secret_scanning_alert"
+  ]
+}

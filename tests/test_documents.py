@@ -143,18 +143,45 @@ def test_xlsx_create_rejects_blank_or_malformed_content(tmp_path: Path) -> None:
 
 def test_pdf_create_read_and_corrupt_failure(tmp_path: Path) -> None:
     service = DocumentService(tmp_path)
-    created = service.create("summary.pdf", content={"text": "Payment terms Net 30"})
+    created = service.create(
+        "summary.pdf",
+        content={
+            "title": "Payment Overview",
+            "subtitle": "Verified terms",
+            "sections": [
+                {
+                    "heading": "Terms",
+                    "paragraphs": ["Payment terms Net 30"],
+                    "bullets": [f"Evidence item {index}: retained in full." for index in range(180)],
+                }
+            ],
+        },
+    )
     assert created["ok"] is True
+    assert created["verification"]["layout"] == "styled_report"
+    assert created["verification"]["page_count"] > 1
 
     read = service.read("summary.pdf")
     assert read["ok"] is True
-    assert read["analysis"]["page_count"] == 1
+    assert read["analysis"]["page_count"] > 1
     assert any("Payment terms" in chunk["content"] for chunk in read["chunks"])
+    assert any("Evidence item 179" in chunk["content"] for chunk in read["chunks"])
 
     (tmp_path / "bad.pdf").write_text("not a pdf", encoding="utf-8")
     corrupt = service.read("bad.pdf")
     assert corrupt["ok"] is False
     assert corrupt["detection"]["file_type"] == "pdf"
+
+
+def test_pdf_create_rejects_empty_content(tmp_path: Path) -> None:
+    result = DocumentService(tmp_path).create(
+        "empty.pdf",
+        content={"title": "Title only"},
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "invalid_pdf_content"
+    assert not (tmp_path / "empty.pdf").exists()
 
 
 def test_csv_fixture_query_and_discovery(tmp_path: Path) -> None:

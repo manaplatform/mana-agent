@@ -11,6 +11,7 @@ class ModelCapability(str, Enum):
     TEXT_GENERATION = "text_generation"
     REASONING = "reasoning"
     TOOL_CALLING = "tool_calling"
+    STRUCTURED_OUTPUT = "structured_output"
     CODE = "code"
     IMAGE_INPUT = "image_input"
     EMBEDDING = "embedding"
@@ -121,8 +122,15 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
         if not model_id:
             continue
         capabilities = normalize_capabilities(provider, model_id, metadata.get("capabilities"))
-        result.append(ModelDescriptor(provider=provider, id=model_id, capabilities=capabilities, source=source, metadata=metadata))
-    return sorted(result, key=lambda item: item.qualified_id)
+        context_window = metadata.get("context_length") or metadata.get("context_window")
+        try:
+            context_window = int(context_window) if context_window is not None else None
+        except (TypeError, ValueError):
+            context_window = None
+        result.append(ModelDescriptor(provider=provider, id=model_id, capabilities=capabilities, context_window=context_window, source=source, metadata=metadata))
+    # Catalog endpoints can contain duplicate IDs while an upstream changes.
+    deduplicated = {item.id: item for item in result}
+    return sorted(deduplicated.values(), key=lambda item: item.qualified_id)
 
 
 def filter_models(models: Iterable[ModelDescriptor], purpose: ModelPurpose) -> list[ModelDescriptor]:

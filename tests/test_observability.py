@@ -53,3 +53,28 @@ def test_otlp_failure_is_recorded_locally(tmp_path):
     store.record_event(_event("trace-otlp"))
     assert store.spans(trace_id="trace-otlp")
     assert store.health()["otlp"]["status"] == "failed"
+
+
+def test_store_keeps_large_attributes_as_valid_json(tmp_path):
+    store = ObservabilityStore(tmp_path)
+    event = _event("large-attributes")
+    event.metadata["payload"] = "x" * 3_000
+    store.record_event(event)
+
+    attributes = store.spans(trace_id="large-attributes")[0]["attributes"]
+    assert attributes["truncated"] is True
+    assert attributes["summary"].endswith("…")
+
+
+def test_store_ignores_malformed_historical_json(tmp_path):
+    store = ObservabilityStore(tmp_path)
+    with store._connect() as db:
+        db.execute(
+            """INSERT INTO spans (span_id, trace_id, kind, event_type, status, started_at,
+               token_usage_json, attributes_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("legacy-corrupt", "legacy", "reasoning", "step.updated", "success", "2026-07-23T00:00:00+00:00", "{", '{"payload":"unterminated'),
+        )
+
+    span = store.spans(trace_id="legacy")[0]
+    assert span["token_usage"] == {}
+    assert span["attributes"] == {}

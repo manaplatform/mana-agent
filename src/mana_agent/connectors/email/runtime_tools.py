@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -10,8 +11,20 @@ from pydantic import BaseModel, Field
 
 from mana_agent.connectors.email.auth.credential_store import CredentialStore
 from mana_agent.connectors.email.config import load_accounts
-from mana_agent.connectors.email.exceptions import EmailConnectorError, EmailInvalidMessageReferenceError, EmailMessageNotFoundError
-from mana_agent.connectors.email.models import EmailAccount, EmailAccountCapabilities, EmailMessageReference, EmailPermission, EmailQuery, EmailSearchResult
+from mana_agent.connectors.email.exceptions import (
+    AuthenticationRequired,
+    EmailConnectorError,
+    EmailInvalidMessageReferenceError,
+    EmailMessageNotFoundError,
+)
+from mana_agent.connectors.email.models import (
+    EmailAccount,
+    EmailAccountCapabilities,
+    EmailMessageReference,
+    EmailPermission,
+    EmailQuery,
+    EmailSearchResult,  # noqa: F401 - retained as a compatibility export
+)
 from mana_agent.connectors.email.permissions import assert_email_permission
 from mana_agent.connectors.email.providers.gmail import GmailProvider
 from mana_agent.connectors.email.sanitizer import untrusted_email_context
@@ -82,7 +95,32 @@ def _provider(account_id: str | None) -> GmailProvider:
 
 
 def _run(coro: Any) -> Any:
-    return asyncio.run(coro)
+    """Run a provider coroutine from synchronous tool execution.
+
+    Dashboard/API turns execute synchronous LangChain tools on an active event
+    loop thread.  In that case the coroutine needs its own thread and loop;
+    ordinary CLI tool calls can use ``asyncio.run`` directly.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: list[Any] = []
+    failure: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            result.append(asyncio.run(coro))
+        except BaseException as exc:
+            failure.append(exc)
+
+    thread = threading.Thread(target=runner, name="mana-email-tool-sync", daemon=True)
+    thread.start()
+    thread.join()
+    if failure:
+        raise failure[0]
+    return result[0]
 
 
 def _capabilities(account: EmailAccount) -> EmailAccountCapabilities:
@@ -112,7 +150,8 @@ def build_email_langchain_tools() -> list[Any]:
 
     def search(**kwargs: object) -> str:
         try:
-            payload = _SearchInput.model_validate(kwargs); provider = _provider(payload.account_id)
+            payload = _SearchInput.model_validate(kwargs)
+            provider = _provider(payload.account_id)
             assert_email_permission(provider.account, EmailPermission.READ)
             query = EmailQuery(**payload.model_dump(exclude={"account_id"}))
             result = _run(provider.search_messages(query))
@@ -160,7 +199,8 @@ def build_email_langchain_tools() -> list[Any]:
 
     def thread_read(**kwargs: object) -> str:
         try:
-            payload = _ThreadInput.model_validate(kwargs); provider = _provider(payload.account_id)
+            payload = _ThreadInput.model_validate(kwargs)
+            provider = _provider(payload.account_id)
             assert_email_permission(provider.account, EmailPermission.READ)
             thread = _run(provider.get_thread(payload.thread_id))
             return untrusted_email_context(thread.model_dump_json())

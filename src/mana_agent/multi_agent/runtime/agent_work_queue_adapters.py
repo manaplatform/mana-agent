@@ -28,7 +28,7 @@ from typing import Any, Callable
 from mana_agent.multi_agent.runtime.agent_session import AgentSession
 from mana_agent.multi_agent.runtime.agent_work_queue import TaskBoard, WorkItem, WorkResult
 from mana_agent.multi_agent.core.types import AgentRole, ExecutionContext, enrich_event_identity
-from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
+from mana_agent.multi_agent.runtime.model_levels import model_level_for_role
 from mana_agent.multi_agent.runtime.mutation_plan import (
     is_architecture_docs_update,
     mutation_trace_has_plan,
@@ -62,13 +62,13 @@ def _execution_context_for_item(item: WorkItem, *, run_id: str | None, flow_id: 
     if isinstance(raw, dict):
         return ExecutionContext.from_mapping(raw)
     worker_id = "subagent_tool_worker_0001"
-    model_assignment = resolve_model_for_role(AgentRole.TOOL_WORKER, global_model="")
+    model_assignment = model_level_for_role(AgentRole.TOOL_WORKER)
     return ExecutionContext(
         agent_id=worker_id,
         subagent_id=worker_id,
         agent_role="tool_worker",
         model_level=model_assignment.model_level,
-        resolved_model=model_assignment.resolved_model,
+        resolved_model="",
         parent_agent_id="agent_coding_0001",
         requested_by_agent_id="agent_coding_0001",
         queue_job_id=item.id,

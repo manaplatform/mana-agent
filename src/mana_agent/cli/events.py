@@ -128,7 +128,9 @@ _TYPE_TO_KIND = {
     "session.started": "session",
     "session.ready": "session",
     "turn.started": "user_request",
+    "message.accepted": "user_request",
     "turn.finished": "response",
+    "turn.cancelled": "response",
     "assistant.started": "response",
     "assistant.delta": "response",
     "agent.decision": "reasoning",
@@ -140,12 +142,26 @@ _TYPE_TO_KIND = {
     "tool.started": "tool",
     "tool.finished": "tool",
     "tool.failed": "tool",
+    "tool.cancelled": "tool",
+    "tool.timeout": "tool",
+    "tool.progress": "tool",
     "tool.stdout": "tool",
     "tool.stderr": "tool",
     "subagent.started": "subagent",
     "subagent.created": "subagent",
     "subagent.finished": "subagent",
     "subagent.delta": "subagent",
+    "task.started": "plan_step",
+    "task.progress": "plan_step",
+    "task.finished": "plan_step",
+    "verification.started": "plan_step",
+    "verification.finished": "plan_step",
+    "review.started": "plan_step",
+    "review.finished": "plan_step",
+    "log": "reasoning",
+    "log.info": "reasoning",
+    "log.warning": "error",
+    "log.error": "error",
     "file.read": "tool",
     "file.changed": "tool",
     "patch.applied": "tool",
@@ -252,13 +268,36 @@ def normalize_event_kind(value: str) -> str:
         return _TYPE_TO_KIND[normalized]
     if normalized in _RAW_KIND_TO_TYPE:
         return _TYPE_TO_KIND.get(_RAW_KIND_TO_TYPE[normalized], "reasoning")
+    if normalized.startswith(("tool.", "command.", "file.", "patch.", "test.")):
+        return "tool"
+    if normalized.startswith(("assistant.", "turn.")):
+        return "response"
+    if normalized.startswith(("agent.", "reasoning.")):
+        return "reasoning"
+    if normalized.startswith("subagent."):
+        return "subagent"
+    if normalized.startswith(("task.", "plan.", "verification.", "review.", "step.")):
+        return "plan_step"
+    if normalized.startswith("session."):
+        return "session"
+    if normalized.startswith("log.") or normalized in {"warning", "error"}:
+        return "error" if normalized in {"warning", "error", "log.warning", "log.error"} else "reasoning"
     return _TYPE_TO_KIND.get(normalized.replace("_", "."), "reasoning")
 
 
 def normalize_event_status(value: str) -> str:
     normalized = str(value or "running").strip().lower().replace(" ", "_")
     normalized = _STATUS_ALIASES.get(normalized, normalized)
-    return normalized if normalized in {"queued", "running", "success", "failed", "skipped", "waiting"} else "running"
+    return normalized if normalized in {
+        "queued",
+        "running",
+        "success",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "skipped",
+        "waiting",
+    } else "running"
 
 
 def _kind_to_event_type(kind: str) -> str:

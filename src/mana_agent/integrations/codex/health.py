@@ -9,6 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from mana_agent.integrations.codex.config import CodexSettings
+from mana_agent.integrations.codex.runtime_environment import isolated_codex_probe_environment
 
 
 class CodexHealthReport(BaseModel):
@@ -34,40 +35,43 @@ def check_codex_health(settings: CodexSettings, repository_path: str | Path) -> 
     app_server_available = False
     if executable is not None:
         try:
-            completed = subprocess.run(
-                [executable, "--version"],
-                cwd=repository if repository.is_dir() else None,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            version = (completed.stdout or completed.stderr).strip()[:200]
-            if completed.returncode != 0:
-                errors.append("Codex version check failed")
-            elif not version.startswith("codex-cli "):
-                errors.append(
-                    "Configured executable is not the official OpenAI Codex CLI: "
-                    f"{executable} reported {version or '<empty version>'!r}. "
-                    "Set MANA_CODEX_BIN to the official Codex executable."
-                )
-            else:
-                app_server = subprocess.run(
-                    [executable, "app-server", "--help"],
+            with isolated_codex_probe_environment() as environment:
+                completed = subprocess.run(
+                    [executable, "--version"],
                     cwd=repository if repository.is_dir() else None,
                     capture_output=True,
                     text=True,
                     timeout=10,
                     check=False,
+                    env=environment,
                 )
-                app_server_available = (
-                    app_server.returncode == 0
-                    and "Usage: codex app-server" in app_server.stdout
-                )
-                if not app_server_available:
+                version = (completed.stdout or completed.stderr).strip()[:200]
+                if completed.returncode != 0:
+                    errors.append("Codex version check failed")
+                elif not version.startswith("codex-cli "):
                     errors.append(
-                        "The configured official Codex CLI does not provide a usable app-server command"
+                        "Configured executable is not the official OpenAI Codex CLI: "
+                        f"{executable} reported {version or '<empty version>'!r}. "
+                        "Set MANA_CODEX_BIN to the official Codex executable."
                     )
+                else:
+                    app_server = subprocess.run(
+                        [executable, "app-server", "--help"],
+                        cwd=repository if repository.is_dir() else None,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                        env=environment,
+                    )
+                    app_server_available = (
+                        app_server.returncode == 0
+                        and "Usage: codex app-server" in app_server.stdout
+                    )
+                    if not app_server_available:
+                        errors.append(
+                            "The configured official Codex CLI does not provide a usable app-server command"
+                        )
         except (OSError, subprocess.TimeoutExpired) as exc:
             errors.append(f"Codex version check failed: {exc}")
     return CodexHealthReport(

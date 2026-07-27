@@ -142,7 +142,14 @@ def merge_timeline(
     for event in events:
         et = str(event.get("type") or "")
         if et.startswith("tool."):
-            eid = str(event.get("event_id") or event.get("id") or "").strip()
+            meta = event.get("metadata") or event.get("details") or {}
+            eid = str(
+                event.get("tool_call_id")
+                or meta.get("tool_call_id")
+                or event.get("event_id")
+                or event.get("id")
+                or ""
+            ).strip()
             ts = str(event.get("started_at") or event.get("timestamp") or "")
             if eid:
                 if eid not in tool_first_ts:
@@ -169,7 +176,12 @@ def merge_timeline(
         ts = tool_first_ts.get(eid, str(ev.get("started_at") or ev.get("timestamp") or ""))
         rows.append({"kind": "event", "ts": ts, "payload": ev})
 
-    rows.sort(key=lambda item: item["ts"])
+    rows.sort(
+        key=lambda item: (
+            item["ts"],
+            int(item["payload"].get("sequence") or 0),
+        )
+    )
     return rows
 
 

@@ -4,6 +4,7 @@ from mana_agent.multi_agent.agents.base_agent import BaseAgent
 from mana_agent.multi_agent.core.ids import new_decision_id
 from mana_agent.multi_agent.core.types import QueueJobType, VerificationResult
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
+from mana_agent.evals.recorder import record_current
 
 
 class VerifierAgent(BaseAgent):
@@ -22,6 +23,7 @@ class VerifierAgent(BaseAgent):
             failures=failures or [summary],
         )
         self.taskboard.add_verification_result(task_id, result)
+        record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
     def verify_no_mutation(self, task_id: str, commands: list[str]) -> VerificationResult:
@@ -35,6 +37,7 @@ class VerifierAgent(BaseAgent):
             risks=["planned_verification_not_executed"],
         )
         self.taskboard.add_verification_result(task_id, result)
+        record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
     def execute_verification(self, task_id: str, commands: list[str]) -> VerificationResult:
@@ -85,6 +88,7 @@ class VerifierAgent(BaseAgent):
             risks=[] if passed else ["verification_failed_or_blocked"],
         )
         self.taskboard.add_verification_result(task_id, result)
+        record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
     def execute_git_verification(self, task_id: str, *, wants_push: bool, target_branch: str | None = None) -> VerificationResult:
@@ -142,6 +146,7 @@ class VerifierAgent(BaseAgent):
             risks=[] if passed else ["git_verification_failed_or_blocked"],
         )
         self.taskboard.add_verification_result(task_id, result)
+        record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
 

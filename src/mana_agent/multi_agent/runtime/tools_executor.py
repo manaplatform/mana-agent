@@ -101,42 +101,43 @@ class LocalToolsExecutor(ToolsExecutor):
         _ = run_id
         out: list[BatchExecutionResult] = []
         for item in requests:
+            from mana_agent.evals.recorder import record_current
+
             t0 = time.perf_counter()
+            record_current("tool.started", {"sequence": int(item.request_index), "request": item.request.model_dump(mode="json"), "backend": "local"})
             try:
                 response = self.worker_client.run_tools(item.request, on_event=on_event)
-                out.append(
-                    BatchExecutionResult(
-                        request_index=int(item.request_index),
-                        ok=True,
-                        response=response.model_dump(),
-                        duration_ms=round((time.perf_counter() - t0) * 1000.0, 3),
-                        backend="local",
-                    )
+                recorded = BatchExecutionResult(
+                    request_index=int(item.request_index),
+                    ok=True,
+                    response=response.model_dump(),
+                    duration_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    backend="local",
                 )
+                out.append(recorded)
             except ToolWorkerProcessError as exc:
-                out.append(
-                    BatchExecutionResult(
-                        request_index=int(item.request_index),
-                        ok=False,
-                        response=None,
-                        error_code=normalize_error_code(exc.code),
-                        error_message=str(exc),
-                        duration_ms=round((time.perf_counter() - t0) * 1000.0, 3),
-                        backend="local",
-                    )
+                recorded = BatchExecutionResult(
+                    request_index=int(item.request_index),
+                    ok=False,
+                    response=None,
+                    error_code=normalize_error_code(exc.code),
+                    error_message=str(exc),
+                    duration_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    backend="local",
                 )
+                out.append(recorded)
             except Exception as exc:  # pragma: no cover - defensive
-                out.append(
-                    BatchExecutionResult(
-                        request_index=int(item.request_index),
-                        ok=False,
-                        response=None,
-                        error_code="job_failed",
-                        error_message=str(exc),
-                        duration_ms=round((time.perf_counter() - t0) * 1000.0, 3),
-                        backend="local",
-                    )
+                recorded = BatchExecutionResult(
+                    request_index=int(item.request_index),
+                    ok=False,
+                    response=None,
+                    error_code="job_failed",
+                    error_message=str(exc),
+                    duration_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    backend="local",
                 )
+                out.append(recorded)
+            record_current("tool.finished", recorded.model_dump(mode="json"))
         return out
 
 

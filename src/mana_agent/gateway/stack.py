@@ -17,11 +17,16 @@ from mana_agent.commands.cli_internal import (
     build_ask_service as _ORIGINAL_BUILD_ASK_SERVICE,
 )
 from mana_agent.config.settings import Settings, default_logs_dir
+from mana_agent.config.inference_provider import resolve_inference_connection
 from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
+from mana_agent.coding.selection import resolve_coding_backend
+from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
+from mana_agent.model_routing.repository import RepositoryMetadataInspector
+from mana_agent.gateway.routing import GatewayRoutingAuthority
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient
 from mana_agent.multi_agent.runtime.tools_executor import (
     LocalToolsExecutor,
@@ -32,6 +37,9 @@ from mana_agent.multi_agent.runtime.tools_executor import (
 from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 from mana_agent.services.chat_service import ChatService
 from mana_agent.memory import CodingMemoryService, MemoryService
+from mana_agent.execution import ExecutionManager, build_execution_manager
+from mana_agent.workspaces.preparation import PreparedRepository
+from mana_agent.workspaces.service import WorkspaceService
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +154,9 @@ class ChatStack:
     workspace_id: str | None = None
     repository_id: str | None = None
     log_path: Path | None = None
+    execution_manager: ExecutionManager | None = None
+    routing_authority: GatewayRoutingAuthority | None = None
+    prepared_repository: PreparedRepository | None = None
 
 
 def build_chat_stack(
@@ -153,6 +164,7 @@ def build_chat_stack(
     config: ChatGatewayConfig,
     *,
     settings: Settings | None = None,
+    prepared_repository: PreparedRepository | None = None,
 ) -> ChatStack:
     """Build ask/chat and optional coding stack for *root*.
 
@@ -163,6 +175,24 @@ def build_chat_stack(
     root = Path(root).expanduser().resolve()
     cfg = config.normalized()
     settings = settings or Settings()
+
+    if cfg.coding_agent and prepared_repository is None:
+        workspace_service = WorkspaceService()
+        expected_workspace_id: str | None = None
+        if cfg.session_id:
+            try:
+                expected_workspace_id = workspace_service.store.get_session(
+                    cfg.session_id
+                ).workspace_id
+            except FileNotFoundError:
+                expected_workspace_id = None
+        prepared_repository = workspace_service.prepare_repository(
+            root,
+            allow_create=not bool(cfg.session_id),
+            initialize_if_missing=True,
+            expected_workspace_id=expected_workspace_id,
+            entry_point="gateway-stack",
+        )
 
     # --- steps / k ---
     chat_agent_max_steps = _resolve_agent_max_steps(
@@ -212,30 +242,27 @@ def build_chat_stack(
         ttl_seconds=resolved_redis_ttl_seconds,
     )
     tools_execution_boot_warnings: list[str] = []
+    execution_manager = build_execution_manager(settings, event_sink=cfg.event_sink)
 
     session_id = cfg.session_id or f"sess-{uuid.uuid4().hex}"
     log_path = default_logs_dir(root) / f"mana_agent_{__import__('datetime').datetime.now().strftime('%Y%m%d')}.log"
 
-    # Workspace / repository ids (best-effort)
-    workspace_id: str | None = None
-    repository_id: str | None = None
-    try:
-        from mana_agent.workspaces.service import WorkspaceService
-        from mana_agent.workspaces.paths import repository_id_for_path
+    workspace_id = prepared_repository.workspace_id if prepared_repository else None
+    repository_id = prepared_repository.repository_id if prepared_repository else None
+    if cfg.session_id and workspace_id is None:
+        try:
+            ctx = WorkspaceService().context_for_session(cfg.session_id)
+            workspace_id = ctx.workspace.workspace_id
+            repository_id = ctx.session.primary_repository_id
+        except (FileNotFoundError, ValueError):
+            workspace_id = None
+            repository_id = None
 
-        ws = WorkspaceService()
-        # Prefer existing session if provided
-        if cfg.session_id:
-            try:
-                ctx = ws.context_for_session(cfg.session_id)
-                workspace_id = getattr(ctx.workspace, "workspace_id", None) or getattr(
-                    ctx.session, "workspace_id", None
-                )
-            except Exception:
-                pass
-        repository_id = repository_id_for_path(root)
-    except Exception:
-        pass
+    routing_authority = GatewayRoutingAuthority(
+        root,
+        settings=settings,
+        event_sink=cfg.event_sink,
+    )
 
     # --- ask + chat service ---
     if cfg.chat_service is not None:
@@ -247,7 +274,10 @@ def build_chat_stack(
         build_ask = _resolve_build_ask_service()
         try:
             ask_service = build_ask(
-                settings, model_override=cfg.model, project_root=root
+                settings,
+                model_override=cfg.model,
+                project_root=root,
+                routing_authority=routing_authority,
             )
         except TypeError:
             try:
@@ -271,33 +301,66 @@ def build_chat_stack(
             auto_index_missing=cfg.auto_index_missing,
         )
 
+    gateway_ask_agent = getattr(ask_service, "ask_agent", None)
+    if gateway_ask_agent is not None and hasattr(gateway_ask_agent, "execution_manager"):
+        gateway_ask_agent.execution_manager = execution_manager
+
+    routing_repository = RepositoryMetadataInspector().inspect(root)
+    route_context = {
+        "routing_authority": routing_authority,
+        "session_id": session_id,
+        "workspace_id": str(workspace_id or ""),
+        "repository_id": str(repository_id or ""),
+    }
     effective_model = resolve_model_for_role(
         AgentRole.MAIN,
         global_model=cfg.model or settings.openai_chat_model,
+        repository=routing_repository,
+        **route_context,
     ).resolved_model
     router_model_assignment = resolve_model_for_role(
         AgentRole.HEAD_DECISION,
         global_model=effective_model,
+        repository=routing_repository,
+        **route_context,
     )
-    coding_model_assignment = resolve_model_for_role(AgentRole.CODING, global_model=effective_model)
+    coding_model_assignment = resolve_model_for_role(
+        AgentRole.CODING,
+        global_model=getattr(settings, "mana_codex_model", None) or effective_model,
+        repository=routing_repository,
+        **route_context,
+    )
     planner_model_assignment = resolve_model_for_role(
         AgentRole.PLANNER,
         global_model=settings.openai_coding_planner_model or effective_model,
+        repository=routing_repository,
+        **route_context,
     )
     tool_worker_model_assignment = resolve_model_for_role(
         AgentRole.TOOL_WORKER,
         global_model=settings.openai_tool_worker_model or effective_model,
+        repository=routing_repository,
+        **route_context,
     )
     effective_tool_worker_model = tool_worker_model_assignment.resolved_model
-    effective_base_url = settings.openai_base_url
+    # Stack construction is deliberately credential-free for diagnostics and
+    # injected test services. The actual model construction validates keys.
+    inference_connection = resolve_inference_connection(settings, require_api_key=False)
+    effective_base_url = inference_connection.base_url
 
     coding_agent_instance = cfg.coding_agent_instance
     coding_memory_service = None
     tool_worker_client = None
     tools_manager_orchestrator = cfg.tools_orchestrator
     tools_executor_instance = None
-    coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
-    coding_agent_is_custom = coding_agent_cls is not CodexCodingAgentShim
+    public_coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
+    coding_selection = resolve_coding_backend(settings)
+    coding_agent_cls = (
+        public_coding_agent_cls
+        if public_coding_agent_cls is not CodexCodingAgentShim
+        else (CodexCodingAgentShim if coding_selection.backend == "codex" else InternalCodingAgentShim)
+    )
+    coding_agent_is_custom = public_coding_agent_cls is not CodexCodingAgentShim
 
     def _build_tools_executor(worker_client: Any) -> Any:
         helper = _public_symbol("build_tools_executor_with_fallback", build_tools_executor_with_fallback)
@@ -317,17 +380,36 @@ def build_chat_stack(
         )
 
     if coding_agent_instance is None and cfg.coding_agent:
+        coding_repository_root = (
+            prepared_repository.repository_root if prepared_repository else root
+        )
+        coding_working_directory = (
+            prepared_repository.working_directory if prepared_repository else root
+        )
         if coding_agent_cls is CodexCodingAgentShim:
+            codex_settings = CodexSettings.from_mana_settings(
+                settings,
+                provider=(
+                    coding_model_assignment.routing_decision.provider
+                    if coding_model_assignment.routing_decision is not None
+                    else None
+                ),
+            ).model_copy(
+                update={"model": coding_model_assignment.resolved_model}
+            )
             coding_agent_instance = coding_agent_cls(
-                repo_root=root,
-                codex_settings=CodexSettings.from_mana_settings(settings),
+                repo_root=coding_repository_root,
+                working_directory=coding_working_directory,
+                codex_settings=codex_settings,
                 repository_id=repository_id,
                 session_id=session_id,
                 event_sink=cfg.event_sink,
+                routing_authority=routing_authority,
+                workspace_id=workspace_id,
             )
         else:
             if not cfg.agent_tools:
-                raise ValueError("custom coding_agent requires agent_tools (needs tool loop).")
+                raise ValueError("internal/custom coding_agent requires agent_tools (needs tool loop).")
             if ask_service is None or getattr(ask_service, "ask_agent", None) is None:
                 raise ValueError("custom coding_agent requires AskService.ask_agent to be configured.")
 
@@ -347,11 +429,11 @@ def build_chat_stack(
             if cfg.tool_worker_process:
                 tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
                 tool_worker_client = tool_worker_client_cls(
-                    api_key=settings.openai_api_key,
+                    api_key=inference_connection.api_key,
                     model=effective_tool_worker_model,
                     base_url=effective_base_url,
-                    repo_root=root,
-                    project_root=root,
+                    repo_root=coding_repository_root,
+                    project_root=coding_working_directory,
                     allowed_prefixes=None,
                     tools_only_strict=cfg.tool_worker_strict,
                     model_level=tool_worker_model_assignment.model_level,
@@ -360,9 +442,10 @@ def build_chat_stack(
                 )
 
             coding_agent_instance = coding_agent_cls(
-                api_key=settings.openai_api_key,
+                api_key=inference_connection.api_key,
                 base_url=effective_base_url,
-                repo_root=root,
+                repo_root=coding_repository_root,
+                project_root=coding_working_directory,
                 ask_agent=ask_service.ask_agent,
                 allowed_prefixes=None,
                 coding_memory_service=coding_memory_service,
@@ -387,9 +470,9 @@ def build_chat_stack(
             tools_executor_instance = _build_tools_executor(tool_worker_client)
             tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
             tools_manager_orchestrator = tools_manager_orchestrator_cls(
-                api_key=settings.openai_api_key,
+                api_key=inference_connection.api_key,
                 model=effective_model,
-                base_url=settings.openai_base_url,
+                base_url=effective_base_url,
                 worker_client=tool_worker_client,
                 repo_root=root,
                 execution_config=tools_execution_config,
@@ -410,15 +493,18 @@ def build_chat_stack(
 
     if isinstance(coding_agent_instance, CodexCodingAgentShim):
         coding_backend = "codex"
-        coding_model = coding_agent_instance.codex_settings.model or "app-server-default"
+        coding_model = str(getattr(settings, "mana_codex_model", "") or "router-managed")
+        routed_coding_model = coding_agent_instance.codex_settings.model or "app-server-default"
         planner_model = "codex-owned"
     elif coding_agent_instance is not None:
-        coding_backend = type(coding_agent_instance).__name__
+        coding_backend = "internal" if isinstance(coding_agent_instance, InternalCodingAgentShim) else type(coding_agent_instance).__name__
         coding_model = coding_model_assignment.resolved_model
+        routed_coding_model = coding_model
         planner_model = planner_model_assignment.resolved_model
     else:
         coding_backend = "disabled"
         coding_model = "disabled"
+        routed_coding_model = "disabled"
         planner_model = "disabled"
     tool_worker_model = (
         tool_worker_model_assignment.resolved_model
@@ -427,11 +513,12 @@ def build_chat_stack(
     )
     logger.info(
         "Resolved chat runtime models: main=%s; router=%s; coding_backend=%s; "
-        "coding=%s; planner=%s; tool_worker=%s",
+        "coding=%s; coding_routed=%s; planner=%s; tool_worker=%s",
         effective_model,
         router_model_assignment.resolved_model,
         coding_backend,
         coding_model,
+        routed_coding_model,
         planner_model,
         tool_worker_model,
     )
@@ -456,6 +543,9 @@ def build_chat_stack(
         tools_executor=tools_executor_instance,
         tools_execution_config=tools_execution_config,
         tools_execution_boot_warnings=tools_execution_boot_warnings,
+        execution_manager=execution_manager,
+        routing_authority=routing_authority,
+        prepared_repository=prepared_repository,
         coding_agent_is_custom=coding_agent_is_custom,
         effective_model=effective_model,
         chat_agent_max_steps=chat_agent_max_steps,

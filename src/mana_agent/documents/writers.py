@@ -141,15 +141,7 @@ def create_document(
         return _create_csv(path, content=content, kind=kind)
 
     if kind == DocumentFileType.PDF:
-        text = content.get("text", "") if isinstance(content, dict) else str(content)
-        _write_simple_text_pdf(path, text)
-        return {
-            "ok": True,
-            "path": str(path),
-            "file_type": kind.value,
-            "created": True,
-            "files_changed": [str(path)],
-        }
+        return _create_pdf(path, content=content, kind=kind)
 
     return {
         "ok": False,
@@ -1024,62 +1016,200 @@ def _update_pdf_metadata(
     }
 
 
-def _write_simple_text_pdf(path: Path, text: str) -> None:
-    safe = (
-        str(text or "")
-        .replace("\\", "\\\\")
-        .replace("(", "\\(")
-        .replace(")", "\\)")
+def _create_pdf(
+    path: Path,
+    *,
+    content: Any,
+    kind: DocumentFileType,
+) -> dict[str, Any]:
+    from xml.sax.saxutils import escape
+
+    _require("reportlab", "reportlab")
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
     )
-    content = f"BT /F1 12 Tf 72 720 Td ({safe[:3000]}) Tj ET".encode(
-        "latin-1",
-        errors="replace",
+
+    payload = content if isinstance(content, dict) else {"text": str(content or "")}
+    title = str(payload.get("title") or path.stem.replace("_", " ").title()).strip()
+    subtitle = str(payload.get("subtitle") or "").strip()
+    raw_paragraphs = payload.get("paragraphs")
+    paragraphs = raw_paragraphs if isinstance(raw_paragraphs, list) else []
+    raw_sections = payload.get("sections")
+    sections = raw_sections if isinstance(raw_sections, list) else []
+    raw_tables = payload.get("tables")
+    tables = raw_tables if isinstance(raw_tables, list) else []
+    has_body_content = bool(str(payload.get("text") or "").strip())
+    has_body_content = has_body_content or any(
+        str(item).strip() for item in paragraphs
     )
-
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
-        ),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        (
-            b"<< /Length "
-            + str(len(content)).encode("ascii")
-            + b" >>\nstream\n"
-            + content
-            + b"\nendstream"
-        ),
-    ]
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with path.open("wb") as handle:
-        handle.write(b"%PDF-1.4\n")
-        offsets = [0]
-
-        for index, obj in enumerate(objects, start=1):
-            offsets.append(handle.tell())
-            handle.write(
-                f"{index} 0 obj\n".encode("ascii")
-                + obj
-                + b"\nendobj\n"
-            )
-
-        xref = handle.tell()
-        handle.write(
-            f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode(
-                "ascii"
-            )
-        )
-
-        for offset in offsets[1:]:
-            handle.write(f"{offset:010d} 00000 n \n".encode("ascii"))
-
-        handle.write(
+    has_body_content = has_body_content or any(
+        isinstance(section, dict)
+        and any(
             (
-                f"trailer << /Root 1 0 R /Size {len(objects) + 1} >>\n"
-                f"startxref\n{xref}\n%%EOF\n"
-            ).encode("ascii")
+                str(section.get("heading") or "").strip(),
+                *(str(item).strip() for item in (section.get("paragraphs") or [])),
+                *(str(item).strip() for item in (section.get("bullets") or [])),
+            )
         )
+        for section in sections
+    )
+    has_body_content = has_body_content or bool(tables)
+    if not has_body_content:
+        return {
+            "ok": False,
+            "error": "invalid_pdf_content",
+            "message": "PDF content must include text, paragraphs, sections, or tables.",
+            "path": str(path),
+        }
+    navy = colors.HexColor("#17324D")
+    muted = colors.HexColor("#5E6B75")
+    light_blue = colors.HexColor("#EAF1F6")
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="PdfTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=24,
+        leading=29,
+        textColor=navy,
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    ))
+    styles.add(ParagraphStyle(
+        name="PdfSubtitle",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=15,
+        textColor=muted,
+        alignment=TA_CENTER,
+        spaceAfter=20,
+    ))
+    styles.add(ParagraphStyle(
+        name="PdfHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=15,
+        leading=19,
+        textColor=navy,
+        spaceBefore=12,
+        spaceAfter=7,
+        keepWithNext=True,
+    ))
+    styles.add(ParagraphStyle(
+        name="PdfBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10.2,
+        leading=15.2,
+        textColor=colors.HexColor("#20272D"),
+        spaceAfter=8,
+    ))
+    styles.add(ParagraphStyle(
+        name="PdfBullet",
+        parent=styles["PdfBody"],
+        leftIndent=14,
+        firstLineIndent=-9,
+        bulletIndent=2,
+        spaceAfter=5,
+    ))
+
+    def paragraph(value: Any, style_name: str = "PdfBody") -> Any:
+        safe = escape(str(value or "")).replace("\n", "<br/>")
+        return Paragraph(safe, styles[style_name])
+
+    story: list[Any] = [Spacer(1, 0.12 * inch), paragraph(title, "PdfTitle")]
+    if subtitle:
+        story.append(paragraph(subtitle, "PdfSubtitle"))
+
+    if not paragraphs and payload.get("text"):
+        paragraphs = [item.strip() for item in str(payload["text"]).split("\n\n") if item.strip()]
+    story.extend(paragraph(item) for item in paragraphs if str(item).strip())
+
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        heading = str(section.get("heading") or "").strip()
+        if heading:
+            story.append(paragraph(heading, "PdfHeading"))
+        section_paragraphs = section.get("paragraphs")
+        if isinstance(section_paragraphs, list):
+            story.extend(paragraph(item) for item in section_paragraphs if str(item).strip())
+        bullets = section.get("bullets")
+        if isinstance(bullets, list):
+            story.extend(
+                Paragraph(escape(str(item)), styles["PdfBullet"], bulletText="-")
+                for item in bullets
+                if str(item).strip()
+            )
+
+    for rows in tables:
+        if not isinstance(rows, list) or not rows:
+            continue
+        table_data = [
+            [paragraph(cell) for cell in row]
+            for row in rows
+            if isinstance(row, list)
+        ]
+        if not table_data:
+            continue
+        table = Table(table_data, repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), light_blue),
+            ("TEXTCOLOR", (0, 0), (-1, 0), navy),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B8CCDA")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.extend([Spacer(1, 6), table, Spacer(1, 8)])
+
+    def draw_footer(canvas: Any, doc: Any) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#D7E0E6"))
+        canvas.line(0.72 * inch, 0.52 * inch, 7.78 * inch, 0.52 * inch)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(muted)
+        canvas.drawString(0.72 * inch, 0.34 * inch, title[:72])
+        canvas.drawRightString(7.78 * inch, 0.34 * inch, f"Page {doc.page}")
+        canvas.restoreState()
+
+    def write_pdf(target: Path) -> None:
+        document = SimpleDocTemplate(
+            str(target),
+            pagesize=letter,
+            rightMargin=0.72 * inch,
+            leftMargin=0.72 * inch,
+            topMargin=0.68 * inch,
+            bottomMargin=0.68 * inch,
+            title=title,
+        )
+        document.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
+
+    _atomic_save(path, write_pdf)
+    pypdf = _require("pypdf", "pypdf")
+    page_count = len(pypdf.PdfReader(str(path)).pages)
+    return {
+        "ok": True,
+        "path": str(path),
+        "file_type": kind.value,
+        "created": True,
+        "files_changed": [str(path)],
+        "verification": {
+            "page_count": page_count,
+            "bytes": path.stat().st_size,
+            "layout": "styled_report",
+        },
+    }

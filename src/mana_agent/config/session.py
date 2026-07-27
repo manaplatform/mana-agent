@@ -69,10 +69,13 @@ class ConfigurationDraft:
         )
 
     def save(self) -> None:
+        def provider_identity(values: dict[str, Any]) -> tuple[Any, Any, Any]:
+            provider = str(values.get("MANA_AI_PROVIDER") or "openai")
+            if provider == "openrouter":
+                return provider, values.get("OPENROUTER_BASE_URL"), values.get("OPENROUTER_API_KEY")
+            return provider, values.get("OPENAI_BASE_URL"), values.get("OPENAI_API_KEY")
         old_identity = (
-            self.original.get("MANA_AI_PROVIDER"),
-            self.original.get("OPENAI_BASE_URL"),
-            self.original.get("OPENAI_API_KEY"),
+            *provider_identity(self.original),
         )
         transient_mem0_key = str(self.values.get("MEM0_API_KEY") or "")
         values = {key: value for key, value in self.values.items() if key != "MEM0_API_KEY"}
@@ -87,11 +90,7 @@ class ConfigurationDraft:
             values["MANA_MEMORY_PROVIDER"] = "mana"
         cleaned = validate_config_values(values)
         save_effective_user_config(cleaned, merge=False)
-        new_identity = (
-            cleaned.get("MANA_AI_PROVIDER"),
-            cleaned.get("OPENAI_BASE_URL"),
-            cleaned.get("OPENAI_API_KEY"),
-        )
+        new_identity = provider_identity(cleaned)
         if new_identity != old_identity:
             invalidate_model_cache()
         self.original = dict(cleaned)

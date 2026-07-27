@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.evals.recorder import record_current
 
 
 class ReviewerAgent(BaseAgent):
     def review(self, task_id: str, risk_summary: str) -> None:
         self.record_evidence(task_id, f"Reviewer assessment: {risk_summary}")
+        record_current("review.finished", {"task_id": task_id, "reviewer": self.agent_id, "summary": risk_summary})
 
     def reject_weak_evidence(self, task_id: str, reason: str) -> None:
         self.taskboard.add_blocker(task_id, f"Reviewer rejected weak evidence: {reason}")
@@ -41,6 +43,7 @@ class ReviewerAgent(BaseAgent):
             self.record_evidence(task_id, result.get("summary") or "Managed branch review approved.")
         else:
             self.reject_weak_evidence(task_id, result.get("summary") or "Managed branch review rejected.")
+        record_current("review.finished", {"task_id": task_id, "reviewer": self.agent_id, "result": result})
         return result
 
     def review_evidence(self, task_id: str, *, route_name: str, requires_verification: bool) -> bool:

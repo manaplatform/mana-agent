@@ -44,6 +44,7 @@ def redact_secrets(value: Any) -> Any:
       has its value replaced with ``***REDACTED***``; remaining values are
       redacted recursively.
     - For lists/tuples, each element is redacted recursively.
+    - String values also redact bearer credentials and OpenAI-style keys.
     - All other values are returned unchanged.
 
     The input is never mutated; a redacted copy is returned.
@@ -60,6 +61,9 @@ def redact_secrets(value: Any) -> Any:
         return [redact_secrets(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact_secrets(item) for item in value)
+    if isinstance(value, str):
+        redacted = _BEARER_RE.sub(f"Bearer {REDACTED}", value)
+        return _OPENAI_KEY_RE.sub(REDACTED, redacted)
     return value
 
 

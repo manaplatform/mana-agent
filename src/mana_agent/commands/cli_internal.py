@@ -66,7 +66,11 @@ from .output import build_output_sink, get_shared_console
 from .workspace_cli import impact_command, repo_app, search_command, session_app, workspace_app
 from .worktree_cli import worktree_app
 from .codex_cli import codex_app
+from .github_app_cli import github_app
 from .email_cli import connector_app
+from .protocols_cli import a2a_app, acp_app
+from .worker_cli import worker_app, workers_app
+from .ssh_cli import ssh_app
 from mana_agent.workspaces.paths import repository_analysis_dir, repository_dir, repository_id_for_path
 
 logger = logging.getLogger(__name__)
@@ -83,13 +87,19 @@ skill_app.add_typer(skill_proposal_app, name="proposal")
 app.add_typer(automation_app, name="automation")
 app.add_typer(automation_app, name="cron")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(acp_app, name="acp")
+app.add_typer(a2a_app, name="a2a")
 app.add_typer(connector_app, name="connector")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(worktree_app, name="worktree")
 app.add_typer(codex_app, name="codex")
+app.add_typer(github_app, name="github-app")
 app.add_typer(repo_app, name="repo")
 app.add_typer(repo_app, name="repository")
 app.add_typer(session_app, name="session")
+app.add_typer(worker_app, name="worker")
+app.add_typer(workers_app, name="workers")
+app.add_typer(ssh_app, name="ssh")
 app.command("search")(search_command)
 app.command("impact")(impact_command)
 
@@ -176,7 +186,7 @@ def _build_project_llm_analyzer():
     )
 
 
-def _build_main_agent_routing_llm() -> Any | None:
+def _build_main_agent_routing_llm(routing_authority: Any | None = None) -> Any | None:
     """Build the lightweight LLM used by the mandatory MainAgent route."""
     if os.getenv("PYTEST_CURRENT_TEST"):
         return None
@@ -185,17 +195,23 @@ def _build_main_agent_routing_llm() -> Any | None:
     except Exception as exc:  # noqa: BLE001 - missing env should not break CLI routing
         logger.debug("MainAgent model routing disabled (settings unavailable): %s", exc)
         return None
-    api_key = str(getattr(settings, "openai_api_key", "") or "").strip()
-    if not api_key:
+    from mana_agent.config.inference_provider import ProviderConfigurationError, resolve_inference_connection
+    try:
+        connection = resolve_inference_connection(settings)
+    except ProviderConfigurationError:
         return None
     model = resolve_model_for_role(
         AgentRole.HEAD_DECISION,
         global_model=getattr(settings, "openai_chat_model", "gpt-4.1-mini"),
+        routing_authority=routing_authority,
+        task_description="Route a CLI request into the model-driven task lifecycle.",
     ).resolved_model
     return create_chat_model(
-        api_key=api_key,
+        api_key=connection.api_key,
         model=model,
-        base_url=getattr(settings, "openai_base_url", None),
+        base_url=connection.base_url,
+        provider=connection.provider,
+        default_headers=connection.headers,
         temperature=0,
     )
 
@@ -220,7 +236,12 @@ def _record_multi_agent_request(
     """Record a mandatory MainAgent route before a legacy entrypoint continues."""
     if command_scope and _SKIP_NEXT_COMMAND_ROUTE.get():
         return ""
-    main_kwargs: dict[str, Any] = {"routing_llm": _build_main_agent_routing_llm()}
+    from mana_agent.gateway.routing import GatewayRoutingAuthority
+
+    routing_authority = GatewayRoutingAuthority(root)
+    main_kwargs: dict[str, Any] = {
+        "routing_llm": _build_main_agent_routing_llm(routing_authority),
+    }
     if session_id:
         main_kwargs["session_id"] = session_id
     result = MainAgent(root, **main_kwargs).run_user_request(
@@ -688,14 +709,15 @@ def mcp_add_command(
 def dashboard_command(
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root to pass to dashboard."),
     port: int = typer.Option(8501, "--port", help="Streamlit server port."),
+    api_port: int | None = typer.Option(None, "--api-port", help="Local live-chat API port (defaults to dashboard port + 1)."),
     headless: bool = typer.Option(True, "--headless/--no-headless", help="Run Streamlit in headless mode (default for servers)."),
 ) -> None:
     """Launch the Mana Agent Web Dashboard (Streamlit).
 
     Requires the optional extra: pip install "mana-agent[dashboard]"
 
-    This command is a thin, lazy wrapper. The real UI lives in
-    dashboard/app.py and uses read-only views over .mana/ + runtime artifacts.
+    The command starts Streamlit plus a loopback FastAPI child used for
+    authenticated REST submission and ordered WebSocket event replay.
     """
     import sys
     from pathlib import Path
@@ -732,21 +754,71 @@ def dashboard_command(
         "--",
         # Pass root via env for the app to pick up
     ]
+    import secrets
+    import subprocess
+    import time
+    import urllib.parse
+    import urllib.request
+
+    resolved_api_port = int(api_port if api_port is not None else port + 1)
+    dashboard_token = secrets.token_urlsafe(32)
+    api_base = f"http://127.0.0.1:{resolved_api_port}"
     env = os.environ.copy()
     env["MANA_DASHBOARD_ROOT"] = str(repo_root)
+    env["MANA_DASHBOARD_API_BASE"] = api_base
+    env["MANA_DASHBOARD_API_TOKEN"] = dashboard_token
+    env["MANA_API_TOKEN"] = dashboard_token
     # Also set for helpers
     os.environ["MANA_DASHBOARD_ROOT"] = str(repo_root)
 
     console.print(f"[cyan]Launching dashboard for[/cyan] {repo_root}")
     console.print(f"[dim]streamlit run {dashboard_path} --server.port {port}[/dim]")
 
-    # Execute (blocking)
-    import subprocess
-
+    api_cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "mana_agent.api.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(resolved_api_port),
+        "--log-level",
+        "warning",
+    ]
+    api_process = subprocess.Popen(api_cmd, env=env)
     try:
+        readiness_url = (
+            f"{api_base}/api/v1/conversations?root="
+            f"{urllib.parse.quote(str(repo_root), safe='')}&limit=1"
+        )
+        deadline = time.monotonic() + 15.0
+        while True:
+            if api_process.poll() is not None:
+                raise typer.BadParameter(
+                    f"Dashboard live-chat API exited with code {api_process.returncode}."
+                )
+            try:
+                with urllib.request.urlopen(readiness_url, timeout=0.5) as response:
+                    if response.status == 200:
+                        break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise typer.BadParameter(
+                        f"Dashboard live-chat API did not become ready on port {resolved_api_port}."
+                    )
+                time.sleep(0.05)
         subprocess.run(cmd, env=env, check=False)
     except KeyboardInterrupt:
         console.print("\nDashboard stopped.")
+    finally:
+        if api_process.poll() is None:
+            api_process.terminate()
+            try:
+                api_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                api_process.kill()
+                api_process.wait(timeout=5)
 
 
 def _automation_root(root: str | None) -> Path:
@@ -756,17 +828,33 @@ def _automation_root(root: str | None) -> Path:
 @automation_app.command("create")
 def automation_create_command(
     name: str = typer.Option(..., "--name", help="Readable schedule name."),
-    action: str = typer.Option(..., "--action", help="analyze, daily_report, self_improvement, or custom."),
+    action: str = typer.Option(..., "--action", help="analyze, daily_report, self_improvement, fleet-verify, or custom."),
     cron: str = typer.Option(..., "--cron", help="Five-field POSIX cron expression."),
     target: list[str] = typer.Option(..., "--target", help="Deployment target: local and/or github."),
     command: str | None = typer.Option(None, "--command", help="Required for action=custom."),
+    platform: list[str] = typer.Option([], "--platform", help="Required platform for action=fleet-verify; repeatable."),
+    verify_command: list[str] = typer.Option([], "--verify-command", help="Verification command for action=fleet-verify; repeatable."),
+    maximum_workers: int = typer.Option(4, "--maximum-workers", min=1, max=64),
+    timeout: int = typer.Option(1800, "--timeout", min=1, max=86400),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
     """Create and immediately deploy an explicitly requested schedule."""
     from mana_agent.automations.service import AutomationValidationError, ScheduleDefinition, deploy_schedule
 
     try:
-        schedule = ScheduleDefinition.create(name=name, action=action, cron=cron, targets=target, command=command)
+        action_config = (
+            {
+                "platforms": platform,
+                "commands": verify_command,
+                "maximum_workers": maximum_workers,
+                "timeout": timeout,
+            }
+            if action == "fleet-verify" else {}
+        )
+        schedule = ScheduleDefinition.create(
+            name=name, action=action, cron=cron, targets=target,
+            command=command, action_config=action_config,
+        )
         deployed = deploy_schedule(schedule, _automation_root(root))
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -880,14 +968,24 @@ def automation_run_now_command(
 
 @automation_app.command("execute", hidden=True)
 def automation_execute_command(
-    action: str = typer.Option(..., "--action", help="Built-in action selected by a saved schedule."),
+    action: str | None = typer.Option(None, "--action", help="Compatibility built-in action."),
+    schedule_id: str | None = typer.Option(None, "--schedule-id", help="Saved schedule identity."),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
     """Execute a built-in action for a deployed schedule."""
-    from mana_agent.automations.service import AutomationValidationError, execute_builtin_action
+    from mana_agent.automations.service import AutomationValidationError, execute_builtin_action, get_schedule
 
     try:
-        result = execute_builtin_action(action, _automation_root(root))
+        root_path = _automation_root(root)
+        if schedule_id:
+            schedule = get_schedule(root_path, schedule_id)
+            result = execute_builtin_action(
+                schedule.action, root_path, action_config=schedule.action_config,
+            )
+        elif action:
+            result = execute_builtin_action(action, root_path)
+        else:
+            raise AutomationValidationError("--schedule-id is required")
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print_json(json.dumps(result))
@@ -1678,12 +1776,24 @@ def build_ask_service(
     model_override: str | None,
     *,
     project_root: Path | None = None,
+    routing_authority: Any | None = None,
 ) -> AskService:
+    root = project_root.resolve() if project_root else Path.cwd().resolve()
+    if routing_authority is None:
+        from mana_agent.gateway.routing import GatewayRoutingAuthority
+
+        routing_authority = GatewayRoutingAuthority(root, settings=settings)
+    route_context = {
+        "routing_authority": routing_authority,
+        "workspace_id": "",
+        "repository_id": "",
+    }
     model = resolve_model_for_role(
         AgentRole.MAIN,
         global_model=model_override or settings.openai_chat_model,
+        task_description="Initialize the main conversational model through the gateway.",
+        **route_context,
     ).resolved_model
-    root = project_root.resolve() if project_root else Path.cwd().resolve()
     qna_chain_cls = _public_symbol("QnAChain", QnAChain)
     ask_agent_cls = _public_symbol("AskAgent", AskAgent)
     ask_service_cls = _public_symbol("AskService", AskService)
@@ -1691,23 +1801,25 @@ def build_ask_service(
     router_model = resolve_model_for_role(
         AgentRole.HEAD_DECISION,
         global_model=model,
+        task_description="Initialize the entry-routing model through the gateway.",
+        **route_context,
     ).resolved_model
 
+    from mana_agent.config.inference_provider import resolve_inference_connection
+    connection = resolve_inference_connection(settings)
     qna_chain = qna_chain_cls(
-        api_key=settings.openai_api_key,
+        api_key=connection.api_key,
         model=model,
-        base_url=settings.openai_base_url,
+        base_url=connection.base_url,
     )
     ask_agent = ask_agent_cls(
-        api_key=settings.openai_api_key,
+        api_key=connection.api_key,
         model=model,
         search_service=build_search_service(settings),
-        base_url=settings.openai_base_url,
+        base_url=connection.base_url,
         project_root=root,
     )
-    router_kwargs = {"api_key": settings.openai_api_key, "model": router_model}
-    if settings.openai_base_url:
-        router_kwargs["base_url"] = settings.openai_base_url
+    router_kwargs = {"api_key": connection.api_key, "model": router_model, "base_url": connection.base_url, "provider": connection.provider, "default_headers": connection.headers}
     router_llm = create_chat_model(**router_kwargs)
 
     return ask_service_cls(

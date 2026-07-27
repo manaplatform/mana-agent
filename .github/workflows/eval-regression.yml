@@ -1,0 +1,155 @@
+name: eval-regression
+
+on:
+  pull_request:
+    paths:
+      - "src/mana_agent/gateway/**"
+      - "src/mana_agent/multi_agent/routing/**"
+      - "src/mana_agent/multi_agent/runtime/**"
+      - "src/mana_agent/integrations/codex/**"
+      - "src/mana_agent/tools/**"
+      - "src/mana_agent/evals/**"
+      - "src/mana_agent/multi_agent/prompts/**"
+      - "evals/**"
+      - ".github/workflows/eval-regression.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/mana_agent/gateway/**"
+      - "src/mana_agent/multi_agent/routing/**"
+      - "src/mana_agent/multi_agent/runtime/**"
+      - "src/mana_agent/integrations/codex/**"
+      - "src/mana_agent/tools/**"
+      - "src/mana_agent/evals/**"
+      - "src/mana_agent/multi_agent/prompts/**"
+      - "evals/**"
+  workflow_dispatch:
+    inputs:
+      require_live_provider:
+        description: "Require the live protected suite and fail if credentials are absent"
+        required: false
+        default: false
+        type: boolean
+      full_suite:
+        description: "Run both baseline and candidate variants"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "23 3 * * *"
+
+concurrency:
+  group: eval-regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  PYTHONPATH: src
+  NO_COLOR: "1"
+  CLICOLOR: "0"
+  TERM: dumb
+
+jobs:
+  protected-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Mana-Agent and evaluation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Validate evaluation suites
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from mana_agent.evals.config import load_suite
+          for path in Path("evals/suites").glob("*.yaml"):
+              suite = load_suite(path)
+              print(f"validated {path}: {len(suite.tasks)} tasks, {len(suite.variants)} variants")
+          PY
+
+      - name: Run deterministic Eval Lab contracts and gate tests
+        run: python -m pytest -q tests/evals
+
+      - name: Require configured provider
+        if: ${{ (github.event_name == 'schedule' || inputs.require_live_provider) && secrets.OPENAI_API_KEY == '' }}
+        run: |
+          echo "Live evaluation is required, but OPENAI_API_KEY is unavailable. No alternate model or recorded response was used." >&2
+          exit 3
+
+      - name: Explain live-suite skip
+        if: ${{ github.event_name != 'schedule' && !inputs.require_live_provider && secrets.OPENAI_API_KEY == '' }}
+        run: echo "Live provider evaluation skipped explicitly because this run does not require provider credentials. Deterministic protected contracts still ran."
+
+      - name: Run protected live routing suite
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.full_suite }}" == "true" ]]; then
+            mana-agent eval run evals/suites/routing-smoke.yaml --json > eval-run.json
+          else
+            mana-agent eval run evals/suites/routing-smoke.yaml --variant candidate --json > eval-run.json
+          fi
+
+      - name: Compare live candidate with checked-in baseline
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: |
+          candidate_id=$(python -c 'import json; print(json.load(open("eval-run.json"))["experiment_id"])')
+          mana-agent eval gate --suite evals/suites/routing-smoke.yaml --baseline evals/baselines/routing-smoke.json --candidate "$candidate_id" --json > regression-gate.json
+
+      - name: Write evaluation summary
+        if: always()
+        run: |
+          {
+            echo "## Mana Eval Lab"
+            echo
+            echo "- Deterministic contracts: completed"
+            if [[ -f regression-gate.json ]]; then
+              echo "- Live regression gate: see uploaded regression reports"
+            else
+              echo "- Live regression gate: not produced"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish JUnit regression result
+        if: always() && hashFiles('.mana/evals/reports/**/regression.junit.xml') != ''
+        uses: dorny/test-reporter@v1
+        with:
+          name: Mana Eval Regression
+          path: .mana/evals/reports/**/regression.junit.xml
+          reporter: java-junit
+
+      - name: Upload sanitized evaluation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mana-eval-${{ github.run_id }}
+          path: |
+            eval-run.json
+            regression-gate.json
+            .mana/evals/reports/**
+            .mana/evals/runs/**/run.json
+            .mana/evals/runs/**/events.jsonl
+            .mana/evals/runs/**/environment.json
+            .mana/evals/runs/**/route.json
+            .mana/evals/runs/**/tests.json
+            .mana/evals/runs/**/outcome.json
+            .mana/evals/runs/**/final.patch
+          if-no-files-found: warn
+          retention-days: 14

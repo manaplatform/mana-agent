@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import uuid
@@ -21,7 +22,7 @@ from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
 
 
 ScheduleTarget = Literal["local", "github"]
-BUILTIN_ACTIONS = frozenset({"analyze", "daily_report", "self_improvement"})
+BUILTIN_ACTIONS = frozenset({"analyze", "daily_report", "self_improvement", "fleet-verify"})
 CONFIG_VERSION = 2
 _CRON_FIELDS = re.compile(r"^[0-9*/?,\-]+$")
 _WORKFLOW_PREFIX = "mana-agent-schedule-"
@@ -39,6 +40,7 @@ class ScheduleDefinition:
     cron: str
     targets: list[ScheduleTarget]
     command: str | None = None
+    action_config: dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
     created_at: str = field(default_factory=lambda: _timestamp())
     updated_at: str = field(default_factory=lambda: _timestamp())
@@ -54,6 +56,7 @@ class ScheduleDefinition:
         cron: str,
         targets: list[str],
         command: str | None = None,
+        action_config: dict[str, Any] | None = None,
     ) -> "ScheduleDefinition":
         definition = cls(
             id=f"sch_{uuid.uuid4().hex[:12]}",
@@ -62,6 +65,7 @@ class ScheduleDefinition:
             cron=" ".join(cron.split()),
             targets=list(dict.fromkeys(targets)),  # type: ignore[arg-type]
             command=command.strip() if command else None,
+            action_config=dict(action_config or {}),
         )
         definition.validate()
         return definition
@@ -75,6 +79,7 @@ class ScheduleDefinition:
             cron=str(value.get("cron", "")),
             targets=list(value.get("targets", [])),
             command=value.get("command"),
+            action_config=dict(value.get("action_config") or {}),
             enabled=bool(value.get("enabled", True)),
             created_at=str(value.get("created_at", _timestamp())),
             updated_at=str(value.get("updated_at", _timestamp())),
@@ -98,6 +103,27 @@ class ScheduleDefinition:
             validate_custom_command(self.command)
         elif self.command:
             raise AutomationValidationError("Built-in actions cannot include a custom command.")
+        if self.action == "fleet-verify":
+            platforms = self.action_config.get("platforms")
+            commands = self.action_config.get("commands")
+            if (
+                not isinstance(platforms, list)
+                or not platforms
+                or set(platforms) - {"linux", "windows", "macos"}
+            ):
+                raise AutomationValidationError(
+                    "fleet-verify schedules require explicit linux/windows/macos platforms."
+                )
+            if not isinstance(commands, list) or not commands or any(
+                not isinstance(item, str) or not item.strip() for item in commands
+            ):
+                raise AutomationValidationError(
+                    "fleet-verify schedules require at least one explicit command."
+                )
+        elif self.action_config:
+            raise AutomationValidationError(
+                "Action configuration is supported only for fleet-verify schedules."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -185,7 +211,23 @@ def schedule_command(schedule: ScheduleDefinition, root: Path) -> str:
         assert schedule.command is not None
         return schedule.command
     root_text = str(root.resolve()).replace("'", "'\\''")
+    if schedule.action == "fleet-verify":
+        return shlex.join(_fleet_verify_argv(schedule, str(root.resolve())))
     return f"mana-agent automation execute --action {schedule.action} --root-dir '{root_text}'"
+
+
+def _fleet_verify_argv(schedule: ScheduleDefinition, root: str) -> list[str]:
+    argv = ["mana-agent", "fleet", "verify", "--root-dir", root]
+    for value in schedule.action_config["platforms"]:
+        argv += ["--platform", str(value)]
+    for value in schedule.action_config["commands"]:
+        argv += ["--command", str(value)]
+    argv += [
+        "--maximum-workers", str(int(schedule.action_config.get("maximum_workers", 4))),
+        "--timeout", str(int(schedule.action_config.get("timeout", 1800))),
+        "--json",
+    ]
+    return argv
 
 
 def read_crontab(runner=subprocess.run) -> str:
@@ -229,7 +271,12 @@ def workflow_path(root: Path, schedule: ScheduleDefinition) -> Path:
 
 
 def render_workflow(schedule: ScheduleDefinition) -> str:
-    command = schedule.command if schedule.action == "custom" else f"mana-agent automation execute --action {schedule.action} --root-dir ."
+    if schedule.action == "custom":
+        command = schedule.command
+    elif schedule.action == "fleet-verify":
+        command = shlex.join(_fleet_verify_argv(schedule, "."))
+    else:
+        command = f"mana-agent automation execute --action {schedule.action} --root-dir ."
     assert command
     return "\n".join(
         [
@@ -354,12 +401,42 @@ def deployment_status(schedule: ScheduleDefinition, root: Path, *, runner=subpro
     return result
 
 
-def execute_builtin_action(action: str, root: Path) -> dict[str, Any]:
+def execute_builtin_action(
+    action: str, root: Path, *, action_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if action not in BUILTIN_ACTIONS:
         raise AutomationValidationError(f"Unsupported built-in action: {action}")
     if action == "self_improvement":
         from mana_agent.automations.self_improvement import run_self_improvement_loop
         return {"ok": True, "created": len(run_self_improvement_loop(root) or [])}
+    if action == "fleet-verify":
+        config = dict(action_config or {})
+        platforms = list(config.get("platforms") or [])
+        commands = list(config.get("commands") or [])
+        if not platforms or not commands:
+            raise AutomationValidationError(
+                "fleet-verify requires persisted explicit platforms and commands"
+            )
+        argv = ["mana-agent", "fleet", "verify", "--root-dir", str(root.resolve())]
+        for value in platforms:
+            argv += ["--platform", str(value)]
+        for value in commands:
+            argv += ["--command", str(value)]
+        argv += [
+            "--maximum-workers", str(int(config.get("maximum_workers", 4))),
+            "--timeout", str(int(config.get("timeout", 1800))),
+            "--json",
+        ]
+        result = subprocess.run(
+            argv, cwd=root, capture_output=True, text=True,
+            timeout=int(config.get("timeout", 1800)) + 60, check=False,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "returncode": result.returncode,
+            "stdout": (result.stdout or "")[-4000:],
+            "stderr": (result.stderr or "")[-2000:],
+        }
     from mana_agent.ui.streamlit_helpers import trigger_automation
     return trigger_automation("analyze" if action in {"analyze", "daily_report"} else action, root=root)
 
@@ -385,7 +462,9 @@ def run_schedule_now(schedule: ScheduleDefinition, root: Path, *, runner=subproc
             "stderr": (completed.stderr or "")[-1000:],
         }
     else:
-        result = execute_builtin_action(schedule.action, root)
+        result = execute_builtin_action(
+            schedule.action, root, action_config=schedule.action_config,
+        )
     schedule.last_run = {"at": _timestamp(), **result}
     schedule.updated_at = _timestamp()
     upsert_schedule(root, schedule)

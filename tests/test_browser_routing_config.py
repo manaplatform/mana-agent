@@ -15,10 +15,7 @@ from mana_agent.multi_agent.runtime.route_executor import available_tool_names
 @pytest.fixture()
 def isolated_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config_dir = tmp_path / ".mana"
-    monkeypatch.setattr(user_config, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(user_config, "CONFIG_FILE", config_dir / "config.toml")
-    monkeypatch.setattr(user_config, "SECRETS_FILE", config_dir / "secrets.toml")
-    monkeypatch.setattr(user_config, "MODEL_CACHE_FILE", config_dir / "model_cache.json")
+    monkeypatch.setenv("MANA_HOME", str(config_dir))
     return config_dir
 
 

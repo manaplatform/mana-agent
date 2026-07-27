@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from textual import events
 from textual.message import Message
 from textual.widgets import TextArea
@@ -46,6 +48,10 @@ class MessageInput(TextArea):
             **kwargs,
         )
         self._reported_height = self.MIN_HEIGHT
+        self._command_completions: tuple[str, ...] = ()
+
+    def set_command_completions(self, names: list[str] | tuple[str, ...]) -> None:
+        self._command_completions = tuple(sorted({f"/{name.lstrip('/')}" for name in names}))
 
     @property
     def value(self) -> str:
@@ -57,6 +63,12 @@ class MessageInput(TextArea):
         self.load_text(value)
         lines = value.split("\n")
         self.cursor_location = (len(lines) - 1, len(lines[-1]))
+        # ``load_text`` posts ``Changed`` asynchronously. On Windows' Proactor
+        # loop that event can lag behind a test or caller's next layout cycle,
+        # leaving explicit multiline assignments at the one-line height. The
+        # new text is already authoritative for explicit line counting, so
+        # report it synchronously; the queued refresh still refines wrapping.
+        self._report_height()
 
     async def _on_key(self, event: events.Key) -> None:
         """Send on Enter and insert newlines only on explicit alternate keys."""
@@ -70,6 +82,16 @@ class MessageInput(TextArea):
             event.prevent_default()
             self.insert("\n")
             return
+        if event.key == "tab" and self.text.startswith("/") and " " not in self.text:
+            matches = [item for item in self._command_completions if item.startswith(self.text)]
+            if matches:
+                completion = os.path.commonprefix(matches)
+                if len(matches) == 1:
+                    completion += " "
+                self.value = completion
+                event.stop()
+                event.prevent_default()
+                return
         await super()._on_key(event)
 
     def on_text_area_changed(self, _: TextArea.Changed) -> None:
@@ -86,7 +108,12 @@ class MessageInput(TextArea):
     def _report_height(self, *, force: bool = False) -> None:
         # ``virtual_size.height`` accounts for both explicit newlines and
         # Textual's soft wrapping. TextArea handles scrolling once constrained.
-        wrapped_lines = max(1, self.virtual_size.height)
+        # Windows' event loop may dispatch ``Changed`` before Textual refreshes
+        # the virtual document.  Explicit newlines are already authoritative,
+        # so include them rather than briefly retaining the previous one-line
+        # virtual height. Soft-wrapped lines are still supplied by Textual.
+        explicit_lines = self.text.count("\n") + 1
+        wrapped_lines = max(1, explicit_lines, self.virtual_size.height)
         height = min(self.MAX_HEIGHT, max(self.MIN_HEIGHT, wrapped_lines + 2))
         if force or height != self._reported_height:
             self._reported_height = height

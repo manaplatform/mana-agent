@@ -96,7 +96,7 @@ class ManaConfigurationApp(App[bool]):
     Screen { background: #0f1117; color: #e5e7eb; }
     Header, Footer { background: #1a1d27; color: #a5b4fc; }
     TabbedContent { height: 1fr; }
-    TabPane { padding: 1 2; }
+    TabPane { padding: 1 2; overflow-y: auto; }
     .section-title { text-style: bold; color: #a5b4fc; margin-bottom: 1; }
     .hint { color: #94a3b8; margin-bottom: 1; }
     .status { min-height: 1; color: #86efac; margin: 1 0; }
@@ -116,8 +116,8 @@ class ManaConfigurationApp(App[bool]):
         self.saved = False
         self._models: list[Any] = []
         self._provider_validated = bool(
-            self.draft.original.get("OPENAI_API_KEY")
-            and self.draft.original.get("OPENAI_BASE_URL")
+            self._provider_api_key(self.draft.original, str(self.draft.original.get("MANA_AI_PROVIDER") or "openai"))
+            and self._provider_base_url(self.draft.original, str(self.draft.original.get("MANA_AI_PROVIDER") or "openai"))
             and self.draft.original.get("OPENAI_CHAT_MODEL")
         )
         self._search_validated = bool(
@@ -147,8 +147,8 @@ class ManaConfigurationApp(App[bool]):
             with TabPane("AI providers", id="providers"):
                 yield Label("Inference provider", classes="section-title")
                 yield Select(provider_options, value=provider_id, id="provider-select", allow_blank=False)
-                yield Input(value=str(values.get("OPENAI_BASE_URL") or ""), placeholder="https://api.example.com/v1", id="provider-base-url")
-                yield Input(password=True, placeholder=self._secret_placeholder("OPENAI_API_KEY"), id="provider-api-key")
+                yield Input(value=self._provider_base_url(values, provider_id), placeholder="https://api.example.com/v1", id="provider-base-url")
+                yield Input(password=True, placeholder=self._secret_placeholder(self._provider_secret_name(provider_id)), id="provider-api-key")
                 yield Input(value=str(values.get("MANA_PROVIDER_DISPLAY_NAME") or ""), placeholder="Custom provider display name (optional)", id="provider-display-name")
                 with Horizontal(classes="actions-inline"):
                     yield Button("Test", id="test-provider", variant="primary")
@@ -175,6 +175,20 @@ class ManaConfigurationApp(App[bool]):
                 yield Label("Embedding model", classes="section-title")
                 yield Static("Only embedding-capable models are offered after catalog refresh.", classes="hint")
                 yield Select(self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True), id="embedding-model", allow_blank=False)
+            with TabPane("Coding runtime", id="coding-runtime"):
+                yield Label("Coding backend", classes="section-title")
+                yield Select(
+                    [("Codex app-server", "codex"), ("Mana-Agent internal", "internal")],
+                    value=str(values.get("MANA_CODING_BACKEND") or ("codex" if values.get("MANA_CODEX_ENABLED", True) else "internal")),
+                    id="coding-backend",
+                    allow_blank=False,
+                )
+                yield Switch(value=bool(values.get("MANA_CODEX_ENABLED", True)), id="codex-enabled")
+                yield Label("Enable the Codex integration", classes="hint")
+                yield Static(
+                    "Backend selection is fixed before each coding turn. Codex failures are never retried through the internal backend.",
+                    classes="hint",
+                )
             with TabPane("Memory", id="memory"):
                 yield Label("Memory mode", classes="section-title")
                 yield Select(
@@ -219,6 +233,45 @@ class ManaConfigurationApp(App[bool]):
                     yield Button("Test", id="test-github", variant="primary")
                     yield Button("Remove credential", id="remove-github-secret", variant="warning")
                 yield Static(self._github_cli_status(), id="github-status", classes="status")
+            with TabPane("Protocols", id="protocols"):
+                yield Label("Agent Client Protocol", classes="section-title")
+                yield Switch(value=bool(values.get("MANA_ACP_ENABLED", True)), id="acp-enabled")
+                yield Label("Enable ACP stdio support", classes="hint")
+                yield Input(value=str(values.get("MANA_ACP_ALLOWED_ROOTS") or ""), placeholder="Additional allowed roots (comma-separated)", id="acp-roots")
+                yield Switch(value=bool(values.get("MANA_ACP_MCP_FORWARDING", True)), id="acp-mcp-forwarding")
+                yield Label("Allow per-session MCP forwarding", classes="hint")
+                yield Label("Agent2Agent 1.0", classes="section-title")
+                yield Switch(value=bool(values.get("MANA_A2A_SERVER_ENABLED", False)), id="a2a-server-enabled")
+                yield Label("Enable authenticated A2A server", classes="hint")
+                yield Input(value=str(values.get("MANA_A2A_HOST") or "127.0.0.1"), placeholder="Bind host", id="a2a-host")
+                yield Input(value=str(values.get("MANA_A2A_PORT") or 8766), placeholder="Port", id="a2a-port")
+                yield Input(value=str(values.get("MANA_A2A_PUBLIC_BASE_URL") or ""), placeholder="https://agent.example", id="a2a-public-url")
+                yield Input(password=True, placeholder=self._secret_placeholder("MANA_A2A_SERVER_TOKEN"), id="a2a-token")
+                yield Input(value=str(values.get("MANA_A2A_ENABLED_SKILLS") or ""), placeholder="Enabled skill IDs (comma-separated)", id="a2a-skills")
+                yield Input(value=str(values.get("MANA_A2A_MAX_CONCURRENT_TASKS") or 4), placeholder="Maximum concurrent tasks", id="a2a-concurrency")
+                yield Switch(value=bool(values.get("MANA_A2A_DELEGATION_ENABLED", False)), id="a2a-delegation-enabled")
+                yield Label("Enable explicitly authorized remote delegation", classes="hint")
+                yield Input(value=str(values.get("MANA_A2A_MAX_DELEGATION_DEPTH") or 3), placeholder="Maximum delegation depth", id="a2a-depth")
+            with TabPane("Computer control", id="computer-control"):
+                computer = values.get("computer_control") if isinstance(values.get("computer_control"), dict) else {}
+                yield Label("Local desktop automation", classes="section-title")
+                yield Switch(value=bool(computer.get("enabled", False)), id="computer-enabled")
+                yield Label("Enable scoped computer-control tools (disabled by default)", classes="hint")
+                yield Switch(value=bool(computer.get("allow_remote_control", False)), id="computer-remote")
+                yield Label("Allow authenticated remote clients (private-data scopes remain separately disabled)", classes="hint")
+                yield Switch(value=bool(computer.get("require_local_confirmation_for_high_risk", True)), id="computer-local-confirmation")
+                yield Label("Require trusted local confirmation for high-risk remote actions", classes="hint")
+                yield Switch(value=bool(computer.get("audit_enabled", True)), id="computer-audit")
+                yield Label("Keep sanitized action audit records (never note/page/clipboard/screenshot content)", classes="hint")
+                yield Input(
+                    value=",".join(str(item) for item in computer.get("allowed_paths", [])),
+                    placeholder="Allowed filesystem roots (comma-separated absolute paths)",
+                    id="computer-paths",
+                )
+                yield Static(
+                    "Fine-grained permission decisions and the live supported/unsupported capability matrix are available in Dashboard → Computer Control.",
+                    classes="hint",
+                )
             with TabPane("Review and save", id="review"):
                 yield Label("Review", classes="section-title")
                 yield Static(self._overview_text(), id="review-summary")
@@ -236,6 +289,20 @@ class ManaConfigurationApp(App[bool]):
 
     def _secret_placeholder(self, key: str) -> str:
         return "Configured •••••••• (leave blank to preserve)" if self.draft.values.get(key) else "Not configured"
+
+    @staticmethod
+    def _provider_secret_name(provider: str) -> str:
+        return "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
+
+    @staticmethod
+    def _provider_base_key(provider: str) -> str:
+        return "OPENROUTER_BASE_URL" if provider == "openrouter" else "OPENAI_BASE_URL"
+
+    def _provider_base_url(self, values: dict[str, Any], provider: str) -> str:
+        return str(values.get(self._provider_base_key(provider)) or PROVIDERS.get(provider).default_base_url)
+
+    def _provider_api_key(self, values: dict[str, Any], provider: str) -> str:
+        return str(values.get(self._provider_secret_name(provider)) or "")
 
     def _initial_model_options(self, key: str, *, embedding: bool = False) -> list[tuple[str, str]]:
         current = str(self.draft.values.get(key) or "").strip()
@@ -256,7 +323,8 @@ class ManaConfigurationApp(App[bool]):
 
     def _overview_text(self) -> str:
         v = self.draft.values
-        key_status = "Configured" if v.get("OPENAI_API_KEY") else "Not configured"
+        provider = str(v.get("MANA_AI_PROVIDER") or "openai")
+        key_status = "Configured" if self._provider_api_key(v, provider) else "Not configured"
         search = str(v.get("MANA_WEB_SEARCH_PROVIDER") or "Disabled") if v.get("MANA_SEARCH_ENABLE_WEB") else "Disabled"
         github = str(v.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "Disabled")
         memory = f"{v.get('MANA_MEMORY_MODE', 'internal')} / {v.get('MANA_MEMORY_PROVIDER', 'mana')}"
@@ -267,6 +335,7 @@ class ManaConfigurationApp(App[bool]):
             f"Web search        {search}\n"
             f"GitHub            {github}\n"
             f"Memory            {memory}"
+            f"\nCoding backend    {v.get('MANA_CODING_BACKEND') or ('codex' if v.get('MANA_CODEX_ENABLED', True) else 'internal')}"
         )
 
     def _role_mapping_text(self) -> str:
@@ -290,10 +359,11 @@ class ManaConfigurationApp(App[bool]):
 
     def _collect(self) -> None:
         provider = str(self.query_one("#provider-select", Select).value)
+        base_key = self._provider_base_key(provider)
         self.draft.values.update(
             {
                 "MANA_AI_PROVIDER": provider,
-                "OPENAI_BASE_URL": self.query_one("#provider-base-url", Input).value.strip(),
+                base_key: self.query_one("#provider-base-url", Input).value.strip() or PROVIDERS.get(provider).default_base_url,
                 "MANA_PROVIDER_DISPLAY_NAME": self.query_one("#provider-display-name", Input).value.strip(),
                 "MANA_SEARCH_ENABLE_WEB": self.query_one("#search-enabled", Switch).value,
                 "MANA_WEB_SEARCH_PROVIDER": "" if str(self.query_one("#search-provider", Select).value) == "disabled" else str(self.query_one("#search-provider", Select).value),
@@ -306,6 +376,8 @@ class ManaConfigurationApp(App[bool]):
                 "MANA_MEMORY_MODE": str(self.query_one("#memory-mode", Select).value),
                 "MANA_MEMORY_PROVIDER": "mana" if str(self.query_one("#memory-mode", Select).value) == "internal" else str(self.query_one("#memory-provider", Select).value),
                 "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
+                "MANA_CODING_BACKEND": str(self.query_one("#coding-backend", Select).value),
+                "MANA_CODEX_ENABLED": self.query_one("#codex-enabled", Switch).value,
                 "MEM0_ORG_ID": self.query_one("#mem0-org-id", Input).value.strip(),
                 "MEM0_PROJECT_ID": self.query_one("#mem0-project-id", Input).value.strip(),
                 "MEM0_BASE_URL": self.query_one("#mem0-base-url", Input).value.strip(),
@@ -317,11 +389,38 @@ class ManaConfigurationApp(App[bool]):
                 "MANA_MODEL_REVIEWER": str(self.query_one("#role-reviewer", Select).value),
                 "MANA_MODEL_TOOL": str(self.query_one("#role-tool", Select).value),
                 "MANA_MODEL_SUMMARIZER": str(self.query_one("#role-summarizer", Select).value),
+                "MANA_ACP_ENABLED": self.query_one("#acp-enabled", Switch).value,
+                "MANA_ACP_ALLOWED_ROOTS": self.query_one("#acp-roots", Input).value.strip(),
+                "MANA_ACP_MCP_FORWARDING": self.query_one("#acp-mcp-forwarding", Switch).value,
+                "MANA_A2A_SERVER_ENABLED": self.query_one("#a2a-server-enabled", Switch).value,
+                "MANA_A2A_HOST": self.query_one("#a2a-host", Input).value.strip(),
+                "MANA_A2A_PORT": int(self.query_one("#a2a-port", Input).value),
+                "MANA_A2A_PUBLIC_BASE_URL": self.query_one("#a2a-public-url", Input).value.strip(),
+                "MANA_A2A_ENABLED_SKILLS": self.query_one("#a2a-skills", Input).value.strip(),
+                "MANA_A2A_MAX_CONCURRENT_TASKS": int(self.query_one("#a2a-concurrency", Input).value),
+                "MANA_A2A_DELEGATION_ENABLED": self.query_one("#a2a-delegation-enabled", Switch).value,
+                "MANA_A2A_MAX_DELEGATION_DEPTH": int(self.query_one("#a2a-depth", Input).value),
+                "MANA_COMPUTER_CONTROL_ENABLED": self.query_one("#computer-enabled", Switch).value,
             }
         )
-        self.draft.set_secret("OPENAI_API_KEY", self.query_one("#provider-api-key", Input).value)
+        existing_computer = self.draft.values.get("computer_control")
+        computer = dict(existing_computer) if isinstance(existing_computer, dict) else {}
+        computer.update({
+            "enabled": self.query_one("#computer-enabled", Switch).value,
+            "allow_remote_control": self.query_one("#computer-remote", Switch).value,
+            "require_local_confirmation_for_high_risk": self.query_one("#computer-local-confirmation", Switch).value,
+            "audit_enabled": self.query_one("#computer-audit", Switch).value,
+            "allowed_paths": [
+                item.strip()
+                for item in self.query_one("#computer-paths", Input).value.split(",")
+                if item.strip()
+            ],
+        })
+        self.draft.values["computer_control"] = computer
+        self.draft.set_secret(self._provider_secret_name(provider), self.query_one("#provider-api-key", Input).value)
         self.draft.set_secret("MANA_WEB_SEARCH_API_KEY", self.query_one("#search-api-key", Input).value)
         self.draft.set_secret("MANA_GITHUB_TOKEN", self.query_one("#github-token", Input).value)
+        self.draft.set_secret("MANA_A2A_SERVER_TOKEN", self.query_one("#a2a-token", Input).value)
         mem0_key = self.query_one("#mem0-api-key", Input).value.strip()
         if mem0_key:
             self.draft.values["MEM0_API_KEY"] = mem0_key
@@ -343,8 +442,8 @@ class ManaConfigurationApp(App[bool]):
                 models = await self.run_worker(
                     lambda: self.catalog_service.refresh(
                         provider=str(self.draft.values["MANA_AI_PROVIDER"]),
-                        base_url=str(self.draft.values["OPENAI_BASE_URL"]),
-                        api_key=str(self.draft.values.get("OPENAI_API_KEY") or ""),
+                        base_url=self._provider_base_url(self.draft.values, str(self.draft.values["MANA_AI_PROVIDER"])),
+                        api_key=self._provider_api_key(self.draft.values, str(self.draft.values["MANA_AI_PROVIDER"])),
                         timeout_seconds=int(self.draft.values.get("MANA_SEARCH_TIMEOUT_SECONDS") or 15),
                     ),
                     thread=True,
@@ -393,7 +492,7 @@ class ManaConfigurationApp(App[bool]):
             return
         if button_id in {"remove-provider-secret", "remove-search-secret", "remove-github-secret"}:
             key = {
-                "remove-provider-secret": "OPENAI_API_KEY",
+                "remove-provider-secret": self._provider_secret_name(str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")),
                 "remove-search-secret": "MANA_WEB_SEARCH_API_KEY",
                 "remove-github-secret": "MANA_GITHUB_TOKEN",
             }[button_id]
@@ -432,7 +531,7 @@ class ManaConfigurationApp(App[bool]):
             self.action_cancel()
         elif button_id in {"continue", "back"}:
             tabs = self.query_one(TabbedContent)
-            order = ["overview", "providers", "models", "embeddings", "memory", "search", "github", "review"]
+            order = ["overview", "providers", "models", "embeddings", "coding-runtime", "memory", "search", "github", "protocols", "computer-control", "review"]
             current = order.index(tabs.active)
             tabs.active = order[min(len(order) - 1, current + (1 if button_id == "continue" else -1))]
 
@@ -452,6 +551,15 @@ class ManaConfigurationApp(App[bool]):
                 raise ValueError("Test the selected GitHub authentication before saving.")
             if not self._memory_validated:
                 raise ValueError("Test the selected external memory provider before saving.")
+            from mana_agent.protocols.common.config import validate_protocol_configuration
+            from types import SimpleNamespace
+            from mana_agent.coding.selection import resolve_coding_backend
+
+            validate_protocol_configuration(self.draft.values)
+            resolve_coding_backend(SimpleNamespace(
+                mana_coding_backend=self.draft.values.get("MANA_CODING_BACKEND"),
+                mana_codex_enabled=self.draft.values.get("MANA_CODEX_ENABLED"),
+            ))
             self.draft.save()
         except Exception as exc:
             self.notify(str(exc), title="Configuration not saved", severity="error")
@@ -472,6 +580,9 @@ class ManaConfigurationApp(App[bool]):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "provider-select":
             self._provider_validated = False
+            provider = str(event.value)
+            self.query_one("#provider-base-url", Input).value = self._provider_base_url(self.draft.values, provider)
+            self.query_one("#provider-api-key", Input).placeholder = self._secret_placeholder(self._provider_secret_name(provider))
         elif event.select.id == "search-provider":
             self._search_validated = False
         elif event.select.id == "github-source":

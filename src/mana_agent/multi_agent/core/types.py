@@ -221,6 +221,19 @@ class TaskBoardItem:
     verification_queue_job_ids: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     plan: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    decomposition_local_id: str = ""
+    preferred_parallelism: str = "automatic"
+    entry_route: str = ""
+    owning_lane: str = ""
+    routing_evidence: dict[str, Any] = field(default_factory=dict)
+    result_summary: str = ""
+    verification_status: str = ""
+    output_artifacts: list[str] = field(default_factory=list)
+    approval_request_ids: list[str] = field(default_factory=list)
+    child_task_ids: list[str] = field(default_factory=list)
+    decomposition_id_map: dict[str, str] = field(default_factory=dict)
+    aggregate_progress: str = ""
     evidence: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)

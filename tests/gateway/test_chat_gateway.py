@@ -22,9 +22,15 @@ from mana_agent.gateway import (
     ChatTurnResult,
     RichChatContext,
 )
+from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.memory import MemoryContent, MemoryRecord
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
+from mana_agent.remote_execution.models import RemoteExecutionEvent, RemoteExecutionRequest
+from mana_agent.remote_execution.providers.local_ssh import LocalSSHProvider
+from mana_agent.remote_execution.service import RemoteExecutionService
+from mana_agent.remote_execution.target_policy import TargetPolicy, TargetPolicyMode
 from mana_agent.services.chat_session_history import ChatSessionHistory
 
 
@@ -123,6 +129,110 @@ class _DummyCodingAgent:
 
     def set_tools_manager_orchestrator(self, orch):
         self.orch = orch
+
+
+def test_missing_managed_worker_uses_direct_ssh_and_operations_lane_tool(
+    monkeypatch, tmp_path: Path
+) -> None:
+    async def execute_direct(self, request, emit, cancel):
+        emit(RemoteExecutionEvent(
+            job_id=request.job_id,
+            session_id=request.session_id,
+            kind="stdout",
+            data={"chunk": "direct output"},
+        ))
+        return 0, "direct output", ""
+
+    monkeypatch.setattr(LocalSSHProvider, "execute", execute_direct)
+    gateway = object.__new__(AgentChatGateway)
+    gateway.remote_execution_service = RemoteExecutionService(
+        target_policy=TargetPolicy(TargetPolicyMode.UNRESTRICTED)
+    )
+    gateway._entry_route_registry = SimpleNamespace(
+        get=lambda _route: SimpleNamespace(
+            tools=("remote_ssh_execute",),
+            availability=lambda: SimpleNamespace(available=True),
+        )
+    )
+    authorized: list[tuple[str, str]] = []
+    gateway._lane_coordinator = SimpleNamespace(
+        authorize_tool=lambda task_id, tool_name: authorized.append((task_id, tool_name))
+    )
+    decision = EntryRoutingDecision(
+        route="remote_execution",
+        confidence=0.99,
+        reason="selected managed worker",
+        required_sources=("remote_execution",),
+        remote_request={
+            "provider": "reverse-worker",
+            "worker_id": "missing-worker",
+            "target": {"host": "example.test", "user": "root"},
+            "authentication": {"mode": "agent"},
+            "command": {"argv": ["true"]},
+        },
+    )
+
+    result = gateway._execute_entry_route(
+        decision=decision,
+        context=EntryRouteContext(session_id="session", conversation_id="session", turn_id="turn"),
+        text="run true",
+        state={},
+        ask_service=None,
+        sink=None,
+        options={"_lane_task_id": "lane-task"},
+    )
+
+    assert result.mode == "remote-completed"
+    assert result.payload["provider"] == "remote-ssh"
+    assert "direct output" in result.answer
+    assert authorized == [("lane-task", "remote_ssh_execute")]
+
+
+def test_missing_worker_at_permission_resume_uses_direct_ssh(monkeypatch) -> None:
+    async def execute_direct(self, request, emit, cancel):
+        emit(RemoteExecutionEvent(
+            job_id=request.job_id,
+            session_id=request.session_id,
+            kind="stdout",
+            data={"chunk": "Top client: 203.0.113.8 (42 requests)\n"},
+        ))
+        return 0, "Top client: 203.0.113.8 (42 requests)\n", ""
+
+    monkeypatch.setattr(LocalSSHProvider, "execute", execute_direct)
+    gateway = object.__new__(AgentChatGateway)
+    gateway.remote_execution_service = RemoteExecutionService()
+    transitions: list[tuple[str, str, str]] = []
+    finishes: list[tuple[str, str]] = []
+    gateway._remote_job_lanes = {"job": "lane-task"}
+    gateway._lane_coordinator = SimpleNamespace(
+        transition=lambda task_id, state, reason: transitions.append((task_id, state.value, reason)),
+        finish=lambda task_id, state, **_kwargs: finishes.append((task_id, state.value)),
+    )
+    request = RemoteExecutionRequest.model_validate({
+        "job_id": "job",
+        "session_id": "session",
+        "provider": "reverse-worker",
+        "worker_id": "missing-worker",
+        "target": {"host": "example.test", "user": "root"},
+        "authentication": {"mode": "agent"},
+        "command": {"argv": ["true"]},
+    })
+    gateway.remote_execution_service.submit(request)
+    permission = gateway.remote_execution_service.pending_permissions()[0]
+
+    result = gateway.remote_permission_command(permission["permission_request_id"])
+
+    assert result == {
+        "status": "succeeded",
+        "job_id": "job",
+        "message": (
+            "Approved remote SSH job completed through direct SSH.\n\n"
+            "Remote command output:\nTop client: 203.0.113.8 (42 requests)\n"
+        ),
+    }
+    assert transitions == [("lane-task", "running", "remote SSH permission approved")]
+    assert finishes == [("lane-task", "completed")]
+    assert gateway._remote_job_lanes == {}
 
 
 def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:
@@ -270,6 +380,26 @@ def test_gateway_uses_codex_shim_without_legacy_coding_workers(
     assert "coding=codex-test-model" in model_log
     assert "planner=codex-owned" in model_log
     assert "tool_worker=disabled" in model_log
+
+
+def test_gateway_uses_internal_runtime_when_codex_is_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+        tool_worker_process=False,
+        auto_execute_plan=False,
+        settings=Settings(MANA_CODEX_ENABLED=False, OPENAI_API_KEY="test-key"),
+    )
+    context = gateway.get_rich_context()
+    assert isinstance(context.coding_agent, InternalCodingAgentShim)
+    assert not isinstance(context.coding_agent, CodexCodingAgentShim)
 
 
 def test_gateway_process_turn_ask_path(tmp_path: Path, monkeypatch) -> None:
@@ -748,7 +878,8 @@ def test_gateway_new_conversation_isolates_history(tmp_path: Path, monkeypatch) 
 
     assert new_session != old_session
     assert "Remember one = b." not in prompts[-1]
-    assert gateway.session_messages(old_session)
+    assert gateway.session_messages(old_session) == []
+    assert old_session not in {item.session_id for item in gateway._workspaces.store.list_sessions()}
     assert [row["content"] for row in gateway.session_messages(new_session) if row["role"] == "user"] == ["What is one?"]
 
 
@@ -858,9 +989,10 @@ def test_gateway_startup_creates_fresh_session_and_new_creates_another(
         for item in second_gateway._workspaces.store.list_sessions()
         if item.primary_repository_id == repository_id
     ]
-    assert len(sessions) == 3
+    assert len(sessions) == 2
+    assert all(item.session_id != second_session for item in sessions)
     assert second_gateway._workspaces.store.get_session(first_session).status == "abandoned"
-    assert second_gateway._workspaces.store.get_session(second_session).status == "closed"
+    assert second_session not in {item.session_id for item in sessions}
     assert second_gateway._workspaces.store.get_session(new_session).status == "active"
 
 

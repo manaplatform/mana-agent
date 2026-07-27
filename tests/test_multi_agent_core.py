@@ -722,6 +722,8 @@ def test_tools_manager_blocks_dangerous_shell_commands():
     with pytest.raises(ToolPermissionError):
         assert_shell_allowed("cat .env")
     assert_shell_allowed("python -m compileall src")
+    with pytest.raises(ToolPermissionError):
+        assert_shell_allowed("ssh root@130.185.73.235 'tail -n 10 /var/log/nginx/access.log'")
 
 
 def test_coding_agent_cannot_directly_execute_tools(tmp_path):
@@ -971,10 +973,7 @@ def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
 @pytest.fixture
 def isolated_model_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config_dir = tmp_path / "mana"
-    monkeypatch.setattr(user_config, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(user_config, "CONFIG_FILE", config_dir / "config.toml")
-    monkeypatch.setattr(user_config, "SECRETS_FILE", config_dir / "secrets.toml")
-    monkeypatch.setattr(user_config, "MODEL_CACHE_FILE", config_dir / "model_cache.json")
+    monkeypatch.setenv("MANA_HOME", str(config_dir))
     for name in set(user_config.DEFAULT_USER_CONFIG) | set(user_config.FIELD_NAME_BY_ENV):
         monkeypatch.delenv(name, raising=False)
     return config_dir

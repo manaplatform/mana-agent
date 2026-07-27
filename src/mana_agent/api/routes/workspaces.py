@@ -37,6 +37,10 @@ class SessionCreateRequest(BaseModel):
     workspace_id: str | None = None
 
 
+class SessionUpdateRequest(BaseModel):
+    title: str
+
+
 class SearchRequest(BaseModel):
     query: str
     mode: Literal["semantic", "text", "file", "symbol"] = "text"
@@ -202,11 +206,64 @@ def get_job(job_id: str) -> dict:
 
 @router.post("/sessions", status_code=201)
 def create_session(payload: SessionCreateRequest, authorization: str | None = Header(None)) -> dict:
+    from mana_agent.sessions import SessionService
+
     _require_mutation_token(authorization)
     cwd = _authorize_path(payload.cwd)
-    return WorkspaceService().create_session(cwd, workspace_id=payload.workspace_id).model_dump(mode="json")
+    return SessionService().create(cwd, workspace_id=payload.workspace_id, frontend="api").model_dump(mode="json")
 
 
 @router.get("/sessions")
 def list_sessions() -> list[dict]:
-    return [item.model_dump(mode="json") for item in WorkspaceService().store.list_sessions()]
+    from mana_agent.sessions import SessionService
+
+    return [item.model_dump(mode="json") for item in SessionService().list()]
+
+
+@router.get("/sessions/{session_id}")
+def get_session(session_id: str) -> dict:
+    from mana_agent.sessions import SessionService
+
+    service = SessionService()
+    try:
+        record = service.workspaces.store.get_session(session_id)
+    except FileNotFoundError as exc:
+        raise ManaApiError(404, "Session not found.") from exc
+    return {
+        "session": service.summary(record).model_dump(mode="json"),
+        "messages": [row.to_dict() for row in service.history.list(session_id, limit=5000)],
+    }
+
+
+@router.patch("/sessions/{session_id}")
+def update_session(session_id: str, payload: SessionUpdateRequest, authorization: str | None = Header(None)) -> dict:
+    from mana_agent.sessions import SessionService
+
+    _require_mutation_token(authorization)
+    try:
+        return SessionService().rename(session_id, payload.title).model_dump(mode="json")
+    except FileNotFoundError as exc:
+        raise ManaApiError(404, "Session not found.") from exc
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, authorization: str | None = Header(None)) -> dict:
+    from mana_agent.sessions import SessionService
+
+    _require_mutation_token(authorization)
+    try:
+        SessionService().delete(session_id)
+    except FileNotFoundError as exc:
+        raise ManaApiError(404, "Session not found.") from exc
+    return {"ok": True, "session_id": session_id}
+
+
+@router.post("/sessions/{session_id}/activate")
+def activate_session(session_id: str, authorization: str | None = Header(None)) -> dict:
+    from mana_agent.sessions import SessionService
+
+    _require_mutation_token(authorization)
+    try:
+        return SessionService().bind(session_id, frontend="api").model_dump(mode="json")
+    except FileNotFoundError as exc:
+        raise ManaApiError(404, "Session not found.") from exc

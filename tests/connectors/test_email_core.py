@@ -150,6 +150,50 @@ def test_runtime_search_reference_is_accepted_by_read_and_keeps_account(monkeypa
     assert read["message"]["message_ref"] == reference
 
 
+def test_runtime_search_executes_inside_active_event_loop(monkeypatch):
+    import asyncio
+    import json
+    import threading
+    from mana_agent.connectors.email import runtime_tools
+
+    account = EmailAccount(
+        id="gmail-a",
+        provider="gmail",
+        address=EmailAddress(address="me@example.com"),
+        granted_permissions={runtime_tools.EmailPermission.READ},
+    )
+    message = EmailMessage(
+        id="id-1",
+        provider_message_id="id-1",
+        account_id=account.id,
+        sender=EmailAddress(address="sender@example.com"),
+        received_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        subject="subject",
+    )
+    provider_thread_ids = []
+
+    class Provider:
+        def __init__(self):
+            self.account = account
+
+        async def search_messages(self, query):
+            provider_thread_ids.append(threading.get_ident())
+            return runtime_tools.EmailSearchResult(messages=[message])
+
+    monkeypatch.setattr(runtime_tools, "_provider", lambda account_id: Provider())
+    tool = {item.name: item for item in runtime_tools.build_email_langchain_tools()}["email_search"]
+    event_loop_thread_id = threading.get_ident()
+
+    async def invoke_from_dashboard_loop():
+        return tool.invoke({"account_id": account.id, "limit": 1})
+
+    payload = json.loads(asyncio.run(invoke_from_dashboard_loop()).split("\n", 1)[1])
+
+    assert payload["ok"] is True
+    assert provider_thread_ids
+    assert provider_thread_ids[0] != event_loop_thread_id
+
+
 def test_runtime_stale_reference_refreshes_once_but_authentication_does_not_retry(monkeypatch):
     import json
     from mana_agent.connectors.email import runtime_tools

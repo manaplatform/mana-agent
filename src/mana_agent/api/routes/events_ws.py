@@ -7,7 +7,6 @@ introduce a second event model. Disconnects cleanly and never block producers.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -31,6 +30,7 @@ async def conversation_events_ws(
     repository_id: str | None = Query(default=None),
     execution_id: str | None = Query(default=None),
     replay_limit: int = Query(default=100, ge=0, le=1000),
+    after_sequence: int = Query(default=0, ge=0),
 ) -> None:
     await websocket.accept()
     root_path = find_mana_root(None if not root else __import__("pathlib").Path(root))
@@ -53,8 +53,11 @@ async def conversation_events_ws(
         await websocket.close(code=4404)
         return
 
-    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     loop = asyncio.get_running_loop()
+
+    def _enqueue(payload: dict[str, Any]) -> None:
+        queue.put_nowait(payload)
 
     def _on_event(payload: dict[str, Any]) -> None:
         if str(payload.get("conversation_id") or "") != conversation_id:
@@ -62,13 +65,9 @@ async def conversation_events_ws(
         if execution_id and str(payload.get("execution_id") or payload.get("turn_id") or "") != execution_id:
             return
         try:
-            loop.call_soon_threadsafe(queue.put_nowait, payload)
-        except Exception:
-            # Drop if queue full / loop closed — never block publishers.
-            try:
-                queue.put_nowait(payload)
-            except Exception:
-                logger.debug("dropped websocket event for %s", conversation_id)
+            loop.call_soon_threadsafe(_enqueue, payload)
+        except RuntimeError:
+            logger.debug("websocket loop closed for %s", conversation_id)
 
     unsubscribe = hub.subscribe(conversation_id, _on_event)
     try:
@@ -79,6 +78,7 @@ async def conversation_events_ws(
                 "conversation_id": conversation_id,
                 "execution_id": execution_id,
                 "repository_id": repo_id,
+                "after_sequence": after_sequence,
             }
         )
         # Replay durable history so reconnecting clients recover state.
@@ -88,6 +88,7 @@ async def conversation_events_ws(
                 execution_id=execution_id or "",
                 limit=replay_limit,
                 repository_id=repo_id,
+                after_sequence=after_sequence,
             )
             for item in history:
                 await websocket.send_json({"type": "event.replay", "event": item})
@@ -97,6 +98,19 @@ async def conversation_events_ws(
                     "status": "success",
                     "conversation_id": conversation_id,
                     "count": len(history),
+                    "last_sequence": max(
+                        [
+                            after_sequence,
+                            *[
+                                (
+                                    int(item.get("sequence") or 0)
+                                    if str(item.get("sequence") or "0").isdigit()
+                                    else 0
+                                )
+                                for item in history
+                            ],
+                        ]
+                    ),
                 }
             )
 

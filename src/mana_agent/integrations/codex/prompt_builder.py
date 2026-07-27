@@ -17,8 +17,11 @@ Task ID:
 Repository:
 {workspace.repository_path}
 
-Worktree:
+Worktree root:
 {workspace.worktree_path}
+
+Working directory:
+{workspace.working_directory or workspace.worktree_path}
 
 Goal:
 {task.goal}
@@ -45,7 +48,12 @@ Constraints:
 - Work only inside the assigned worktree.
 - Do not modify files outside the allowed scope without reporting why.
 - Do not commit, push, publish, or open a pull request.
-- Do not access credentials or elevate permissions.
+- Do not read, reveal, copy, or modify credentials, and do not elevate permissions.
+  Never invoke `ssh` from this Codex process. Explicit user-authorized SSH tasks
+  must be submitted as structured jobs to a connected external worker. That worker
+  alone may resolve an identity-file path or SSH agent; never inspect the key file,
+  request its passphrase in chat, or include credential material in output. If no
+  worker is connected, report that condition without attempting local SSH.
 - Preserve public behavior unless the task explicitly changes it.
 - Add or update tests for behavior changes.
 - When verification commands are listed, run them. Otherwise select and run

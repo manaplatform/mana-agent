@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from mana_agent.gateway import (
     AgentChatGateway,
     EntryRouteRegistry,
@@ -12,7 +14,7 @@ from mana_agent.gateway import (
     RouteAvailability,
     RouteRegistration,
 )
-from mana_agent.gateway.entry_routing import ENTRY_ROUTER_PROMPT, EntryRoutingDecision, EntryRoutingError
+from mana_agent.gateway.entry_routing import ENTRY_ROUTER_PROMPT, EntryRouteContext, EntryRoutingDecision, EntryRoutingError
 from mana_agent.gateway.entry_routing import gmail_route_availability
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -30,6 +32,7 @@ class _RouteModel:
             "gmail": ["gmail"], "calendar": ["calendar"], "browser": ["browser"],
             "search": ["search"], "github": ["github"], "repository": ["repository"],
             "memory": ["memory"], "automation": ["repository"],
+            "artifact": ["artifact"],
             "capability_error": ["gmail"],
         }
         return SimpleNamespace(
@@ -44,6 +47,7 @@ class _RouteModel:
                     "reason_code": "TEST_ROUTE",
                     "error_code": "GMAIL_NOT_AVAILABLE" if route == "capability_error" else "",
                     "reuse_active_route": len(self.payloads) > 1,
+                    "artifact_family": "pdf" if route == "artifact" else "",
                 }
             )
         )
@@ -58,8 +62,11 @@ class _AskAgent:
             trace=[{"tool_name": "email_search", "status": "ok"}],
         )
         self.calls: list[dict[str, Any]] = []
+        self.project_roots: list[Path] = []
 
     def run(self, **kwargs: Any) -> Any:
+        if hasattr(self, "project_root"):
+            self.project_roots.append(Path(self.project_root).resolve())
         self.calls.append(kwargs)
         return self.response
 
@@ -112,6 +119,7 @@ class _CodingAgent:
 def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
     registry = EntryRouteRegistry()
     for name, description in (
+        ("multi_task", "compound task orchestration"),
         ("conversation", "ordinary conversation"),
         ("coding", "Codex coding"),
         ("gmail", "Gmail inbox"),
@@ -122,6 +130,7 @@ def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
         ("repository", "repository inspection"),
         ("memory", "memory retrieval"),
         ("automation", "automation"),
+        ("artifact", "artifact operations"),
         ("unsupported", "safe stop"),
         ("capability_error", "missing capability"),
     ):
@@ -175,6 +184,53 @@ def test_latest_gmail_routes_to_connector_and_preserves_identifiers(tmp_path: Pa
     assert result.payload["turn_id"] == "turn_exact"
 
 
+def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    upload = tmp_path / "uploads" / "test.xls"
+    upload.parent.mkdir()
+    upload.write_bytes(b"worksheet")
+    coding = _CodingAgent()
+    gateway, _chat, ask = _gateway(tmp_path, _RouteModel("artifact"), coding_agent=coding)
+    ask.project_root = tmp_path
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "test.xls\nin cell under age add average of age.",
+        attachments=[{"path": str(upload), "mime_type": "application/vnd.ms-excel"}],
+    )
+
+    assert result.payload["route"] == "artifact"
+    assert result.payload["lane_id"] == "artifact"
+    assert result.payload["routing_evidence"]["artifact_families"] == ["spreadsheet"]
+    assert coding.calls == []
+    assert ask.calls[0]["index_dir"] is not None
+    assert Path(ask.calls[0]["index_dir"]).name == ".artifact-index"
+
+
+def test_pdf_creation_without_attachment_uses_isolated_concrete_index_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, ask = _gateway(tmp_path, _RouteModel("artifact"))
+    ask.project_root = tmp_path
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Create a PDF from the completed research.",
+    )
+
+    assert result.mode == "route-artifact"
+    assert ask.calls[0]["index_dir"] is not None
+    assert Path(ask.calls[0]["index_dir"]).name == ".artifact-index"
+    assert Path(ask.calls[0]["index_dir"]).parent.name.startswith("turn_")
+    assert ask.project_roots == [tmp_path.resolve()]
+    assert ask.calls[0]["tool_policy"]["skill_root"] == str(tmp_path.resolve())
+    assert ask.calls[0]["tool_policy"]["allowed_tools"][0] == "read_skill"
+    assert "read_skill(skill_name='pdf-create')" in ask.calls[0]["question"]
+    assert "Mana-Agent launch directory" in ask.calls[0]["question"]
+
+
 def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     unavailable = RouteAvailability(
@@ -191,6 +247,52 @@ def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path
     assert "gmail" in result.answer.lower()
     assert not chat.conversation_calls
     assert not ask_agent.calls
+
+
+def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
+    class _IncorrectCapabilityModel:
+        def invoke(self, _messages: list[Any]) -> Any:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "capability_error",
+                        "confidence": 0.98,
+                        "reason": "search is unavailable",
+                        "required_sources": ["search"],
+                        "target_urls": [],
+                        "requires_live_data": True,
+                        "reason_code": "SEARCH_UNAVAILABLE",
+                        "error_code": "SEARCH_NOT_AVAILABLE",
+                        "reuse_active_route": False,
+                    }
+                )
+            )
+
+    router = EntryRouter(llm=_IncorrectCapabilityModel(), registry=_registry())
+
+    with pytest.raises(EntryRoutingError, match=r"declared available source\(s\) unavailable: search"):
+        router.route(
+            user_prompt="Find current public information about Mana-Agent.",
+            context=EntryRouteContext(session_id="session", conversation_id="session", turn_id="turn"),
+        )
+
+
+def test_search_route_availability_requires_a_configured_provider(tmp_path: Path, monkeypatch) -> None:
+    from mana_agent.search.config import SearchConfig
+
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    monkeypatch.setattr(
+        SearchConfig,
+        "from_env",
+        classmethod(lambda cls: SearchConfig(enable_web=True, web_provider="tavily")),
+    )
+
+    availability = gateway._search_route_availability()
+
+    assert availability.available is False
+    assert availability.configured is True
+    assert availability.authorized is False
+    assert "credentials" in availability.reason.lower()
 
 
 def test_gmail_availability_reads_live_account_and_credential_registry(monkeypatch) -> None:
@@ -263,6 +365,11 @@ def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monke
     assert coding.calls
     assert coding.session_id == session_id
     assert coding_result.payload["session_id"] == session_id
+
+
+def test_entry_router_exposes_authorized_ssh_requests_to_coding_workflow() -> None:
+    assert "remote_execution" in ENTRY_ROUTER_PROMPT
+    assert "Never select coding for" in ENTRY_ROUTER_PROMPT
 
 
 def test_followup_gmail_reuses_one_session_and_supplies_previous_route(tmp_path: Path, monkeypatch) -> None:
@@ -357,6 +464,230 @@ def test_ping_uses_a_valid_tool_free_model_decision(tmp_path: Path, monkeypatch)
     assert result.mode == "route-conversation"
     assert result.answer == "ordinary conversation"
     assert len(chat.conversation_calls) == 1
+def test_router_exposes_exact_required_source_contract_to_model() -> None:
+    registry = _registry()
+    captured: dict[str, Any] = {}
+
+    def invoke(messages: list[Any]) -> Any:
+        captured.update(json.loads(messages[-1].content))
+        return SimpleNamespace(content=json.dumps({
+            "route": "conversation",
+            "confidence": 0.9,
+            "reason": "ordinary discussion",
+            "required_sources": ["none"],
+            "target_urls": [],
+        }))
+
+    decision = EntryRouter(llm=SimpleNamespace(invoke=invoke), registry=registry).route(
+        user_prompt="Hello",
+        context=SimpleNamespace(to_dict=lambda: {"session_id": "s"}),
+    )
+
+    assert decision.required_sources == ("none",)
+    assert captured["required_source_rules"]["command"] == [["none"]]
+    assert captured["required_source_rules"]["multi_task"] == [["none"]]
+    assert "command" not in captured["required_source_vocabulary"]
+    assert "repository" in captured["required_source_vocabulary"]
+
+
+def test_multi_task_route_is_registered_and_requires_no_parent_sources() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "multi_task",
+            "confidence": 0.97,
+            "reason": "The request has separately routed work.",
+            "required_sources": ["none"],
+            "target_urls": [],
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Inspect GitHub issues, then update the repository.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.route == "multi_task"
+    assert decision.required_sources == ("none",)
+
+
+def test_multi_task_route_rejects_claimed_child_source() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "multi_task",
+            "confidence": 0.97,
+            "reason": "Invalid parent source claim.",
+            "required_sources": ["repository"],
+            "target_urls": [],
+        }))
+    )
+
+    with pytest.raises(EntryRoutingError, match="tool-free routes"):
+        EntryRouter(llm=model, registry=registry).route(
+            user_prompt="Inspect GitHub issues and update the repository.",
+            context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+        )
+
+
+def test_atomic_child_excludes_recursive_orchestration_from_model_registry() -> None:
+    registry = _registry()
+    model = _RouteModel("search")
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Research OpenClaw.",
+        context=EntryRouteContext(
+            session_id="s",
+            conversation_id="s",
+            turn_id="t:research_openclaw",
+            conversation_summary="Research OpenClaw and create a PDF.",
+            atomic_child=True,
+            orchestration_parent_task_id="task-root",
+        ),
+    )
+
+    assert decision.route == "search"
+    assert "multi_task" not in {row["name"] for row in model.payloads[0]["routes"]}
+    assert model.payloads[0]["routing_constraints"] == {
+        "atomic_child": True,
+        "disallowed_routes": ["multi_task"],
+        "orchestration_parent_task_id": "task-root",
+    }
+
+
+def test_atomic_child_rejects_model_attempt_to_select_recursive_orchestration() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "multi_task",
+            "confidence": 0.97,
+            "reason": "Incorrectly reconsidered the parent compound request.",
+            "required_sources": ["none"],
+            "target_urls": [],
+        }))
+    )
+
+    with pytest.raises(EntryRoutingError, match="atomic compound child"):
+        EntryRouter(llm=model, registry=registry).route(
+            user_prompt="Research OpenClaw.",
+            context=EntryRouteContext(
+                session_id="s",
+                conversation_id="s",
+                turn_id="t:research_openclaw",
+                atomic_child=True,
+                orchestration_parent_task_id="task-root",
+            ),
+        )
+
+
+def test_artifact_creation_uses_model_selected_family_without_file_evidence() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "artifact",
+            "confidence": 0.98,
+            "reason": "Create a PDF artifact.",
+            "required_sources": ["artifact"],
+            "target_urls": [],
+            "artifact_family": "pdf",
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Create a PDF from the supplied research.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.artifact_family == "pdf"
+
+
+def test_router_unknown_source_error_identifies_invalid_model_value() -> None:
+    registry = _registry()
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "conversation",
+            "confidence": 0.9,
+            "reason": "invalid model contract",
+            "required_sources": ["command"],
+            "target_urls": [],
+        }))
+    )
+
+    try:
+        EntryRouter(llm=model, registry=registry).route(
+            user_prompt="Show my sessions",
+            context=SimpleNamespace(to_dict=lambda: {"session_id": "s"}),
+        )
+    except EntryRoutingError as exc:
+        assert "unknown source identifier(s): command" in str(exc)
+        assert "Allowed values:" in str(exc)
+    else:
+        raise AssertionError("unknown source identifiers must fail closed")
+
+
+def test_router_uses_structured_output_when_model_supports_it() -> None:
+    registry = _registry()
+    calls: list[tuple[object, str, bool]] = []
+
+    class StructuredModel:
+        def with_structured_output(self, schema, *, method: str, strict: bool):
+            calls.append((schema, method, strict))
+            return SimpleNamespace(
+                invoke=lambda _messages: {
+                    "route": "conversation",
+                    "confidence": 0.9,
+                    "reason": "No tool is needed.",
+                    "required_sources": ["none"],
+                }
+            )
+
+        def invoke(self, _messages):  # pragma: no cover - must not be used
+            raise AssertionError("structured output was available")
+
+    decision = EntryRouter(llm=StructuredModel(), registry=registry).route(
+        user_prompt="Hello",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.route == "conversation"
+    assert calls[0][1:] == ("json_schema", True)
+
+
+def test_remote_routing_requires_direct_ssh_without_a_managed_worker() -> None:
+    registry = EntryRouteRegistry()
+    registry.register(
+        RouteRegistration(
+            "remote_execution",
+            "SSH execution",
+            lambda: RouteAvailability(
+                available=True,
+                details={"managed_worker_available": False, "direct_ssh_available": True},
+            ),
+        )
+    )
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "remote_execution",
+            "confidence": 0.9,
+            "reason": "No managed worker is available.",
+            "required_sources": ["remote_execution"],
+            "target_urls": [],
+            "remote_request": {
+                "provider": "remote-ssh",
+                "worker_id": "",
+                "target": {"host": "example.test", "user": "root"},
+                "authentication": {"mode": "agent"},
+                "command": {"argv": ["true"]},
+            },
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="Run true over SSH.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.remote_request["provider"] == "remote-ssh"
 
 
 def test_failed_required_browser_source_stops_multi_source_plan(tmp_path: Path, monkeypatch) -> None:
@@ -386,6 +717,43 @@ def test_failed_required_browser_source_stops_multi_source_plan(tmp_path: Path, 
         "browser": {"status": "failed", "error": "browser returned no evidence"}
     }
     assert len(failing_browser.calls) == 1
+
+
+def test_compound_child_search_uses_only_its_validated_child_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _RouteModel("conversation"))
+    captured: dict[str, str] = {}
+
+    def execute_required_sources(**kwargs: Any):
+        captured["text"] = kwargs["text"]
+        from mana_agent.gateway.turn_engine import ChatTurnResult
+
+        return ChatTurnResult(answer="research complete", payload={"route": "search"})
+
+    monkeypatch.setattr(gateway, "_execute_required_sources", execute_required_sources)
+    child_prompt = "Research current public information about Hermes Agent."
+    decision = EntryRoutingDecision(
+        route="search",
+        confidence=0.98,
+        reason="Current public research is required.",
+        required_sources=("search",),
+    )
+
+    gateway._execute_entry_route(
+        decision=decision,
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t:research"),
+        text=child_prompt,
+        state={"messages": [{"role": "user", "content": "unrelated parent conversation"}]},
+        ask_service=gateway.get_ask_service(),
+        sink=None,
+        options={"_isolated_child_prompt": True},
+    )
+
+    assert captured["text"] == child_prompt
+    assert "unrelated parent conversation" not in captured["text"]
 
 
 def test_session_close_new_history_and_stale_finalization(tmp_path: Path, monkeypatch) -> None:
@@ -423,5 +791,5 @@ def test_new_closes_previous_and_opens_fresh_session(tmp_path: Path, monkeypatch
 
     service = WorkspaceService()
     assert second != first
-    assert service.store.get_session(first).status == "closed"
+    assert first not in {item.session_id for item in service.store.list_sessions()}
     assert service.store.get_session(second).status == "active"

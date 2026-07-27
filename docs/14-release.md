@@ -8,7 +8,9 @@ and confirm the deliverables before publishing or tagging.
 
 - Package version lives in `pyproject.toml` under `[project].version`.
 - Runtime version resolution uses `mana_agent._version.get_version()` (pyproject first, then installed metadata).
-- Stable Git tags use the form `vMAJOR.MINOR.PATCH` (for example `v0.0.15`).
+- Stable GitHub Release tags are derived from `[project].version` as
+  `vMAJOR.MINOR.PATCH` (for example, application version `0.0.15` publishes
+  tag `v0.0.15`). The version-tag trigger must match that derived tag.
 - Keep the README version badge in sync when cutting a documented release.
 
 ## GitHub automation
@@ -26,14 +28,14 @@ Configuration lives under `.github/`:
 | `.github/workflows/release.yml` | Build package + binaries; publish GitHub Releases |
 | `.github/workflows/publish-pypi.yml` | Validate, build, and publish releases to PyPI with OIDC |
 
-### Stable releases (`v*.*.*` tags)
+### Stable releases (application-version tags)
 
 1. Update `pyproject.toml` version and user-facing docs as needed.
 2. Record notable changes in `CHANGELOG.md`.
 3. Merge to `main` after review and CI.
-4. Create and push an annotated tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-5. The `release` workflow builds wheels, sdists, platform binaries, checksums, then publishes a GitHub Release using the standardized body from `build_release_notes.py`.
-6. Publishing that GitHub Release triggers `publish-pypi.yml`. It independently runs the complete test suite, verifies that the tag and package version match, checks that the version is not already on PyPI, builds and validates one wheel and one source distribution, and uploads those exact files to PyPI.
+4. Create and push an annotated trigger tag matching the application version: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+5. The `release` workflow reads `[project].version`, derives the GitHub Release tag as `vX.Y.Z`, and fails if the pushed trigger tag differs. It then builds wheels, sdists, platform binaries, checksums, and publishes the GitHub Release using the standardized body from `build_release_notes.py`.
+6. Publishing that GitHub Release triggers `publish-pypi.yml`. It independently runs the complete test suite, verifies that the release tag and package version match, checks that the version is not already on PyPI, builds and validates one wheel and one source distribution, and uploads those exact files to PyPI.
 7. Re-running the GitHub release workflow for the same tag **updates** that release (assets and notes) instead of creating a duplicate. PyPI is different: published versions are immutable and cannot be overwritten.
 
 Release notes are **not** static placeholders. They combine:
@@ -68,7 +70,7 @@ In PyPI, open the `mana-agent` project publishing settings, add a GitHub Actions
 4. The existing release workflow creates the GitHub Release. Once that release is published, the PyPI workflow validates and publishes the package.
 5. Confirm that both `mana-agent-0.0.11.tar.gz` and the matching wheel are present on PyPI.
 
-After removing one leading `v`, the GitHub Release tag must exactly match `[project].version`; otherwise publication stops. PyPI versions are immutable and cannot be overwritten or replaced, so increment the package version before every new publication.
+The GitHub Release tag is derived from `[project].version` with one leading `v`; the trigger tag must exactly match it or publication stops. PyPI versions are immutable and cannot be overwritten or replaced, so increment the package version before every new publication.
 
 Manual runs of `publish-pypi.yml` require an existing tag and may validate or rebuild artifacts only. The production publish job is restricted to the `release.published` event, so `workflow_dispatch`, pushes, and pull requests cannot publish to PyPI.
 
