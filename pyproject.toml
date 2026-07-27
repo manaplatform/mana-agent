@@ -26,6 +26,8 @@ dependencies = [
   "python-dotenv>=1.0,<3.0",
   "PyYAML>=6.0,<7.0",
   "tomli>=2.0,<3.0; python_version < '3.11'",
+  # Windows does not ship the IANA timezone database used by zoneinfo.
+  "tzdata>=2025.2",
   "mcp>=1.0,<2.0",
 
   # ✅ LangChain (modern, supported)

@@ -381,6 +381,26 @@ def _lock_path(root: Path) -> Path:
     return config_path(root).with_suffix(".lock")
 
 
+def _acquire_windows_file_lock(handle: Any) -> None:
+    import msvcrt
+
+    handle.seek(0)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    # ``msvcrt.locking`` locks from the current file position.
+    # Keep both acquisition and release on the same first byte.
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def _release_windows_file_lock(handle: Any) -> None:
+    import msvcrt
+
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def _store_lock(root: Path):
     path = _lock_path(root)
@@ -391,12 +411,7 @@ def _store_lock(root: Path):
         handle = path.open("a+b")
         try:
             if os.name == "nt":
-                import msvcrt
-                handle.seek(0)
-                if handle.tell() == 0:
-                    handle.write(b"0")
-                    handle.flush()
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                _acquire_windows_file_lock(handle)
             else:
                 import fcntl
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -404,9 +419,7 @@ def _store_lock(root: Path):
         finally:
             try:
                 if os.name == "nt":
-                    import msvcrt
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    _release_windows_file_lock(handle)
                 else:
                     import fcntl
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

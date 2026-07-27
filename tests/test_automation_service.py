@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -64,6 +66,26 @@ def test_calendar_cron_preserves_timezone() -> None:
     assert result is not None
     assert result.astimezone(service.ZoneInfo("Asia/Tehran")).hour == 9
     assert result.astimezone(service.ZoneInfo("Asia/Tehran")).weekday() == 0
+
+
+def test_windows_store_lock_acquires_and_releases_the_same_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, int]] = []
+
+    def locking(fd: int, mode: int, nbytes: int) -> None:
+        calls.append((mode, nbytes, service.os.lseek(fd, 0, service.os.SEEK_CUR)))
+
+    fake_msvcrt = SimpleNamespace(LK_LOCK=1, LK_UNLCK=2, locking=locking)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    with (tmp_path / "automation.lock").open("a+b") as handle:
+        service._acquire_windows_file_lock(handle)
+        service._release_windows_file_lock(handle)
+
+    assert [(mode, nbytes, position) for mode, nbytes, position in calls] == [
+        (fake_msvcrt.LK_LOCK, 1, 0),
+        (fake_msvcrt.LK_UNLCK, 1, 0),
+    ]
 
 
 def test_create_rejects_a_past_one_time_trigger(tmp_path: Path) -> None:

@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Fixed Windows automation persistence: the one-byte store lock now unlocks
+  the same byte it acquires, and the runtime dependency now includes the IANA
+  timezone database required by Windows' ``zoneinfo`` implementation.
+  - Verification: targeted automation-service tests passed.
+
 - Registered the typed automation chat tools with the Operations lane's explicit
   `automation` capability, so a validated automation route can reach
   `automation_create` without bypassing lane permission checks. Added regression
