@@ -139,6 +139,11 @@ def test_message_reflows_when_a_surrounding_panel_changes_width() -> None:
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.pause()
+            # History replay is deliberately deferred until its mounted
+            # VerticalScroll has completed a refresh. Windows' Proactor event
+            # loop may expose the app after that refresh but before the
+            # dynamically mounted message card is processed.
+            await pilot.pause()
             message = _message(app)
             panel = app.query_one("#side-panel", Static)
             initial_width = message.scrollable_content_region.width

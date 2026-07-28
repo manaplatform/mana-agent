@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Stabilized the surrounding-panel TUI reflow regression on Windows by waiting
+  through Textual's deferred history replay and dynamic-card mount cycle before
+  inspecting the replayed message.
+  - Verification: `.venv/bin/python -m pytest -q tests/test_tui_message_layout.py`
+    passed (7 tests); full Windows CI remains to be rerun.
+
 - Reconciled merged TUI wrapping regressions with the read-only full-card-width
   contract and made the consecutive-message fixture independent of vertical
   scrollbar width changes.
