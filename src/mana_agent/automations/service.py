@@ -7,6 +7,7 @@ reloads the definition, checks its due time, and acquires a durable lease.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import platform
@@ -14,6 +15,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -27,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 
 from mana_agent.utils.redaction import redact_secrets
 from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
+from mana_agent.workspaces.paths import mana_home
 
 
 CONFIG_VERSION = 3
@@ -35,6 +38,7 @@ LEASE_SECONDS = 3_600
 _ID_PATTERN = re.compile(r"^(?:aut|sch)_[A-Za-z0-9_-]{3,128}$")
 _CRON_FIELD = re.compile(r"^[0-9*/,\-]+$")
 _MANAGED_PREFIX = "mana-agent-automation-"
+_AUTOMATION_RUNTIME_NAME = "runtime"
 _PROCESS_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 
@@ -716,10 +720,114 @@ def list_runs(root: Path, automation_id: str = "", *, limit: int = 50) -> list[d
     return rows[-max(1, limit):]
 
 
+def _automation_runtime_dir() -> Path:
+    return mana_home() / "automations" / _AUTOMATION_RUNTIME_NAME
+
+
+def _automation_runtime_marker(runtime: Path) -> Path:
+    return runtime / ".mana-agent-runtime.json"
+
+
+def _source_virtualenv() -> Path:
+    """Find the virtual environment that contains the current CLI runtime."""
+    # Do not resolve the Python symlink: doing so points into the base Python
+    # framework and loses the virtual environment's ``pyvenv.cfg`` parent.
+    candidates = [Path(sys.executable).expanduser().parent.parent]
+    executable = shutil.which("mana-agent")
+    if executable:
+        candidates.insert(0, Path(executable).expanduser().parent.parent)
+    for candidate in candidates:
+        if (candidate / "pyvenv.cfg").is_file():
+            return candidate
+    raise AutomationValidationError(
+        "Local scheduler deployment requires Mana-Agent to be installed in a virtual environment "
+        "so it can create its protected-path-safe runtime under ~/.mana."
+    )
+
+
+def _runtime_fingerprint(source_venv: Path) -> str:
+    package_root = Path(__file__).resolve().parents[1]
+    parts = [str(source_venv), str(source_venv.stat().st_mtime_ns)]
+    for path in sorted(package_root.rglob("*.py")):
+        stat = path.stat()
+        parts.append(f"{path.relative_to(package_root)}:{stat.st_mtime_ns}:{stat.st_size}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _copy_runtime_package(source_venv: Path, runtime: Path, *, launcher_runtime: Path) -> None:
+    source_site_packages = next(source_venv.glob("lib/python*/site-packages"), None)
+    runtime_site_packages = next(runtime.glob("lib/python*/site-packages"), None)
+    if source_site_packages is None or runtime_site_packages is None:
+        raise AutomationValidationError("The Mana-Agent virtual environment has no site-packages directory.")
+    source_package = Path(__file__).resolve().parents[1]
+    target_package = runtime_site_packages / "mana_agent"
+    shutil.copytree(source_package, target_package, dirs_exist_ok=True)
+    for editable_path in runtime_site_packages.glob("__editable__.mana_agent-*.pth"):
+        editable_path.unlink()
+    launcher = runtime / "bin" / "mana-agent"
+    if not launcher.is_file():
+        raise AutomationValidationError("The copied Mana-Agent runtime has no CLI launcher.")
+    launcher.write_text(
+        f"#!{launcher_runtime / 'bin' / 'python'}\n"
+        "from mana_agent.commands.cli import app\n\n"
+        "if __name__ == '__main__':\n"
+        "    app()\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o700)
+
+
+def ensure_automation_runtime() -> Path:
+    """Create an executable scheduler snapshot beneath ``~/.mana``.
+
+    launchd does not inherit Terminal's privacy permission to read a development
+    checkout in ``~/Documents``. The snapshot intentionally contains the active
+    virtual environment and the installed source package so scheduled jobs only
+    read owner-controlled paths under the Mana home.
+    """
+    source_venv = _source_virtualenv()
+    runtime = _automation_runtime_dir()
+    fingerprint = _runtime_fingerprint(source_venv)
+    marker = _automation_runtime_marker(runtime)
+    try:
+        current = json.loads(marker.read_text(encoding="utf-8")) if marker.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        current = {}
+    executable = runtime / "bin" / "mana-agent"
+    if current.get("fingerprint") == fingerprint and executable.is_file():
+        return executable
+
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".runtime-", dir=runtime.parent))
+    try:
+        shutil.copytree(source_venv, staging / "venv", symlinks=True)
+        staged_runtime = staging / "venv"
+        _copy_runtime_package(source_venv, staged_runtime, launcher_runtime=runtime)
+        _automation_runtime_marker(staged_runtime).write_text(
+            json.dumps({"fingerprint": fingerprint}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if runtime.exists():
+            shutil.rmtree(runtime)
+        os.replace(staged_runtime, runtime)
+    except OSError as exc:
+        raise AutomationValidationError(
+            f"Unable to prepare the local scheduler runtime under {runtime}: {exc}"
+        ) from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return executable
+
+
 def _executor_argv(automation: AutomationDefinition, root: Path) -> list[str]:
-    executable = shutil.which("mana-agent") or "mana-agent"
-    prefix = [executable]
-    return prefix + [
+    # GitHub installs the package in the runner before invocation, while local
+    # schedulers must be independent of a possibly protected development tree.
+    executable = (
+        Path(shutil.which("mana-agent") or "mana-agent")
+        if automation.target_runtime == "github"
+        else ensure_automation_runtime()
+    )
+    return [str(executable)] + [
         "automation", "execute", "--automation-id", automation.id,
         "--root-dir", str(root.resolve()),
     ]
@@ -836,8 +944,8 @@ def deploy_launchd(
 ) -> DeploymentState:
     path = _launchd_path(automation)
     if not automation.enabled:
-        path.unlink(missing_ok=True)
         runner(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], capture_output=True, text=True, check=False)
+        path.unlink(missing_ok=True)
         return DeploymentState(status="disabled", backend="launchd", artifact=str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     argv = _executor_argv(automation, root)
@@ -1147,6 +1255,11 @@ def execute_automation(
     except Exception:
         _release_lease(root, automation_id, run.id)
         raise
+    # A completed one-time automation has no further due occurrence. Remove its
+    # recurring platform wakeup promptly so it cannot continue polling forever.
+    finished_automation = get_automation(root, automation_id)
+    if finished_automation.trigger.type == "once" and not finished_automation.enabled:
+        reconcile_deployment(root, automation_id)
     event = "automation.run.completed" if status == "succeeded" else "automation.run.failed"
     emit_automation_event(root, event, get_automation(root, automation_id), run_id=run.id, status=status)
     return {"ok": status == "succeeded", "executed": True, **completed}

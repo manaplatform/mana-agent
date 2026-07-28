@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Moved the executable local-scheduler snapshot beneath `~/.mana/automations/runtime`.
+  Launchd now runs this owner-controlled copy instead of reading a development virtual
+  environment beneath macOS-protected locations such as `~/Documents`; completed one-time
+  runs also remove their platform wakeup.
+  - Verification: targeted automation-service tests passed.
+
 - Fixed local connector automation execution to distinguish immediate job execution from
   automation authoring, rejecting unexpected schedule mutations instead of recording a false
   success. macOS launchd jobs now retain their Mana home, write per-job stdout/stderr logs, and

@@ -113,6 +113,7 @@ def test_local_deployment_uses_id_executor_and_one_managed_marker(
 ) -> None:
     automation = _automation(tmp_path)
     monkeypatch.setattr(service.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(service, "ensure_automation_runtime", lambda: Path("/runtime/mana-agent"))
     writes: list[str] = []
 
     def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -135,6 +136,7 @@ def test_interval_backend_wakes_minutely_without_converting_to_cron(
         trigger=IntervalTrigger(every_seconds=18_000, anchor_at=datetime.now(timezone.utc)),
     )
     monkeypatch.setattr(service.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(service, "ensure_automation_runtime", lambda: Path("/runtime/mana-agent"))
     writes: list[str] = []
 
     def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -233,6 +235,7 @@ def test_platform_persistent_scheduler_adapters_are_id_based(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     automation = _automation(tmp_path)
+    monkeypatch.setattr(service, "ensure_automation_runtime", lambda: Path("/runtime/mana-agent"))
     calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -265,6 +268,52 @@ def test_platform_persistent_scheduler_adapters_are_id_based(
     windows = service.deploy_windows(automation, tmp_path, runner=runner)
     assert windows.status == "deployed"
     assert any("ManaAgent-" + automation.id in command for command in calls)
+
+
+def test_automation_runtime_copies_the_active_venv_beneath_mana_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source-venv"
+    source_site_packages = source / "lib" / "python3.12" / "site-packages"
+    source_site_packages.mkdir(parents=True)
+    (source / "pyvenv.cfg").write_text("home = /python\n", encoding="utf-8")
+    (source / "bin").mkdir()
+    (source / "bin" / "mana-agent").write_text("#!/source/python\n", encoding="utf-8")
+    package_root = tmp_path / "source-package" / "mana_agent"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("VERSION = 'test'\n", encoding="utf-8")
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana-home"))
+    monkeypatch.setattr(service, "_source_virtualenv", lambda: source)
+    monkeypatch.setattr(service, "_runtime_fingerprint", lambda _source: "snapshot-1")
+    monkeypatch.setattr(service, "__file__", str(package_root / "automations" / "service.py"))
+
+    executable = service.ensure_automation_runtime()
+
+    assert executable == tmp_path / "mana-home" / "automations" / "runtime" / "bin" / "mana-agent"
+    assert executable.is_file()
+    assert "#!" + str(executable.parent / "python") in executable.read_text(encoding="utf-8")
+    assert (executable.parents[1] / "lib" / "python3.12" / "site-packages" / "mana_agent" / "__init__.py").is_file()
+
+
+def test_disabling_launchd_boots_out_before_removing_the_plist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    automation = _automation(tmp_path)
+    automation.enabled = False
+    launch_path = tmp_path / "LaunchAgents" / f"{automation.id}.plist"
+    launch_path.parent.mkdir(parents=True)
+    launch_path.write_text("plist", encoding="utf-8")
+    monkeypatch.setattr(service, "_launchd_path", lambda _item: launch_path)
+    monkeypatch.setattr(service.os, "getuid", lambda: 501, raising=False)
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[:2] == ["launchctl", "bootout"]
+        assert launch_path.exists()
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    state = service.deploy_launchd(automation, tmp_path, runner=runner)
+    assert state.status == "disabled"
+    assert not launch_path.exists()
 
 
 def test_launchd_health_reports_a_recorded_executor_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
