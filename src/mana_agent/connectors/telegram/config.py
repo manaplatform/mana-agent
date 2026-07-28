@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mana_agent.config.user_config import load_user_config, save_user_config
+from mana_agent.config.user_config import load_user_config, load_user_secrets, save_user_config, save_user_secrets
 from mana_agent.workspaces.paths import mana_home
 
 from .errors import TelegramConfigurationError
@@ -95,6 +95,9 @@ class TelegramConfig(BaseModel):
 
     @property
     def bot_token(self) -> str:
+        secret_value = str(load_user_secrets().get(self.bot_token_env, "")).strip()
+        if secret_value:
+            return secret_value
         value = str(os.getenv(self.bot_token_env, "")).strip()
         if value or not self.bot_token_secret_ref:
             return value
@@ -107,6 +110,9 @@ class TelegramConfig(BaseModel):
 
     @property
     def webhook_secret(self) -> str:
+        secret_value = str(load_user_secrets().get(self.webhook.secret_env, "")).strip()
+        if secret_value:
+            return secret_value
         return str(os.getenv(self.webhook.secret_env, "")).strip()
 
     @property
@@ -124,7 +130,10 @@ class TelegramConfig(BaseModel):
         if not self.enabled:
             raise TelegramConfigurationError("Telegram connector is disabled.")
         if not self.bot_token:
-            raise TelegramConfigurationError(f"Telegram bot token is missing from environment variable {self.bot_token_env}.")
+            raise TelegramConfigurationError(
+                f"Telegram bot token is missing. Add {self.bot_token_env} to Mana's secrets.toml "
+                f"or set it in the connector process environment."
+            )
         if self.effective_transport == "webhook":
             parsed = urlparse(self.webhook.public_url)
             if parsed.scheme != "https" or not parsed.netloc:
@@ -159,6 +168,8 @@ def load_telegram_config(values: dict[str, Any] | None = None) -> TelegramConfig
         raise TelegramConfigurationError(f"Invalid Telegram configuration: {exc}") from exc
 
 
-def save_telegram_config(config: TelegramConfig) -> None:
-    """Persist connector settings, storing only secret environment variable names."""
+def save_telegram_config(config: TelegramConfig, *, bot_token: str = "") -> None:
+    """Persist connector settings and, when provided, its bot token in secrets.toml."""
     save_user_config({"telegram": config.model_dump(mode="json")}, merge=True)
+    if clean_token := bot_token.strip():
+        save_user_secrets({config.bot_token_env: clean_token}, merge=True)
