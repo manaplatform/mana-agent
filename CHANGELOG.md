@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Fixed the cross-platform scheduler-adapter test to explicitly mock macOS's
+  POSIX-only user-ID lookup while exercising the `launchd` backend on Windows.
+  - Verification: targeted automation-service scheduler-adapter test passed.
+
 - Fixed Windows automation persistence: the one-byte store lock now unlocks
   the same byte it acquires, and the runtime dependency now includes the IANA
   timezone database required by Windows' ``zoneinfo`` implementation.

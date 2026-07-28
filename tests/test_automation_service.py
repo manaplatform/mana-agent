@@ -241,6 +241,7 @@ def test_platform_persistent_scheduler_adapters_are_id_based(
 
     launch_path = tmp_path / "LaunchAgents" / f"{automation.id}.plist"
     monkeypatch.setattr(service, "_launchd_path", lambda _item: launch_path)
+    monkeypatch.setattr(service.os, "getuid", lambda: 501, raising=False)
     launch = service.deploy_launchd(automation, tmp_path, runner=runner)
     assert launch.status == "deployed"
     assert automation.id in launch_path.read_text(encoding="utf-8")
