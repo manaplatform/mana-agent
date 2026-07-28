@@ -32,6 +32,37 @@ def test_nested_telegram_config_round_trip_without_secret(monkeypatch, tmp_path:
     assert loaded.webhook.public_url == "https://example.test"
 
 
+def test_telegram_token_resolves_from_mana_secrets_before_environment(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    config = TelegramConfig(enabled=True, default_repository=str(repository))
+
+    user_config.save_user_secrets({"TELEGRAM_BOT_TOKEN": "secret-token"})
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "environment-token")
+
+    assert config.bot_token == "secret-token"
+    config.validate_runtime()
+
+
+def test_save_telegram_config_persists_token_only_in_secrets(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    save_telegram_config(TelegramConfig(enabled=True, default_repository=str(repository)), bot_token="secret-token")
+
+    assert "secret-token" not in user_config.config_file().read_text(encoding="utf-8")
+    assert user_config.load_user_secrets()["TELEGRAM_BOT_TOKEN"] == "secret-token"
+
+
+def test_telegram_webhook_secret_resolves_from_mana_secrets(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    user_config.save_user_secrets({"TELEGRAM_WEBHOOK_SECRET": "s" * 32})
+
+    assert TelegramConfig(webhook={"secret_env": "TELEGRAM_WEBHOOK_SECRET"}).webhook_secret == "s" * 32
+
+
 def test_cli_discovers_telegram_commands(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path))
     result = CliRunner().invoke(app, ["connector", "telegram", "--help"])

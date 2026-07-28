@@ -32,6 +32,10 @@ from mana_agent.workspaces.preparation import RepositoryPreparationError
 logger = logging.getLogger(__name__)
 
 
+class SearchOperationDecisionError(RuntimeError):
+    """Raised when a search route lacks a valid model-selected query."""
+
+
 def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
     """Build one chronological conversation prompt with the current message once."""
     messages = list(session_state.get("messages") or [])
@@ -298,10 +302,22 @@ def run_web_research_answer(
     queries: list[SearchQuery] = []
     web_query = str((decision.tool_inputs.get("web_search") or {}).get("query") or "").strip()
     if "web_search" in decision.selected_tools:
-        queries.append(SearchQuery(query=web_query or question, target="web"))
+        if not web_query:
+            raise SearchOperationDecisionError(
+                "Model decision failed: web_search.query. No search was executed because the selected operation did not include a query."
+            )
+        if len(web_query) > 400:
+            raise SearchOperationDecisionError(
+                "Model decision failed: web_search.query. No search was executed because the selected query exceeds the provider's 400-character limit."
+            )
+        queries.append(SearchQuery(query=web_query, target="web"))
     github_input = decision.tool_inputs.get("github_search") or {}
-    github_query = str(github_input.get("query") or web_query or question).strip()
+    github_query = str(github_input.get("query") or "").strip()
     if "github_search" in decision.selected_tools:
+        if not github_query:
+            raise SearchOperationDecisionError(
+                "Model decision failed: github_search.query. No search was executed because the selected operation did not include a query."
+            )
         queries.append(
             SearchQuery(
                 query=github_query,
@@ -311,7 +327,9 @@ def run_web_research_answer(
             )
         )
     if not queries:
-        queries.append(SearchQuery(query=question, target="web"))
+        raise SearchOperationDecisionError(
+            "Model decision failed: external_search. No search was executed because no model-selected search operation was available."
+        )
     targets = list(dict.fromkeys(query.target for query in queries))
     forced_decision = SearchDecision(
         needs_search=True,
@@ -624,6 +642,11 @@ def process_chat_turn(
             )
         except Exception as exc:
             logger.debug("web research path failed: %s", exc)
+            return ChatTurnResult(
+                answer=f"Model decision failed: external_search. No fallback action was executed. Reason: {exc}",
+                error="external_search_decision_failed",
+                decision=agent_decision,
+            )
 
     edit_request = bool(
         agent_decision.intent == "edit"

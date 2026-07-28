@@ -63,6 +63,31 @@ def test_atomic_workspace_write_retries_transient_windows_access_denial(
     assert not list(tmp_path.glob(".session.json.*.tmp"))
 
 
+def test_atomic_workspace_write_recovers_when_session_directory_is_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sessions" / "session_test" / "session.json"
+    real_replace = os.replace
+    replace_calls = 0
+
+    def removed_directory_once(source: str | Path, destination: str | Path) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 1:
+            Path(source).unlink()
+            target.parent.rmdir()
+            raise FileNotFoundError(2, "No such file or directory", str(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr("mana_agent.workspaces.store.os.replace", removed_directory_once)
+
+    atomic_write_json(target, {"status": "active"})
+
+    assert replace_calls == 2
+    assert json.loads(target.read_text(encoding="utf-8")) == {"status": "active"}
+
+
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "mana-home"

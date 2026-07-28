@@ -17,27 +17,40 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Windows may briefly hold the destination open for indexing or virus
-        # scanning. Retry only that sharing violation; other I/O errors fail.
-        for attempt in range(6):
-            try:
-                os.replace(temporary, path)
-                break
-            except PermissionError:
-                if attempt == 5:
-                    raise
-                time.sleep(0.01 * (2**attempt))
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    # A session reset can remove a session directory while another worker is
+    # finishing its atomic write. Recreate the directory and restage once so a
+    # valid new session never fails with a missing ``session.json`` path.
+    for directory_attempt in range(2):
+        temporary: str | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Windows may briefly hold the destination open for indexing or
+            # virus scanning. Retry only that sharing violation; other I/O
+            # errors fail.
+            for attempt in range(6):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.01 * (2**attempt))
+                except FileNotFoundError:
+                    if directory_attempt == 1:
+                        raise
+                    break
+        except FileNotFoundError:
+            if directory_attempt == 1:
+                raise
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def _read(path: Path, cls: type[T]) -> T:

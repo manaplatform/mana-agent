@@ -60,12 +60,15 @@ class ConfiguredWebSearchProvider:
     def _tavily(self, query: str, *, max_results: int) -> list[SearchResult]:
         if not self.api_key:
             raise WebSearchError("MANA_WEB_SEARCH_API_KEY is required for Tavily")
-        payload = json.dumps({"api_key": self.api_key, "query": query, "max_results": max_results}).encode("utf-8")
+        payload = json.dumps({"query": query, "max_results": max_results}).encode("utf-8")
         data = self._request_json(
             "https://api.tavily.com/search",
             method="POST",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
         )
         return [self._generic_result(item, query=query) for item in data.get("results", [])]
 

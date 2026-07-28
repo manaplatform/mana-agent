@@ -4,6 +4,43 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Fixed model-routed search follow-ups: the entry router now carries its
+  compact, model-selected search query into the executor. The executor rejects
+  missing or oversized operations rather than silently sending the full
+  conversation transcript to Tavily, whose query limit is 400 characters.
+  Search routes now request a separate, validated model decision for the exact
+  operation because high-level entry routing does not provide tool arguments;
+  this applies to both direct and required-source search routes.
+  - Verification: `venv/bin/python -m pytest
+    tests/gateway/test_turn_engine_search.py tests/test_ask_entry_router.py
+    tests/test_web_search_provider.py tests/test_search_router.py
+    tests/gateway/test_entry_routing.py -q` passed (50 tests); `venv/bin/python -m py_compile
+    src/mana_agent/gateway/turn_engine.py src/mana_agent/gateway/chat_gateway.py
+    src/mana_agent/multi_agent/runtime/entry_router.py
+    tests/gateway/test_turn_engine_search.py` and `git diff --check` passed.
+
+- Fixed Tavily web search authentication by sending the configured key in the
+  required `Authorization: Bearer` header rather than in the request body.
+  This prevents provider HTTP 400 failures on model-selected search turns.
+  - Verification: `venv/bin/python -m pytest tests/test_web_search_provider.py
+    tests/test_search_config.py tests/test_search_router.py -q` passed (6
+    tests); `venv/bin/python -m py_compile src/mana_agent/search/web_provider.py
+    tests/test_web_search_provider.py` and `git diff --check` passed.
+
+- Fixed session persistence during Telegram `/new`: atomic workspace writes
+  now restage once after recreating a session directory that was concurrently
+  removed, preventing a missing `session.json` error for the new session.
+  - Verification: `venv/bin/python -m pytest tests/test_workspaces.py -q`
+    passed (13 tests); `venv/bin/python -m py_compile
+    src/mana_agent/workspaces/store.py tests/test_workspaces.py` and
+    `git diff --check` passed.
+
+- Updated the Telegram connector to resolve its bot token from Mana's managed
+  `secrets.toml` before the process environment, and made CLI setup save the
+  validated token there without writing it to `config.toml`.
+  Webhook secrets now use the same credential resolution path.
+  - Verification: `venv/bin/python -m pytest tests/connectors/test_telegram_cli_config.py tests/connectors/test_telegram_core.py -q` passed (14 tests); `venv/bin/python -m py_compile src/mana_agent/config/user_config.py src/mana_agent/connectors/telegram/config.py src/mana_agent/commands/telegram_cli.py` and `git diff --check` passed.
+
 - Added `external/supermemory` as a fully supported memory provider alongside
   `internal/mana` and `external/mem0`, including shared-factory wiring, lazy SDK
   loading, deterministic Supermemory scope tags/custom IDs, keyring-backed

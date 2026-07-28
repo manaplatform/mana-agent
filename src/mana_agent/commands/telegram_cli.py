@@ -44,8 +44,8 @@ def setup(
         identity = asyncio.run(_identity(config, token=token))
     except (OSError, RuntimeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    save_telegram_config(config)
-    typer.echo(f"Configured Telegram bot @{identity.username or identity.id}. Set {bot_token_env} in the connector process environment.")
+    save_telegram_config(config, bot_token=token)
+    typer.echo(f"Configured Telegram bot @{identity.username or identity.id}. Its token was saved in Mana's secrets.toml.")
 
 
 @telegram_app.command("test")

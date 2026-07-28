@@ -5,13 +5,12 @@ Mana-Agent can expose its existing model-routed chat service through a Telegram 
 ## Create and configure a bot
 
 1. In Telegram, open the verified `@BotFather` account, run `/newbot`, and retain the bot token as a deployment secret.
-2. Run setup. The token is used once for `getMe` validation and is not written to TOML:
+2. Run setup. The token is validated with `getMe` and stored in Mana's protected `~/.mana/secrets.toml`:
 
    ```bash
    mana-agent connector telegram setup \
      --repository /srv/projects/my-repo \
      --allowed-user 123456789
-   export TELEGRAM_BOT_TOKEN='…'
    ```
 
 3. Start polling:
@@ -24,7 +23,15 @@ Use `/id` in a private chat or approved group to inspect the numeric user, chat,
 
 ## Configuration
 
-Mana-Agent reads the existing `~/.mana/config.toml`. Secret values remain in environment variables named by `bot_token_env` and `secret_env`.
+Mana-Agent reads connector settings from `~/.mana/config.toml` and credentials from
+`~/.mana/secrets.toml`. `TELEGRAM_BOT_TOKEN` in `secrets.toml` takes precedence over
+the same environment variable; the environment remains available for deployments.
+
+```toml
+# ~/.mana/secrets.toml
+TELEGRAM_BOT_TOKEN = "…"
+TELEGRAM_WEBHOOK_SECRET = "…" # Required only for webhook transport
+```
 
 ```toml
 [telegram]
