@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Generated a read-only Gmail inbox check report for `ahdr1277@gmail.com` at
+  `gmail_check_ahdr1277_2026-07-28_1252.txt`, covering the 10 most recent Inbox
+  messages while explicitly excluding Spam and Trash.
+  - Verification: Gmail access succeeded; every returned message was addressed
+    to the requested account; the report file was verified as readable and
+    contains all 10 results.
+
 - Moved the executable local-scheduler snapshot beneath `~/.mana/automations/runtime`.
   Launchd now runs this owner-controlled copy instead of reading a development virtual
   environment beneath macOS-protected locations such as `~/Documents`; completed one-time
