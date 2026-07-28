@@ -17,8 +17,6 @@ All notable repository changes should be recorded here.
 - Bumped the package and documented version to `v0.1.2`.
   - Verification: `python -m pytest -q tests/test_package_version.py` passed.
 
-## 2026-07-28
-
 - Moved the executable local-scheduler snapshot beneath `~/.mana/automations/runtime`.
   Launchd now runs this owner-controlled copy instead of reading a development virtual
   environment beneath macOS-protected locations such as `~/Documents`; completed one-time
@@ -61,6 +59,18 @@ All notable repository changes should be recorded here.
     automation-service tests passed (95 tests). Changed-file Ruff,
     Python compilation, and `git diff --check` passed; focused TUI tests also
     passed for the card styling change.
+- Stabilized the surrounding-panel TUI reflow regression on Windows by waiting
+  through Textual's deferred history replay and dynamic-card mount cycle before
+  inspecting the replayed message.
+  - Verification: `.venv/bin/python -m pytest -q tests/test_tui_message_layout.py`
+    passed (7 tests); full Windows CI remains to be rerun.
+
+- Reconciled merged TUI wrapping regressions with the read-only full-card-width
+  contract and made the consecutive-message fixture independent of vertical
+  scrollbar width changes.
+  - Verification: the two focused TUI layout files passed five consecutive
+    runs (55 tests total); `.venv/bin/python -m pytest -q` passed (1,363 passed,
+    2 skipped); changed-test Ruff and `git diff --check` passed.
 
 ## 2026-07-27
 
@@ -682,6 +692,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-20
 
+- Clarified the gateway entry-router decision contract so tool-free prompts such as `ping` must emit `required_sources: ["none"]` instead of an omitted or empty source list.
+  - Strict validation remains intact: missing model-selected sources stop safely and never trigger a fallback route.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py -k 'ping or missing_required_sources'` passed (3 tests); Python compilation and `git diff --check` passed.
+
+- Fixed Textual chat-message wrapping to measure read-only message cards against their full available content width instead of reserving an invisible editing-cursor cell.
+  - Existing and newly mounted messages now reflow correctly for terminal resizes and surrounding-panel width changes without stale per-widget wrap widths.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_multiline_input.py tests/test_tui_live_tools_scroll.py tests/test_tui_auto_chat_tool_events.py` passed (19 tests); `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_tui*.py` passed (34 tests); Python compilation and `git diff --check` passed. Ruff and mypy are not installed in the repository environment.
 - Added webhook-driven GitHub App Autopilot with signed raw-body ingress, durable delivery/job persistence, deterministic validated event routing, actor authorization, installation-scoped authentication, persistent task sessions, isolated worktrees, Codex-only execution, verification gates, deterministic branches, and draft pull-request lifecycle support.
   - Added `mana-agent github-app` operational commands, health/readiness endpoints, least-privilege manifest/setup documentation, security-alert redaction, idempotency/coalescing, subject locks, bounded retry/cancellation controls, and structured lifecycle metrics.
   - Verification: `.venv/bin/ruff check src/mana_agent/github_autopilot src/mana_agent/commands/github_app_cli.py tests/test_github_autopilot.py src/mana_agent/integrations/codex/backend.py src/mana_agent/integrations/codex/coding_agent_shim.py tests/test_codex_integration.py` passed; `.venv/bin/python -m pytest tests/test_github_autopilot.py tests/test_codex_integration.py tests/test_api_analyze.py tests/test_api_conversations.py tests/test_package_version.py -q` passed (40 tests). Full-suite verification was not completed because the existing external-memory test configuration causes unrelated `MemoryConfigurationError` failures in `tests/test_ask_agent.py`.
@@ -842,7 +859,7 @@ All notable repository changes should be recorded here.
 - Added a production PyPI release workflow using GitHub Release publication, PyPI Trusted Publishing/OIDC, immutable action pins, once-built verified artifacts, version/PyPI availability gates, and serialized non-cancelling deployment concurrency.
   - Manual dispatches can validate and rebuild an existing tag but cannot reach the production publish job; push and pull-request CI now tests, builds, and checks distributions without publishing.
   - Added automated workflow safety and release-version validation coverage plus one-time Trusted Publisher and release documentation.
-  - Verification: Pending.
+  - Verification: `actionlint -color .github/workflows/publish-pypi.yml .github/workflows/ci.yml` passed; all GitHub workflow YAML parsed successfully; `python .github/scripts/validate_release_version.py --tag v0.0.15 --check-pypi` passed; `python -m build --sdist --wheel` produced one wheel and one sdist and `python -m twine check` passed for both; `PATH="$PWD/venv/bin:$PATH" PYTHONPATH=src ./venv/bin/python -m pytest -q` passed (947 tests, 1 skipped).
 
 - Added the Experience-to-Skill Workshop and trusted built-in `skill-creator` capability.
   - Completed, verified task experience now passes deterministic eligibility gates and evidence-weighted confidence scoring before any model generation occurs.

@@ -46,6 +46,22 @@ class SelectableText(TextArea):
     def __init__(self, text: str = "", **kwargs: object) -> None:
         super().__init__(text, read_only=True, show_line_numbers=False, **kwargs)
 
+    @property
+    def wrap_width(self) -> int:
+        """Measure read-only text against every available content cell.
+
+        ``TextArea`` normally reserves one cell for an editable cursor when it
+        calculates its soft-wrap width. Message cards are read-only, so that
+        reservation made a line exactly as wide as its card wrap one character
+        early. A subsequent terminal resize happened to add the missing cell,
+        which made the initial-layout bug look like a reflow timing issue.
+
+        Keep the framework's normal resize handling: this property is read by
+        ``TextArea._on_resize`` whenever Textual lays the widget out again.
+        """
+        if not self.soft_wrap:
+            return 0
+        return self.scrollable_content_region.width - self.gutter_width
     def on_mount(self) -> None:
         """Rewrap dynamically mounted cards after their parent has laid out.
 
