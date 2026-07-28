@@ -128,6 +128,11 @@ Return JSON only with this schema:
   "requires_external_search": false,
   "user_visible_message": null
 }
+
+When selecting `web_search` or `github_search`, include exactly one matching
+`tool_plan` entry with a compact, standalone `args.query` (at most 400
+characters). The executor runs that exact model-selected query; it never sends
+the full conversation transcript to a search provider.
 """
 
 

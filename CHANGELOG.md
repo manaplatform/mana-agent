@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Fixed model-routed search follow-ups: the entry router now carries its
+  compact, model-selected search query into the executor. The executor rejects
+  missing or oversized operations rather than silently sending the full
+  conversation transcript to Tavily, whose query limit is 400 characters.
+  Search routes now request a separate, validated model decision for the exact
+  operation because high-level entry routing does not provide tool arguments.
+  - Verification: `venv/bin/python -m pytest
+    tests/gateway/test_turn_engine_search.py tests/test_ask_entry_router.py
+    tests/test_web_search_provider.py tests/test_search_router.py
+    tests/gateway/test_entry_routing.py -q` passed (50 tests); `venv/bin/python -m py_compile
+    src/mana_agent/gateway/turn_engine.py src/mana_agent/gateway/chat_gateway.py
+    src/mana_agent/multi_agent/runtime/entry_router.py
+    tests/gateway/test_turn_engine_search.py` and `git diff --check` passed.
+
 - Fixed Tavily web search authentication by sending the configured key in the
   required `Authorization: Bearer` header rather than in the request body.
   This prevents provider HTTP 400 failures on model-selected search turns.

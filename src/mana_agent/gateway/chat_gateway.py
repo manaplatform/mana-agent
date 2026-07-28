@@ -43,6 +43,7 @@ from mana_agent.gateway.turn_engine import (
     _serialize_tool_traces,
     _conversation_prompt,
     agent_decision_llm,
+    decide_chat_route,
     load_analysis_context,
     process_chat_turn,
     run_web_research_answer,
@@ -2414,6 +2415,47 @@ class AgentChatGateway:
                 return ChatTurnResult(answer=answer, mode="remote-completed", decision=decision, payload={"route": decision.route, "provider": "remote-ssh", "job_id": request.job_id, "state": job.state.value, "events": [event.model_dump(mode="json") for event in job.events]})
             return ChatTurnResult(answer="Remote job was assigned to the selected managed worker.", mode="remote-assigned", decision=decision, payload={"route": decision.route, "provider": "reverse-worker", "job_id": request.job_id, "state": job.state.value})
 
+        if decision.route in {"search", "github"}:
+            required_tool = "github_search" if decision.route == "github" else "web_search"
+            try:
+                search_operation = decide_chat_route(
+                    ask_service=ask_service,
+                    question=text,
+                    root=self.root,
+                    memory_context=_conversation_prompt(state, text),
+                )
+            except Exception as exc:
+                return ChatTurnResult(
+                    answer=(
+                        f"Model decision failed: {required_tool}.query. "
+                        f"No search was executed. Reason: {exc}"
+                    ),
+                    error="search_operation_decision_failed",
+                    mode="route-tool-error",
+                    decision=decision,
+                    payload={"route": decision.route},
+                )
+            selected = set(search_operation.selected_tools)
+            query = str((search_operation.tool_inputs.get(required_tool) or {}).get("query") or "").strip()
+            if (
+                not search_operation.verifier_passed
+                or selected != {required_tool}
+                or not query
+                or len(query) > 400
+            ):
+                return ChatTurnResult(
+                    answer=(
+                        f"Model decision failed: {required_tool}.query. "
+                        "No search was executed because the required search-operation decision was invalid."
+                    ),
+                    error="search_operation_decision_invalid",
+                    mode="route-tool-error",
+                    decision=decision,
+                    payload={"route": decision.route},
+                )
+            mapped = search_operation
+        else:
+            mapped = None
         mapped = {
             "coding": AgentDecision(
                 intent="edit",
@@ -2431,23 +2473,7 @@ class AgentChatGateway:
                 reasoning_summary=decision.reason,
                 verifier_passed=True,
             ),
-            "search": AgentDecision(
-                intent="web_research",
-                confidence=decision.confidence,
-                selected_tools=["web_search"],
-                web_search_needed=True,
-                reasoning_summary=decision.reason,
-                verifier_passed=True,
-            ),
-            "github": AgentDecision(
-                intent="web_research",
-                confidence=decision.confidence,
-                selected_tools=["github_search"],
-                web_search_needed=True,
-                reasoning_summary=decision.reason,
-                verifier_passed=True,
-            ),
-        }.get(decision.route)
+        }.get(decision.route, mapped)
         if mapped is None:
             return ChatTurnResult(
                 answer=f"The `{decision.route}` route is registered but has no executor.",

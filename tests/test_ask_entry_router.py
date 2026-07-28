@@ -333,6 +333,7 @@ def test_router_can_select_web_search_for_openclaw_request() -> None:
     router = EntryRouter(
         llm=_FakeLLM(
             '{"kind":"web_search","confidence":0.91,"reason":"needs current public web research",'
+            '"tool_plan":[{"tool":"web_search","args":{"query":"OpenClaw latest description"}}],'
             '"requires_external_search":true}'
         )
     )
@@ -348,6 +349,7 @@ def test_router_can_select_web_search_for_openclaw_request() -> None:
 
     assert decision.kind == "web_search"
     assert decision.requires_external_search is True
+    assert decision.tool_plan == [{"tool": "web_search", "args": {"query": "OpenClaw latest description"}}]
 
 
 def test_invalid_router_output_stops_without_action(tmp_path: Path) -> None:
