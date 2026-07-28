@@ -18,4 +18,8 @@ def create_memory_backend(config: MemoryConfig, *, root: str | Path) -> MemoryBa
         from mana_agent.memory.providers.mem0.backend import Mem0MemoryBackend
 
         return Mem0MemoryBackend(validated)
+    if validated.mode == "external" and validated.provider == "supermemory":
+        from mana_agent.memory.providers.supermemory.backend import SupermemoryProvider
+
+        return SupermemoryProvider(validated)
     raise AssertionError("validated memory configuration was not handled")

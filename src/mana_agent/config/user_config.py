@@ -45,7 +45,7 @@ SECRET_KEYS = {
     "MANA_A2A_SERVER_TOKEN",
     "MANA_GITHUB_WEBHOOK_SECRET",
 }
-NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY"}
+NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY", "SUPERMEMORY_API_KEY"}
 
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
@@ -122,6 +122,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MEM0_ORG_ID": "",
     "MEM0_PROJECT_ID": "",
     "MEM0_BASE_URL": "",
+    "SUPERMEMORY_BASE_URL": "",
     "MANA_MEMORY_TIMEOUT_SECONDS": 15,
     "MANA_WEB_SEARCH_PROVIDER": "",
     "MANA_WEB_SEARCH_API_KEY": "",
@@ -322,6 +323,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MEM0_ORG_ID": "mem0_org_id",
     "MEM0_PROJECT_ID": "mem0_project_id",
     "MEM0_BASE_URL": "mem0_base_url",
+    "SUPERMEMORY_BASE_URL": "supermemory_base_url",
     "MANA_MEMORY_TIMEOUT_SECONDS": "mana_memory_timeout_seconds",
     "MANA_WEB_SEARCH_PROVIDER": "mana_web_search_provider",
     "MANA_WEB_SEARCH_API_KEY": "mana_web_search_api_key",
@@ -786,11 +788,15 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
             mode=str(cleaned.get("MANA_MEMORY_MODE") or "internal").lower(),
             provider=str(cleaned.get("MANA_MEMORY_PROVIDER") or "mana").lower(),
             fallback_to_internal=bool(cleaned.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", False)),
-            api_key=str(cleaned.get("MEM0_API_KEY") or ""),
+            api_key=str(
+                cleaned.get("SUPERMEMORY_API_KEY")
+                or cleaned.get("MEM0_API_KEY")
+                or ""
+            ),
             secret_ref=str(cleaned.get("MANA_MEMORY_SECRET_REF") or ""),
             org_id=str(cleaned.get("MEM0_ORG_ID") or ""),
             project_id=str(cleaned.get("MEM0_PROJECT_ID") or ""),
-            base_url=str(cleaned.get("MEM0_BASE_URL") or ""),
+            base_url=str(cleaned.get("SUPERMEMORY_BASE_URL") or cleaned.get("MEM0_BASE_URL") or ""),
             timeout_seconds=float(cleaned.get("MANA_MEMORY_TIMEOUT_SECONDS") or 15),
         ).validate()
     for name in (

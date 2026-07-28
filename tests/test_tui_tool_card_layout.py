@@ -147,13 +147,18 @@ def test_history_messages_wrap_at_available_card_width_after_replay_append_and_r
             assistant_message = chat_log.query_one(".assistant-message", SelectableText)
 
             # Replayed short text has the full message-card width rather than one
-            # character per row. Card borders and padding remain part of the box model.
+            # character per row. Read-only messages do not reserve an editable
+            # cursor cell; card borders and padding remain part of the box model.
             assert user_message.wrapped_document.height == 1
-            assert user_message.wrap_width == user_message.content_size.width - 1
+            assert (
+                user_message.wrap_width
+                == user_message.scrollable_content_region.width
+            )
             assert user_message.region.width > user_message.content_size.width
             assert user_message.size.width > 1
             assert (
-                assistant_message.wrap_width == assistant_message.content_size.width - 1
+                assistant_message.wrap_width
+                == assistant_message.scrollable_content_region.width
             )
             assert assistant_message.wrapped_document.height < len(
                 assistant_message.text
@@ -171,7 +176,10 @@ def test_history_messages_wrap_at_available_card_width_after_replay_append_and_r
             await pilot.pause()
             live_assistant = list(chat_log.query(".assistant-message"))[-1]
             assert live_assistant.wrapped_document.height == 1
-            assert live_assistant.wrap_width == live_assistant.content_size.width - 1
+            assert (
+                live_assistant.wrap_width
+                == live_assistant.scrollable_content_region.width
+            )
 
             wide_wrap_width = assistant_message.wrap_width
             await pilot.resize_terminal(48, 24)

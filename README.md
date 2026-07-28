@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.1-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.2-purple" />
 </p>
 
 `mana-agent` is an installable Python CLI and optional web dashboard for understanding, operating, and safely changing software repositories. It combines repository indexing, static analysis, semantic retrieval, multi-agent orchestration, constrained tool execution, Git operations, document processing, browser automation, external search, and remote connectors in one traceable workflow.
 
-> **Current documented version:** `v0.1.1`
+> **Current documented version:** `v0.1.2`
 
 ## Quick links
 
@@ -561,13 +561,23 @@ export MANA_MEMORY_PROVIDER=mem0
 export MEM0_API_KEY="m0-..."
 ```
 
-The `mana-agent --configure` Memory tab can store the Mem0 key in the operating
-system keyring; normal configuration contains only `MANA_MEMORY_SECRET_REF`.
-Optional `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, and `MEM0_BASE_URL` values are passed
-only when supported by the installed SDK. External memory sends selected
-content and scope metadata to Mem0, so review provider privacy and retention
-policies first. Failures never silently switch to internal memory and existing
-local records are never uploaded. Return to local memory with
+Or use hosted Supermemory:
+
+```bash
+pip install "mana-agent[supermemory]"
+export MANA_MEMORY_MODE=external
+export MANA_MEMORY_PROVIDER=supermemory
+export SUPERMEMORY_API_KEY="sm_..."
+```
+
+The `mana-agent --configure` Memory tab can store the selected external-memory
+API key in the operating system keyring; normal configuration contains only
+`MANA_MEMORY_SECRET_REF`. Optional `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, and
+`MEM0_BASE_URL` values are passed only when supported by the installed Mem0
+SDK. External memory sends selected content and scope metadata to the chosen
+provider, so review provider privacy and retention policies first. Failures
+never silently switch to internal memory and existing local records are never
+uploaded. Return to local memory with
 `MANA_MEMORY_MODE=internal` and `MANA_MEMORY_PROVIDER=mana`.
 
 The chat gateway owns one shared memory service for its lifetime. Completed

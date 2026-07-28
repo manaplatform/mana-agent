@@ -21,6 +21,12 @@ from mana_agent.memory import (
     MemoryWriteRequest,
 )
 from mana_agent.memory.providers.mem0.mapper import response_to_record, scope_to_filters, scope_to_mem0
+from mana_agent.memory.providers.shared import (
+    supermemory_container_tags,
+    supermemory_custom_id,
+    supermemory_primary_container_tag,
+)
+from mana_agent.memory.providers.supermemory.backend import SupermemoryProvider
 
 
 def test_internal_mode_is_default_and_reuses_existing_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,7 +56,7 @@ def test_internal_canonical_records_are_scope_isolated(tmp_path: Path, monkeypat
 
 @pytest.mark.parametrize(
     ("mode", "provider"),
-    [("internal", "mem0"), ("external", "mana"), ("other", "mana")],
+    [("internal", "mem0"), ("internal", "supermemory"), ("external", "mana"), ("other", "mana")],
 )
 def test_invalid_mode_provider_combinations_stop(mode: str, provider: str) -> None:
     with pytest.raises(MemoryConfigurationError):
@@ -60,6 +66,8 @@ def test_invalid_mode_provider_combinations_stop(mode: str, provider: str) -> No
 def test_external_mode_requires_key_and_never_falls_back() -> None:
     with pytest.raises(MemoryConfigurationError, match="requires"):
         MemoryConfig(mode="external", provider="mem0").validate()
+    with pytest.raises(MemoryConfigurationError, match="requires"):
+        MemoryConfig(mode="external", provider="supermemory").validate()
     with pytest.raises(MemoryConfigurationError, match="no fallback"):
         MemoryConfig(mode="external", provider="mem0", api_key="test", fallback_to_internal=True).validate()
 
@@ -77,6 +85,33 @@ def test_internal_mode_does_not_resolve_retained_external_secret(monkeypatch: py
         }
     )
     assert config.mode == "internal"
+
+
+def test_supermemory_config_prefers_secret_ref_then_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", "env-key")
+    monkeypatch.setattr("mana_agent.memory.config.MemorySecretStore.get", lambda *_args: "secret-store-key")
+    config = MemoryConfig.load(
+        {
+            "MANA_MEMORY_MODE": "external",
+            "MANA_MEMORY_PROVIDER": "supermemory",
+            "MANA_MEMORY_SECRET_REF": "supermemory:ref",
+        }
+    )
+    assert config.api_key == "secret-store-key"
+
+
+def test_supermemory_explicit_key_overrides_stored_secret_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", "env-key")
+    monkeypatch.setattr("mana_agent.memory.config.MemorySecretStore.get", lambda *_args: "old-secret-key")
+    config = MemoryConfig.load(
+        {
+            "MANA_MEMORY_MODE": "external",
+            "MANA_MEMORY_PROVIDER": "supermemory",
+            "MANA_MEMORY_SECRET_REF": "supermemory:ref",
+            "SUPERMEMORY_API_KEY": "new-inline-key",
+        }
+    )
+    assert config.api_key == "new-inline-key"
 
 
 def test_scope_mapping_keeps_dimensions_separate() -> None:
@@ -106,6 +141,57 @@ def test_mem0_response_normalization_preserves_provider_id_and_metadata() -> Non
     assert (record.id, record.content.text, record.score, record.provider) == ("mem-1", "fact", 0.75, "mem0")
     assert record.metadata == {"kind": "decision"}
     assert record.provider_metadata == {"categories": ["work"]}
+
+
+def test_supermemory_tags_and_custom_ids_are_deterministic() -> None:
+    scope = MemoryScope(user_id="u-1", workspace_id="workspace 1", repository_id="repo", agent_id="main", session_id="s1")
+    assert supermemory_primary_container_tag(scope) == supermemory_primary_container_tag(scope)
+    assert supermemory_container_tags(scope) == [
+        "mana",
+        "mana:user:u-1",
+        "mana:workspace:workspace-1",
+        "mana:repository:repo",
+        "mana:agent:main",
+        "mana:session:s1",
+    ]
+    custom_id = supermemory_custom_id(
+        scope=scope,
+        content="fact",
+        metadata={"memory_kind": "task", "fingerprint": "abc123"},
+    )
+    assert custom_id is not None
+    assert "." not in custom_id
+    assert custom_id.startswith("mana:task:")
+    assert custom_id == supermemory_custom_id(
+        scope=scope,
+        content="fact",
+        metadata={"memory_kind": "task", "fingerprint": "abc123"},
+    )
+
+
+def test_supermemory_backend_uses_container_tag_without_deprecated_container_tags() -> None:
+    captured: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_call(method: str, *args: object, operation: str, **kwargs: object) -> object:
+        captured.append((method, args, kwargs))
+        if method == "add":
+            return types.SimpleNamespace(id="doc-1", status="queued")
+        return types.SimpleNamespace(results=[])
+
+    backend = SupermemoryProvider(MemoryConfig(mode="external", provider="supermemory", api_key="test"))
+    backend.client.call = fake_call  # type: ignore[method-assign]
+
+    async def run() -> None:
+        scope = MemoryScope(user_id="u", workspace_id="w", repository_id="r", session_id="s")
+        await backend.add(MemoryWriteRequest(MemoryContent("fact"), scope, {"memory_kind": "task"}))
+        await backend.search(MemorySearchRequest("fact", scope))
+
+    asyncio.run(run())
+
+    assert captured
+    for method, _args, kwargs in captured:
+        assert "container_tag" in kwargs
+        assert "container_tags" not in kwargs
 
 
 def test_mem0_search_requires_positive_entity_scope(tmp_path: Path) -> None:
@@ -319,7 +405,10 @@ def test_mem0_health_normalizes_failures_without_secret(
 
 def test_mem0_key_becomes_keyring_reference_not_plain_config(monkeypatch: pytest.MonkeyPatch) -> None:
     saved: dict[str, object] = {}
-    monkeypatch.setattr("mana_agent.memory.config.MemorySecretStore.set", lambda _self, key, reference="": "mem0:ref" if key == "secret-value" else "")
+    monkeypatch.setattr(
+        "mana_agent.memory.config.MemorySecretStore.set",
+        lambda _self, key, reference="", provider="mem0": "mem0:ref" if key == "secret-value" and provider == "mem0" else "",
+    )
     monkeypatch.setattr("mana_agent.config.session.save_effective_user_config", lambda values, merge=False: saved.update(values))
     monkeypatch.setattr("mana_agent.config.session.invalidate_model_cache", lambda: None)
     draft = ConfigurationDraft(
@@ -329,6 +418,24 @@ def test_mem0_key_becomes_keyring_reference_not_plain_config(monkeypatch: pytest
     draft.save()
     assert saved["MANA_MEMORY_SECRET_REF"] == "mem0:ref"
     assert "MEM0_API_KEY" not in saved
+    assert "secret-value" not in repr(saved)
+
+
+def test_supermemory_key_becomes_keyring_reference_not_plain_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: dict[str, object] = {}
+    monkeypatch.setattr(
+        "mana_agent.memory.config.MemorySecretStore.set",
+        lambda _self, key, reference="", provider="mem0": "supermemory:ref" if key == "secret-value" and provider == "supermemory" else "",
+    )
+    monkeypatch.setattr("mana_agent.config.session.save_effective_user_config", lambda values, merge=False: saved.update(values))
+    monkeypatch.setattr("mana_agent.config.session.invalidate_model_cache", lambda: None)
+    draft = ConfigurationDraft(
+        original={},
+        values={"MANA_MEMORY_MODE": "external", "MANA_MEMORY_PROVIDER": "supermemory", "SUPERMEMORY_API_KEY": "secret-value"},
+    )
+    draft.save()
+    assert saved["MANA_MEMORY_SECRET_REF"] == "supermemory:ref"
+    assert "SUPERMEMORY_API_KEY" not in saved
     assert "secret-value" not in repr(saved)
 
 
@@ -345,6 +452,19 @@ def test_low_level_config_writer_never_persists_mem0_key(tmp_path: Path, monkeyp
     assert "never-write-this" not in persisted
 
 
+def test_low_level_config_writer_never_persists_supermemory_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mana_agent.config import user_config
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    user_config.save_effective_user_config(
+        {"MANA_MEMORY_MODE": "external", "MANA_MEMORY_PROVIDER": "supermemory", "SUPERMEMORY_API_KEY": "never-write-this"},
+        merge=False,
+    )
+    persisted = (tmp_path / "config.toml").read_text(encoding="utf-8") + (tmp_path / "secrets.toml").read_text(encoding="utf-8")
+    assert "SUPERMEMORY_API_KEY" not in persisted
+    assert "never-write-this" not in persisted
+
+
 def test_configuration_tui_conditionally_shows_external_fields() -> None:
     from textual.widgets import Select
     from mana_agent.tui.configuration_app import ManaConfigurationApp
@@ -356,10 +476,14 @@ def test_configuration_tui_conditionally_shows_external_fields() -> None:
         )
         app = ManaConfigurationApp(draft=draft)
         async with app.run_test() as pilot:
-            assert app.query_one("#mem0-api-key").display is False
+            assert app.query_one("#memory-api-key").display is False
             app.query_one("#memory-mode", Select).value = "external"
             await pilot.pause()
-            assert app.query_one("#mem0-api-key").display is True
+            assert app.query_one("#memory-api-key").display is True
+            app.query_one("#memory-provider", Select).value = "supermemory"
+            await pilot.pause()
+            assert app.query_one("#mem0-org-id").display is False
+            assert "Supermemory API key" in app.query_one("#memory-api-key").placeholder
 
     asyncio.run(run())
 

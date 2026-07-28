@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from mana_agent.memory.models import MemoryContent, MemoryRecord, MemoryScope
-
-SCOPE_METADATA_KEYS = {
-    "repository_id": "mana_repository_id",
-    "conversation_id": "mana_conversation_id",
-    "task_id": "mana_task_id",
-}
+from mana_agent.memory.providers.shared import SCOPE_METADATA_KEYS, parse_timestamp, scope_metadata
 
 
 def scope_to_mem0(scope: MemoryScope) -> tuple[dict[str, str], dict[str, str]]:
@@ -26,12 +20,7 @@ def scope_to_mem0(scope: MemoryScope) -> tuple[dict[str, str], dict[str, str]]:
         }.items()
         if value
     }
-    metadata = {
-        provider_key: getattr(scope, scope_key)
-        for scope_key, provider_key in SCOPE_METADATA_KEYS.items()
-        if getattr(scope, scope_key)
-    }
-    return entities, metadata
+    return entities, scope_metadata(scope)
 
 
 def scope_to_filters(
@@ -46,16 +35,6 @@ def scope_to_filters(
     if not clauses:
         return {}
     return clauses[0] if len(clauses) == 1 else {"AND": clauses}
-
-
-def _parse_time(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
 
 def response_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
@@ -88,6 +67,6 @@ def response_to_record(row: dict[str, Any], scope: MemoryScope) -> MemoryRecord:
         score=float(row["score"]) if row.get("score") is not None else None,
         provider="mem0",
         provider_metadata=provider_metadata,
-        created_at=_parse_time(row.get("created_at")),
-        updated_at=_parse_time(row.get("updated_at")),
+        created_at=parse_timestamp(row.get("created_at")),
+        updated_at=parse_timestamp(row.get("updated_at")),
     )

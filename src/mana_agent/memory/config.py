@@ -11,6 +11,14 @@ from mana_agent.config.user_config import load_effective_settings
 from mana_agent.memory.errors import MemoryConfigurationError, MemoryDependencyError
 
 KEYRING_SERVICE = "mana-agent-memory"
+_EXTERNAL_PROVIDER_ENV = {
+    "mem0": "MEM0_API_KEY",
+    "supermemory": "SUPERMEMORY_API_KEY",
+}
+_EXTERNAL_PROVIDER_SECRET_PREFIX = {
+    "mem0": "mem0",
+    "supermemory": "supermemory",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +34,7 @@ class MemoryConfig:
     timeout_seconds: float = 15.0
 
     def validate(self) -> "MemoryConfig":
-        allowed = {"internal": {"mana"}, "external": {"mem0"}}
+        allowed = {"internal": {"mana"}, "external": {"mem0", "supermemory"}}
         if self.mode not in allowed:
             raise MemoryConfigurationError("Memory mode must be 'internal' or 'external'.")
         if self.provider not in allowed[self.mode]:
@@ -34,7 +42,10 @@ class MemoryConfig:
                 f"Memory provider {self.provider!r} is not valid for {self.mode!r} mode."
             )
         if self.mode == "external" and not (self.api_key or self.secret_ref):
-            raise MemoryConfigurationError("Mem0 requires MEM0_API_KEY or MANA_MEMORY_SECRET_REF.")
+            env_var = _EXTERNAL_PROVIDER_ENV.get(self.provider, "provider API key")
+            raise MemoryConfigurationError(
+                f"{self.provider.capitalize()} requires {env_var} or MANA_MEMORY_SECRET_REF."
+            )
         if self.fallback_to_internal:
             raise MemoryConfigurationError(
                 "External-to-internal fallback is not implemented; no fallback action was executed."
@@ -44,38 +55,43 @@ class MemoryConfig:
     @classmethod
     def load(cls, values: dict[str, Any] | None = None) -> "MemoryConfig":
         raw = load_effective_settings(include_env=True) if values is None else values
-        mode = str(os.getenv("MANA_MEMORY_MODE", raw.get("MANA_MEMORY_MODE", "internal"))).strip().lower()
+        mode = str(raw.get("MANA_MEMORY_MODE") or os.getenv("MANA_MEMORY_MODE", "internal")).strip().lower()
         default_provider = "mana" if mode == "internal" else "mem0"
-        provider = str(
-            os.getenv("MANA_MEMORY_PROVIDER", raw.get("MANA_MEMORY_PROVIDER", default_provider))
-        ).strip().lower()
+        provider = str(raw.get("MANA_MEMORY_PROVIDER") or os.getenv("MANA_MEMORY_PROVIDER", default_provider)).strip().lower()
         fallback = str(
-            os.getenv(
-                "MANA_MEMORY_FALLBACK_TO_INTERNAL",
-                raw.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", False),
-            )
+            raw.get("MANA_MEMORY_FALLBACK_TO_INTERNAL")
+            if raw.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", "") != ""
+            else os.getenv("MANA_MEMORY_FALLBACK_TO_INTERNAL", False)
         ).lower() in {"1", "true", "yes", "on"}
+        provider_api_env = _EXTERNAL_PROVIDER_ENV.get(provider, "")
+        explicit_api_key = str(raw.get(provider_api_env, "") or "").strip() if provider_api_env else ""
+        secret_ref = str(raw.get("MANA_MEMORY_SECRET_REF", "") or "").strip()
+        secret_api_key = MemorySecretStore().get(secret_ref) if (mode == "external" and secret_ref) else ""
+        api_key = explicit_api_key or secret_api_key or str(os.getenv(provider_api_env, "") or "").strip()
         config = cls(
             mode=mode,
             provider=provider,
             fallback_to_internal=fallback,
-            api_key=str(os.getenv("MEM0_API_KEY", raw.get("MEM0_API_KEY", "")) or "").strip(),
-            secret_ref=str(raw.get("MANA_MEMORY_SECRET_REF", "") or "").strip(),
-            org_id=str(os.getenv("MEM0_ORG_ID", raw.get("MEM0_ORG_ID", "")) or "").strip(),
-            project_id=str(os.getenv("MEM0_PROJECT_ID", raw.get("MEM0_PROJECT_ID", "")) or "").strip(),
-            base_url=str(os.getenv("MEM0_BASE_URL", raw.get("MEM0_BASE_URL", "")) or "").strip(),
+            api_key=api_key,
+            secret_ref=secret_ref,
+            org_id=str(raw.get("MEM0_ORG_ID") or os.getenv("MEM0_ORG_ID", "")).strip(),
+            project_id=str(raw.get("MEM0_PROJECT_ID") or os.getenv("MEM0_PROJECT_ID", "")).strip(),
+            base_url=str(
+                raw.get("MEM0_BASE_URL")
+                or raw.get("SUPERMEMORY_BASE_URL")
+                or os.getenv("MEM0_BASE_URL", "")
+                or os.getenv("SUPERMEMORY_BASE_URL", "")
+            ).strip(),
             timeout_seconds=float(
-                os.getenv(
-                    "MANA_MEMORY_TIMEOUT_SECONDS",
-                    raw.get("MANA_MEMORY_TIMEOUT_SECONDS", 15),
-                )
+                raw.get("MANA_MEMORY_TIMEOUT_SECONDS")
+                or os.getenv("MANA_MEMORY_TIMEOUT_SECONDS", 15)
                 or 15
             ),
         )
         if config.mode == "external" and config.secret_ref and not config.api_key:
-            config = replace(config, api_key=MemorySecretStore().get(config.secret_ref))
-            if not config.api_key:
-                raise MemoryConfigurationError("The configured Mem0 secret reference is empty.")
+            raise MemoryConfigurationError(
+                f"The configured {config.provider.capitalize()} secret reference is empty."
+            )
         return config.validate()
 
 
@@ -88,12 +104,13 @@ class MemorySecretStore:
             import keyring
         except ImportError as exc:
             raise MemoryDependencyError(
-                "Mem0 credentials require the optional memory dependency: pip install 'mana-agent[mem0]'."
+                "External memory credentials require the optional keyring dependency: pip install 'mana-agent[mem0]' or 'mana-agent[supermemory]'."
             ) from exc
         return keyring
 
-    def set(self, api_key: str, reference: str = "") -> str:
-        ref = reference or f"mem0:{uuid.uuid4().hex}"
+    def set(self, api_key: str, reference: str = "", *, provider: str = "mem0") -> str:
+        prefix = _EXTERNAL_PROVIDER_SECRET_PREFIX.get(provider, provider or "memory")
+        ref = reference or f"{prefix}:{uuid.uuid4().hex}"
         self._keyring().set_password(KEYRING_SERVICE, ref, api_key)
         return ref
 
