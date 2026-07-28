@@ -1,5 +1,14 @@
 # Browser Automation
 
+## Teach Mode capture
+
+When Playwright is installed and browser capture is enabled, Teach Mode accepts
+semantic browser events with URL/frame context and multiple stable selector
+candidates. Accessible role/name, automation/test IDs, labels, and stable DOM
+attributes outrank volatile class, position, XPath, and coordinate candidates.
+Browser cookies, tokens, session data, and password values are never part of a
+flow. See [Teach Mode](26-teach-mode.md).
+
 Mana-Agent can expose an isolated, headless Playwright browser directly to the
 chat model. The model selects structured browser actions from the user's
 natural-language request; Mana-Agent does not encode workflows for individual

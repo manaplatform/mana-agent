@@ -615,7 +615,16 @@ class AgentChatGateway:
             RouteRegistration("github", "Public GitHub search and inspection.", self._github_route_availability, ("github_search",)),
             RouteRegistration("repository", "Read-only local repository inspection.", lambda: self._available(), ("repo_search", "read_file")),
             RouteRegistration("memory", "Persisted conversation memory retrieval.", lambda: self._available(), ("memory_search",)),
-            RouteRegistration("automation", "Automation creation and management.", lambda: self._available()),
+            RouteRegistration(
+                "automation",
+                "Model-authored durable automation creation and management.",
+                lambda: self._available(),
+                (
+                    "automation_create", "automation_get", "automation_list",
+                    "automation_status", "automation_update", "automation_delete",
+                    "automation_enable", "automation_disable", "automation_run_now",
+                ),
+            ),
             RouteRegistration("unsupported", "Safe stop when no registered route applies.", lambda: self._available()),
             RouteRegistration("capability_error", "Explicit stop for an unavailable required capability.", lambda: self._available()),
         )
@@ -1511,7 +1520,7 @@ class AgentChatGateway:
                         "gmail": ("email",),
                         "calendar": ("calendar",),
                         "computer": ("computer",),
-                        "automation": ("deployment", "shell_read", "shell_write"),
+                        "automation": ("automation", "deployment", "shell_read", "shell_write"),
                         "artifact": ("artifact_read", "artifact_write"),
                         "remote_execution": ("remote_ssh_execute",),
                     }.get(entry_decision.route, ())
@@ -2025,7 +2034,7 @@ class AgentChatGateway:
             "repository": ("repository_read",), "browser": ("browser",),
             "search": ("web_search",), "github": ("web_search",), "memory": ("memory",),
             "gmail": ("email",), "calendar": ("calendar",), "computer": ("computer",),
-            "automation": ("deployment", "shell_read", "shell_write"),
+            "automation": ("automation", "deployment", "shell_read", "shell_write"),
             "artifact": ("artifact_read", "artifact_write"), "remote_execution": ("remote_ssh_execute",),
         }.get(decision.route, ())
         reservation = self._lane_coordinator.reserve(
@@ -2276,6 +2285,18 @@ class AgentChatGateway:
                 for tool_name in tool_names:
                     self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
             return self._execute_gmail_route(
+                decision=decision,
+                context=context,
+                text=execution_text,
+                ask_service=ask_service,
+                callbacks=options.get("callbacks"),
+            )
+
+        if decision.route == "automation":
+            if lane_task_id:
+                for tool_name in registration.tools:
+                    self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
+            return self._execute_automation_route(
                 decision=decision,
                 context=context,
                 text=execution_text,
@@ -2711,6 +2732,181 @@ class AgentChatGateway:
         if not answer:
             raise RuntimeError("repository tools returned no evidence")
         return ChatTurnResult(answer=answer, trace=_serialize_tool_traces(response))
+
+    def _execute_automation_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        ask_service: Any,
+        callbacks: Any,
+    ) -> ChatTurnResult:
+        """Execute only typed automation tools and report persisted results."""
+        ask_agent = getattr(ask_service, "ask_agent", None)
+        if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
+            return ChatTurnResult(
+                answer="Automation authoring requires the configured model tool executor.",
+                error="automation_executor_unavailable",
+                mode="route-automation-error",
+                decision=decision,
+                payload={"route": "automation"},
+            )
+        from mana_agent.automations.runtime_tools import AUTOMATION_OPERATION_TOOLS
+        from zoneinfo import ZoneInfo
+        from mana_agent.automations.service import (
+            AutomationService,
+            human_trigger,
+            machine_timezone,
+            now_utc,
+        )
+        from mana_agent.config.settings import default_index_dir
+        automation_service = AutomationService(self.root)
+        authoring_now_utc = now_utc()
+        authoring_timezone = machine_timezone()
+        authoring_now_local = authoring_now_utc.astimezone(ZoneInfo(authoring_timezone))
+        selected_tools = AUTOMATION_OPERATION_TOOLS.get(decision.automation_operation)
+        if selected_tools is None:
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: automation_operation. No automation tool was executed. "
+                    "Reason: the selected automation operation is missing or invalid."
+                ),
+                error="automation_operation_invalid",
+                mode="route-automation-error",
+                decision=decision,
+                payload={"route": "automation"},
+            )
+        before = {item.id: item.to_dict() for item in automation_service.list()}
+        teach_context = "No eligible reviewed Teach flows are available."
+        try:
+            from mana_agent.teach.service import TeachService
+            teach_service = TeachService()
+            handoffs = []
+            for flow in teach_service.storage.list_flows():
+                try:
+                    handoffs.append(teach_service.automation_handoff(flow.id, version=flow.version))
+                except Exception:
+                    continue
+            if handoffs:
+                teach_context = "Eligible reviewed Teach flow metadata:\n" + json.dumps(
+                    handoffs, ensure_ascii=False, default=str
+                )
+        except Exception:
+            pass
+
+        system_prompt = (
+            "You are Mana-Agent's dedicated automation authoring executor. Use only automation_* "
+            f"tools selected by the validated operation `{decision.automation_operation}`. "
+            "Call the selected operation directly. For create, call automation_create and never "
+            "call automation_list as discovery, confirmation, or a prerequisite. For list, call "
+            "automation_list only because the validated user intent is to view existing records. "
+            "Every create/update/manage claim in your response must come from the tool's "
+            "persisted result. Convert elapsed recurrence to an interval trigger with exact "
+            "every_seconds and a timezone-aware anchor_at; use cron only for calendar schedules "
+            "and once for one absolute occurrence. A singular requested execution time with no "
+            "recurrence means a one-time automation; recurrence is not a missing field and you "
+            "must not ask whether it should be once or recurring. When only a clock time is given, "
+            "resolve run_at to its next future occurrence in the supplied timezone. Ask about time "
+            "only when the future instant itself cannot be resolved safely, such as a genuinely "
+            "ambiguous meridiem or timezone. Creating a connector automation must only persist and "
+            "deploy the job; never execute the connector action during the authoring turn. "
+            f"For requested local output with no explicit destination, use the automation workspace "
+            f"`{self.root}` with a descriptive relative basename; do not ask the user to choose "
+            "between local storage and a cloud destination. Ask about an output destination only "
+            "when the user explicitly requires an external destination but has not identified it. "
+            f"Authoring context: current_utc={authoring_now_utc.isoformat()}, "
+            f"machine_timezone={authoring_timezone}, "
+            f"current_local={authoring_now_local.isoformat()}. Use an explicitly requested IANA "
+            "timezone or this machine timezone and always resolve one-time run_at strictly after "
+            "current_utc. Never ask for cron syntax or internal action "
+            "names. Command jobs are allowed only when the user explicitly requested a command. "
+            "Connector jobs use connector_action with `arguments` (never `input`) and may use "
+            "`prompt` for output instructions. Retry policy uses `maximum_attempts`; misfire "
+            "policy uses `mode` with skip, run_once, or catch_up. Retain permission/account "
+            "references, never credentials. Teach jobs must pin flow_id and flow_version and will be rejected "
+            "unless the exact version is reviewed and verified. If a material field is missing, "
+            "ask one focused clarification and do not call automation_create. After a successful "
+            "write, state the automation ID, interpreted trigger, timezone, next run, source, "
+            "deployment status, and any blocked reason exactly as persisted.\n\n"
+            + teach_context
+        )
+        try:
+            response = ask_agent.run(
+                question=text,
+                index_dir=self._index_dir or default_index_dir(self.root),
+                k=self._resolved_k,
+                max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                timeout_seconds=max(30, self._agent_timeout_seconds),
+                callbacks=callbacks,
+                system_prompt=system_prompt,
+                tool_policy={
+                    "allowed_tools": list(selected_tools),
+                    "disable_external_search": True,
+                    "require_initial_tool_call": True,
+                },
+                flow_id=context.session_id,
+                run_id=context.turn_id,
+            )
+        except Exception as exc:
+            return ChatTurnResult(
+                answer=str(exc),
+                error=f"Automation route failed: {exc}",
+                mode="route-automation-error",
+                decision=decision,
+                payload={"route": "automation"},
+            )
+        after_records = {item.id: item for item in automation_service.list()}
+        changed = [
+            item for item_id, item in after_records.items()
+            if item_id not in before or item.to_dict() != before[item_id]
+        ]
+        deleted_ids = sorted(set(before) - set(after_records))
+        answer = str(getattr(response, "answer", response) or "").strip()
+        persisted_cards: list[dict[str, Any]] = []
+        if changed:
+            lines = ["Persisted automation result:"]
+            for item in changed:
+                card = {
+                    "automation_id": item.id,
+                    "name": item.name,
+                    "interpreted_trigger": human_trigger(item.trigger),
+                    "timezone": item.timezone,
+                    "next_run_at": item.next_run_at.isoformat() if item.next_run_at else None,
+                    "deployment_status": item.deployment.status,
+                    "source": item.source,
+                    "blocked_reason": item.deployment.blocked_reason,
+                }
+                persisted_cards.append(card)
+                lines.extend([
+                    f"- ID: {item.id}",
+                    f"  Name: {item.name}",
+                    f"  Trigger: {card['interpreted_trigger']}",
+                    f"  Timezone: {item.timezone}",
+                    f"  Next run: {card['next_run_at'] or 'none'}",
+                    f"  Deployment: {item.deployment.status}",
+                    f"  Source: {item.source}",
+                ])
+                if item.deployment.blocked_reason:
+                    lines.append(f"  Blocked: {item.deployment.blocked_reason}")
+            answer = "\n".join(lines)
+        elif deleted_ids:
+            answer = "Deleted persisted automation" + (
+                f": {deleted_ids[0]}" if len(deleted_ids) == 1 else f"s: {', '.join(deleted_ids)}"
+            )
+        return ChatTurnResult(
+            answer=answer,
+            sources=list(getattr(response, "sources", []) or []),
+            mode="route-automation",
+            decision=decision,
+            trace=_serialize_tool_traces(response),
+            warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
+            payload={
+                "route": "automation",
+                "automation_records": persisted_cards,
+                "deleted_automation_ids": deleted_ids,
+            },
+        )
 
     def _execute_gmail_route(
         self,

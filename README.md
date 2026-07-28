@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.1-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.2-purple" />
 </p>
 
 `mana-agent` is an installable Python CLI and optional web dashboard for understanding, operating, and safely changing software repositories. It combines repository indexing, static analysis, semantic retrieval, multi-agent orchestration, constrained tool execution, Git operations, document processing, browser automation, external search, and remote connectors in one traceable workflow.
 
-> **Current documented version:** `v0.1.1`
+> **Current documented version:** `v0.1.2`
 
 ## Quick links
 
@@ -27,6 +27,7 @@
 - [Troubleshooting](#troubleshooting)
 - [Configuration](#configuration)
 - [Computer control](docs/22-computer-control.md)
+- [Teach Mode](docs/26-teach-mode.md)
 - [Reverse workers](docs/23-reverse-workers.md)
 - [Telegram connector](#telegram-connector)
 - [Web dashboard](#web-dashboard)
@@ -56,7 +57,7 @@ Use Mana-Agent to:
 - inspect and operate Git without unsafe shell interpolation;
 - work with Word, PDF, Excel, CSV, and project-library files;
 - automate browser tasks in an isolated Playwright session;
-- run persistent schedules through local cron or GitHub Actions;
+- create persistent automations through model-driven chat;
 - connect Gmail and Telegram to the same model-driven runtime;
 - continue multi-turn coding work with repository-scoped memory.
 
@@ -81,8 +82,8 @@ Use Mana-Agent to:
 | External search | Optional model-selected web and GitHub search with repository-local result caching. |
 | Remote connectors | Gmail access and Telegram bot interaction through the same tool-aware chat runtime. |
 | Protocol gateway | ACP v1 editor access and A2A 1.0 server/client delegation through the shared gateway, sessions, task board, memory, lanes, and tool policy. |
-| Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automations, cron jobs, and settings. |
-| Automations | Persistent scheduled actions deployed to local cron, GitHub Actions, or both. |
+| Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automation inspection, and settings. |
+| Automations | Typed persistent jobs authored in chat and deployed through hidden platform schedulers. |
 | Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and repository-local runtime data. |
 | Mana Eval Lab | Reproducible multi-variant runs, immutable trajectories, replay, leaderboards, paired regression reports, and fail-closed CI gates. |
 
@@ -144,6 +145,36 @@ Local computer control is an explicit `computer` route and remains disabled
 until configured. It exposes narrow tools rather than raw OS command execution,
 keeps remote control off separately, and truthfully reports unsupported desktop
 capabilities. See [Computer Control and Desktop Automation](docs/22-computer-control.md).
+
+Teach Mode turns one explicitly recorded, semantic demonstration into a
+reviewed and verification-driven reusable Mana Flow:
+
+```bash
+mana-agent teach start "Export my weekly report"
+mana-agent teach explain "This date changes every week"
+mana-agent teach stop
+mana-agent teach replay export-my-weekly-report --mode dry_run
+```
+
+Optional native desktop monitoring uses explicit local and OS grants:
+
+```bash
+pip install "mana-agent[teach-desktop]"
+mana-agent teach grant --scope full --allow --open-settings
+mana-agent teach start "Export my weekly report" --desktop
+```
+
+Printable keyboard content is never stored as a raw keylog; Teach Mode records
+shortcuts, navigation, redacted typing activity, pointer actions, active
+applications/windows, and available accessibility metadata.
+
+Once all local Teach grants exist, ordinary `teach start` automatically selects
+desktop capture. A missing OS grant fails clearly rather than creating an empty
+desktop recording; use `--no-desktop` for intentional semantic-only sessions.
+
+Recordings stay under `~/.mana/teach`, secrets are redacted, sensitive replay
+steps retain confirmations, and imports remain untrusted until dry-run and
+activation. See [Teach Mode](docs/26-teach-mode.md).
 
 ---
 
@@ -530,13 +561,23 @@ export MANA_MEMORY_PROVIDER=mem0
 export MEM0_API_KEY="m0-..."
 ```
 
-The `mana-agent --configure` Memory tab can store the Mem0 key in the operating
-system keyring; normal configuration contains only `MANA_MEMORY_SECRET_REF`.
-Optional `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, and `MEM0_BASE_URL` values are passed
-only when supported by the installed SDK. External memory sends selected
-content and scope metadata to Mem0, so review provider privacy and retention
-policies first. Failures never silently switch to internal memory and existing
-local records are never uploaded. Return to local memory with
+Or use hosted Supermemory:
+
+```bash
+pip install "mana-agent[supermemory]"
+export MANA_MEMORY_MODE=external
+export MANA_MEMORY_PROVIDER=supermemory
+export SUPERMEMORY_API_KEY="sm_..."
+```
+
+The `mana-agent --configure` Memory tab can store the selected external-memory
+API key in the operating system keyring; normal configuration contains only
+`MANA_MEMORY_SECRET_REF`. Optional `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, and
+`MEM0_BASE_URL` values are passed only when supported by the installed Mem0
+SDK. External memory sends selected content and scope metadata to the chosen
+provider, so review provider privacy and retention policies first. Failures
+never silently switch to internal memory and existing local records are never
+uploaded. Return to local memory with
 `MANA_MEMORY_MODE=internal` and `MANA_MEMORY_PROVIDER=mana`.
 
 The chat gateway owns one shared memory service for its lifetime. Completed
@@ -834,8 +875,7 @@ Dashboard pages include:
 | Connectors | Secret-safe Telegram setup and shared connector state. |
 | Traces | Decisions, tool calls, verification results, and runtime events. |
 | Observability | Trace trees, timings, token usage, latency, errors, queue waits, and bottleneck findings. |
-| Automations | Create and manage persistent scheduled actions. |
-| Cron Jobs | Inspect deployment state and enable, disable, or remove schedules. |
+| Automations | Inspect chat-authored jobs, deployment health, recent runs, and delete definitions. |
 | Settings | Provider, model-role, search, connector, and runtime settings. |
 
 For dashboard development, prefer the command above so the live-chat API and
@@ -884,19 +924,17 @@ Local telemetry remains authoritative when an export fails.
 
 ---
 
-## Automations and cron jobs
+## Automations
 
-Schedules are stored in:
+Canonical definitions and run records are stored per repository under:
 
 ```text
-.mana/automations/config.json
+~/.mana/repositories/<repository-id>/automations/config.json
 ```
 
-A schedule can target:
-
-- local cron;
-- GitHub Actions;
-- both targets from one Mana-Agent schedule.
+Cron, launchd, systemd, Windows Task Scheduler, interval wakeups, and GitHub
+workflow schedules are hidden deployment details. The user-facing concept is
+always an Automation.
 
 Install dependencies:
 
@@ -904,36 +942,29 @@ Install dependencies:
 pip install "mana-agent[automations]"
 ```
 
-Create and deploy a schedule:
+Create and update automations in chat:
 
 ```bash
-mana-agent automation create \
-  --name "Nightly analysis" \
-  --action analyze \
-  --cron "0 2 * * *" \
-  --target local \
-  --target github \
-  --deploy
+mana-agent chat
+# You: Analyse this repository every night.
+# You: Check my email every 5 hours.
+# You: Run the reviewed invoice Teach flow every weekday at 9 AM.
 ```
 
-Lifecycle commands:
+The public CLI is management-only:
 
 ```bash
 mana-agent automation list
-mana-agent automation show sch_<id>
-mana-agent automation status sch_<id>
-mana-agent automation deploy sch_<id>
-mana-agent automation run sch_<id>
-mana-agent automation enable sch_<id>
-mana-agent automation disable sch_<id>
-mana-agent automation remove sch_<id>
+mana-agent automation status aut_<id>
+mana-agent automation delete aut_<id>
 ```
 
-Local cron uses the host timezone. GitHub Actions schedules use UTC.
-
-For GitHub targets, Mana-Agent generates one managed workflow per schedule. The workflow installs the required package extras, executes the action, uploads `.mana/` as workflow artifacts, and exposes manual dispatch.
-
-When deployment requires repository changes, Mana-Agent must show planned file and Git operations before commit or push and must not silently modify the default branch.
+Definitions store an explicit IANA timezone. Exact intervals retain an anchor
+and elapsed seconds; they are never approximated as a cron expression. The
+hidden executor reloads the record by ID, acquires a lease, records bounded
+redacted output, and advances the next run. If no durable backend or required
+permission is available, the persisted deployment/run state is truthfully
+blocked.
 
 ---
 
@@ -1103,6 +1134,7 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/21-entry-routing-and-chat-sessions.md`](docs/21-entry-routing-and-chat-sessions.md) | Typed entry routing, connector availability, and chat-session lifecycle. |
 | [`docs/24-fleet.md`](docs/24-fleet.md) | Fleet architecture, trust, workers, CLI, permissions, and operations. |
 | [`docs/25-cross-platform-verification.md`](docs/25-cross-platform-verification.md) | Verification matrices, outcomes, Eval configuration, and recovery. |
+| [`docs/26-teach-mode.md`](docs/26-teach-mode.md) | Demonstration recording, flow compilation, verification, replay, scheduling, privacy, and packages. |
 | [`docs/05-configuration.md`](docs/05-configuration.md) | Provider, model, search, and runtime settings. |
 | [`docs/06-workflows.md`](docs/06-workflows.md) | Common analysis and coding workflows. |
 | [`docs/07-diagram.md`](docs/07-diagram.md) | Standalone Mermaid architecture diagram. |
@@ -1118,6 +1150,7 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/16-email-connectors.md`](docs/16-email-connectors.md) | Gmail connector setup and security. |
 | [`docs/17-browser-automation.md`](docs/17-browser-automation.md) | Browser automation setup and safety. |
 | [`docs/18-telegram-connector.md`](docs/18-telegram-connector.md) | Telegram bot setup, polling/webhook deployment, security, and troubleshooting. |
+| [`docs/27-automations.md`](docs/27-automations.md) | Unified automation schema, migration, deployment, execution, and Teach handoff. |
 | [`docs/adaptive-coding-runtime.md`](docs/adaptive-coding-runtime.md) | Adaptive coding runtime overview and behavior. |
 | [`docs/multi-agent-routing.md`](docs/multi-agent-routing.md) | Multi-agent routing architecture and decision flow. |
 

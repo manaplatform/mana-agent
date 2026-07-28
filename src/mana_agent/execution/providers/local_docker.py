@@ -106,7 +106,9 @@ class LocalDockerProvider(ProviderBase):
             secret_environment[secret.target] = self.secret_resolver.resolve(secret.reference)
         if spec.environment or secret_environment:
             fd, env_file = tempfile.mkstemp(prefix="mana-docker-env-")
-            os.fchmod(fd, 0o600)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 for key, value in {**spec.environment, **secret_environment}.items():
                     stream.write(f"{key}={value}\n")

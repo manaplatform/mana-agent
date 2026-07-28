@@ -91,6 +91,9 @@ def test_tool_permissions_are_enforced_by_capability() -> None:
     assert validate_tool_permission(
         contracts[LaneId.OPERATIONS], "remote_ssh_execute", task_capabilities=("remote_ssh_execute",)
     ) == {"remote_ssh_execute"}
+    assert validate_tool_permission(
+        contracts[LaneId.OPERATIONS], "automation_create", task_capabilities=("automation",)
+    ) == {"automation"}
     with pytest.raises(LanePermissionError):
         validate_tool_permission(contracts[LaneId.REVIEW], "edit_file")
 

@@ -48,6 +48,7 @@ class _RouteModel:
                     "error_code": "GMAIL_NOT_AVAILABLE" if route == "capability_error" else "",
                     "reuse_active_route": len(self.payloads) > 1,
                     "artifact_family": "pdf" if route == "artifact" else "",
+                    "automation_operation": "create" if route == "automation" else "",
                 }
             )
         )
@@ -370,6 +371,35 @@ def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monke
 def test_entry_router_exposes_authorized_ssh_requests_to_coding_workflow() -> None:
     assert "remote_execution" in ENTRY_ROUTER_PROMPT
     assert "Never select coding for" in ENTRY_ROUTER_PROMPT
+
+
+def test_entry_router_assigns_deferred_gmail_actions_only_to_automation() -> None:
+    assert "Do not select gmail when the requested mailbox action is deferred" in ENTRY_ROUTER_PROMPT
+    assert "select automation instead and do not select gmail as a preliminary action" in ENTRY_ROUTER_PROMPT
+    assert "At 12:52, check my Gmail" in ENTRY_ROUTER_PROMPT
+    assert "listing is not a prerequisite for creation" in ENTRY_ROUTER_PROMPT
+
+
+def test_entry_router_requires_a_typed_automation_operation() -> None:
+    router = EntryRouter(llm=SimpleNamespace(), registry=_registry())
+
+    with pytest.raises(EntryRoutingError, match="automation route requires automation_operation"):
+        router._validate({
+            "route": "automation",
+            "confidence": 0.99,
+            "reason": "Create the requested schedule.",
+            "required_sources": ["repository"],
+        })
+
+    decision = router._validate({
+        "route": "automation",
+        "confidence": 0.99,
+        "reason": "Create the requested schedule.",
+        "required_sources": ["repository"],
+        "automation_operation": "create",
+    })
+
+    assert decision.automation_operation == "create"
 
 
 def test_followup_gmail_reuses_one_session_and_supplies_previous_route(tmp_path: Path, monkeypatch) -> None:

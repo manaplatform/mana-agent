@@ -1805,6 +1805,16 @@ class AskAgent:
 
             computer_tools = build_computer_langchain_tools()
 
+        teach_tools = []
+        teach_settings = get_setting("teach", {})
+        if not isinstance(teach_settings, dict) or bool(teach_settings.get("enabled", True)):
+            from mana_agent.teach.runtime_tools import build_teach_langchain_tools
+
+            teach_tools = build_teach_langchain_tools()
+
+        from mana_agent.automations.runtime_tools import build_automation_langchain_tools
+        automation_tools = build_automation_langchain_tools(self.project_root)
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
@@ -1812,6 +1822,8 @@ class AskAgent:
             *build_email_langchain_tools(),
             *browser_tools,
             *computer_tools,
+            *teach_tools,
+            *automation_tools,
             *mcp_tools,
             *list(getattr(self, "tools", []) or []),
         ]

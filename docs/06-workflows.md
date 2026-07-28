@@ -1,5 +1,13 @@
 # Workflows
 
+## Learned and scheduled flows
+
+Teach Mode flows are stable, versioned workflow definitions exposed to chat,
+agents, CLI, API, and the persistent automation service. Scheduled jobs choose
+an explicit `pinned` or `latest` revision policy and are rejected if mandatory
+inputs lack defaults. Scheduled replay retains permissions, confirmations, and
+observable verification. See [Teach Mode scheduling](26-teach-mode.md#scheduling).
+
 `mana-agent` supports a few common repository-assistant workflows: initial analysis, targeted questions, interactive chat, and resuming a saved automation run. The command docs describe the available entry points and the outputs they produce. [docs/04-commands.md:1-171](docs/04-commands.md:1-171) [docs/03-quick-start.md:1-119](docs/03-quick-start.md:1-119)
 
 ## 1. Open an interactive chat session

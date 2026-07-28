@@ -26,6 +26,13 @@ class SelectableText(TextArea):
     SelectableText:focus {
         border: none;
     }
+    /* A read-only TextArea still paints its current cursor line by default.
+       Message cards already provide the visual boundary, so suppress that
+       inner rectangle and keep one clean card per chat message. */
+    SelectableText .text-area--cursor-line,
+    SelectableText.-read-only .text-area--cursor {
+        background: transparent;
+    }
     """
 
     BINDINGS = [

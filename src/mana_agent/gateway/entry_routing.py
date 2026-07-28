@@ -33,6 +33,10 @@ EntryRouteName = Literal[
     "capability_error",
 ]
 
+AutomationOperation = Literal[
+    "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
+]
+
 RequiredSource = Literal[
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
     "memory", "artifact", "remote_execution", "internal_knowledge", "none",
@@ -96,6 +100,7 @@ class EntryRoutingDecision:
     command_arguments: tuple[str, ...] = ()
     remote_request: dict[str, Any] = field(default_factory=dict)
     artifact_family: str = ""
+    automation_operation: AutomationOperation | str = ""
     source: str = "model"
 
     def to_dict(self) -> dict[str, Any]:
@@ -152,6 +157,9 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     command_arguments: list[str] = Field(default_factory=list)
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
+    automation_operation: Literal[
+        "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
+    ] = ""
 
 
 class EntryRoutingError(RuntimeError):
@@ -230,7 +238,9 @@ Route semantics:
   requested concise findings (counts, top entries, and relevant samples) rather
   than streaming an entire log; its stdout is shown back in chat after approval.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
-- gmail: inspect or act on the user's Gmail/email account through registered email tools.
+- gmail: inspect or act on the user's Gmail/email account immediately in the current turn through
+  registered email tools. Do not select gmail when the requested mailbox action is deferred,
+  scheduled for a specified time, or recurring.
 - calendar: calendar account operations through a registered account/cloud calendar connector.
 - computer: permission-aware control of the local desktop, installed applications, native calendar,
   media, notes, clipboard, screenshots, filesystem, notifications, browser application, or system.
@@ -242,12 +252,19 @@ Route semantics:
 - github: connected/public GitHub information.
 - repository: read-only local repository questions or inspection.
 - memory: explicitly requested persisted memory retrieval.
-- automation: create, inspect, or manage an automation.
+- automation: create, inspect, or manage an automation, including a one-time or recurring future
+  connector action. A request to perform another route's action later or at a specified time
+  selects automation for the whole turn; the referenced connector becomes the persisted job and
+  must not execute during automation creation. Return the exact automation_operation. Use create
+  for a request to make or schedule an automation and list only when the user actually asks to see
+  existing automations; listing is not a prerequisite for creation.
 - unsupported: no registered route can represent the request safely.
 
 Repository context is only one possible evidence source. Current mailbox/account data is never ordinary conversation. Requests to check an inbox, latest
 email, Gmail message, email thread, or mailbox must select gmail when that registered route
-represents the request. The conversation route must never speculate about connector availability.
+represents an immediate request. If the user asks to check that mailbox at a future or specified
+time, select automation instead and do not select gmail as a preliminary action. The conversation
+route must never speculate about connector availability.
 Use computer—not calendar—for an explicitly native/installed desktop calendar, and computer—not
 browser—for the user's current installed browser page or tabs. Do not choose computer merely as an
 availability fallback for a cloud calendar or isolated public-browser request.
@@ -290,7 +307,8 @@ Return JSON only:
   "command_name": "sessions",
   "command_arguments": ["list"],
   "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
-  "artifact_family": ""
+  "artifact_family": "",
+  "automation_operation": ""
 }
 
 Examples:
@@ -309,6 +327,8 @@ Examples:
 - “Improve metadata in this repository” -> coding, ["repository"].
 - “Check my latest Gmail” -> gmail, ["gmail"], even when Gmail is unavailable; use
   capability_error with GMAIL_NOT_AVAILABLE rather than repository, memory, or conversation.
+- “At 12:52, check my Gmail” -> automation, ["repository"], automation_operation=create; create
+  only the scheduled one-time connector action in this turn and do not inspect Gmail now.
 """
 
 
@@ -530,6 +550,25 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: artifact route requires artifact_family when evidence does not resolve it."
             )
+        automation_operation = str(payload.get("automation_operation") or "").strip().lower()
+        allowed_automation_operations = {
+            "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
+        }
+        if automation_operation and automation_operation not in allowed_automation_operations:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: automation_operation is invalid."
+            )
+        if route == "automation" and not automation_operation:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: automation route requires automation_operation."
+            )
+        if route != "automation" and automation_operation:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: automation_operation is only valid for the automation route."
+            )
         if route == "remote_execution" and not isinstance(remote_request, dict):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: remote_execution requires structured remote_request.")
         if route == "remote_execution":
@@ -590,6 +629,7 @@ class EntryRouter:
             ),
             remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
             artifact_family=artifact_family,
+            automation_operation=automation_operation,
         )
 
 

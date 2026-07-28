@@ -1,5 +1,19 @@
 # Configuration
 
+## Teach Mode
+
+The optional `[teach]` table controls semantic event sources, user-data storage,
+retention, browser/native capture, exclusions, redaction, verification, replay,
+correction checkpoints, private Flow Cards, and experimental sharing. Screenshot
+and voice persistence default off, redaction defaults on, and imports always
+require dry run. The complete typed keys are documented in
+[Teach Mode](26-teach-mode.md#configuration).
+
+`desktop_capture` defaults to false. `allowed_applications`,
+`excluded_applications`, and event-source settings bound native monitoring; OS
+privacy approval and the separate Teach grant store are still required when the
+configuration enables it.
+
 ## Mana Fleet
 
 Fleet is disabled by default with `MANA_FLEET_ENABLED=false`. Worker, timeout,
@@ -72,10 +86,11 @@ Saved files:
 - `~/.mana/secrets.toml` for API keys and tokens.
 - `~/.mana/model_cache.json` for fetched model IDs keyed by provider/base URL.
 
-Mem0 credentials are an exception to the legacy secrets file: the Memory tab
-stores the API key in the operating-system keyring and writes only a
+External-memory credentials are an exception to the legacy secrets file: the
+Memory tab stores the API key in the operating-system keyring and writes only a
 `MANA_MEMORY_SECRET_REF` reference to `config.toml`. Headless deployments should
-inject `MEM0_API_KEY` directly through their secret manager/environment.
+inject `MEM0_API_KEY` or `SUPERMEMORY_API_KEY` directly through their secret
+manager/environment.
 
 The config directory is created with private permissions where the OS allows it. Secret values are masked in display output.
 
@@ -124,10 +139,11 @@ Exactly two modes are supported:
 
 - `internal` with provider `mana` keeps memory locally managed and remains the
   compatibility-preserving default.
-- `external` with provider `mem0` uses the optional hosted provider adapter.
+- `external` with provider `mem0` or `supermemory` uses the optional hosted
+  provider adapter selected in configuration.
 
-Install external support with `pip install "mana-agent[mem0]"`. Configure it in
-the Memory tab or set:
+Install external support with `pip install "mana-agent[mem0]"` or
+`pip install "mana-agent[supermemory]"`. Configure it in the Memory tab or set:
 
 ```bash
 MANA_MEMORY_MODE=external
@@ -136,6 +152,16 @@ MEM0_API_KEY="m0-..."
 MEM0_ORG_ID=
 MEM0_PROJECT_ID=
 MEM0_BASE_URL=
+MANA_MEMORY_TIMEOUT_SECONDS=15
+MANA_MEMORY_FALLBACK_TO_INTERNAL=false
+```
+
+Or:
+
+```bash
+MANA_MEMORY_MODE=external
+MANA_MEMORY_PROVIDER=supermemory
+SUPERMEMORY_API_KEY="sm_..."
 MANA_MEMORY_TIMEOUT_SECONDS=15
 MANA_MEMORY_FALLBACK_TO_INTERNAL=false
 ```
@@ -149,7 +175,7 @@ turn without memory, but it must report that state. Switch back with
 
 External memory has different privacy and retention implications because
 selected content, identity scopes, and metadata leave the local machine. Review
-the provider policy before enabling it.
+the selected provider policy before enabling it.
 
 Chat follow-ups use the gateway-owned shared memory service in addition to the
 durable session transcript. The service records successful user/assistant turn

@@ -305,7 +305,7 @@ def load_automations(root: Path | None = None) -> dict[str, Any]:
     try:
         data = load_config(root)
     except ValueError:
-        return {"automations": [], "schedules": [], "runs": [], "root": str(root)}
+        return {"automations": [], "runs": [], "root": str(root)}
     data["root"] = str(root)
     return data
 
@@ -322,12 +322,12 @@ def save_automations(data: dict[str, Any], root: Path | None = None) -> bool:
 
 
 def list_schedules(root: Path | None = None) -> list[dict[str, Any]]:
-    """Return typed persistent schedules for dashboard rendering."""
+    """Compatibility read returning canonical automations."""
     root = find_mana_root(root)
-    from mana_agent.automations.service import list_schedules as _list_schedules
+    from mana_agent.automations.service import list_automations
 
     try:
-        return [schedule.to_dict() for schedule in _list_schedules(root)]
+        return [automation.to_dict() for automation in list_automations(root)]
     except ValueError:
         return []
 
@@ -341,43 +341,33 @@ def create_schedule(
     command: str | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
-    """Create and immediately deploy an explicitly requested schedule."""
-    root = find_mana_root(root)
-    from mana_agent.automations.service import ScheduleDefinition, deploy_schedule
-
-    schedule = ScheduleDefinition.create(name=name, action=action, cron=cron, targets=targets, command=command)
-    return deploy_schedule(schedule, root).to_dict()
+    """Retired authoring boundary; automation creation belongs to chat."""
+    _ = (name, action, cron, targets, command, root)
+    raise ValueError("Create automations through model-driven chat.")
 
 
 def schedule_status(schedule_id: str, root: Path | None = None) -> dict[str, Any]:
     root = find_mana_root(root)
-    from mana_agent.automations.service import deployment_status, get_schedule
-
-    return deployment_status(get_schedule(root, schedule_id), root)
+    from mana_agent.automations.service import AutomationService
+    return AutomationService(root).status(schedule_id)
 
 
 def delete_schedule(schedule_id: str, root: Path | None = None) -> None:
     root = find_mana_root(root)
-    from mana_agent.automations.service import delete_schedule as _delete, remove_deployment
-
-    schedule = _delete(root, schedule_id)
-    remove_deployment(schedule, root)
+    from mana_agent.automations.service import AutomationService
+    AutomationService(root).delete(schedule_id)
 
 
 def set_schedule_enabled(schedule_id: str, enabled: bool, root: Path | None = None) -> dict[str, Any]:
     root = find_mana_root(root)
-    from mana_agent.automations.service import deploy_schedule, get_schedule
-
-    schedule = get_schedule(root, schedule_id)
-    schedule.enabled = enabled
-    return deploy_schedule(schedule, root).to_dict()
+    from mana_agent.automations.service import AutomationService
+    return AutomationService(root).update(schedule_id, {"enabled": enabled}).to_dict()
 
 
 def run_schedule_now(schedule_id: str, root: Path | None = None) -> dict[str, Any]:
     root = find_mana_root(root)
-    from mana_agent.automations.service import get_schedule, run_schedule_now as _run_schedule_now
-
-    return _run_schedule_now(get_schedule(root, schedule_id), root)
+    from mana_agent.automations.service import AutomationService
+    return AutomationService(root).execute(schedule_id, force=True)
 
 
 def append_automation_run(run: dict[str, Any], root: Path | None = None) -> bool:

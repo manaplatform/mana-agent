@@ -66,22 +66,16 @@ Use `mana-agent fleet --help` for worker, job, comparison, log, artifact,
 cancellation, and verification commands. `fleet verify` requires explicit
 platforms and argv commands; it never exposes a generic interactive shell.
 
-Persistent schedules use the same command/service:
+Create persistent Fleet automations through chat after the model has produced
+and validated the exact Fleet job:
 
 ```bash
-mana-agent automation create \
-  --name "Nightly cross-platform tests" \
-  --action fleet-verify \
-  --cron "0 2 * * *" \
-  --target local \
-  --root-dir . \
-  --platform linux \
-  --platform windows \
-  --platform macos \
-  --verify-command "python -m pytest -q"
+mana-agent chat
+# You: Run the approved Linux, Windows, and macOS Fleet verification every night at 2 AM.
 ```
 
-Events are ordered and persisted with a sequence cursor. Event data carries
+The automation route persists the selected verification inputs and permissions;
+there is no public raw scheduler authoring command. Events are ordered and persisted with a sequence cursor. Event data carries
 run, job, task, session, workspace, repository, worker, and provider identities.
 Logs are bounded before persistence. Dashboard and API clients replay with
 `after_sequence` to avoid duplicates.

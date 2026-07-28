@@ -45,7 +45,7 @@ SECRET_KEYS = {
     "MANA_A2A_SERVER_TOKEN",
     "MANA_GITHUB_WEBHOOK_SECRET",
 }
-NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY"}
+NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY", "SUPERMEMORY_API_KEY"}
 
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
@@ -122,6 +122,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MEM0_ORG_ID": "",
     "MEM0_PROJECT_ID": "",
     "MEM0_BASE_URL": "",
+    "SUPERMEMORY_BASE_URL": "",
     "MANA_MEMORY_TIMEOUT_SECONDS": 15,
     "MANA_WEB_SEARCH_PROVIDER": "",
     "MANA_WEB_SEARCH_API_KEY": "",
@@ -207,6 +208,26 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
             "music": "auto",
             "notes": "auto",
         },
+    },
+    "teach": {
+        "enabled": True,
+        "event_sources": ["browser", "accessibility", "application", "filesystem", "keyboard", "pointer"],
+        "desktop_capture": False,
+        "retention_days": 30,
+        "screenshot_policy": "never",
+        "coordinate_fallback": True,
+        "voice_enabled": False,
+        "browser_capture": True,
+        "excluded_applications": [],
+        "allowed_applications": [],
+        "excluded_domains": [],
+        "recording_allowed_paths": [],
+        "sensitive_detection": True,
+        "automatic_verification": True,
+        "replay_retry_limit": 1,
+        "correction_checkpoints": True,
+        "flow_cards": True,
+        "experimental_sharing": False,
     },
     # Empty is the compatibility sentinel; the configuration TUI persists an
     # explicit value when the user saves its coding-runtime screen.
@@ -302,6 +323,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MEM0_ORG_ID": "mem0_org_id",
     "MEM0_PROJECT_ID": "mem0_project_id",
     "MEM0_BASE_URL": "mem0_base_url",
+    "SUPERMEMORY_BASE_URL": "supermemory_base_url",
     "MANA_MEMORY_TIMEOUT_SECONDS": "mana_memory_timeout_seconds",
     "MANA_WEB_SEARCH_PROVIDER": "mana_web_search_provider",
     "MANA_WEB_SEARCH_API_KEY": "mana_web_search_api_key",
@@ -713,6 +735,13 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw_computer, dict):
             raise UserConfigError("computer_control must be a TOML table.")
         cleaned["computer_control"] = ComputerControlSettings.model_validate(raw_computer).model_dump(mode="json")
+    if "teach" in cleaned:
+        from mana_agent.teach.config import TeachSettings
+
+        raw_teach = cleaned["teach"]
+        if not isinstance(raw_teach, dict):
+            raise UserConfigError("teach must be a TOML table.")
+        cleaned["teach"] = TeachSettings.model_validate(raw_teach).model_dump(mode="json")
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
     if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
@@ -759,11 +788,15 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
             mode=str(cleaned.get("MANA_MEMORY_MODE") or "internal").lower(),
             provider=str(cleaned.get("MANA_MEMORY_PROVIDER") or "mana").lower(),
             fallback_to_internal=bool(cleaned.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", False)),
-            api_key=str(cleaned.get("MEM0_API_KEY") or ""),
+            api_key=str(
+                cleaned.get("SUPERMEMORY_API_KEY")
+                or cleaned.get("MEM0_API_KEY")
+                or ""
+            ),
             secret_ref=str(cleaned.get("MANA_MEMORY_SECRET_REF") or ""),
             org_id=str(cleaned.get("MEM0_ORG_ID") or ""),
             project_id=str(cleaned.get("MEM0_PROJECT_ID") or ""),
-            base_url=str(cleaned.get("MEM0_BASE_URL") or ""),
+            base_url=str(cleaned.get("SUPERMEMORY_BASE_URL") or cleaned.get("MEM0_BASE_URL") or ""),
             timeout_seconds=float(cleaned.get("MANA_MEMORY_TIMEOUT_SECONDS") or 15),
         ).validate()
     for name in (

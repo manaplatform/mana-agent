@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     mem0_org_id: str = Field(default="", alias="MEM0_ORG_ID")
     mem0_project_id: str = Field(default="", alias="MEM0_PROJECT_ID")
     mem0_base_url: str = Field(default="", alias="MEM0_BASE_URL")
+    supermemory_base_url: str = Field(default="", alias="SUPERMEMORY_BASE_URL")
     mana_memory_timeout_seconds: int = Field(default=15, alias="MANA_MEMORY_TIMEOUT_SECONDS")
     mana_web_search_provider: str = Field(default="", alias="MANA_WEB_SEARCH_PROVIDER")
     mana_web_search_api_key: str = Field(default="", alias="MANA_WEB_SEARCH_API_KEY")

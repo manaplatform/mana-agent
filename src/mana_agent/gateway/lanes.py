@@ -150,7 +150,7 @@ READ_CAPABILITIES = (
     "test_execution", "email", "calendar", "computer",
 )
 WRITE_CAPABILITIES = (
-    "repository_write", "shell_write", "git_write", "release", "deployment",
+    "repository_write", "shell_write", "git_write", "release", "deployment", "automation",
 )
 
 
@@ -219,7 +219,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.OPERATIONS, display_name="Operations", description="Handles deployment, infrastructure, and monitoring.",
             owns=("deployment", "infrastructure checks", "monitoring"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("shell_read", "shell_write", "deployment", "browser", "git_read", "computer", "remote_ssh_execute"),
+            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "browser", "git_read", "computer", "remote_ssh_execute"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
             max_concurrent_jobs=1, max_subagents=0, token_budget=25_000, cost_budget=12.0,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
@@ -321,6 +321,13 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "git_diff": frozenset({"git_read"}),
     "remote_ssh_execute": frozenset({"remote_ssh_execute"}),
 }
+
+for _automation_tool in (
+    "automation_create", "automation_get", "automation_list", "automation_status",
+    "automation_update", "automation_delete", "automation_enable",
+    "automation_disable", "automation_run_now",
+):
+    TOOL_CAPABILITIES[_automation_tool] = frozenset({"automation"})
 
 for _git_read_tool in (
     "git_log", "git_show", "git_branch", "git_remote", "git_help", "git_config_get",

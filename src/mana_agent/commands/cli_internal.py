@@ -79,13 +79,12 @@ app = typer.Typer(help="mana-agent CLI", invoke_without_command=True, no_args_is
 skills_app = typer.Typer(help="Manage Mana Agent skills.")
 skill_app = typer.Typer(help="Review and manage Experience-to-Skill proposals.")
 skill_proposal_app = typer.Typer(help="Review a single skill proposal.")
-automation_app = typer.Typer(help="Create, deploy, inspect, and run persistent automations.")
+automation_app = typer.Typer(help="Inspect and delete chat-authored automations.")
 mcp_app = typer.Typer(help="Connect to or serve Model Context Protocol tools and resources.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(skill_app, name="skill")
 skill_app.add_typer(skill_proposal_app, name="proposal")
 app.add_typer(automation_app, name="automation")
-app.add_typer(automation_app, name="cron")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(acp_app, name="acp")
 app.add_typer(a2a_app, name="a2a")
@@ -825,167 +824,63 @@ def _automation_root(root: str | None) -> Path:
     return _resolve_repo(root)
 
 
-@automation_app.command("create")
-def automation_create_command(
-    name: str = typer.Option(..., "--name", help="Readable schedule name."),
-    action: str = typer.Option(..., "--action", help="analyze, daily_report, self_improvement, fleet-verify, or custom."),
-    cron: str = typer.Option(..., "--cron", help="Five-field POSIX cron expression."),
-    target: list[str] = typer.Option(..., "--target", help="Deployment target: local and/or github."),
-    command: str | None = typer.Option(None, "--command", help="Required for action=custom."),
-    platform: list[str] = typer.Option([], "--platform", help="Required platform for action=fleet-verify; repeatable."),
-    verify_command: list[str] = typer.Option([], "--verify-command", help="Verification command for action=fleet-verify; repeatable."),
-    maximum_workers: int = typer.Option(4, "--maximum-workers", min=1, max=64),
-    timeout: int = typer.Option(1800, "--timeout", min=1, max=86400),
-    root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
-) -> None:
-    """Create and immediately deploy an explicitly requested schedule."""
-    from mana_agent.automations.service import AutomationValidationError, ScheduleDefinition, deploy_schedule
-
-    try:
-        action_config = (
-            {
-                "platforms": platform,
-                "commands": verify_command,
-                "maximum_workers": maximum_workers,
-                "timeout": timeout,
-            }
-            if action == "fleet-verify" else {}
-        )
-        schedule = ScheduleDefinition.create(
-            name=name, action=action, cron=cron, targets=target,
-            command=command, action_config=action_config,
-        )
-        deployed = deploy_schedule(schedule, _automation_root(root))
-    except AutomationValidationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    console.print_json(json.dumps(deployed.to_dict()))
-
-
 @automation_app.command("list")
 def automation_list_command(root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root.")) -> None:
-    """List saved schedules and their most recent deployment state."""
-    from mana_agent.automations.service import list_schedules
+    """List chat-authored persistent automations."""
+    from mana_agent.automations.service import list_automations
 
-    console.print_json(json.dumps([schedule.to_dict() for schedule in list_schedules(_automation_root(root))]))
+    console.print_json(json.dumps([item.to_dict() for item in list_automations(_automation_root(root))]))
 
 
 @automation_app.command("status")
 def automation_status_command(
-    schedule_id: str = typer.Argument(..., help="Schedule id."),
+    automation_id: str = typer.Argument(..., help="Automation id."),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
-    """Detect local-cron and managed-workflow deployment drift."""
-    from mana_agent.automations.service import AutomationValidationError, deployment_status, get_schedule
+    """Inspect the canonical record, deployment health, and recent runs."""
+    from mana_agent.automations.service import AutomationService, AutomationValidationError
 
     try:
-        status = deployment_status(get_schedule(_automation_root(root), schedule_id), _automation_root(root))
+        status = AutomationService(_automation_root(root)).status(automation_id)
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print_json(json.dumps(status))
 
 
-@automation_app.command("deploy")
-def automation_deploy_command(
-    schedule_id: str = typer.Argument(..., help="Schedule id."),
+@automation_app.command("delete")
+def automation_delete_command(
+    automation_id: str = typer.Argument(..., help="Automation id."),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
-    """Reconcile a saved schedule with its selected deployment targets."""
-    from mana_agent.automations.service import AutomationValidationError, deploy_schedule, get_schedule
+    """Delete an automation and its managed scheduler artifacts."""
+    from mana_agent.automations.service import AutomationService, AutomationValidationError
 
     try:
-        schedule = deploy_schedule(get_schedule(_automation_root(root), schedule_id), _automation_root(root))
+        AutomationService(_automation_root(root)).delete(automation_id)
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    console.print_json(json.dumps(schedule.to_dict()))
+    console.print(f"Deleted {automation_id}")
 
 
-@automation_app.command("enable")
-def automation_enable_command(
-    schedule_id: str = typer.Argument(..., help="Schedule id."),
+@automation_app.command("remove", hidden=True)
+def automation_remove_compatibility_command(
+    automation_id: str = typer.Argument(..., help="Automation id."),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
-    """Enable or disable and immediately reconcile a schedule."""
-    from mana_agent.automations.service import AutomationValidationError, deploy_schedule, get_schedule
-
-    try:
-        schedule = get_schedule(_automation_root(root), schedule_id)
-        schedule.enabled = True
-        schedule = deploy_schedule(schedule, _automation_root(root))
-    except AutomationValidationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    console.print_json(json.dumps(schedule.to_dict()))
-
-
-@automation_app.command("disable")
-def automation_disable_command(
-    schedule_id: str = typer.Argument(..., help="Schedule id."),
-    root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
-) -> None:
-    """Disable and immediately reconcile a schedule."""
-    from mana_agent.automations.service import AutomationValidationError, deploy_schedule, get_schedule
-
-    try:
-        schedule = get_schedule(_automation_root(root), schedule_id)
-        schedule.enabled = False
-        schedule = deploy_schedule(schedule, _automation_root(root))
-    except AutomationValidationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    console.print_json(json.dumps(schedule.to_dict()))
-
-
-@automation_app.command("remove")
-def automation_remove_command(
-    schedule_id: str = typer.Argument(..., help="Schedule id."),
-    root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
-) -> None:
-    """Remove a saved schedule and its local deployment artifacts."""
-    from mana_agent.automations.service import AutomationValidationError, delete_schedule, remove_deployment
-
-    try:
-        root_path = _automation_root(root)
-        schedule = delete_schedule(root_path, schedule_id)
-        remove_deployment(schedule, root_path)
-    except AutomationValidationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    console.print(f"Removed {schedule_id}")
-
-
-@automation_app.command("run-now")
-def automation_run_now_command(
-    schedule_id: str = typer.Argument(..., help="Schedule id."),
-    root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
-) -> None:
-    """Run an explicitly selected saved schedule immediately."""
-    from mana_agent.automations.service import AutomationValidationError, get_schedule, run_schedule_now
-
-    try:
-        root_path = _automation_root(root)
-        result = run_schedule_now(get_schedule(root_path, schedule_id), root_path)
-    except AutomationValidationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    console.print_json(json.dumps(result))
+    """Compatibility alias for delete."""
+    automation_delete_command(automation_id, root)
 
 
 @automation_app.command("execute", hidden=True)
 def automation_execute_command(
-    action: str | None = typer.Option(None, "--action", help="Compatibility built-in action."),
-    schedule_id: str | None = typer.Option(None, "--schedule-id", help="Saved schedule identity."),
+    automation_id: str = typer.Option(..., "--automation-id", help="Persisted automation identity."),
     root: str | None = typer.Option(None, "--root-dir", "--repo", help="Repository root."),
 ) -> None:
-    """Execute a built-in action for a deployed schedule."""
-    from mana_agent.automations.service import AutomationValidationError, execute_builtin_action, get_schedule
+    """Internal persistent-scheduler entrypoint."""
+    from mana_agent.automations.service import AutomationService, AutomationValidationError
 
     try:
-        root_path = _automation_root(root)
-        if schedule_id:
-            schedule = get_schedule(root_path, schedule_id)
-            result = execute_builtin_action(
-                schedule.action, root_path, action_config=schedule.action_config,
-            )
-        elif action:
-            result = execute_builtin_action(action, root_path)
-        else:
-            raise AutomationValidationError("--schedule-id is required")
+        result = AutomationService(_automation_root(root)).execute(automation_id)
     except AutomationValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print_json(json.dumps(result))
@@ -1061,7 +956,8 @@ def skills_list(
     console.print("[bold]Adaptive Repository Skills:[/bold]")
     for item in adaptive:
         console.print(f"- {item.name} ({item.status}, {item.version}, {item.id})")
-    if not adaptive: console.print("- (none)")
+    if not adaptive:
+        console.print("- (none)")
 
 
 @skills_app.command("show")
@@ -1095,19 +991,23 @@ def _adaptive_id(root: Path, repository: str | None = None) -> str:
 @skills_app.command("storage-path")
 def skills_storage_path(json_output: bool = typer.Option(False, "--json")) -> None:
     path = SkillStorage().storage_path()
-    if json_output: console.print_json(json.dumps({"path": str(path)}))
-    else: console.print(str(path))
+    if json_output:
+        console.print_json(json.dumps({"path": str(path)}))
+    else:
+        console.print(str(path))
 
 
 @skills_app.command("candidates")
 def skills_candidates(repo: str | None = typer.Option(None, "--repo", "--root-dir"), repository: str | None = typer.Option(None, "--repository")) -> None:
-    root=_resolve_repo(repo); items=SkillStorage().list(_adaptive_id(root, repository), state="candidates")
+    root = _resolve_repo(repo)
+    items = SkillStorage().list(_adaptive_id(root, repository), state="candidates")
     console.print_json(json.dumps([item.model_dump(mode="json") for item in items]))
 
 
 @skills_app.command("review")
 def skills_review(skill_id: str, repo: str | None = typer.Option(None, "--repo", "--root-dir")) -> None:
-    root=_resolve_repo(repo); path, manifest, evidence, markdown=SkillStorage().load(_adaptive_id(root), skill_id)
+    root = _resolve_repo(repo)
+    path, manifest, evidence, markdown = SkillStorage().load(_adaptive_id(root), skill_id)
     report = json.loads((path / "security.json").read_text(encoding="utf-8")) if (path / "security.json").exists() else []
     console.print_json(json.dumps({"skill": markdown, "manifest":manifest.model_dump(mode="json"), "evidence":evidence.model_dump(mode="json"), "security":report}, ensure_ascii=False))
 
@@ -1115,18 +1015,22 @@ def skills_review(skill_id: str, repo: str | None = typer.Option(None, "--repo",
 @skills_app.command("approve")
 @skills_app.command("activate")
 def skills_approve(skill_id: str, repo: str | None = typer.Option(None, "--repo", "--root-dir")) -> None:
-    root=_resolve_repo(repo); storage=SkillStorage(); rid=_adaptive_id(root)
+    root = _resolve_repo(repo)
+    storage = SkillStorage()
+    rid = _adaptive_id(root)
     path, manifest, evidence, markdown=storage.load(rid, skill_id, active=False)
     # Approval is deliberately a final revalidation; candidates cannot promote themselves.
     from mana_agent.skills.adaptive import SkillValidator
     findings=SkillValidator().validate(markdown, manifest, evidence, storage.repository_dir(rid))
-    if any(item.severity == "critical" for item in findings): raise typer.BadParameter("critical security finding blocks activation")
+    if any(item.severity == "critical" for item in findings):
+        raise typer.BadParameter("critical security finding blocks activation")
     console.print(str(storage.activate(rid, skill_id)))
 
 
 @skills_app.command("reject")
 def skills_reject(skill_id: str, reason: str = typer.Option(..., "--reason"), repo: str | None = typer.Option(None, "--repo", "--root-dir")) -> None:
-    root=_resolve_repo(repo); path=SkillStorage().reject(_adaptive_id(root), skill_id, reason)
+    root = _resolve_repo(repo)
+    path = SkillStorage().reject(_adaptive_id(root), skill_id, reason)
     console.print(str(path))
 
 
@@ -1138,13 +1042,15 @@ def skills_archive(skill_id: str, repo: str | None = typer.Option(None, "--repo"
 
 @skills_app.command("explain-permissions")
 def skills_explain_permissions(skill_id: str, repo: str | None = typer.Option(None, "--repo", "--root-dir")) -> None:
-    root=_resolve_repo(repo); _path, manifest, _evidence, _markdown=SkillStorage().load(_adaptive_id(root), skill_id)
+    root = _resolve_repo(repo)
+    _path, manifest, _evidence, _markdown = SkillStorage().load(_adaptive_id(root), skill_id)
     console.print_json(json.dumps(SkillPolicyEngine().explain(manifest)))
 
 
 @skills_app.command("rebuild-index")
 def skills_rebuild_index(repo: str | None = typer.Option(None, "--repo", "--root-dir")) -> None:
-    root=_resolve_repo(repo); console.print(str(SkillStorage().rebuild_index(_adaptive_id(root))))
+    root = _resolve_repo(repo)
+    console.print(str(SkillStorage().rebuild_index(_adaptive_id(root))))
 
 
 @skill_app.command("proposals")

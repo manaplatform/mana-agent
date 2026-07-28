@@ -1,5 +1,15 @@
 # Architecture
 
+## Teach Mode pipeline
+
+Teach Mode follows `explicit start → semantic raw events → redaction →
+normalization → parameterization → typed flow → review → safe replay →
+observable verification`. It reuses the shared user data directory,
+computer-control permission scopes, execution event hub, model tool selection,
+API, and persistent automation service. It does not introduce a separate
+executor or scheduler. Typed extension protocols and trust boundaries are
+described in [Teach Mode](26-teach-mode.md#architecture-and-extension-points).
+
 ## Fleet verification boundary
 
 `mana_agent.fleet` owns worker capability inventory, health, deterministic
@@ -45,10 +55,10 @@ repository, conversation, and task identities.
 
 The `internal/mana` adapter remains the default and wraps the existing SQLite
 coding-flow and JSON multi-agent stores without rewriting them. The optional
-`external/mem0` adapter is lazy, normalizes provider responses and failures,
-maps scope fields in one mapper, applies timeouts, and reuses its client for the
-service lifecycle. Invalid configuration stops before execution; external
-failure never selects an internal backend implicitly.
+`external/mem0` and `external/supermemory` adapters are lazy, normalize provider
+responses and failures, map scope fields in one mapper, apply timeouts, and
+reuse their clients for the service lifecycle. Invalid configuration stops
+before execution; external failure never selects an internal backend implicitly.
 
 `ChatStack` owns one canonical service instance and rebinds its identity scope
 when the frontend opens a session; this does not construct a backend or create a

@@ -13,8 +13,7 @@ __all__ = ["get_scheduler", "schedule_job", "list_jobs_stub"]
 
 def get_scheduler() -> None:
     raise RuntimeError(
-        "In-process scheduling was retired. Create an explicit persistent schedule with "
-        "`mana-agent automation create`."
+        "In-process scheduling was retired. Create automations through model-driven chat."
     )
 
 

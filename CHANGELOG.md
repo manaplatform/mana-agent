@@ -4,6 +4,61 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Added `external/supermemory` as a fully supported memory provider alongside
+  `internal/mana` and `external/mem0`, including shared-factory wiring, lazy SDK
+  loading, deterministic Supermemory scope tags/custom IDs, keyring-backed
+  secret handling, and provider-safe metadata flattening.
+- Updated the memory configuration flow, Textual settings UI, tests, and
+  documentation so `MANA_MEMORY_PROVIDER=supermemory` and
+  `SUPERMEMORY_API_KEY` work through the same provider-neutral `MemoryService`
+  path without any fallback to internal or Mem0 storage.
+  - Verification: `venv/bin/python -m py_compile src/mana_agent/memory/config.py src/mana_agent/memory/factory.py src/mana_agent/memory/providers/shared.py src/mana_agent/memory/providers/mem0/mapper.py src/mana_agent/memory/providers/supermemory/client.py src/mana_agent/memory/providers/supermemory/mapper.py src/mana_agent/memory/providers/supermemory/backend.py src/mana_agent/config/session.py src/mana_agent/config/settings.py src/mana_agent/config/user_config.py src/mana_agent/tui/configuration_app.py tests/test_memory_architecture.py` passed; `venv/bin/python -m pytest tests/test_memory_architecture.py -q` passed (26 tests); `git diff --check` passed.
+
+- Bumped the package and documented version to `v0.1.2`.
+  - Verification: `python -m pytest -q tests/test_package_version.py` passed.
+
+- Moved the executable local-scheduler snapshot beneath `~/.mana/automations/runtime`.
+  Launchd now runs this owner-controlled copy instead of reading a development virtual
+  environment beneath macOS-protected locations such as `~/Documents`; completed one-time
+  runs also remove their platform wakeup.
+  - Verification: targeted automation-service tests passed.
+
+- Fixed local connector automation execution to distinguish immediate job execution from
+  automation authoring, rejecting unexpected schedule mutations instead of recording a false
+  success. macOS launchd jobs now retain their Mana home, write per-job stdout/stderr logs, and
+  report a recorded non-zero executor exit as unhealthy.
+  - Verification: targeted automation-service tests passed.
+
+- Fixed the cross-platform scheduler-adapter test to explicitly mock macOS's
+  POSIX-only user-ID lookup while exercising the `launchd` backend on Windows.
+  - Verification: targeted automation-service scheduler-adapter test passed.
+
+- Fixed Windows automation persistence: the one-byte store lock now unlocks
+  the same byte it acquires, and the runtime dependency now includes the IANA
+  timezone database required by Windows' ``zoneinfo`` implementation.
+  - Verification: targeted automation-service tests passed.
+
+- Registered the typed automation chat tools with the Operations lane's explicit
+  `automation` capability, so a validated automation route can reach
+  `automation_create` without bypassing lane permission checks. Added regression
+  coverage for dispatching a registered automation route from an isolated
+  `multi_task` child instead of returning `route_executor_unavailable`. Deferred
+  Gmail checks now select the automation route without inspecting the mailbox
+  during authoring, and a singular requested time creates a one-time trigger
+  without asking for recurrence. Automation routing now requires a validated
+  operation and exposes only its exact tool, so creation calls
+  `automation_create` directly instead of repeatedly using `automation_list`;
+  unspecified local output defaults to the automation workspace instead of
+  prompting the user to choose local versus cloud storage. The create tool now
+  exposes discriminated trigger/job schemas plus typed retry and misfire
+  policies, supplies the current timestamp and timezone during authoring, and
+  rejects past one-time schedules instead of persisting an unrunnable record.
+  Simplified read-only TUI message cards by
+  suppressing TextArea's inner cursor-line fill.
+  - Verification: focused automation-route, entry-routing, lane, gateway, and
+    automation-service tests passed (95 tests). Changed-file Ruff,
+    Python compilation, and `git diff --check` passed; focused TUI tests also
+    passed for the card styling change.
 - Stabilized the surrounding-panel TUI reflow regression on Windows by waiting
   through Textual's deferred history replay and dynamic-card mount cycle before
   inspecting the replayed message.
@@ -18,6 +73,74 @@ All notable repository changes should be recorded here.
     2 skipped); changed-test Ruff and `git diff --check` passed.
 
 ## 2026-07-27
+
+- Unified schedules and dashboard automation records behind the versioned
+  `AutomationDefinition` contract. Added locked atomic migration, exact anchored
+  interval/cron/once triggers, typed jobs, persistent platform deployment,
+  leased ID-based headless execution, canonical run history and events,
+  model-only chat authoring tools, reviewed/verified Teach flow handoff, and
+  management-only CLI/dashboard/TUI surfaces. Removed the public cron alias,
+  raw automation/Teach schedule creation commands, and the dashboard Cron page.
+  - Verification: focused automation, Teach, dashboard, chat-tool, entry-route,
+    gateway, and platform-adapter tests passed; changed-file Ruff, Python 3.12
+    compilation, and `git diff --check` passed; full
+    `.venv/bin/python -m pytest -q` passed (1,384 passed, 2 skipped).
+
+- Fixed Teach Mode atomic persistence on Windows: temporary-file writes now
+  conditionally apply POSIX-only descriptor permissions, allowing descriptors
+  to close before replacement and cleanup. Docker secret environment files use
+  the same portability guard. The owner-only mode assertion is now correctly
+  limited to platforms whose filesystem mode bits support that guarantee.
+  - Verification: `PYTHONPATH=src .venv/bin/pytest -q tests/test_teach_mode.py`
+    passed (22 tests); changed-file Ruff, Python 3.12 compilation, and
+    `git diff --check` passed.
+
+- Corrected native Teach Mode text events: printable input is now reconstructed
+  in memory into one semantic event (including spaces and backspace edits)
+  instead of persisting the literal `{{ typed_text }}` placeholder. Secure
+  fields remain content-free, and the existing redaction layer still masks
+  detected secrets before storage.
+  - Verification: `PYTHONPATH=src .venv/bin/pytest -q tests/test_teach_mode.py`,
+    changed-file Ruff, `python -m compileall -q src/mana_agent/teach`, and
+    `git diff --check` passed.
+
+- Added the local-first Mana Teach Mode foundation: recoverable recording
+  sessions, versioned semantic events, optional cross-platform capture
+  protocols and diagnostics, redaction, selector ranking, conservative input
+  inference, typed workflow compilation with provenance, safe dry/guided/normal
+  replay, observable verification, targeted selector repair, versioned local
+  storage, deterministic validated `.mana-flow` packages, private Flow Cards,
+  CLI/API/chat-tool/live-event integration, and persistent version-policy-aware
+  scheduling. Imported flows remain untrusted and sensitive actions retain
+  existing permission and confirmation requirements.
+  - Verification: focused Teach Mode, automation, chat-tool, API/WebSocket,
+    configuration, and CLI compatibility checks passed (49 tests); the full
+    suite passed (1,366 passed, 2 skipped). Changed files passed Ruff,
+    `python -m compileall -q src`, and `git diff --check`. Repository-wide Ruff
+    remains non-clean with 792 unrelated pre-existing findings.
+
+- Extended Teach Mode with an explicit native desktop-monitoring path:
+  separately persisted owner-only Mana grants, OS privacy status/settings
+  handoff, a session-bound background recorder, active application/window and
+  accessibility metadata, shortcut/navigation capture, pointer events with
+  normalized fallback positions, redacted typing activity, application
+  allowlists, API/chat/CLI integration, and the `teach-desktop` optional
+  dependency group. Printable keyboard content is never persisted as a raw
+  keylog, and native recording fails closed when a dependency or OS grant is
+  missing.
+  - Verification: Teach Mode and integration checks passed (35 tests), the
+    Teach-specific suite passed (18 tests), and the full suite passed (1,372
+    passed, 2 skipped). Changed files passed Ruff, `python -m compileall -q
+    src`, and `git diff --check`. The optional desktop extra installed
+    successfully and the live macOS doctor probe correctly reported dependency
+    availability plus the still-unapproved OS Accessibility grant.
+
+- Prevented misleading empty Teach recordings after a user has granted all
+  local desktop scopes: normal `teach start` now selects native monitoring, and
+  startup stops with an actionable OS-permission error if that monitor cannot
+  attach. `--no-desktop` remains the explicit semantic-only path.
+  - Verification: focused Teach Mode suite passed (20 tests); changed files
+    passed Ruff, compilation, and `git diff --check`.
 
 - Bumped the package and documented release version to `v0.1.1`.
   - Verification: `python -m pytest tests/test_package_version.py` passed.
