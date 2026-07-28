@@ -244,7 +244,10 @@ def test_platform_persistent_scheduler_adapters_are_id_based(
     monkeypatch.setattr(service.os, "getuid", lambda: 501, raising=False)
     launch = service.deploy_launchd(automation, tmp_path, runner=runner)
     assert launch.status == "deployed"
-    assert automation.id in launch_path.read_text(encoding="utf-8")
+    launch_content = launch_path.read_text(encoding="utf-8")
+    assert automation.id in launch_content
+    assert "StandardOutPath" in launch_content
+    assert "StandardErrorPath" in launch_content
 
     unit_dir = tmp_path / "systemd"
     monkeypatch.setattr(
@@ -262,6 +265,57 @@ def test_platform_persistent_scheduler_adapters_are_id_based(
     windows = service.deploy_windows(automation, tmp_path, runner=runner)
     assert windows.status == "deployed"
     assert any("ManaAgent-" + automation.id in command for command in calls)
+
+
+def test_launchd_health_reports_a_recorded_executor_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    automation = _automation(tmp_path)
+    automation.deployment = DeploymentState(status="deployed", backend="launchd")
+    service.upsert_automation(tmp_path, automation)
+    launch_path = tmp_path / "LaunchAgents" / f"{automation.id}.plist"
+    launch_path.parent.mkdir(parents=True)
+    launch_path.write_text("plist", encoding="utf-8")
+    monkeypatch.setattr(service, "_launchd_path", lambda _item: launch_path)
+    monkeypatch.setattr(service.os, "getuid", lambda: 501, raising=False)
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[:2] == ["launchctl", "print"]
+        return subprocess.CompletedProcess(args, 0, "last exit code = 1", "")
+
+    assert service.deployment_status(automation, tmp_path, runner=runner)["deployment_healthy"] is False
+
+
+def test_connector_execution_fails_if_gateway_mutates_automations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    automation = create_automation(
+        tmp_path,
+        name="Gmail task",
+        trigger=OnceTrigger(run_at=datetime.now(timezone.utc) + timedelta(hours=1), timezone="UTC"),
+        job={
+            "type": "connector_action", "connector": "gmail", "action": "check_inbox",
+            "arguments": {"account": "account@example.com"}, "prompt": "Check the inbox.",
+        },
+        timezone_name="UTC", deploy=False,
+    )
+
+    class Gateway:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def send(self, _session_id: str, prompt: str) -> str:
+            assert "Immediately execute" in prompt
+            assert "do not create" in prompt
+            duplicate = automation.model_copy(update={"id": "aut_unexpectedmutation"})
+            service.upsert_automation(tmp_path, duplicate)
+            return "Incorrectly created an automation."
+
+        def close_session(self, _session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr("mana_agent.gateway.AgentChatGateway", Gateway)
+    result = service._execute_job(automation, tmp_path)
+    assert result["ok"] is False
+    assert "modify durable automation definitions" in str(result["error"])
 
 
 def test_secret_values_are_rejected(tmp_path: Path) -> None:

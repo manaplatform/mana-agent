@@ -725,6 +725,22 @@ def _executor_argv(automation: AutomationDefinition, root: Path) -> list[str]:
     ]
 
 
+def _launchd_log_paths(automation: AutomationDefinition, root: Path) -> tuple[Path, Path]:
+    """Return durable, per-automation launchd output paths."""
+    directory = config_path(root).parent / "logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    return (
+        directory / f"{automation.id}.stdout.log",
+        directory / f"{automation.id}.stderr.log",
+    )
+
+
+def _launchd_environment() -> dict[str, str]:
+    """Preserve the configured Mana home when launchd starts outside a shell."""
+    mana_home = os.getenv("MANA_HOME", "").strip()
+    return {"MANA_HOME": mana_home} if mana_home else {}
+
+
 def managed_marker(automation: AutomationDefinition) -> str:
     return f"# mana-agent:{automation.id}"
 
@@ -826,6 +842,14 @@ def deploy_launchd(
     path.parent.mkdir(parents=True, exist_ok=True)
     argv = _executor_argv(automation, root)
     escaped = "".join(f"<string>{_xml_escape(value)}</string>" for value in argv)
+    stdout_path, stderr_path = _launchd_log_paths(automation, root)
+    environment = "".join(
+        f"<key>{_xml_escape(key)}</key><string>{_xml_escape(value)}</string>"
+        for key, value in _launchd_environment().items()
+    )
+    environment_xml = (
+        f"<key>EnvironmentVariables</key><dict>{environment}</dict>" if environment else ""
+    )
     calendar = ""
     interval = "<key>StartInterval</key><integer>60</integer>"
     if automation.trigger.type == "cron":
@@ -838,6 +862,9 @@ def deploy_launchd(
         '"http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>'
         f"<key>Label</key><string>com.mana-agent.automation.{automation.id}</string>"
         f"<key>ProgramArguments</key><array>{escaped}</array>{calendar}{interval}"
+        f"<key>StandardOutPath</key><string>{_xml_escape(str(stdout_path))}</string>"
+        f"<key>StandardErrorPath</key><string>{_xml_escape(str(stderr_path))}</string>"
+        f"{environment_xml}"
         "<key>RunAtLoad</key><true/></dict></plist>"
     )
     path.write_text(content, encoding="utf-8")
@@ -1002,7 +1029,14 @@ def deployment_status(automation: AutomationDefinition, root: Path, *, runner=su
     if state["backend"] == "github-actions":
         healthy = state["status"] == "deployed" and workflow_path(root, automation).exists()
     elif state["backend"] == "launchd":
-        healthy = _launchd_path(automation).exists()
+        path = _launchd_path(automation)
+        if path.exists():
+            result = runner(
+                ["launchctl", "print", f"gui/{os.getuid()}/com.mana-agent.automation.{automation.id}"],
+                capture_output=True, text=True, check=False,
+            )
+            last_exit_failed = re.search(r"last exit code = [1-9][0-9]*", result.stdout or "")
+            healthy = result.returncode == 0 and last_exit_failed is None
     elif state["backend"] == "windows-task-scheduler":
         result = runner(["schtasks", "/Query", "/TN", f"ManaAgent-{automation.id}"], capture_output=True, text=True, check=False)
         healthy = result.returncode == 0
@@ -1212,9 +1246,15 @@ def _execute_job(automation: AutomationDefinition, root: Path) -> dict[str, Any]
         f"Execute the model-selected tool {job.tool_name} with these validated arguments: "
         f"{json.dumps(job.arguments, ensure_ascii=False)}"
     )
+    before_automations = {
+        item.id: item.to_dict() for item in list_automations(root)
+    }
     if job.type == "connector_action":
         prompt = (
-            f"Execute connector {job.connector} action {job.action} with these validated arguments: "
+            "Immediately execute this already-due persisted connector job. This is execution, "
+            "not automation authoring: do not create, inspect, update, reschedule, or defer any "
+            "automation. Perform the authenticated connector action now and report its result. "
+            f"Connector: {job.connector}. Action: {job.action}. Validated arguments: "
             f"{json.dumps(job.arguments, ensure_ascii=False)}. {job.prompt}"
         )
     gateway = AgentChatGateway(root)
@@ -1223,6 +1263,15 @@ def _execute_job(automation: AutomationDefinition, root: Path) -> dict[str, Any]
         answer = gateway.send(session_id, prompt)
     finally:
         gateway.close_session(session_id)
+    after_automations = {item.id: item.to_dict() for item in list_automations(root)}
+    if after_automations != before_automations:
+        return {
+            "ok": False,
+            "error": (
+                "Automation execution attempted to modify durable automation definitions instead "
+                "of executing the persisted job. No successful execution was recorded."
+            ),
+        }
     return {"ok": True, "answer": _bounded(answer)}
 
 

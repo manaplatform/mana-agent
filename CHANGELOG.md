@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Fixed local connector automation execution to distinguish immediate job execution from
+  automation authoring, rejecting unexpected schedule mutations instead of recording a false
+  success. macOS launchd jobs now retain their Mana home, write per-job stdout/stderr logs, and
+  report a recorded non-zero executor exit as unhealthy.
+  - Verification: targeted automation-service tests passed.
+
 - Fixed the cross-platform scheduler-adapter test to explicitly mock macOS's
   POSIX-only user-ID lookup while exercising the `launchd` backend on Windows.
   - Verification: targeted automation-service scheduler-adapter test passed.
