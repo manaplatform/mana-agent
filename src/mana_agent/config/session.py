@@ -94,7 +94,7 @@ class ConfigurationDraft:
             values["MANA_MEMORY_SECRET_REF"] = MemorySecretStore().set(
                 transient_memory_key,
                 str(values.get("MANA_MEMORY_SECRET_REF") or ""),
-                provider,
+                provider=provider,
             )
         if str(values.get("MANA_MEMORY_MODE") or "internal") == "internal":
             values["MANA_MEMORY_PROVIDER"] = "mana"

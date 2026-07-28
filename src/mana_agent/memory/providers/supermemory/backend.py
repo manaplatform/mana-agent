@@ -43,7 +43,6 @@ class SupermemoryProvider:
             "add",
             content=request.content.text,
             container_tag=supermemory_primary_container_tag(scope),
-            container_tags=supermemory_container_tags(scope),
             custom_id=custom_id,
             metadata=metadata,
             task_type="memory",
@@ -68,7 +67,6 @@ class SupermemoryProvider:
             "search.memories",
             q=request.query,
             container_tag=supermemory_primary_container_tag(request.scope),
-            container_tags=supermemory_container_tags(request.scope),
             filters=supermemory_filters(supermemory_metadata(request.scope, request.metadata)),
             limit=max(1, request.limit),
             search_mode="hybrid",
@@ -113,7 +111,6 @@ class SupermemoryProvider:
             memory_id,
             content=content,
             container_tag=supermemory_primary_container_tag(request.scope),
-            container_tags=supermemory_container_tags(request.scope),
             custom_id=supermemory_custom_id(scope=request.scope, content=content, metadata=metadata),
             metadata=metadata,
             task_type="memory",
@@ -154,7 +151,7 @@ class SupermemoryProvider:
         while True:
             response = await self.client.call(
                 "documents.list",
-                container_tags=supermemory_container_tags(scope),
+                container_tag=supermemory_primary_container_tag(scope),
                 filters=supermemory_filters(supermemory_metadata(scope)),
                 limit=100,
                 page=page,

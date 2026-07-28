@@ -26,6 +26,7 @@ from mana_agent.memory.providers.shared import (
     supermemory_custom_id,
     supermemory_primary_container_tag,
 )
+from mana_agent.memory.providers.supermemory.backend import SupermemoryProvider
 
 
 def test_internal_mode_is_default_and_reuses_existing_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,11 +148,11 @@ def test_supermemory_tags_and_custom_ids_are_deterministic() -> None:
     assert supermemory_primary_container_tag(scope) == supermemory_primary_container_tag(scope)
     assert supermemory_container_tags(scope) == [
         "mana",
-        "mana.user.u-1",
-        "mana.workspace.workspace-1",
-        "mana.repository.repo",
-        "mana.agent.main",
-        "mana.session.s1",
+        "mana:user:u-1",
+        "mana:workspace:workspace-1",
+        "mana:repository:repo",
+        "mana:agent:main",
+        "mana:session:s1",
     ]
     custom_id = supermemory_custom_id(
         scope=scope,
@@ -159,11 +160,38 @@ def test_supermemory_tags_and_custom_ids_are_deterministic() -> None:
         metadata={"memory_kind": "task", "fingerprint": "abc123"},
     )
     assert custom_id is not None
+    assert "." not in custom_id
+    assert custom_id.startswith("mana:task:")
     assert custom_id == supermemory_custom_id(
         scope=scope,
         content="fact",
         metadata={"memory_kind": "task", "fingerprint": "abc123"},
     )
+
+
+def test_supermemory_backend_uses_container_tag_without_deprecated_container_tags() -> None:
+    captured: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_call(method: str, *args: object, operation: str, **kwargs: object) -> object:
+        captured.append((method, args, kwargs))
+        if method == "add":
+            return types.SimpleNamespace(id="doc-1", status="queued")
+        return types.SimpleNamespace(results=[])
+
+    backend = SupermemoryProvider(MemoryConfig(mode="external", provider="supermemory", api_key="test"))
+    backend.client.call = fake_call  # type: ignore[method-assign]
+
+    async def run() -> None:
+        scope = MemoryScope(user_id="u", workspace_id="w", repository_id="r", session_id="s")
+        await backend.add(MemoryWriteRequest(MemoryContent("fact"), scope, {"memory_kind": "task"}))
+        await backend.search(MemorySearchRequest("fact", scope))
+
+    asyncio.run(run())
+
+    assert captured
+    for method, _args, kwargs in captured:
+        assert "container_tag" in kwargs
+        assert "container_tags" not in kwargs
 
 
 def test_mem0_search_requires_positive_entity_scope(tmp_path: Path) -> None:

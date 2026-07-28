@@ -54,11 +54,11 @@ def flat_scalar_metadata(metadata: dict[str, Any] | None) -> dict[str, str | int
 
 
 def _safe_tag_component(value: str, *, max_length: int = 48) -> str:
-    cleaned = "".join(ch.lower() if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value).strip())
-    cleaned = cleaned.strip("-.") or f"id-{stable_hash({'value': str(value)})[:12]}"
+    cleaned = "".join(ch.lower() if ch.isalnum() or ch in {"-", "_", ":"} else "-" for ch in str(value).strip())
+    cleaned = cleaned.strip("-:") or f"id-{stable_hash({'value': str(value)})[:12]}"
     if len(cleaned) <= max_length:
         return cleaned
-    return f"{cleaned[: max_length - 13].rstrip('-.')}-{stable_hash({'value': cleaned})[:12]}"
+    return f"{cleaned[: max_length - 13].rstrip('-:')}-{stable_hash({'value': cleaned})[:12]}"
 
 
 def supermemory_container_tags(scope: MemoryScope) -> list[str]:
@@ -66,12 +66,12 @@ def supermemory_container_tags(scope: MemoryScope) -> list[str]:
     for scope_key, label in SUPERMEMORY_TAG_COMPONENTS:
         value = str(getattr(scope, scope_key) or "").strip()
         if value:
-            tags.append(f"mana.{label}.{_safe_tag_component(value)}")
+            tags.append(f"mana:{label}:{_safe_tag_component(value)}")
     return tags
 
 
 def supermemory_primary_container_tag(scope: MemoryScope) -> str:
-    return f"mana.scope.{stable_hash({'scope': scope.as_dict()})}"
+    return f"mana:scope:{stable_hash({'scope': scope.as_dict()})}"
 
 
 def supermemory_metadata(
@@ -117,7 +117,7 @@ def supermemory_custom_id(
         return None
     content_hash = stable_hash({"content": content})[:12]
     identity_hash = stable_hash(stable_identity)
-    return f"mana.{_safe_tag_component(kind, max_length=20)}.{identity_hash}.{content_hash}"
+    return f"mana:{_safe_tag_component(kind, max_length=20)}:{identity_hash}:{content_hash}"
 
 
 def record_from_document(
