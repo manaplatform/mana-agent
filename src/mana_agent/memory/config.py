@@ -67,7 +67,7 @@ class MemoryConfig:
         explicit_api_key = str(raw.get(provider_api_env, "") or "").strip() if provider_api_env else ""
         secret_ref = str(raw.get("MANA_MEMORY_SECRET_REF", "") or "").strip()
         secret_api_key = MemorySecretStore().get(secret_ref) if (mode == "external" and secret_ref) else ""
-        api_key = secret_api_key or explicit_api_key or str(os.getenv(provider_api_env, "") or "").strip()
+        api_key = explicit_api_key or secret_api_key or str(os.getenv(provider_api_env, "") or "").strip()
         config = cls(
             mode=mode,
             provider=provider,

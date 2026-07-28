@@ -99,6 +99,20 @@ def test_supermemory_config_prefers_secret_ref_then_environment(monkeypatch: pyt
     assert config.api_key == "secret-store-key"
 
 
+def test_supermemory_explicit_key_overrides_stored_secret_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", "env-key")
+    monkeypatch.setattr("mana_agent.memory.config.MemorySecretStore.get", lambda *_args: "old-secret-key")
+    config = MemoryConfig.load(
+        {
+            "MANA_MEMORY_MODE": "external",
+            "MANA_MEMORY_PROVIDER": "supermemory",
+            "MANA_MEMORY_SECRET_REF": "supermemory:ref",
+            "SUPERMEMORY_API_KEY": "new-inline-key",
+        }
+    )
+    assert config.api_key == "new-inline-key"
+
+
 def test_scope_mapping_keeps_dimensions_separate() -> None:
     scope = MemoryScope(
         user_id="u", agent_id="a", session_id="s", workspace_id="w",
