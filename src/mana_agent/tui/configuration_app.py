@@ -133,6 +133,18 @@ class ManaConfigurationApp(App[bool]):
         )
         self._memory_validated = str(self.draft.original.get("MANA_MEMORY_MODE") or "internal") == "internal"
 
+    def _memory_provider(self) -> str:
+        mode = str(self.query_one("#memory-mode", Select).value) if self.is_mounted else str(self.draft.values.get("MANA_MEMORY_MODE") or "internal")
+        if mode == "internal":
+            return "mana"
+        if self.is_mounted:
+            return str(self.query_one("#memory-provider", Select).value or "mem0")
+        return str(self.draft.values.get("MANA_MEMORY_PROVIDER") or "mem0")
+
+    def _memory_secret_placeholder(self, provider: str) -> str:
+        key_name = "SUPERMEMORY_API_KEY" if provider == "supermemory" else "MEM0_API_KEY"
+        return "Configured •••••••• (leave blank to preserve)" if self.draft.values.get("MANA_MEMORY_SECRET_REF") or self.draft.values.get(key_name) else "Not configured"
+
     def compose(self) -> ComposeResult:
         values = self.draft.values
         provider_id = str(values.get("MANA_AI_PROVIDER") or "openai")
@@ -198,8 +210,17 @@ class ManaConfigurationApp(App[bool]):
                     allow_blank=False,
                 )
                 yield Static("Internal memory is locally managed by Mana-Agent and remains the default.", id="memory-hint", classes="hint")
-                yield Select([("Mem0", "mem0")], value="mem0", id="memory-provider", allow_blank=False)
-                yield Input(password=True, placeholder="Mem0 API key (stored in the OS keyring)", id="mem0-api-key")
+                yield Select(
+                    [("Mem0", "mem0"), ("Supermemory", "supermemory")],
+                    value=(
+                        str(values.get("MANA_MEMORY_PROVIDER") or "mem0")
+                        if str(values.get("MANA_MEMORY_PROVIDER") or "mem0") in {"mem0", "supermemory"}
+                        else "mem0"
+                    ),
+                    id="memory-provider",
+                    allow_blank=False,
+                )
+                yield Input(password=True, placeholder="External memory API key (stored in the OS keyring)", id="memory-api-key")
                 yield Input(value=str(values.get("MEM0_ORG_ID") or ""), placeholder="Organization ID (optional)", id="mem0-org-id")
                 yield Input(value=str(values.get("MEM0_PROJECT_ID") or ""), placeholder="Project ID (optional)", id="mem0-project-id")
                 yield Input(value=str(values.get("MEM0_BASE_URL") or ""), placeholder="Custom base URL (optional)", id="mem0-base-url")
@@ -381,6 +402,7 @@ class ManaConfigurationApp(App[bool]):
                 "MEM0_ORG_ID": self.query_one("#mem0-org-id", Input).value.strip(),
                 "MEM0_PROJECT_ID": self.query_one("#mem0-project-id", Input).value.strip(),
                 "MEM0_BASE_URL": self.query_one("#mem0-base-url", Input).value.strip(),
+                "SUPERMEMORY_BASE_URL": "",
                 "MANA_MODEL_MAIN": str(self.query_one("#role-main", Select).value),
                 "MANA_MODEL_HEAD_DECISION": str(self.query_one("#role-head", Select).value),
                 "MANA_MODEL_PLANNER": str(self.query_one("#role-planner", Select).value),
@@ -421,9 +443,12 @@ class ManaConfigurationApp(App[bool]):
         self.draft.set_secret("MANA_WEB_SEARCH_API_KEY", self.query_one("#search-api-key", Input).value)
         self.draft.set_secret("MANA_GITHUB_TOKEN", self.query_one("#github-token", Input).value)
         self.draft.set_secret("MANA_A2A_SERVER_TOKEN", self.query_one("#a2a-token", Input).value)
-        mem0_key = self.query_one("#mem0-api-key", Input).value.strip()
-        if mem0_key:
-            self.draft.values["MEM0_API_KEY"] = mem0_key
+        memory_provider = self._memory_provider()
+        memory_key = self.query_one("#memory-api-key", Input).value.strip()
+        self.draft.values.pop("MEM0_API_KEY", None)
+        self.draft.values.pop("SUPERMEMORY_API_KEY", None)
+        if memory_key:
+            self.draft.values["SUPERMEMORY_API_KEY" if memory_provider == "supermemory" else "MEM0_API_KEY"] = memory_key
         self.draft.set_models(
             provider=provider,
             high=str(self.query_one("#high-model", Select).value),
@@ -488,7 +513,7 @@ class ManaConfigurationApp(App[bool]):
                 status.update(f"Validation failed: {exc}")
                 return
             self._memory_validated = True
-            status.update("Connected to Mem0")
+            status.update(f"Connected to {self._memory_provider().capitalize()}")
             return
         if button_id in {"remove-provider-secret", "remove-search-secret", "remove-github-secret"}:
             key = {
@@ -598,16 +623,29 @@ class ManaConfigurationApp(App[bool]):
             self._search_validated = False
         elif event.input.id in {"github-token", "github-secret-ref"} and event.value:
             self._github_validated = False
-        elif event.input.id in {"mem0-api-key", "mem0-org-id", "mem0-project-id", "mem0-base-url"} and event.value:
+        elif event.input.id in {"memory-api-key", "mem0-org-id", "mem0-project-id", "mem0-base-url"} and event.value:
             self._memory_validated = False
 
     def _update_memory_fields(self) -> None:
         external = str(self.query_one("#memory-mode", Select).value) == "external"
-        for selector in ("#memory-provider", "#mem0-api-key", "#mem0-org-id", "#mem0-project-id", "#mem0-base-url", "#test-memory"):
+        provider = str(self.query_one("#memory-provider", Select).value or "mem0")
+        for selector in ("#memory-provider", "#memory-api-key", "#test-memory"):
             self.query_one(selector).display = external
+        for selector in ("#mem0-org-id", "#mem0-project-id", "#mem0-base-url"):
+            self.query_one(selector).display = external and provider == "mem0"
+        self.query_one("#memory-api-key", Input).placeholder = (
+            "Supermemory API key (stored in the OS keyring)"
+            if provider == "supermemory"
+            else "Mem0 API key (stored in the OS keyring)"
+        ) if external else "External memory API key"
         self.query_one("#memory-hint", Static).update(
-            "Mem0 stores selected memory with an external provider. Review its privacy policy before enabling."
-            if external else "Internal memory is locally managed by Mana-Agent and remains the default."
+            (
+                "Supermemory stores selected memory with an external provider. Review its privacy and retention policies before enabling."
+                if provider == "supermemory"
+                else "Mem0 stores selected memory with an external provider. Review its privacy policy before enabling."
+            )
+            if external
+            else "Internal memory is locally managed by Mana-Agent and remains the default."
         )
 
 

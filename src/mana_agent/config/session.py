@@ -77,14 +77,24 @@ class ConfigurationDraft:
         old_identity = (
             *provider_identity(self.original),
         )
-        transient_mem0_key = str(self.values.get("MEM0_API_KEY") or "")
-        values = {key: value for key, value in self.values.items() if key != "MEM0_API_KEY"}
-        if transient_mem0_key:
+        provider = str(self.values.get("MANA_MEMORY_PROVIDER") or "mana").strip().lower()
+        transient_memory_key = str(
+            self.values.get("SUPERMEMORY_API_KEY")
+            or self.values.get("MEM0_API_KEY")
+            or ""
+        )
+        values = {
+            key: value
+            for key, value in self.values.items()
+            if key not in {"MEM0_API_KEY", "SUPERMEMORY_API_KEY"}
+        }
+        if transient_memory_key:
             from mana_agent.memory.config import MemorySecretStore
 
             values["MANA_MEMORY_SECRET_REF"] = MemorySecretStore().set(
-                transient_mem0_key,
+                transient_memory_key,
                 str(values.get("MANA_MEMORY_SECRET_REF") or ""),
+                provider,
             )
         if str(values.get("MANA_MEMORY_MODE") or "internal") == "internal":
             values["MANA_MEMORY_PROVIDER"] = "mana"

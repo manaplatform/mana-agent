@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-28
 
+- Added `external/supermemory` as a fully supported memory provider alongside
+  `internal/mana` and `external/mem0`, including shared-factory wiring, lazy SDK
+  loading, deterministic Supermemory scope tags/custom IDs, keyring-backed
+  secret handling, and provider-safe metadata flattening.
+- Updated the memory configuration flow, Textual settings UI, tests, and
+  documentation so `MANA_MEMORY_PROVIDER=supermemory` and
+  `SUPERMEMORY_API_KEY` work through the same provider-neutral `MemoryService`
+  path without any fallback to internal or Mem0 storage.
+  - Verification: `venv/bin/python -m py_compile src/mana_agent/memory/config.py src/mana_agent/memory/factory.py src/mana_agent/memory/providers/shared.py src/mana_agent/memory/providers/mem0/mapper.py src/mana_agent/memory/providers/supermemory/client.py src/mana_agent/memory/providers/supermemory/mapper.py src/mana_agent/memory/providers/supermemory/backend.py src/mana_agent/config/session.py src/mana_agent/config/settings.py src/mana_agent/config/user_config.py src/mana_agent/tui/configuration_app.py tests/test_memory_architecture.py` passed; `venv/bin/python -m pytest tests/test_memory_architecture.py -q` passed (26 tests); `git diff --check` passed.
+
+- Bumped the package and documented version to `v0.1.2`.
+  - Verification: `python -m pytest -q tests/test_package_version.py` passed.
+
+## 2026-07-28
+
 - Moved the executable local-scheduler snapshot beneath `~/.mana/automations/runtime`.
   Launchd now runs this owner-controlled copy instead of reading a development virtual
   environment beneath macOS-protected locations such as `~/Documents`; completed one-time

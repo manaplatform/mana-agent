@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "LLM-powered static analysis and repository understanding tool"
 readme = "README.md"
 requires-python = ">=3.10,<=3.14.6"  # Support up to Python 3.14.6; some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
@@ -70,6 +70,7 @@ teach-desktop = [
   "pyobjc-framework-ApplicationServices>=10,<13; sys_platform == 'darwin'",
 ]
 mem0 = ["mem0ai>=2.0,<3.0", "keyring>=24.0,<26.0"]
+supermemory = ["supermemory>=3.56,<4.0", "keyring>=24.0,<26.0"]
 acp = ["agent-client-protocol>=0.11,<0.12"]
 a2a = ["a2a-sdk[http-server]>=1.1,<2.0"]
 protocols = [
@@ -115,6 +116,7 @@ full = [
   "google-auth-oauthlib>=1.2,<2.0",
   "keyring>=24.0,<26.0",
   "mem0ai>=2.0,<3.0",
+  "supermemory>=3.56,<4.0",
   "agent-client-protocol>=0.11,<0.12",
   "a2a-sdk[http-server]>=1.1,<2.0"
 ]
