@@ -9,7 +9,8 @@ All notable repository changes should be recorded here.
   missing or oversized operations rather than silently sending the full
   conversation transcript to Tavily, whose query limit is 400 characters.
   Search routes now request a separate, validated model decision for the exact
-  operation because high-level entry routing does not provide tool arguments.
+  operation because high-level entry routing does not provide tool arguments;
+  this applies to both direct and required-source search routes.
   - Verification: `venv/bin/python -m pytest
     tests/gateway/test_turn_engine_search.py tests/test_ask_entry_router.py
     tests/test_web_search_provider.py tests/test_search_router.py

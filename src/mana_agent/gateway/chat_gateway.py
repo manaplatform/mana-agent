@@ -2652,14 +2652,24 @@ class AgentChatGateway:
                     evidence.append(result.answer)
                     trace.extend(result.trace)
                 elif source in {"search", "github"}:
-                    source_decision = AgentDecision(
-                        intent="web_research",
-                        confidence=decision.confidence,
-                        selected_tools=["github_search" if source == "github" else "web_search"],
-                        web_search_needed=True,
-                        reasoning_summary=decision.reason,
-                        verifier_passed=True,
+                    required_tool = "github_search" if source == "github" else "web_search"
+                    source_decision = decide_chat_route(
+                        ask_service=ask_service,
+                        question=text,
+                        root=self.root,
                     )
+                    selected = set(source_decision.selected_tools)
+                    query = str((source_decision.tool_inputs.get(required_tool) or {}).get("query") or "").strip()
+                    if (
+                        not source_decision.verifier_passed
+                        or selected != {required_tool}
+                        or not query
+                        or len(query) > 400
+                    ):
+                        raise RuntimeError(
+                            f"Model decision failed: {required_tool}.query. "
+                            "No search was executed because the required search-operation decision was invalid."
+                        )
                     answer, _sources, source_trace = run_web_research_answer(
                         ask_service=ask_service, question=text, root=self.root, decision=source_decision
                     )
