@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
-from mana_agent.canvas.config import CanvasConfig, MANA_CATALOG_ID
+from mana_agent.canvas.config import CanvasConfig, MANA_CATALOG_ID, is_loopback_url
 from mana_agent.canvas.models import Component, ValidationError
 
 
@@ -222,6 +222,7 @@ def validate_components(
                 surface_id,
                 f"/components/{index}/url",
                 errors,
+                allow_localhost=config.allow_localhost,
             )
         if item.component == "Artifact":
             _validate_url(
@@ -230,6 +231,7 @@ def validate_components(
                 surface_id,
                 f"/components/{index}/url",
                 errors,
+                allow_localhost=config.allow_localhost,
             )
     if rows:
         _validate_depth(rows, surface_id, config.max_component_depth, errors)
@@ -312,11 +314,18 @@ def _validate_url(
     surface_id: str,
     path: str,
     errors: list[ValidationError],
+    *,
+    allow_localhost: bool,
 ) -> None:
     if isinstance(value, dict) and set(value) == {"path"}:
         return
     parsed = urlsplit(str(value or ""))
-    if parsed.scheme not in allowed or (parsed.scheme == "https" and not parsed.netloc):
+    loopback_http = (
+        allow_localhost and parsed.scheme == "http" and is_loopback_url(str(value))
+    )
+    if not loopback_http and (
+        parsed.scheme not in allowed or (parsed.scheme == "https" and not parsed.netloc)
+    ):
         errors.append(
             _error(surface_id, path, "URL does not satisfy the configured allowlist.")
         )

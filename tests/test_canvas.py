@@ -12,7 +12,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from mana_agent.api.app import create_app
 from mana_agent.canvas.catalog import CatalogValidationError, validate_components
-from mana_agent.canvas.config import CanvasConfig, MANA_CATALOG_ID
+from mana_agent.canvas.config import CanvasConfig, LOCAL_CATALOG_PATH, MANA_CATALOG_ID
 from mana_agent.canvas.generation import CanvasGenerationError, parse_generated_messages
 from mana_agent.canvas.models import (
     CanvasEventEnvelope,
@@ -24,6 +24,7 @@ from mana_agent.canvas.reducer import CanvasStateError, reduce_canvas_event
 from mana_agent.canvas.service import CanvasService, canvas_service_for_root
 from mana_agent.canvas.store import CanvasStore
 from mana_agent.config.settings import Settings
+from mana_agent.config.user_config import save_effective_user_config
 from mana_agent.services.conversation_service import ConversationService
 from mana_agent.services.execution_event_hub import (
     ExecutionEventHub,
@@ -360,6 +361,99 @@ def test_settings_reject_invalid_canvas_configuration() -> None:
         )
 
 
+def test_canvas_configuration_is_loaded_from_config_toml_not_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    monkeypatch.setenv("MANA_CANVAS_ENABLED", "false")
+    monkeypatch.setenv(
+        "MANA_CANVAS_ALLOWED_CATALOGS", "https://env.invalid/catalog.json"
+    )
+    save_effective_user_config(
+        {
+            "MANA_CANVAS_ENABLED": True,
+            "MANA_CANVAS_ALLOWED_CATALOGS": MANA_CATALOG_ID,
+            "MANA_CANVAS_ALLOW_LOCALHOST": True,
+        },
+        merge=False,
+    )
+
+    settings = Settings()
+
+    assert settings.mana_canvas_enabled is True
+    assert settings.mana_canvas_allowed_catalogs == MANA_CATALOG_ID
+    config_text = (tmp_path / "mana" / "config.toml").read_text(encoding="utf-8")
+    assert "MANA_CANVAS_ALLOW_LOCALHOST = true" in config_text
+    assert "env.invalid" not in config_text
+
+
+def test_canvas_supports_only_explicit_loopback_http_catalogs_and_resources(
+    tmp_path: Path,
+) -> None:
+    local_catalog = f"http://localhost:8765{LOCAL_CATALOG_PATH}"
+    config = CanvasConfig()
+    service = CanvasService(
+        config=config,
+        store=CanvasStore(tmp_path / "canvas"),
+        event_hub=ExecutionEventHub(),
+    )
+    snapshot = service.create_surface(
+        session_id="local",
+        conversation_id="local",
+        surface_id="surface",
+        owner={"agent_id": "main"},
+        correlation_id="turn-local",
+        catalog_id=local_catalog,
+    )
+    assert snapshot.catalog_id == local_catalog
+    validate_components(
+        [
+            {
+                "id": "root",
+                "component": "Image",
+                "url": "http://127.0.0.1:8000/image.png",
+                "description": "Local image",
+            }
+        ],
+        surface_id="local",
+        config=config,
+    )
+    with pytest.raises(CatalogValidationError, match="allowlist"):
+        validate_components(
+            [
+                {
+                    "id": "root",
+                    "component": "Image",
+                    "url": "http://example.com/image.png",
+                    "description": "Remote image",
+                }
+            ],
+            surface_id="remote",
+            config=config,
+        )
+    with pytest.raises(ValueError, match="loopback"):
+        CanvasConfig(
+            allowed_catalogs=(local_catalog,), allow_localhost=False
+        ).validate()
+
+
+def test_local_canvas_catalog_endpoint_and_capability(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    save_effective_user_config({"MANA_CANVAS_ALLOW_LOCALHOST": True}, merge=False)
+    client = TestClient(create_app(), base_url="http://localhost:8000")
+    catalog = client.get(LOCAL_CATALOG_PATH)
+    assert catalog.status_code == 200
+    assert catalog.json()["catalogId"] == MANA_CATALOG_ID
+    capabilities = client.get("/api/v1/canvas/capabilities").json()
+    assert (
+        f"http://localhost:8000{LOCAL_CATALOG_PATH}"
+        in capabilities["renderer"]["catalog_ids"]
+    )
+
+
 def test_action_model_rejects_extra_client_permission_scope() -> None:
     with pytest.raises(PydanticValidationError):
         RendererAction.model_validate(
@@ -504,6 +598,13 @@ def test_canvas_rest_snapshot_and_cross_session_action_rejection(
     )
     assert response.status_code == 200
     assert response.json()["snapshot"]["surface_id"] == "plan"
+    document = client.get(
+        "/api/v1/dashboard/live-canvas",
+        params={"conversation_id": conversation.conversation_id, "root": str(root)},
+    )
+    assert document.status_code == 200
+    assert "http://127.0.0.1:*" in document.headers["Content-Security-Policy"]
+    assert "http://[::1]:*" not in document.headers["Content-Security-Policy"]
     rejected = client.post(
         f"/api/v1/conversations/{conversation.conversation_id}/canvas/surfaces/other/actions",
         json={
@@ -587,6 +688,8 @@ def test_renderer_has_safe_fallback_and_accessibility_contracts() -> None:
         / "src/mana_agent/dashboard/components/live_canvas.js"
     ).read_text(encoding="utf-8")
     assert "Unsupported component" in source
+    assert "Waiting for surface content" in source
+    assert "Surface generation did not complete" in source
     assert 'setAttribute("role","alert")' in source
     assert 'aria-label="Canvas surface"' in source
     assert "eval(" not in source

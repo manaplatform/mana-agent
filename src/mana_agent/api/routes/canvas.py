@@ -15,7 +15,12 @@ from mana_agent.api.routes.conversations import (
     _service,
 )
 from mana_agent.canvas.catalog import catalog_metadata
-from mana_agent.canvas.config import CanvasConfig, IMPLEMENTATION_VERSION
+from mana_agent.canvas.config import (
+    CanvasConfig,
+    IMPLEMENTATION_VERSION,
+    LOCAL_CATALOG_PATH,
+    is_loopback_url,
+)
 from mana_agent.canvas.models import RendererAction, RendererCapabilities
 from mana_agent.canvas.reducer import CanvasStateError
 from mana_agent.canvas.service import canvas_service_for_root
@@ -64,20 +69,30 @@ def _require_conversation(
 
 
 @router.get("/canvas/capabilities")
-def canvas_capabilities() -> dict[str, Any]:
+def canvas_capabilities(request: Request) -> dict[str, Any]:
     config = CanvasConfig.from_settings(Settings())
+    catalog_ids = list(config.allowed_catalogs)
+    local_catalog_id = str(request.base_url).rstrip("/") + LOCAL_CATALOG_PATH
+    if config.allow_localhost and is_loopback_url(local_catalog_id):
+        catalog_ids.append(local_catalog_id)
     return {
         "ok": True,
         "enabled": config.enabled,
         "implementation_version": IMPLEMENTATION_VERSION,
         "renderer": RendererCapabilities(
             protocol_versions=config.protocol_versions,
-            catalog_ids=config.allowed_catalogs,
+            catalog_ids=tuple(dict.fromkeys(catalog_ids)),
             inline_catalogs=config.accept_inline_catalogs,
             max_components=config.max_components_per_surface,
         ).model_dump(mode="json"),
         "catalog": catalog_metadata(),
     }
+
+
+@router.get("/canvas/catalogs/core/v1/catalog.json")
+def canvas_core_catalog() -> dict[str, Any]:
+    """Serve the built-in catalog from the same local API as the renderer."""
+    return catalog_metadata()
 
 
 @router.get("/conversations/{conversation_id}/canvas/surfaces")
@@ -190,7 +205,7 @@ def dashboard_live_canvas(
     height: int = 760,
 ) -> HTMLResponse:
     _require_conversation(conversation_id, root, repository_id)
-    path, _ = _canvas(root, repository_id)
+    path, service = _canvas(root, repository_id)
     from mana_agent.dashboard.components.live_canvas import live_canvas_html
 
     html = live_canvas_html(
@@ -199,15 +214,18 @@ def dashboard_live_canvas(
         api_base=str(request.base_url).rstrip("/"),
         surface_id=surface_id,
         height=max(360, min(int(height or 760), 1400)),
+        generation_timeout_seconds=service.config.generation_timeout_seconds,
     )
     return HTMLResponse(
         html,
         headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
-                "default-src 'none'; img-src https:; script-src 'unsafe-inline'; "
+                "default-src 'none'; img-src https: http://localhost:* http://127.0.0.1:*; "
+                "script-src 'unsafe-inline'; "
                 "style-src 'unsafe-inline'; connect-src 'self' ws: wss:; "
-                "form-action 'none'; frame-ancestors 'self'"
+                "form-action 'none'; frame-ancestors 'self' http://localhost:* "
+                "http://127.0.0.1:*"
             ),
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",

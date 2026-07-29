@@ -412,7 +412,7 @@ mana-agent plan
 
 When no command is provided, the CLI should guide the user interactively.
 
-First-run interactive setup must use the dedicated TUI/config modules and persist user-level settings under `~/.mana`. Preserve the precedence order: CLI flags, environment variables and `.env`, `~/.mana` config/secrets, then safe defaults. Non-interactive runs must not block on prompts.
+First-run interactive setup must use the dedicated TUI/config modules and persist user-level settings under `~/.mana`. Resolve Mana-managed settings from `~/.mana/config.toml`, credentials from `~/.mana/secrets.toml`, then safe defaults. Repository `.env` files and shell environment variables must not override persisted Mana configuration. Non-interactive runs must not block on prompts.
 
 CLI behavior should include:
 

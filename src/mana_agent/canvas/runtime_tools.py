@@ -25,6 +25,8 @@ class _Surface(_Decision):
 
 class _Create(_Surface):
     owner: OwnerRef
+    components: list[dict[str, Any]] = Field(min_length=1)
+    data_model: dict[str, Any] = Field(default_factory=dict)
     retain_on_complete: bool = True
 
 
@@ -60,6 +62,55 @@ def _json(operation) -> str:
         )
 
 
+def _create_surface_with_content(
+    *,
+    service: Any,
+    source_decision_id: str,
+    session_id: str,
+    conversation_id: str,
+    surface_id: str,
+    owner: OwnerRef | dict[str, Any],
+    components: list[dict[str, Any]],
+    data_model: dict[str, Any],
+    retain_on_complete: bool,
+) -> Any:
+    """Publish a model-authored initial surface only when its full content validates."""
+    from mana_agent.canvas.catalog import validate_components, validate_data_model
+
+    validated_components = validate_components(
+        components,
+        surface_id=surface_id,
+        config=service.config,
+        require_root=True,
+    )
+    validated_data = validate_data_model(data_model, surface_id=surface_id)
+    service.create_surface(
+        session_id=session_id,
+        conversation_id=conversation_id,
+        surface_id=surface_id,
+        owner=owner,
+        correlation_id=source_decision_id,
+        source=CanvasSource.AGENT,
+        retain_on_complete=retain_on_complete,
+    )
+    service.update_components(
+        session_id=session_id,
+        conversation_id=conversation_id,
+        surface_id=surface_id,
+        components=validated_components,
+        correlation_id=source_decision_id,
+    )
+    if validated_data:
+        return service.update_data(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            surface_id=surface_id,
+            value=validated_data,
+            correlation_id=source_decision_id,
+        )
+    return service.get_surface(session_id, surface_id)
+
+
 def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
     service = canvas_service_for_root(root)
     common = (
@@ -69,17 +120,23 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
     return [
         StructuredTool.from_function(
             name="canvas_create_surface",
-            description=f"Create a durable A2UI surface. {common}",
+            description=(
+                "Create a complete durable A2UI surface. The same call must include a validated "
+                "component adjacency list containing id='root' and its initial data model. "
+                f"{common}"
+            ),
             args_schema=_Create,
-            func=lambda source_decision_id, session_id, conversation_id, surface_id, owner, retain_on_complete: (
+            func=lambda source_decision_id, session_id, conversation_id, surface_id, owner, components, data_model, retain_on_complete: (
                 _json(
-                    lambda: service.create_surface(
+                    lambda: _create_surface_with_content(
+                        service=service,
+                        source_decision_id=source_decision_id,
                         session_id=session_id,
                         conversation_id=conversation_id,
                         surface_id=surface_id,
                         owner=owner,
-                        correlation_id=source_decision_id,
-                        source=CanvasSource.AGENT,
+                        components=components,
+                        data_model=data_model,
                         retain_on_complete=retain_on_complete,
                     )
                 )

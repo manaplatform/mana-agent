@@ -210,7 +210,7 @@ and revocation instructions are in
 
 ## Live Canvas
 
-Live Canvas treats model-generated UI as untrusted data. It accepts only the versioned A2UI lifecycle and Mana's allowlisted native catalog. Raw HTML, JavaScript, CSS, dynamic script loading, browser evaluation, unsafe URLs, hidden client permission scopes, cross-session actions, and replayed actions are rejected. Side-effect actions must pass through an attached existing permission broker and fail closed otherwise. Payload, tree, component, rate, surface, timeout, expiry, and connection-queue limits apply before browser rendering. See [`docs/live-canvas.md`](docs/live-canvas.md) for the complete trust boundary and limitations.
+Live Canvas treats model-generated UI as untrusted data. It accepts only the versioned A2UI lifecycle and Mana's allowlisted native catalog. Raw HTML, JavaScript, CSS, dynamic script loading, browser evaluation, unsafe URLs, hidden client permission scopes, cross-session actions, and replayed actions are rejected. Remote resources require HTTPS; optional HTTP development access is restricted to the exact loopback hosts `localhost` and `127.0.0.1` and can be disabled in `~/.mana/config.toml`. Side-effect actions must pass through an attached existing permission broker and fail closed otherwise. Payload, tree, component, rate, surface, timeout, expiry, and connection-queue limits apply before browser rendering. See [`docs/live-canvas.md`](docs/live-canvas.md) for the complete trust boundary and limitations.
 
 ---
 

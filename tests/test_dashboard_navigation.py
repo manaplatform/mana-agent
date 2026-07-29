@@ -15,8 +15,20 @@ def test_timeline_merge_orders_messages_and_events() -> None:
         {"role": "assistant", "content": "hello", "created_at": "2026-01-01T00:00:04"},
     ]
     events = [
-        {"type": "tool.started", "kind": "tool", "title": "search", "started_at": "2026-01-01T00:00:03", "status": "running"},
-        {"type": "turn.started", "kind": "user_request", "title": "user", "started_at": "2026-01-01T00:00:01", "status": "running"},
+        {
+            "type": "tool.started",
+            "kind": "tool",
+            "title": "search",
+            "started_at": "2026-01-01T00:00:03",
+            "status": "running",
+        },
+        {
+            "type": "turn.started",
+            "kind": "user_request",
+            "title": "user",
+            "started_at": "2026-01-01T00:00:01",
+            "status": "running",
+        },
     ]
     timeline = merge_timeline(messages, events)
     assert [row["kind"] for row in timeline] == ["event", "message", "event", "message"]
@@ -25,16 +37,25 @@ def test_timeline_merge_orders_messages_and_events() -> None:
 
 def test_dashboard_page_modules_are_discoverable() -> None:
     """Page modules exist on the package path without importing Streamlit."""
-    for name in ("overview", "chat", "analyze", "reports", "taskboard", "observability", "metrics", "automations"):
-        spec = importlib.util.find_spec(f"mana_agent.dashboard.pages.{name}")
+    for name in (
+        "overview",
+        "chat",
+        "analyze",
+        "reports",
+        "taskboard",
+        "observability",
+        "metrics",
+        "automations",
+    ):
+        spec = importlib.util.find_spec(f"mana_agent.dashboard.views.{name}")
         assert spec is not None and spec.origin
         assert Path(spec.origin).name == f"{name}.py"
-    assert importlib.util.find_spec("mana_agent.dashboard.pages.cron") is None
+    assert importlib.util.find_spec("mana_agent.dashboard.views.cron") is None
 
 
 def test_dashboard_has_one_management_only_automation_page() -> None:
     app_spec = importlib.util.find_spec("mana_agent.dashboard.app")
-    page_spec = importlib.util.find_spec("mana_agent.dashboard.pages.automations")
+    page_spec = importlib.util.find_spec("mana_agent.dashboard.views.automations")
     assert app_spec and app_spec.origin and page_spec and page_spec.origin
     app_source = Path(app_spec.origin).read_text(encoding="utf-8")
     page_source = Path(page_spec.origin).read_text(encoding="utf-8")
@@ -57,7 +78,9 @@ def test_live_api_base_control_is_outside_page_callbacks() -> None:
     source = Path(spec.origin).read_text(encoding="utf-8")
     tree = ast.parse(source)
     page_factory = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_page"
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_page"
     )
 
     page_text_inputs = [
@@ -72,16 +95,22 @@ def test_live_api_base_control_is_outside_page_callbacks() -> None:
     assert source.index("_render_shared_sidebar()") < source.index("nav.run()")
 
 
-@pytest.mark.skipif(importlib.util.find_spec("streamlit") is None, reason="streamlit optional extra not installed")
+@pytest.mark.skipif(
+    importlib.util.find_spec("streamlit") is None,
+    reason="streamlit optional extra not installed",
+)
 def test_dashboard_pages_export_render_callables() -> None:
-    from mana_agent.dashboard.pages import analyze, chat, overview
+    from mana_agent.dashboard.views import analyze, chat, overview
 
     assert callable(overview.render)
     assert callable(chat.render)
     assert callable(analyze.render)
 
 
-@pytest.mark.skipif(importlib.util.find_spec("streamlit") is None, reason="streamlit optional extra not installed")
+@pytest.mark.skipif(
+    importlib.util.find_spec("streamlit") is None,
+    reason="streamlit optional extra not installed",
+)
 def test_packaged_dashboard_app_is_importable() -> None:
     import mana_agent.dashboard.app as app_module
 

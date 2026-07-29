@@ -41,3 +41,9 @@ test("bindings and JSON pointer updates are deterministic", () => {
   const model = canvas.updatePath({ project: { priority: "low" } }, "/project/priority", "high");
   assert.equal(canvas.resolve({ path: "/project/priority" }, model, {}), "high");
 });
+
+test("abandoned empty surfaces expire into a retry state", () => {
+  const surface = { created_at: "2026-01-01T00:00:00Z", components: [] };
+  assert.equal(canvas.generationExpired(surface, 30, Date.parse("2026-01-01T00:00:29Z")), false);
+  assert.equal(canvas.generationExpired(surface, 30, Date.parse("2026-01-01T00:00:31Z")), true);
+});

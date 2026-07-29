@@ -488,7 +488,7 @@
     };
 
     const dispatchEvent = (event) => { reduce(state, { type: "event", event }); render(); };
-    const socketUrl = () => `${config.wsBase}/api/v1/ws/conversations/${encodeURIComponent(config.sessionId)}?root=${encodeURIComponent(config.root)}&replay_limit=1000&after_sequence=${state.lastSequence}`;
+    const socketUrl = () => `${config.wsBase}/api/v1/ws/conversations/${encodeURIComponent(config.sessionId)}?root=${encodeURIComponent(config.root)}&replay_limit=1000&after_sequence=${state.lastSequence}${config.token ? `&token=${encodeURIComponent(config.token)}` : ""}`;
     const switchSession = (sessionId) => {
       const replacementId = text(sessionId);
       if (!replacementId || replacementId === config.sessionId) return;

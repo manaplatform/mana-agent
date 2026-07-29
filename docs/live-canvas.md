@@ -94,6 +94,16 @@ The normal model tool route exposes:
 
 Entry routing must return the structured `canvas` route and `canvas` required source before these tools are available. The dedicated executor provides the exact session, conversation, turn/decision, and ownership context. No keyword router or default Canvas action exists.
 
+The route validates its model-produced lifecycle before reporting success. If a
+new surface has no persisted `root` component after the first tool run, Mana
+requests a bounded model correction with update-only Canvas tools. If the
+validated correction still leaves the surface incomplete, Mana rolls back that
+new surface and reports a `route-canvas-error`; it never generates a static
+fallback interface or leaves a permanent loading surface.
+The renderer uses `MANA_CANVAS_GENERATION_TIMEOUT_SECONDS` from
+`~/.mana/config.toml` to turn abandoned legacy surfaces into an explicit retry
+error instead of displaying an unbounded waiting state.
+
 Workflow nodes use the owner-bound facade:
 
 ```python
@@ -130,6 +140,7 @@ To add a component:
 ## Recovery and gateway APIs
 
 - `GET /api/v1/canvas/capabilities`
+- `GET /api/v1/canvas/catalogs/core/v1/catalog.json`
 - `GET /api/v1/conversations/{conversation_id}/canvas/surfaces`
 - `GET /api/v1/conversations/{conversation_id}/canvas/surfaces/{surface_id}`
 - `POST /api/v1/conversations/{conversation_id}/canvas/surfaces/{surface_id}/actions`
@@ -153,11 +164,11 @@ When Canvas is enabled, the Agent Card advertises the optional A2UI extension, s
 - Conversation, session, surface, component, owner, action, and correlation identifiers are checked separately.
 - Action IDs are persisted and replayed actions are rejected.
 - Secret redaction is applied by the shared event hub, and Canvas payloads must not contain prompts, credentials, private tool state, or internal paths.
-- Browser CSP blocks arbitrary sources and scripts. Images require HTTPS; artifact URLs follow the configured allowlist.
+- Browser CSP blocks arbitrary sources and scripts. Remote images require HTTPS; loopback HTTP resources are permitted only when `MANA_CANVAS_ALLOW_LOCALHOST = true` is persisted in `~/.mana/config.toml`. Artifact URLs follow the configured allowlist.
 
 ## Troubleshooting
 
-- **Canvas disabled:** set `MANA_CANVAS_ENABLED=true` in the normal Mana configuration source.
+- **Canvas disabled:** set `MANA_CANVAS_ENABLED = true` in `~/.mana/config.toml`.
 - **Unsupported catalog/version:** compare `/api/v1/canvas/capabilities` with the agent or A2A client negotiation metadata.
 - **Sequence gap:** reconnect. The renderer reloads the durable snapshot and resumes the shared event cursor.
 - **Expired surface:** create a new surface; expired or deleted surfaces cannot be updated.

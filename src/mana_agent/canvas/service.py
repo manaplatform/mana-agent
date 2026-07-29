@@ -431,7 +431,8 @@ class CanvasService:
         with self._lock:
             self._enforce_rate(session_id, surface_id)
             failure_key = (session_id, surface_id, str(values["correlation_id"]))
-            self._assert_validation_budget(failure_key)
+            if values["event_type"] != CanvasEventType.DELETE:
+                self._assert_validation_budget(failure_key)
             current = self.store.load_snapshot(session_id, surface_id)
             event = CanvasEventEnvelope(
                 **values,

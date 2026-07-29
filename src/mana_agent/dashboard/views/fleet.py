@@ -33,7 +33,9 @@ def render(_root: Path | None = None) -> None:
         )
         with st.container(border=True):
             columns = st.columns(4)
-            columns[0].markdown(f"**{worker.display_name or worker.worker_id}**\n\n`{worker.worker_id}`")
+            columns[0].markdown(
+                f"**{worker.display_name or worker.worker_id}**\n\n`{worker.worker_id}`"
+            )
             columns[1].metric("Health", status.value)
             columns[2].metric(
                 "Platform",
@@ -65,15 +67,22 @@ def render(_root: Path | None = None) -> None:
             )
             if run.summary:
                 st.dataframe(
-                    [item.model_dump(mode="json") for item in run.summary.platform_results],
+                    [
+                        item.model_dump(mode="json")
+                        for item in run.summary.platform_results
+                    ],
                     use_container_width=True,
                     hide_index=True,
                 )
             with st.expander("Jobs, logs, artifacts, and cleanup"):
-                st.json({
-                    "jobs": [item.model_dump(mode="json") for item in run.jobs],
-                    "results": [item.model_dump(mode="json") for item in run.results],
-                })
+                st.json(
+                    {
+                        "jobs": [item.model_dump(mode="json") for item in run.jobs],
+                        "results": [
+                            item.model_dump(mode="json") for item in run.results
+                        ],
+                    }
+                )
     st.caption(
         "Management actions use `/api/v1/fleet` and require the configured API "
         "mutation permission token; this read-only page never creates dashboard-only state."

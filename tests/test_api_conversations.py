@@ -21,7 +21,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(create_app())
 
 
-def test_conversation_create_list_get_and_message(client: TestClient, tmp_path: Path) -> None:
+def test_conversation_create_list_get_and_message(
+    client: TestClient, tmp_path: Path
+) -> None:
     root = str(tmp_path / "repo")
     created = client.post("/api/v1/conversations", json={"title": "Demo", "root": root})
     assert created.status_code == 201
@@ -29,9 +31,14 @@ def test_conversation_create_list_get_and_message(client: TestClient, tmp_path: 
 
     listed = client.get("/api/v1/conversations", params={"root": root})
     assert listed.status_code == 200
-    assert any(item["conversation_id"] == conversation_id for item in listed.json()["conversations"])
+    assert any(
+        item["conversation_id"] == conversation_id
+        for item in listed.json()["conversations"]
+    )
 
-    detail = client.get(f"/api/v1/conversations/{conversation_id}", params={"root": root})
+    detail = client.get(
+        f"/api/v1/conversations/{conversation_id}", params={"root": root}
+    )
     assert detail.status_code == 200
     assert detail.json()["conversation"]["title"] == "Demo"
 
@@ -39,8 +46,15 @@ def test_conversation_create_list_get_and_message(client: TestClient, tmp_path: 
     from mana_agent.services import conversation_service as cs
 
     def fake_send(self, conversation_id, content, **kwargs):  # noqa: ANN001
-        self.append_message(conversation_id, role="user", content=content, execution_id="exec_test")
-        self.append_message(conversation_id, role="assistant", content=f"got:{content}", execution_id="exec_test")
+        self.append_message(
+            conversation_id, role="user", content=content, execution_id="exec_test"
+        )
+        self.append_message(
+            conversation_id,
+            role="assistant",
+            content=f"got:{content}",
+            execution_id="exec_test",
+        )
         self.set_status(conversation_id, "idle", execution_id="exec_test")
         return {
             "ok": True,
@@ -53,8 +67,6 @@ def test_conversation_create_list_get_and_message(client: TestClient, tmp_path: 
         }
 
     # Use dependency-free path: call messages endpoint with patched send_message
-    import mana_agent.api.routes.conversations as routes
-
     original = cs.ConversationService.send_message
     cs.ConversationService.send_message = fake_send  # type: ignore[method-assign]
     try:
@@ -67,7 +79,9 @@ def test_conversation_create_list_get_and_message(client: TestClient, tmp_path: 
     finally:
         cs.ConversationService.send_message = original  # type: ignore[method-assign]
 
-    history = client.get(f"/api/v1/conversations/{conversation_id}/messages", params={"root": root})
+    history = client.get(
+        f"/api/v1/conversations/{conversation_id}/messages", params={"root": root}
+    )
     assert history.status_code == 200
     roles = [m["role"] for m in history.json()["messages"]]
     assert roles == ["user", "assistant"]
@@ -75,14 +89,18 @@ def test_conversation_create_list_get_and_message(client: TestClient, tmp_path: 
 
 def test_missing_conversation_returns_404(client: TestClient, tmp_path: Path) -> None:
     root = str(tmp_path / "repo")
-    response = client.get("/api/v1/conversations/conv_doesnotexist123", params={"root": root})
+    response = client.get(
+        "/api/v1/conversations/conv_doesnotexist123", params={"root": root}
+    )
     assert response.status_code == 404
 
 
 def test_live_chat_document_hydrates_same_origin_reducer(
     client: TestClient,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MANA_DASHBOARD_API_TOKEN", "dashboard-secret")
     root = str(tmp_path / "repo")
     created = client.post(
         "/api/v1/conversations",
@@ -96,14 +114,20 @@ def test_live_chat_document_hydrates_same_origin_reducer(
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert "Content-Security-Policy" in response.headers
+    assert "http://127.0.0.1:*" in response.headers["Content-Security-Policy"]
+    assert "http://[::1]:*" not in response.headers["Content-Security-Policy"]
     assert "ManaLiveChat.init" in response.text
+    assert '"token": "dashboard-secret"' in response.text
+    assert "&token=${encodeURIComponent(config.token)}" in response.text
     assert conversation_id in response.text
     assert "/api/v1/ws/conversations/" in response.text
 
 
 def test_event_serialization_shape(client: TestClient, tmp_path: Path) -> None:
     root = str(tmp_path / "repo")
-    created = client.post("/api/v1/conversations", json={"title": "Events", "root": root}).json()
+    created = client.post(
+        "/api/v1/conversations", json={"title": "Events", "root": root}
+    ).json()
     conversation_id = created["conversation"]["conversation_id"]
     from mana_agent.services.execution_event_hub import get_execution_event_hub
     from mana_agent.services.conversation_service import ConversationService
@@ -127,7 +151,15 @@ def test_event_serialization_shape(client: TestClient, tmp_path: Path) -> None:
     payload = events.json()["events"]
     assert payload
     event = payload[0]
-    for key in ("event_id", "type", "kind", "status", "conversation_id", "execution_id", "started_at"):
+    for key in (
+        "event_id",
+        "type",
+        "kind",
+        "status",
+        "conversation_id",
+        "execution_id",
+        "started_at",
+    ):
         assert key in event
     assert event["conversation_id"] == conversation_id
     assert event["execution_id"] == "exec_1"

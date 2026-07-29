@@ -9,6 +9,15 @@
   const clone = (value) => JSON.parse(JSON.stringify(value == null ? {} : value));
   const canvasEvent = (event) => (event.metadata || event.details || {}).canvas_event || null;
 
+  function safeResourceUrl(value) {
+    try {
+      const url = new URL(text(value), document.baseURI);
+      if (url.protocol === "https:") return url.href;
+      if (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname)) return url.href;
+    } catch (_error) { /* Invalid URLs are blocked below. */ }
+    return "";
+  }
+
   function createState(sessionId) {
     return {
       sessionId: text(sessionId), surfaces: new Map(), selected: "", lastSequence: 0,
@@ -111,6 +120,11 @@
     return (component.actions || []).find((item) => item.name === family || item.name.endsWith(`.${family}`));
   }
 
+  function generationExpired(surface, timeoutSeconds, now = Date.now()) {
+    const created = Date.parse((surface || {}).created_at || "");
+    return Number.isFinite(created) && now - created > Number(timeoutSeconds || 30) * 1000;
+  }
+
   function init(config) {
     const mount = document.getElementById(config.mountId);
     const state = createState(config.sessionId);
@@ -181,8 +195,8 @@
       else if (component.component === "Form") { const form=document.createElement("form");form.className="a2-column";appendChildren(form);const action=actionFor(component,"submit");form.addEventListener("submit",(event)=>{event.preventDefault();if(action)submitAction(surface,component,action);});node.appendChild(form); }
       else if (component.component === "Badge") { const badge=document.createElement("span");badge.className="a2-badge";badge.textContent=text(value("text"));node.appendChild(badge); }
       else if (component.component === "Progress") { const progress=document.createElement("progress");progress.className="a2-progress";progress.max=Number(component.max||100);progress.value=Number(value("value",0));progress.setAttribute("aria-label",text(component.label||"Progress"));node.appendChild(progress); }
-      else if (component.component === "Image") { const image=document.createElement("img");const url=text(value("url"));if(!url.startsWith("https://"))return unsupported("Blocked image URL");image.className="a2-image";image.src=url;image.alt=text(value("description"));image.loading="lazy";node.appendChild(image); }
-      else if (component.component === "Artifact") { const link=document.createElement("a");link.className="a2-artifact";link.textContent=text(value("label"));const url=text(value("url"));if(url.startsWith("https://"))link.href=url;else link.href="#";link.rel="noopener noreferrer";link.target="_blank";node.appendChild(link); }
+      else if (component.component === "Image") { const image=document.createElement("img");const url=safeResourceUrl(value("url"));if(!url)return unsupported("Blocked image URL");image.className="a2-image";image.src=url;image.alt=text(value("description"));image.loading="lazy";node.appendChild(image); }
+      else if (component.component === "Artifact") { const link=document.createElement("a");link.className="a2-artifact";link.textContent=text(value("label"));const url=safeResourceUrl(value("url"));link.href=url||"#";link.rel="noopener noreferrer";link.target="_blank";node.appendChild(link); }
       else if (component.component === "Table") renderTable(node,value("columns",[]),value("rows",[]));
       else if (component.component === "List") { const list=document.createElement("ul");for(const item of value("items",[])){const li=document.createElement("li");li.textContent=text(typeof item==="object"?item.label||item.text||JSON.stringify(item):item);list.appendChild(li);}node.appendChild(list); }
       else if (component.component === "Tabs") { const tabs=document.createElement("div");tabs.className="a2-row";for(const tab of component.tabs||[]){const button=document.createElement("button");button.type="button";button.textContent=text(tab.label);button.addEventListener("click",()=>{node.querySelector(".tab-content").replaceChildren(renderComponent(surface,tab.child,nextTrail,local));});tabs.appendChild(button);}node.appendChild(tabs);const content=document.createElement("div");content.className="tab-content";if((component.tabs||[])[0])content.appendChild(renderComponent(surface,component.tabs[0].child,nextTrail,local));node.appendChild(content); }
@@ -208,6 +222,7 @@
 
     function renderTable(node,columns,rows){const wrap=document.createElement("div");wrap.style.overflow="auto";const table=document.createElement("table");table.className="a2-table";const head=document.createElement("thead");const hr=document.createElement("tr");for(const col of columns||[]){const th=document.createElement("th");th.textContent=text(col.label??col.key??col);hr.appendChild(th);}head.appendChild(hr);table.appendChild(head);const body=document.createElement("tbody");for(const row of rows||[]){const tr=document.createElement("tr");for(const col of columns||[]){const td=document.createElement("td");const key=col.key??col;td.textContent=text(typeof row==="object"?row[key]:row);tr.appendChild(td);}body.appendChild(tr);}table.appendChild(body);wrap.appendChild(table);node.appendChild(wrap);}
     function unsupported(message){const node=document.createElement("div");node.className="unsupported";node.setAttribute("role","status");node.textContent=message;return node;}
+    function surfaceFailure(){const node=document.createElement("div");node.className="state-panel a2-error";node.setAttribute("role","alert");node.textContent="Surface generation did not complete. Ask the agent to retry.";return node;}
 
     function render() {
       const active = document.activeElement && document.activeElement.id;
@@ -219,7 +234,7 @@
       if(state.loading){const p=document.createElement("div");p.className="state-panel";p.textContent="Restoring Live Canvas…";main.appendChild(p);}
       else if(state.error){const p=document.createElement("div");p.className="state-panel a2-error";p.setAttribute("role","alert");p.textContent=state.error;main.appendChild(p);}
       else if(state.mode==="workflow")renderWorkflow();
-      else { const surface=state.surfaces.get(state.selected)||surfaces[0];if(!surface){const p=document.createElement("div");p.className="state-panel";p.textContent="No active surfaces in this session.";main.appendChild(p);}else{state.selected=surface.surface_id;const section=document.createElement("section");section.className="surface";section.setAttribute("aria-label",`Canvas surface ${surface.surface_id}`);const provenance=document.createElement("div");provenance.className="surface-meta";provenance.textContent=`A2UI ${surface.protocol_version} · owner ${Object.entries(surface.owner||{}).filter(([,v])=>v).map(([k,v])=>`${k}:${v}`).join(" · ")||"unknown"}`;section.appendChild(provenance);section.appendChild(renderComponent(surface,"root",new Set(),surface.data_model||{}));main.appendChild(section);} }
+      else { const surface=state.surfaces.get(state.selected)||surfaces[0];if(!surface){const p=document.createElement("div");p.className="state-panel";p.textContent="No active surfaces in this session.";main.appendChild(p);}else{state.selected=surface.surface_id;const section=document.createElement("section");section.className="surface";section.setAttribute("aria-label",`Canvas surface ${surface.surface_id}`);const provenance=document.createElement("div");provenance.className="surface-meta";provenance.textContent=`A2UI ${surface.protocol_version} · owner ${Object.entries(surface.owner||{}).filter(([,v])=>v).map(([k,v])=>`${k}:${v}`).join(" · ")||"unknown"}`;section.appendChild(provenance);if(!(surface.components||[]).length){section.appendChild(generationExpired(surface,config.generationTimeoutSeconds)?surfaceFailure():unsupported("Waiting for surface content…"));}else{section.appendChild(renderComponent(surface,"root",new Set(),surface.data_model||{}));}main.appendChild(section);} }
       connection.classList.toggle("ok",state.socketReady);connection.textContent=state.socketReady?"Live":"Disconnected · recovering";shell.classList.toggle("fullscreen",state.fullscreen);
       if(active){const target=document.getElementById(active);if(target)target.focus();}
     }
@@ -235,5 +250,5 @@
     return { state, applySnapshot:(value)=>applySnapshot(state,value), applyEvent:(value)=>applyCanvasEvent(state,value), render, close:()=>{stopped=true;if(socket)socket.close();} };
   }
 
-  return { createState, applySnapshot, applyCanvasEvent, applyHubEvent, updatePath, resolve, init };
+  return { createState, applySnapshot, applyCanvasEvent, applyHubEvent, updatePath, resolve, generationExpired, init };
 });

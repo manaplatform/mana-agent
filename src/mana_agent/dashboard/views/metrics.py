@@ -4,7 +4,11 @@ from pathlib import Path
 
 import streamlit as st
 
-from mana_agent.ui.streamlit_helpers import find_mana_root, get_metrics_summary, get_observability_overview
+from mana_agent.ui.streamlit_helpers import (
+    find_mana_root,
+    get_metrics_summary,
+    get_observability_overview,
+)
 
 
 def render(root: Path | None = None) -> None:

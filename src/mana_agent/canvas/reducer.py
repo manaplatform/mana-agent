@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any
 
 from mana_agent.canvas.catalog import validate_components, validate_data_model
-from mana_agent.canvas.config import CanvasConfig
+from mana_agent.canvas.config import CanvasConfig, catalog_id_is_allowed
 from mana_agent.canvas.models import (
     CanvasEventEnvelope,
     CanvasEventType,
@@ -33,7 +33,7 @@ def reduce_canvas_event(
             )
         body = _body(event, "createSurface")
         catalog_id = str(body.get("catalogId") or "")
-        if catalog_id not in config.allowed_catalogs:
+        if not catalog_id_is_allowed(catalog_id, config):
             raise CanvasStateError("Surface catalog is not allowlisted.")
         owner = OwnerRef(
             agent_id=event.agent_id,

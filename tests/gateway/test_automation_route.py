@@ -1,7 +1,8 @@
 """Integration coverage for model-driven automation chat authoring."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,10 +16,12 @@ from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDeci
 from mana_agent.gateway.turn_engine import ChatTurnResult
 
 
-def test_automation_create_schema_reports_only_relevant_payload_errors(tmp_path: Path) -> None:
-    tool = {
-        item.name: item for item in build_automation_langchain_tools(tmp_path)
-    }["automation_create"]
+def test_automation_create_schema_reports_only_relevant_payload_errors(
+    tmp_path: Path,
+) -> None:
+    tool = {item.name: item for item in build_automation_langchain_tools(tmp_path)}[
+        "automation_create"
+    ]
     payload = {
         "source_decision_id": "decision-invalid-shape",
         "name": "Gmail latest messages",
@@ -57,7 +60,8 @@ def test_automation_create_schema_reports_only_relevant_payload_errors(tmp_path:
 
 
 def test_natural_language_automation_route_creates_persisted_exact_interval(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
     monkeypatch.setattr(
@@ -70,30 +74,34 @@ def test_natural_language_automation_route_creates_persisted_exact_interval(
         def run(self, *, question: str, tool_policy: dict, **_kwargs):
             assert question == "Check my email every 5 hours."
             assert tool_policy["allowed_tools"] == ["automation_create"]
-            output = tools["automation_create"].invoke({
-                "name": "Check email",
-                "description": "Check the connected inbox and summarize new actionable mail.",
-                "trigger": {
-                    "type": "interval",
-                    "every_seconds": 18_000,
-                    "anchor_at": datetime.now(timezone.utc).isoformat(),
-                },
-                "job": {
-                    "type": "connector_action",
-                    "connector": "gmail",
-                    "action": "check_inbox",
-                    "arguments": {},
-                    "prompt": "Summarize new actionable messages.",
-                },
-                "timezone": "UTC",
-                "target_runtime": "local",
-                "permission_references": ["account://gmail/default"],
-                "retry_policy": {},
-                "misfire_policy": {"mode": "run_once"},
-                "idempotency_key": "turn-create-email-five-hours",
-                "source_decision_id": "decision-1",
-            })
-            return SimpleNamespace(answer=output, sources=[], warnings=[], tool_traces=[])
+            output = tools["automation_create"].invoke(
+                {
+                    "name": "Check email",
+                    "description": "Check the connected inbox and summarize new actionable mail.",
+                    "trigger": {
+                        "type": "interval",
+                        "every_seconds": 18_000,
+                        "anchor_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    "job": {
+                        "type": "connector_action",
+                        "connector": "gmail",
+                        "action": "check_inbox",
+                        "arguments": {},
+                        "prompt": "Summarize new actionable messages.",
+                    },
+                    "timezone": "UTC",
+                    "target_runtime": "local",
+                    "permission_references": ["account://gmail/default"],
+                    "retry_policy": {},
+                    "misfire_policy": {"mode": "run_once"},
+                    "idempotency_key": "turn-create-email-five-hours",
+                    "source_decision_id": "decision-1",
+                }
+            )
+            return SimpleNamespace(
+                answer=output, sources=[], warnings=[], tool_traces=[]
+            )
 
     gateway = object.__new__(AgentChatGateway)
     gateway.root = tmp_path
@@ -127,7 +135,8 @@ def test_natural_language_automation_route_creates_persisted_exact_interval(
 
 
 def test_one_time_gmail_request_is_authored_without_recurrence_question(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
     monkeypatch.setattr(
@@ -135,17 +144,27 @@ def test_one_time_gmail_request_is_authored_without_recurrence_question(
         lambda root, automation_id: AutomationService(root).get(automation_id),
     )
     tools = {item.name: item for item in build_automation_langchain_tools(tmp_path)}
-    run_at = datetime(2026, 7, 29, 1, 8, tzinfo=timezone.utc)
+    run_at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=1, minute=8, second=0, microsecond=0
+    )
 
     class ModelToolExecutor:
         def run(
-            self, *, question: str, system_prompt: str, tool_policy: dict, **_kwargs,
+            self,
+            *,
+            question: str,
+            system_prompt: str,
+            tool_policy: dict,
+            **_kwargs,
         ):
             assert question == (
                 "Create an automation that checks ahdr1277@gmail.com once at 1:08 UTC."
             )
             assert "recurrence is not a missing field" in system_prompt
-            assert "never execute the connector action during the authoring turn" in system_prompt
+            assert (
+                "never execute the connector action during the authoring turn"
+                in system_prompt
+            )
             assert "do not ask the user to choose" in system_prompt
             assert str(tmp_path) in system_prompt
             assert "current_utc=" in system_prompt
@@ -153,30 +172,34 @@ def test_one_time_gmail_request_is_authored_without_recurrence_question(
             assert "with `arguments` (never `input`)" in system_prompt
             assert tool_policy["allowed_tools"] == ["automation_create"]
             assert "never call automation_list" in system_prompt
-            output = tools["automation_create"].invoke({
-                "name": "One-time Gmail check",
-                "description": "Check the requested Gmail account once at the requested time.",
-                "trigger": {
-                    "type": "once",
-                    "run_at": run_at.isoformat(),
+            output = tools["automation_create"].invoke(
+                {
+                    "name": "One-time Gmail check",
+                    "description": "Check the requested Gmail account once at the requested time.",
+                    "trigger": {
+                        "type": "once",
+                        "run_at": run_at.isoformat(),
+                        "timezone": "UTC",
+                    },
+                    "job": {
+                        "type": "connector_action",
+                        "connector": "gmail",
+                        "action": "check_inbox",
+                        "arguments": {"account": "ahdr1277@gmail.com"},
+                        "prompt": "Capture the Gmail check information.",
+                    },
                     "timezone": "UTC",
-                },
-                "job": {
-                    "type": "connector_action",
-                    "connector": "gmail",
-                    "action": "check_inbox",
-                    "arguments": {"account": "ahdr1277@gmail.com"},
-                    "prompt": "Capture the Gmail check information.",
-                },
-                "timezone": "UTC",
-                "target_runtime": "local",
-                "permission_references": ["account://gmail/ahdr1277@gmail.com"],
-                "retry_policy": {},
-                "misfire_policy": {"mode": "run_once"},
-                "idempotency_key": "turn-create-one-time-gmail-check",
-                "source_decision_id": "decision-one-time-gmail",
-            })
-            return SimpleNamespace(answer=output, sources=[], warnings=[], tool_traces=[])
+                    "target_runtime": "local",
+                    "permission_references": ["account://gmail/ahdr1277@gmail.com"],
+                    "retry_policy": {},
+                    "misfire_policy": {"mode": "run_once"},
+                    "idempotency_key": "turn-create-one-time-gmail-check",
+                    "source_decision_id": "decision-one-time-gmail",
+                }
+            )
+            return SimpleNamespace(
+                answer=output, sources=[], warnings=[], tool_traces=[]
+            )
 
     gateway = object.__new__(AgentChatGateway)
     gateway.root = tmp_path
@@ -214,9 +237,15 @@ def test_one_time_gmail_request_is_authored_without_recurrence_question(
 
 def test_registered_automation_route_dispatches_from_multi_task_child_lane() -> None:
     automation_tools = (
-        "automation_create", "automation_get", "automation_list", "automation_status",
-        "automation_update", "automation_delete", "automation_enable",
-        "automation_disable", "automation_run_now",
+        "automation_create",
+        "automation_get",
+        "automation_list",
+        "automation_status",
+        "automation_update",
+        "automation_delete",
+        "automation_enable",
+        "automation_disable",
+        "automation_run_now",
     )
     authorized: list[tuple[str, str]] = []
     executed: dict[str, object] = {}
@@ -228,7 +257,9 @@ def test_registered_automation_route_dispatches_from_multi_task_child_lane() -> 
         )
     )
     gateway._lane_coordinator = SimpleNamespace(
-        authorize_tool=lambda task_id, tool_name: authorized.append((task_id, tool_name))
+        authorize_tool=lambda task_id, tool_name: authorized.append(
+            (task_id, tool_name)
+        )
     )
 
     def execute_automation_route(**kwargs):

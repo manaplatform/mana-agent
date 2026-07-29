@@ -16,10 +16,13 @@ import sys
 try:
     import streamlit as st
 except ImportError as exc:  # pragma: no cover
-    print("ERROR: streamlit is required. pip install 'mana-agent[dashboard]'", file=sys.stderr)
+    print(
+        "ERROR: streamlit is required. pip install 'mana-agent[dashboard]'",
+        file=sys.stderr,
+    )
     raise SystemExit(1) from exc
 
-from mana_agent.dashboard.pages import (
+from mana_agent.dashboard.views import (
     analyze,
     automations,
     chat,
@@ -46,7 +49,9 @@ st.set_page_config(
 
 root = find_mana_root()
 st.session_state.setdefault("mana_dashboard_root", str(root))
-st.session_state.setdefault("mana_api_base", str(os.getenv("MANA_DASHBOARD_API_BASE") or ""))
+st.session_state.setdefault(
+    "mana_api_base", str(os.getenv("MANA_DASHBOARD_API_BASE") or "")
+)
 
 
 def _page(fn, *, title: str, icon: str, url_path: str, default: bool = False):
@@ -61,29 +66,53 @@ def _render_shared_sidebar() -> None:
     st.sidebar.markdown("## 🧠 Mana Agent")
     st.sidebar.caption(f"Root: `{root.name}`")
     st.sidebar.text_input("Live API base", key="mana_api_base")
-    st.sidebar.caption("Navigation uses Streamlit page routes with active highlighting.")
+    st.sidebar.caption(
+        "Navigation uses Streamlit page routes with active highlighting."
+    )
 
 
 pages = {
     "Workspace": [
-        _page(overview.render, title="Overview", icon="🏠", url_path="overview", default=True),
+        _page(
+            overview.render,
+            title="Overview",
+            icon="🏠",
+            url_path="overview",
+            default=True,
+        ),
         _page(chat.render, title="Chat", icon="💬", url_path="chat"),
         _page(canvas.render, title="Live Canvas", icon="🖼️", url_path="canvas"),
         _page(analyze.render, title="Analyze", icon="🔬", url_path="analyze"),
         _page(reports.render, title="Reports", icon="📄", url_path="reports"),
-        _page(skills.render, title="Skill Workshop", icon="🧩", url_path="skill-workshop"),
+        _page(
+            skills.render, title="Skill Workshop", icon="🧩", url_path="skill-workshop"
+        ),
     ],
     "Runtime": [
-        _page(taskboard.render, title="Taskboard & Traces", icon="🗂️", url_path="taskboard"),
-        _page(observability.render, title="Observability", icon="📡", url_path="observability"),
+        _page(
+            taskboard.render, title="Taskboard & Traces", icon="🗂️", url_path="taskboard"
+        ),
+        _page(
+            observability.render,
+            title="Observability",
+            icon="📡",
+            url_path="observability",
+        ),
         _page(metrics.render, title="Metrics", icon="📊", url_path="metrics"),
         _page(processes.render, title="Processes", icon="⚙️", url_path="processes"),
     ],
     "Operations": [
         _page(fleet.render, title="Fleet", icon="🛰️", url_path="fleet"),
-        _page(computer_control.render, title="Computer Control", icon="🖥️", url_path="computer-control"),
+        _page(
+            computer_control.render,
+            title="Computer Control",
+            icon="🖥️",
+            url_path="computer-control",
+        ),
         _page(connectors.render, title="Connectors", icon="🔌", url_path="connectors"),
-        _page(automations.render, title="Automations", icon="⚡", url_path="automations"),
+        _page(
+            automations.render, title="Automations", icon="⚡", url_path="automations"
+        ),
     ],
 }
 
