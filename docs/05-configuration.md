@@ -379,3 +379,38 @@ MANA_WEB_SEARCH_ENDPOINT=
 ```
 
 GitHub tokens are optional. Without a token, GitHub search may still work with unauthenticated rate limits.
+
+## Live Canvas / A2UI
+
+Live Canvas is configured in `~/.mana/config.toml`. Defaults are intentionally bounded; inline catalogs and non-HTTPS remote images are disabled. Loopback HTTP is allowed by default for local development only.
+
+```toml
+MANA_CANVAS_ENABLED = true
+MANA_CANVAS_PROTOCOL_VERSIONS = "v0.9"
+MANA_CANVAS_DEFAULT_PROTOCOL_VERSION = "v0.9"
+MANA_CANVAS_ALLOWED_CATALOGS = "https://mana-agent.dev/a2ui/catalogs/core/v1/catalog.json"
+MANA_CANVAS_ACCEPT_INLINE_CATALOGS = false
+MANA_CANVAS_ALLOW_LOCALHOST = true
+MANA_CANVAS_MAX_ACTIVE_SURFACES = 16
+MANA_CANVAS_MAX_COMPONENTS = 250
+MANA_CANVAS_MAX_EVENT_BYTES = 262144
+MANA_CANVAS_MAX_DEPTH = 24
+MANA_CANVAS_SNAPSHOT_INTERVAL = 20
+MANA_CANVAS_GENERATION_TIMEOUT_SECONDS = 30
+MANA_CANVAS_SURFACE_EXPIRY_SECONDS = 86400
+MANA_CANVAS_ACTION_TIMEOUT_SECONDS = 900
+MANA_CANVAS_VALIDATION_RETRY_LIMIT = 1
+MANA_CANVAS_MAX_UPDATES_PER_SECOND = 20
+MANA_CANVAS_WEBSOCKET_QUEUE_SIZE = 256
+MANA_CANVAS_ALLOWED_IMAGE_SCHEMES = "https"
+MANA_CANVAS_ALLOWED_ARTIFACT_SCHEMES = "https,artifact"
+MANA_CANVAS_DEVELOPER_DIAGNOSTICS = false
+```
+
+The built-in catalog is also served at
+`http://localhost:<api-port>/api/v1/canvas/catalogs/core/v1/catalog.json`.
+Only `localhost` and `127.0.0.1` may use HTTP. Setting
+`MANA_CANVAS_ALLOW_LOCALHOST = false` disables these aliases. Unsupported
+versions, unsafe URL schemes, missing catalogs, excessive retry limits, and
+non-positive resource bounds fail configuration validation. See
+[Live Canvas and A2UI](./live-canvas.md).

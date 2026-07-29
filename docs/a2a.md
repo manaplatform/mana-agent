@@ -30,3 +30,7 @@ mana-agent a2a agents remove reviewer
 The registry stores non-secret metadata under the Mana user state directory. Credentials must be supplied from the secret/configuration layer and are never stored in the registry. Discovery requires A2A 1.0, validates HTTPS and resolved addresses, disables redirects, and caches validated cards. Local development endpoints require the explicit `--allow-local` delegation flag.
 
 Delegation sends only the explicit approved context package. Repository files, memory, chat history, secrets, and credentials are not added implicitly. Policy verifies the selected skill, workspace allowlist, authentication availability, concurrency limits, hop depth, visited agents, and task fingerprint before a handoff. After a remote accepts work, failures are reported rather than silently switching to a local agent.
+
+## Optional A2UI capability
+
+When Live Canvas is enabled, the Agent Card advertises the optional A2UI extension, wire version `v0.9`, allowlisted catalogs, inline-catalog policy, and `application/a2ui+json`. A2UI data is emitted only when the caller activates the extension and its `a2uiClientCapabilities` includes a matching catalog. Other callers keep the existing text status and answer artifacts. See [Live Canvas and A2UI](./live-canvas.md) for message and negotiation examples.

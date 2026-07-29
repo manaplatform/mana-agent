@@ -68,7 +68,14 @@ def create_a2a_app(
     class _ContextBuilder:
         def build(self, request: Request) -> ServerCallContext:
             identity = require_bearer_token(request.headers.get("authorization"), token)
-            return ServerCallContext(user=_User(identity.caller_id), state={"headers": dict(request.headers)})
+            requested = {
+                item.strip() for item in str(request.headers.get("x-a2a-extensions") or "").split(",")
+                if item.strip()
+            }
+            return ServerCallContext(
+                user=_User(identity.caller_id), state={"headers": dict(request.headers)},
+                requested_extensions=requested,
+            )
 
     context_builder = _ContextBuilder()
     app = FastAPI(title="Mana-Agent A2A", docs_url=None, redoc_url=None)

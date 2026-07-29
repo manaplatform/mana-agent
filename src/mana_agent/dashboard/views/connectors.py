@@ -24,15 +24,21 @@ def render(root: Path | None = None) -> None:
         secret_source = st.selectbox("Secret source", ["keyring", "environment"])
         submitted = st.form_submit_button("Validate and connect")
     if submitted:
+
         def ids(value: str) -> list[int]:
             return [int(item.strip()) for item in value.split(",") if item.strip()]
+
         try:
             result = service.connect_telegram(
                 TelegramConnectRequest(
-                    transport=transport, repository=repository,
-                    allowed_users=ids(allowed_users), allowed_chats=ids(allowed_chats),
+                    transport=transport,
+                    repository=repository,
+                    allowed_users=ids(allowed_users),
+                    allowed_chats=ids(allowed_chats),
                     webhook_url=webhook_url,
-                    secret_source="keyring" if secret_source == "keyring" else "environment",
+                    secret_source="keyring"
+                    if secret_source == "keyring"
+                    else "environment",
                 ),
                 token=token,
             )

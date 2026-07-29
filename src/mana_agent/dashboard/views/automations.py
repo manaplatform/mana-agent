@@ -1,4 +1,5 @@
 """Read-only inspection and deletion for canonical automations."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,7 +14,9 @@ def render(root: Path | None = None) -> None:
     root = root or find_mana_root()
     service = AutomationService(root)
     st.header("Automations")
-    st.caption("Create or update automations in chat. This page is for inspection and deletion.")
+    st.caption(
+        "Create or update automations in chat. This page is for inspection and deletion."
+    )
     records = service.list()
     if not records:
         st.info("No automations yet. Ask Mana-Agent in chat to create one.")
@@ -28,7 +31,9 @@ def render(root: Path | None = None) -> None:
             st.write(f"**Next run:** {automation.next_run_at or '—'}")
             st.write(f"**Last run:** {automation.last_run_at or '—'}")
             st.write(f"**Job:** {automation.job.type}")
-            st.write(f"**Deployment:** {automation.deployment.status} ({automation.deployment.backend or 'unassigned'})")
+            st.write(
+                f"**Deployment:** {automation.deployment.status} ({automation.deployment.backend or 'unassigned'})"
+            )
             if automation.deployment.blocked_reason:
                 st.warning(automation.deployment.blocked_reason)
             if automation.recent_execution:

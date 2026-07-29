@@ -37,7 +37,10 @@ from mana_agent.gateway.entry_routing import (
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.lane_coordinator import LaneCoordinator, LaneCoordinatorError
 from mana_agent.gateway.lanes import LaneTaskState
-from mana_agent.gateway.artifact_routing import artifact_handler_availability, artifact_routing_evidence
+from mana_agent.gateway.artifact_routing import (
+    artifact_handler_availability,
+    artifact_routing_evidence,
+)
 from mana_agent.gateway.turn_engine import (
     ChatTurnResult,
     _serialize_tool_traces,
@@ -59,11 +62,21 @@ from mana_agent.memory.errors import MemoryError
 from mana_agent.services.chat_service import ChatService
 from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.workspaces.service import WorkspaceService
-from mana_agent.workspaces.preparation import PreparedRepository, RepositoryPreparationError
+from mana_agent.workspaces.preparation import (
+    PreparedRepository,
+    RepositoryPreparationError,
+)
 from mana_agent.evals.recorder import record_current
-from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
+from mana_agent.model_routing.models import (
+    Complexity,
+    LatencyClass,
+    RiskLevel,
+    RoutingRequest,
+)
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
-from mana_agent.integrations.computer_control.context import authenticated_computer_client
+from mana_agent.integrations.computer_control.context import (
+    authenticated_computer_client,
+)
 from mana_agent.remote_execution.service import RemoteExecutionService
 
 logger = logging.getLogger(__name__)
@@ -99,7 +112,10 @@ def _computer_permission_requests_from_trace(response: Any) -> list[dict[str, st
                     payload = json.loads(candidate)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
-            if not isinstance(payload, dict) or payload.get("error_code") != "permission_required":
+            if (
+                not isinstance(payload, dict)
+                or payload.get("error_code") != "permission_required"
+            ):
                 continue
             request_id = str(payload.get("permission_request_id") or "").strip()
             scope = str(payload.get("permission_scope") or "").strip()
@@ -110,7 +126,9 @@ def _computer_permission_requests_from_trace(response: Any) -> list[dict[str, st
                 "permission_request_id": request_id,
                 "permission_scope": scope,
                 "execution_id": execution_id,
-                "preview": str(payload.get("preview") or "Computer permission required."),
+                "preview": str(
+                    payload.get("preview") or "Computer permission required."
+                ),
             }
     return list(requests.values())
 
@@ -251,22 +269,32 @@ class AgentChatGateway:
                 agent_max_steps=agent_max_steps,
                 agent_unlimited=agent_unlimited,
                 agent_timeout_seconds=agent_timeout_seconds,
-                lane_overrides=lane_overrides or self._json_setting("mana_lane_contracts"),
+                lane_overrides=lane_overrides
+                or self._json_setting("mana_lane_contracts"),
                 lane_global_worker_limit=(
                     lane_global_worker_limit
                     if lane_global_worker_limit is not None
-                    else int(getattr(self.settings, "mana_lane_global_worker_limit", 8) or 8)
+                    else int(
+                        getattr(self.settings, "mana_lane_global_worker_limit", 8) or 8
+                    )
                 ),
-                lane_provider_limits=lane_provider_limits or self._json_setting("mana_lane_provider_limits"),
+                lane_provider_limits=lane_provider_limits
+                or self._json_setting("mana_lane_provider_limits"),
                 lane_session_token_budget=(
                     lane_session_token_budget
                     if lane_session_token_budget is not None
-                    else (getattr(self.settings, "mana_lane_session_token_budget", None) or None)
+                    else (
+                        getattr(self.settings, "mana_lane_session_token_budget", None)
+                        or None
+                    )
                 ),
                 lane_global_token_budget=(
                     lane_global_token_budget
                     if lane_global_token_budget is not None
-                    else (getattr(self.settings, "mana_lane_global_token_budget", None) or None)
+                    else (
+                        getattr(self.settings, "mana_lane_global_token_budget", None)
+                        or None
+                    )
                 ),
                 session_id=session_id,
                 chat_service=chat_service,
@@ -319,7 +347,9 @@ class AgentChatGateway:
         self.execution_manager = self._stack.execution_manager
         self.routing_authority = self._stack.routing_authority
         if self.routing_authority is None:
-            raise RuntimeError("Gateway routing authority is unavailable. No model action can be executed.")
+            raise RuntimeError(
+                "Gateway routing authority is unavailable. No model action can be executed."
+            )
         self._coding_agent_max_steps = self._stack.coding_agent_max_steps
         self._resolved_k = self._stack.resolved_k
         self._coding_agent_is_custom = self._stack.coding_agent_is_custom
@@ -330,7 +360,12 @@ class AgentChatGateway:
 
         self.command_registry = build_default_registry()
         self.remote_execution_service = RemoteExecutionService()
-        from mana_agent.fleet import FleetConfig, FleetRegistry, FleetService, FleetStore
+        from mana_agent.fleet import (
+            FleetConfig,
+            FleetRegistry,
+            FleetService,
+            FleetStore,
+        )
 
         self.fleet_config = FleetConfig.from_settings(self.settings)
         self.fleet_store = FleetStore(self.fleet_config.root)
@@ -342,8 +377,12 @@ class AgentChatGateway:
             store=self.fleet_store,
         )
         self._remote_job_lanes: dict[str, str] = {}
-        self._entry_route_registry = entry_route_registry or self._build_entry_route_registry()
-        route_llm = getattr(getattr(self.get_ask_service(), "entry_router", None), "llm", None)
+        self._entry_route_registry = (
+            entry_route_registry or self._build_entry_route_registry()
+        )
+        route_llm = getattr(
+            getattr(self.get_ask_service(), "entry_router", None), "llm", None
+        )
         self._entry_router = entry_router or EntryRouter(
             llm=route_llm or agent_decision_llm(self.get_ask_service()),
             registry=self._entry_route_registry,
@@ -369,7 +408,9 @@ class AgentChatGateway:
         from mana_agent.background import BackgroundProcessManager
         from mana_agent.connectors.service import ConnectorService
 
-        self.background_processes = BackgroundProcessManager(event_sink=self._event_sink)
+        self.background_processes = BackgroundProcessManager(
+            event_sink=self._event_sink
+        )
         self.session_service.process_manager = self.background_processes
         self.connector_service = ConnectorService(self.background_processes)
         self.command_dispatcher = CommandDispatcher(self.command_registry)
@@ -399,7 +440,10 @@ class AgentChatGateway:
             worker = self.remote_execution_service.workers.select_connected_worker()
         except LookupError:
             return self._available(
-                details={"managed_worker_available": False, "direct_ssh_available": True}
+                details={
+                    "managed_worker_available": False,
+                    "direct_ssh_available": True,
+                }
             )
         return self._available(
             details={
@@ -426,29 +470,49 @@ class AgentChatGateway:
         clean_action = str(action).strip().lower()
         clean_worker_id = str(worker_id).strip()
         if clean_action not in {"register", "start", "stop"} or not clean_worker_id:
-            raise ValueError("Remote worker action must be register, start, or stop with a worker ID.")
+            raise ValueError(
+                "Remote worker action must be register, start, or stop with a worker ID."
+            )
         registry = self.remote_execution_service.workers
         if clean_action == "register":
             token = registry.issue_enrolment_token(clean_worker_id)
-            return {"status": "enrolment_issued", "worker_id": clean_worker_id, "enrolment_token": token, "message": "Give this one-time token to the external worker transport. It expires in 10 minutes and is not stored in chat history."}
+            return {
+                "status": "enrolment_issued",
+                "worker_id": clean_worker_id,
+                "enrolment_token": token,
+                "message": "Give this one-time token to the external worker transport. It expires in 10 minutes and is not stored in chat history.",
+            }
         if clean_action == "start":
             if registry.registration(clean_worker_id) is None:
-                raise RuntimeError("Worker is not enrolled. Ask to register it first; no fallback action was executed.")
-            return {"status": "awaiting_connection", "worker_id": clean_worker_id, "message": "Waiting for the enrolled worker to establish its authenticated outbound connection."}
+                raise RuntimeError(
+                    "Worker is not enrolled. Ask to register it first; no fallback action was executed."
+                )
+            return {
+                "status": "awaiting_connection",
+                "worker_id": clean_worker_id,
+                "message": "Waiting for the enrolled worker to establish its authenticated outbound connection.",
+            }
         registry.disconnect(clean_worker_id)
-        return {"status": "stopped", "worker_id": clean_worker_id, "message": "Worker connection was stopped; active jobs are marked disconnected."}
+        return {
+            "status": "stopped",
+            "worker_id": clean_worker_id,
+            "message": "Worker connection was stopped; active jobs are marked disconnected.",
+        }
 
     def fleet_command(
-        self, args: list[str], *, session_id: str = "",
-        workspace_id: str = "", repository_id: str = "",
+        self,
+        args: list[str],
+        *,
+        session_id: str = "",
+        workspace_id: str = "",
+        repository_id: str = "",
     ) -> dict[str, Any]:
         """Serve canonical Fleet controls without inventing execution decisions."""
         _ = (session_id, workspace_id, repository_id)
         action = args[0].lower() if args else "list"
         if action in {"list", "workers"}:
             workers = [
-                item.model_dump(mode="json")
-                for item in self.fleet_registry.list()
+                item.model_dump(mode="json") for item in self.fleet_registry.list()
             ]
             return {
                 "message": json.dumps(workers, indent=2),
@@ -469,7 +533,10 @@ class AgentChatGateway:
             return {"message": json.dumps(summary, indent=2), "summary": summary}
         if action == "cancel" and len(args) == 2:
             self.fleet_service.cancel(args[1])
-            return {"message": f"Cancellation requested for Fleet job {args[1]}.", "job_id": args[1]}
+            return {
+                "message": f"Cancellation requested for Fleet job {args[1]}.",
+                "job_id": args[1],
+            }
         if action in {"run", "verify"}:
             raise RuntimeError(
                 "Fleet execution requires a validated structured selection request from "
@@ -486,7 +553,8 @@ class AgentChatGateway:
 
         pending = next(
             (
-                item for item in self.remote_execution_service.pending_permissions()
+                item
+                for item in self.remote_execution_service.pending_permissions()
                 if item["permission_request_id"] == permission_request_id
             ),
             None,
@@ -522,7 +590,11 @@ class AgentChatGateway:
                     error=str(exc),
                 )
                 self._remote_job_lanes.pop(job.request.job_id, None)
-            return {"status": "worker_unavailable", "job_id": job.request.job_id, "message": str(exc)}
+            return {
+                "status": "worker_unavailable",
+                "job_id": job.request.job_id,
+                "message": str(exc),
+            }
         if lane_task_id:
             lane_state = (
                 LaneTaskState.COMPLETED
@@ -533,7 +605,9 @@ class AgentChatGateway:
                 lane_task_id,
                 state=lane_state,
                 verification_state={"remote_job_state": job.state.value},
-                error="" if lane_state is LaneTaskState.COMPLETED else f"remote SSH job ended as {job.state.value}",
+                error=""
+                if lane_state is LaneTaskState.COMPLETED
+                else f"remote SSH job ended as {job.state.value}",
             )
             self._remote_job_lanes.pop(job.request.job_id, None)
         if job.request.provider == "remote-ssh":
@@ -549,12 +623,20 @@ class AgentChatGateway:
                 "job_id": job.request.job_id,
                 "message": message,
             }
-        return {"status": job.state.value, "job_id": job.request.job_id, "message": "Approved remote SSH job was dispatched to its selected external worker."}
+        return {
+            "status": job.state.value,
+            "job_id": job.request.job_id,
+            "message": "Approved remote SSH job was dispatched to its selected external worker.",
+        }
 
     def _build_entry_route_registry(self) -> EntryRouteRegistry:
         registry = EntryRouteRegistry()
         registrations = (
-            RouteRegistration("conversation", "Ordinary tool-free conversation.", lambda: self._available()),
+            RouteRegistration(
+                "conversation",
+                "Ordinary tool-free conversation.",
+                lambda: self._available(),
+            ),
             RouteRegistration(
                 "multi_task",
                 "Orchestrates two or more separately routed child-task lifecycles.",
@@ -563,7 +645,9 @@ class AgentChatGateway:
             RouteRegistration(
                 "coding",
                 "Codex coding workflow for repository file changes.",
-                lambda: self._available(self._coding_agent is not None, "Coding agent is not configured."),
+                lambda: self._available(
+                    self._coding_agent is not None, "Coding agent is not configured."
+                ),
             ),
             RouteRegistration(
                 "remote_execution",
@@ -571,39 +655,83 @@ class AgentChatGateway:
                 self._remote_execution_route_availability,
                 ("remote_ssh_execute",),
             ),
-            RouteRegistration("artifact", "User-provided document and media artifact operations.", lambda: self._available(True), ("artifact_read", "artifact_write")),
+            RouteRegistration(
+                "artifact",
+                "User-provided document and media artifact operations.",
+                lambda: self._available(True),
+                ("artifact_read", "artifact_write"),
+            ),
             RouteRegistration(
                 "command",
                 "Shared chat commands for sessions, connectors, tasks, models, diagnostics, and processes.",
                 lambda: self._available(),
-                tuple(item.canonical_name for item in self.command_registry.definitions()),
+                tuple(
+                    item.canonical_name for item in self.command_registry.definitions()
+                ),
             ),
             RouteRegistration(
                 "gmail",
                 "Connected Gmail inbox, message, thread, and email operations.",
                 gmail_route_availability,
-                ("email_accounts_list", "email_search", "email_read", "email_thread_read"),
+                (
+                    "email_accounts_list",
+                    "email_search",
+                    "email_read",
+                    "email_thread_read",
+                ),
             ),
-            RouteRegistration("calendar", "Connected calendar operations.", lambda: self._available(False, "No calendar connector is registered.")),
+            RouteRegistration(
+                "calendar",
+                "Connected calendar operations.",
+                lambda: self._available(False, "No calendar connector is registered."),
+            ),
             RouteRegistration(
                 "computer",
                 "Permission-aware local desktop and installed-application control.",
                 self._computer_route_availability,
                 (
-                    "computer_capabilities", "computer_permission_status", "computer_list_apps",
-                    "computer_open_app", "computer_close_app", "computer_active_app",
-                    "calendar_list_events", "calendar_create_event", "calendar_update_event",
-                    "calendar_delete_event", "media_get_status", "media_play", "media_pause",
-                    "media_next", "media_previous", "media_set_volume", "notes_search",
-                    "notes_read", "notes_create", "notes_update", "notes_delete",
-                    "browser_get_active_page", "browser_read_page", "browser_list_tabs",
-                    "browser_open_url", "browser_activate_tab", "browser_close_tab",
-                    "clipboard_read", "clipboard_write", "computer_take_screenshot",
-                    "computer_open_path", "computer_reveal_path", "computer_file_metadata",
-                    "computer_copy_path", "computer_move_path", "computer_rename_path",
-                    "computer_create_directory", "computer_trash_path",
-                    "computer_send_notification", "computer_get_system_status",
-                    "computer_set_system_volume", "computer_control_system",
+                    "computer_capabilities",
+                    "computer_permission_status",
+                    "computer_list_apps",
+                    "computer_open_app",
+                    "computer_close_app",
+                    "computer_active_app",
+                    "calendar_list_events",
+                    "calendar_create_event",
+                    "calendar_update_event",
+                    "calendar_delete_event",
+                    "media_get_status",
+                    "media_play",
+                    "media_pause",
+                    "media_next",
+                    "media_previous",
+                    "media_set_volume",
+                    "notes_search",
+                    "notes_read",
+                    "notes_create",
+                    "notes_update",
+                    "notes_delete",
+                    "browser_get_active_page",
+                    "browser_read_page",
+                    "browser_list_tabs",
+                    "browser_open_url",
+                    "browser_activate_tab",
+                    "browser_close_tab",
+                    "clipboard_read",
+                    "clipboard_write",
+                    "computer_take_screenshot",
+                    "computer_open_path",
+                    "computer_reveal_path",
+                    "computer_file_metadata",
+                    "computer_copy_path",
+                    "computer_move_path",
+                    "computer_rename_path",
+                    "computer_create_directory",
+                    "computer_trash_path",
+                    "computer_send_notification",
+                    "computer_get_system_status",
+                    "computer_set_system_volume",
+                    "computer_control_system",
                 ),
             ),
             RouteRegistration(
@@ -612,22 +740,73 @@ class AgentChatGateway:
                 self._browser_route_availability,
                 ("browser_open", "browser_inspect", "browser_check_links"),
             ),
-            RouteRegistration("search", "Public web search and discovery.", self._search_route_availability, ("web_search",)),
-            RouteRegistration("github", "Public GitHub search and inspection.", self._github_route_availability, ("github_search",)),
-            RouteRegistration("repository", "Read-only local repository inspection.", lambda: self._available(), ("repo_search", "read_file")),
-            RouteRegistration("memory", "Persisted conversation memory retrieval.", lambda: self._available(), ("memory_search",)),
+            RouteRegistration(
+                "search",
+                "Public web search and discovery.",
+                self._search_route_availability,
+                ("web_search",),
+            ),
+            RouteRegistration(
+                "github",
+                "Public GitHub search and inspection.",
+                self._github_route_availability,
+                ("github_search",),
+            ),
+            RouteRegistration(
+                "repository",
+                "Read-only local repository inspection.",
+                lambda: self._available(),
+                ("repo_search", "read_file"),
+            ),
+            RouteRegistration(
+                "memory",
+                "Persisted conversation memory retrieval.",
+                lambda: self._available(),
+                ("memory_search",),
+            ),
             RouteRegistration(
                 "automation",
                 "Model-authored durable automation creation and management.",
                 lambda: self._available(),
                 (
-                    "automation_create", "automation_get", "automation_list",
-                    "automation_status", "automation_update", "automation_delete",
-                    "automation_enable", "automation_disable", "automation_run_now",
+                    "automation_create",
+                    "automation_get",
+                    "automation_list",
+                    "automation_status",
+                    "automation_update",
+                    "automation_delete",
+                    "automation_enable",
+                    "automation_disable",
+                    "automation_run_now",
                 ),
             ),
-            RouteRegistration("unsupported", "Safe stop when no registered route applies.", lambda: self._available()),
-            RouteRegistration("capability_error", "Explicit stop for an unavailable required capability.", lambda: self._available()),
+            RouteRegistration(
+                "canvas",
+                "Validated durable A2UI Live Canvas operations.",
+                lambda: self._available(
+                    bool(getattr(self.settings, "mana_canvas_enabled", True)),
+                    "Live Canvas is disabled.",
+                ),
+                (
+                    "canvas_create_surface",
+                    "canvas_update_components",
+                    "canvas_update_data",
+                    "canvas_delete_surface",
+                    "canvas_get_surface",
+                    "canvas_list_surfaces",
+                    "canvas_wait_for_action",
+                ),
+            ),
+            RouteRegistration(
+                "unsupported",
+                "Safe stop when no registered route applies.",
+                lambda: self._available(),
+            ),
+            RouteRegistration(
+                "capability_error",
+                "Explicit stop for an unavailable required capability.",
+                lambda: self._available(),
+            ),
         )
         for registration in registrations:
             registry.register(registration)
@@ -645,9 +824,13 @@ class AgentChatGateway:
                 try:
                     self._event_sink("workspace.repository_initialized", message)
                 except Exception:
-                    logger.debug("workspace initialization status event failed", exc_info=True)
+                    logger.debug(
+                        "workspace initialization status event failed", exc_info=True
+                    )
             except Exception:
-                logger.debug("workspace initialization status event failed", exc_info=True)
+                logger.debug(
+                    "workspace initialization status event failed", exc_info=True
+                )
 
     def _prepare_coding_workspace(self) -> PreparedRepository:
         expected_workspace_id = self._stack.workspace_id
@@ -691,7 +874,9 @@ class AgentChatGateway:
         return RouteAvailability(available=True, details=dict(status))
 
     def _computer_route_availability(self) -> RouteAvailability:
-        from mana_agent.integrations.computer_control.config import ComputerControlSettings
+        from mana_agent.integrations.computer_control.config import (
+            ComputerControlSettings,
+        )
 
         try:
             settings = ComputerControlSettings.load()
@@ -739,7 +924,9 @@ class AgentChatGateway:
         enabled = SearchConfig.from_env().enable_github
         return self._available(enabled, "GitHub search is disabled for this session.")
 
-    def create_session(self, *, frontend: str = "cli", session_id: str | None = None) -> str:
+    def create_session(
+        self, *, frontend: str = "cli", session_id: str | None = None
+    ) -> str:
         """Open one chat session, or bind the active id created by the frontend."""
         if session_id:
             sid = session_id
@@ -803,10 +990,14 @@ class AgentChatGateway:
                 session_id=session_id,
             )
             self._stack.coding_memory_service = rebound
-            if self._coding_agent is not None and hasattr(self._coding_agent, "coding_memory_service"):
+            if self._coding_agent is not None and hasattr(
+                self._coding_agent, "coding_memory_service"
+            ):
                 self._coding_agent.coding_memory_service = rebound
 
-    def _new_session_state(self, session_id: str, *, frontend: str = "cli") -> dict[str, Any]:
+    def _new_session_state(
+        self, session_id: str, *, frontend: str = "cli"
+    ) -> dict[str, Any]:
         analysis = None
         try:
             analysis = load_analysis_context(self.root)
@@ -816,7 +1007,9 @@ class AgentChatGateway:
         completed: dict[str, dict[str, str]] = {}
         for message in messages:
             if message.role in {"user", "assistant"}:
-                completed.setdefault(message.turn_id, {})[message.role] = message.content
+                completed.setdefault(message.turn_id, {})[message.role] = (
+                    message.content
+                )
         history = [
             (turn["user"], turn["assistant"])
             for turn in completed.values()
@@ -842,7 +1035,9 @@ class AgentChatGateway:
             self._sessions[session_id] = self._new_session_state(session_id)
         return self._sessions[session_id]
 
-    def start_new_conversation(self, session_id: str, *, frontend: str | None = None) -> str:
+    def start_new_conversation(
+        self, session_id: str, *, frontend: str | None = None
+    ) -> str:
         """Permanently replace the current conversation with a fresh session."""
         state = self._session(session_id)
         selected_frontend = frontend or str(state.get("frontend") or "cli")
@@ -852,9 +1047,13 @@ class AgentChatGateway:
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
         self._chat_session_id = None
-        return self.create_session(frontend=selected_frontend, session_id=record.session_id)
+        return self.create_session(
+            frontend=selected_frontend, session_id=record.session_id
+        )
 
-    def switch_session(self, session_id: str, *, frontend: str = "cli") -> list[dict[str, Any]]:
+    def switch_session(
+        self, session_id: str, *, frontend: str = "cli"
+    ) -> list[dict[str, Any]]:
         """Activate a canonical session and return its exact durable timeline."""
         current = self._chat_session_id
         workspace_id = None
@@ -870,7 +1069,9 @@ class AgentChatGateway:
             self._active.discard(current)
         self._sessions.pop(session_id, None)
         self._chat_session_id = session_id
-        self._sessions[session_id] = self._new_session_state(session_id, frontend=frontend)
+        self._sessions[session_id] = self._new_session_state(
+            session_id, frontend=frontend
+        )
         self._bind_runtime_session(session_id)
         return activation.messages
 
@@ -881,7 +1082,9 @@ class AgentChatGateway:
         if self._chat_session_id == session_id:
             self._chat_session_id = None
 
-    def close_session(self, session_id: str | None = None, *, abandoned: bool = False) -> str | None:
+    def close_session(
+        self, session_id: str | None = None, *, abandoned: bool = False
+    ) -> str | None:
         """Idempotently finalize the active chat while preserving its history."""
         sid = str(session_id or self._chat_session_id or "").strip()
         if not sid:
@@ -989,10 +1192,7 @@ class AgentChatGateway:
     ) -> str:
         if not result.answer:
             return ""
-        content = (
-            f"User: {user_text[:8000]}\n"
-            f"Assistant: {str(result.answer)[:12000]}"
-        )
+        content = f"User: {user_text[:8000]}\nAssistant: {str(result.answer)[:12000]}"
         try:
             self._stack.memory_service.add_blocking(
                 MemoryWriteRequest(
@@ -1081,25 +1281,43 @@ class AgentChatGateway:
             decision = row.get("decision") or {}
             if len(parts) > 1 and parts[1].lower() == "explain":
                 return json.dumps(row, indent=2, default=str)
-            return json.dumps({
-                "decision_id": decision.get("decision_id"),
-                "provider": decision.get("provider"),
-                "model": decision.get("selected_model"),
-                "routing_mode": decision.get("routing_mode"),
-                "confidence": decision.get("confidence"),
-                "reasons": decision.get("selection_reasons", []),
-            }, indent=2, default=str)
+            return json.dumps(
+                {
+                    "decision_id": decision.get("decision_id"),
+                    "provider": decision.get("provider"),
+                    "model": decision.get("selected_model"),
+                    "routing_mode": decision.get("routing_mode"),
+                    "confidence": decision.get("confidence"),
+                    "reasons": decision.get("selection_reasons", []),
+                },
+                indent=2,
+                default=str,
+            )
         if command == "/tasks":
             rows = self.list_tasks(session_id=session_id, active_only=True)
-            return json.dumps([{
-                "task_id": row["task_id"], "parent_task_id": row["parent_task_id"],
-                "state": str(row["state"]), "lane": str(row["owning_lane"]),
-                "model": row["model"], "progress": row["progress_summary"],
-            } for row in rows], indent=2, default=str)
+            return json.dumps(
+                [
+                    {
+                        "task_id": row["task_id"],
+                        "parent_task_id": row["parent_task_id"],
+                        "state": str(row["state"]),
+                        "lane": str(row["owning_lane"]),
+                        "model": row["model"],
+                        "progress": row["progress_summary"],
+                    }
+                    for row in rows
+                ],
+                indent=2,
+                default=str,
+            )
         if command == "/budget":
             return json.dumps(self.budget_usage(session_id=session_id), indent=2)
         if command == "/candidates":
-            rows = [row for row in self.list_tasks(session_id=session_id) if row.get("task_type") == "candidate"]
+            rows = [
+                row
+                for row in self.list_tasks(session_id=session_id)
+                if row.get("task_type") == "candidate"
+            ]
             return json.dumps(rows, indent=2, default=str)
         if command == "/models" and len(parts) > 1 and parts[1].lower() == "health":
             return json.dumps(self.model_health(), indent=2, default=str)
@@ -1141,37 +1359,47 @@ class AgentChatGateway:
             # Minimal ChatService-only path
             state = self._session(session_id)
             turn_id = f"turn_{uuid.uuid4().hex[:20]}"
-            minimal_decision = self.routing_authority.route(RoutingRequest(
-                role="main",
-                task_description=text,
-                task_type="routine",
-                complexity=Complexity.LOW,
-                risk=RiskLevel.LOW,
-                latency_requirement=LatencyClass.INTERACTIVE,
-                budgets=routing_budgets_from_settings(self.settings),
-                task_id=turn_id,
-                session_id=session_id,
-                workspace_id=str(self._stack.workspace_id or ""),
-                repository_id=str(self._stack.repository_id or ""),
-                execution_lane="conversation",
-            ))
-            minimal_ask = getattr(self._chat_service, "_ask_service", None) or getattr(self._chat_service, "ask_service", None)
-            self._apply_selected_model(getattr(minimal_ask, "qna_chain", None), minimal_decision.selected_model)
-            self._apply_selected_model(getattr(minimal_ask, "ask_agent", None), minimal_decision.selected_model)
+            minimal_decision = self.routing_authority.route(
+                RoutingRequest(
+                    role="main",
+                    task_description=text,
+                    task_type="routine",
+                    complexity=Complexity.LOW,
+                    risk=RiskLevel.LOW,
+                    latency_requirement=LatencyClass.INTERACTIVE,
+                    budgets=routing_budgets_from_settings(self.settings),
+                    task_id=turn_id,
+                    session_id=session_id,
+                    workspace_id=str(self._stack.workspace_id or ""),
+                    repository_id=str(self._stack.repository_id or ""),
+                    execution_lane="conversation",
+                )
+            )
+            minimal_ask = getattr(self._chat_service, "_ask_service", None) or getattr(
+                self._chat_service, "ask_service", None
+            )
+            self._apply_selected_model(
+                getattr(minimal_ask, "qna_chain", None), minimal_decision.selected_model
+            )
+            self._apply_selected_model(
+                getattr(minimal_ask, "ask_agent", None), minimal_decision.selected_model
+            )
             state["latest_routing_decision"] = minimal_decision.concise()
-            self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
+            self._append_session_message(
+                session_id, role="user", content=text, turn_id=turn_id
+            )
             hist = state.get("history", [])[-20:]
             question = text
             if hist:
-                transcript = "\n\n".join(
-                    f"User: {q}\nMana-Agent: {a}" for q, a in hist
-                )
+                transcript = "\n\n".join(f"User: {q}\nMana-Agent: {a}" for q, a in hist)
                 question = (
                     f"Conversation history for continuity:\n{transcript[-20000:]}\n\n"
                     f"Current user message:\n{text}"
                 )
             try:
-                resp = self._chat_service.ask(question, k=getattr(self._chat_service, "_k", 6))
+                resp = self._chat_service.ask(
+                    question, k=getattr(self._chat_service, "_k", 6)
+                )
             except Exception as exc:
                 self._append_session_message(
                     session_id,
@@ -1187,7 +1415,9 @@ class AgentChatGateway:
             result = (answer or "").strip() or "(No response from agent)"
             state.setdefault("history", []).append((text, result))
             state["history"] = state["history"][-40:]
-            self._append_session_message(session_id, role="assistant", content=result, turn_id=turn_id)
+            self._append_session_message(
+                session_id, role="assistant", content=result, turn_id=turn_id
+            )
             return result
         finally:
             self._active.discard(session_id)
@@ -1210,10 +1440,16 @@ class AgentChatGateway:
         except FileNotFoundError:
             workspace_id = repository_id = ""
         context = CommandContext(
-            frontend=frontend, session_id=session_id, workspace_id=workspace_id,
-            repository_id=repository_id, capabilities={"chat", "sessions", "gateway", "processes", "connectors"},
-            gateway=self, sessions=self.session_service, processes=self.background_processes,
-            connectors=self.connector_service, frontend_data=frontend_data or {},
+            frontend=frontend,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            repository_id=repository_id,
+            capabilities={"chat", "sessions", "gateway", "processes", "connectors"},
+            gateway=self,
+            sessions=self.session_service,
+            processes=self.background_processes,
+            connectors=self.connector_service,
+            frontend_data=frontend_data or {},
         )
         return self.command_dispatcher.dispatch(text, context, confirmed=confirmed)
 
@@ -1223,23 +1459,33 @@ class AgentChatGateway:
     def cancel(self, session_id: str) -> bool:
         computer_cancelled = False
         try:
-            from mana_agent.integrations.computer_control.cancellation import cancel_computer_session
+            from mana_agent.integrations.computer_control.cancellation import (
+                cancel_computer_session,
+            )
 
             computer_cancelled = cancel_computer_session(session_id)
         except Exception:
             logger.debug("computer-control cancellation failed", exc_info=True)
-        active = self._lane_coordinator.list_tasks(active_only=True, session_id=session_id)
+        active = self._lane_coordinator.list_tasks(
+            active_only=True, session_id=session_id
+        )
         if not active:
             return computer_cancelled
         roots = [item for item in active if not item.parent_task_id]
         for task in roots or list(active):
-            self._lane_coordinator.cancel_tree(task.task_id, reason="frontend cancellation requested")
+            self._lane_coordinator.cancel_tree(
+                task.task_id, reason="frontend cancellation requested"
+            )
         return True
 
-    def list_tasks(self, *, session_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
+    def list_tasks(
+        self, *, session_id: str = "", active_only: bool = False
+    ) -> list[dict[str, Any]]:
         return [
             self._task_surface(item)
-            for item in self._lane_coordinator.list_tasks(active_only=active_only, session_id=session_id)
+            for item in self._lane_coordinator.list_tasks(
+                active_only=active_only, session_id=session_id
+            )
         ]
 
     def inspect_task(self, task_id: str) -> dict[str, Any]:
@@ -1254,33 +1500,41 @@ class AgentChatGateway:
     def _task_surface(self, execution: Any) -> dict[str, Any]:
         payload = asdict(execution)
         try:
-            task = self._lane_coordinator.taskboard.get_task(execution.taskboard_task_id)
+            task = self._lane_coordinator.taskboard.get_task(
+                execution.taskboard_task_id
+            )
         except KeyError:
             return payload
-        payload.update({
-            "taskboard_status": task.status.value,
-            "entry_route": task.entry_route,
-            "owning_lane": task.owning_lane or execution.owning_lane.value,
-            "depends_on": list(task.depends_on),
-            "acceptance_criteria": list(task.acceptance_criteria),
-            "decomposition_local_id": task.decomposition_local_id,
-            "preferred_parallelism": task.preferred_parallelism,
-            "result_summary": task.result_summary,
-            "verification_status": task.verification_status,
-            "output_artifacts": list(task.output_artifacts),
-            "approval_request_ids": list(task.approval_request_ids),
-            "aggregate_progress": task.aggregate_progress,
-            "child_task_ids": list(task.child_task_ids),
-        })
+        payload.update(
+            {
+                "taskboard_status": task.status.value,
+                "entry_route": task.entry_route,
+                "owning_lane": task.owning_lane or execution.owning_lane.value,
+                "depends_on": list(task.depends_on),
+                "acceptance_criteria": list(task.acceptance_criteria),
+                "decomposition_local_id": task.decomposition_local_id,
+                "preferred_parallelism": task.preferred_parallelism,
+                "result_summary": task.result_summary,
+                "verification_status": task.verification_status,
+                "output_artifacts": list(task.output_artifacts),
+                "approval_request_ids": list(task.approval_request_ids),
+                "aggregate_progress": task.aggregate_progress,
+                "child_task_ids": list(task.child_task_ids),
+            }
+        )
         return payload
 
-    def pause_task(self, task_id: str, *, reason: str = "paused by main model") -> dict[str, Any]:
+    def pause_task(
+        self, task_id: str, *, reason: str = "paused by main model"
+    ) -> dict[str, Any]:
         return asdict(self._lane_coordinator.pause(task_id, reason=reason))
 
     def resume_task(self, task_id: str) -> dict[str, Any]:
         return asdict(self._lane_coordinator.resume(task_id))
 
-    def cancel_task(self, task_id: str, *, include_children: bool = True) -> dict[str, Any]:
+    def cancel_task(
+        self, task_id: str, *, include_children: bool = True
+    ) -> dict[str, Any]:
         cancelled = (
             self._lane_coordinator.cancel_tree(task_id)
             if include_children
@@ -1291,18 +1545,30 @@ class AgentChatGateway:
     def reprioritize_task(self, task_id: str, priority: str) -> dict[str, Any]:
         from mana_agent.gateway.lanes import LanePriority
 
-        return asdict(self._lane_coordinator.reprioritize(task_id, LanePriority(priority)))
+        return asdict(
+            self._lane_coordinator.reprioritize(task_id, LanePriority(priority))
+        )
 
-    def attach_task_evidence(self, task_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    def attach_task_evidence(
+        self, task_id: str, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
         return asdict(self._lane_coordinator.attach_evidence(task_id, evidence))
 
-    def request_task_verification(self, task_id: str, *, level: str = "standard") -> dict[str, Any]:
+    def request_task_verification(
+        self, task_id: str, *, level: str = "standard"
+    ) -> dict[str, Any]:
         return asdict(self._lane_coordinator.request_verification(task_id, level=level))
 
-    def budget_usage(self, *, task_id: str = "", session_id: str = "") -> dict[str, Any]:
-        return self._lane_coordinator.budget_usage(task_id=task_id, session_id=session_id)
+    def budget_usage(
+        self, *, task_id: str = "", session_id: str = ""
+    ) -> dict[str, Any]:
+        return self._lane_coordinator.budget_usage(
+            task_id=task_id, session_id=session_id
+        )
 
-    def latest_routing_decision(self, *, session_id: str = "", task_id: str = "") -> dict[str, Any] | None:
+    def latest_routing_decision(
+        self, *, session_id: str = "", task_id: str = ""
+    ) -> dict[str, Any] | None:
         return self.routing_authority.latest(session_id=session_id, task_id=task_id)
 
     def routing_history(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -1329,8 +1595,13 @@ class AgentChatGateway:
         self._bind_runtime_session(session_id)
         self._active.add(session_id)
         turn_id = str(options.pop("turn_id", "") or f"turn_{uuid.uuid4().hex[:20]}")
-        record_current("gateway.turn.started", {"session_id": session_id, "turn_id": turn_id, "original_task": text})
-        self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
+        record_current(
+            "gateway.turn.started",
+            {"session_id": session_id, "turn_id": turn_id, "original_task": text},
+        )
+        self._append_session_message(
+            session_id, role="user", content=text, turn_id=turn_id
+        )
         try:
             state = self._session(session_id)
             conversation_id = str(state.get("conversation_id") or session_id)
@@ -1357,27 +1628,34 @@ class AgentChatGateway:
                 previous_route=str(state.get("active_route") or ""),
                 conversation_summary=_conversation_prompt(state, text)[-12000:],
                 artifact_evidence=artifact_routing_evidence(
-                    root=self.root, user_prompt=text,
-                    attachments=options.get("attachments", ()), target_files=options.get("target_files", ()),
+                    root=self.root,
+                    user_prompt=text,
+                    attachments=options.get("attachments", ()),
+                    target_files=options.get("target_files", ()),
                 ),
             )
-            entry_model_decision = self.routing_authority.route(RoutingRequest(
-                role="head_decision",
-                task_description=f"Classify the gateway entry route for: {text}",
-                task_type="routing",
-                complexity=Complexity.MEDIUM,
-                risk=RiskLevel.MEDIUM,
-                required_capabilities=frozenset({"structured_output"}),
-                latency_requirement=LatencyClass.INTERACTIVE,
-                budgets=routing_budgets_from_settings(self.settings),
-                task_id=f"{turn_id}:entry",
-                session_id=session_id,
-                workspace_id=str(self._stack.workspace_id or ""),
-                repository_id=str(self._stack.repository_id or ""),
-                execution_lane="entry_routing",
-                expected_output_type="entry_routing_decision",
-            ))
-            self._apply_selected_model(getattr(self._entry_router, "llm", None), entry_model_decision.selected_model)
+            entry_model_decision = self.routing_authority.route(
+                RoutingRequest(
+                    role="head_decision",
+                    task_description=f"Classify the gateway entry route for: {text}",
+                    task_type="routing",
+                    complexity=Complexity.MEDIUM,
+                    risk=RiskLevel.MEDIUM,
+                    required_capabilities=frozenset({"structured_output"}),
+                    latency_requirement=LatencyClass.INTERACTIVE,
+                    budgets=routing_budgets_from_settings(self.settings),
+                    task_id=f"{turn_id}:entry",
+                    session_id=session_id,
+                    workspace_id=str(self._stack.workspace_id or ""),
+                    repository_id=str(self._stack.repository_id or ""),
+                    execution_lane="entry_routing",
+                    expected_output_type="entry_routing_decision",
+                )
+            )
+            self._apply_selected_model(
+                getattr(self._entry_router, "llm", None),
+                entry_model_decision.selected_model,
+            )
             try:
                 entry_decision = self._entry_router.route(
                     user_prompt=text,
@@ -1388,17 +1666,26 @@ class AgentChatGateway:
                     answer=str(exc),
                     error=str(exc),
                     mode="route-error",
-                    payload={"route": "unsupported", "error_code": "entry_route_invalid"},
+                    payload={
+                        "route": "unsupported",
+                        "error_code": "entry_route_invalid",
+                    },
                 )
             else:
-                record_current("gateway.entry_route", {"decision": entry_decision.to_dict(), "turn_id": turn_id})
+                record_current(
+                    "gateway.entry_route",
+                    {"decision": entry_decision.to_dict(), "turn_id": turn_id},
+                )
                 state["active_route"] = entry_decision.route
                 if entry_decision.route == "command":
                     import shlex
 
                     command_text = "/" + entry_decision.command_name
                     if entry_decision.command_arguments:
-                        command_text += " " + " ".join(shlex.quote(item) for item in entry_decision.command_arguments)
+                        command_text += " " + " ".join(
+                            shlex.quote(item)
+                            for item in entry_decision.command_arguments
+                        )
                     command_result = self.dispatch_command(
                         command_text,
                         session_id=session_id,
@@ -1410,9 +1697,15 @@ class AgentChatGateway:
                         )
                     record_current(
                         "gateway.turn.finished",
-                        {"turn_id": turn_id, "mode": "command", "command": entry_decision.command_name},
+                        {
+                            "turn_id": turn_id,
+                            "mode": "command",
+                            "command": entry_decision.command_name,
+                        },
                     )
-                    active_session_id = str(command_result.data.get("session_id") or session_id)
+                    active_session_id = str(
+                        command_result.data.get("session_id") or session_id
+                    )
                     return ChatTurnResult(
                         answer=command_result.message,
                         mode="command",
@@ -1448,10 +1741,12 @@ class AgentChatGateway:
                 if entry_decision.route == "artifact":
                     artifact_evidence = dict(route_context.artifact_evidence)
                     if entry_decision.artifact_family:
-                        artifact_evidence["artifact_families"] = sorted({
-                            *artifact_evidence.get("artifact_families", []),
-                            entry_decision.artifact_family,
-                        })
+                        artifact_evidence["artifact_families"] = sorted(
+                            {
+                                *artifact_evidence.get("artifact_families", []),
+                                entry_decision.artifact_family,
+                            }
+                        )
                     available, reason = artifact_handler_availability(artifact_evidence)
                     availability = RouteAvailability(available, reason=reason)
                 execution_role = {
@@ -1465,54 +1760,114 @@ class AgentChatGateway:
                     "calendar": "tool",
                     "computer": "tool",
                     "automation": "tool",
+                    "canvas": "tool",
                     "artifact": "tool",
                     "remote_execution": "tool",
                 }.get(entry_decision.route, "main")
-                parallel_requested = bool(options.pop("request_parallel_candidates", False))
+                parallel_requested = bool(
+                    options.pop("request_parallel_candidates", False)
+                )
                 route_tools = self._entry_route_registry.get(entry_decision.route).tools
-                execution_decision = self.routing_authority.route(RoutingRequest(
-                    role=execution_role,
-                    task_description=text,
-                    task_type="coding" if entry_decision.route == "coding" else "artifact" if entry_decision.route == "artifact" else "routine",
-                    complexity=Complexity.MEDIUM if entry_decision.route == "coding" else Complexity.LOW,
-                    risk=RiskLevel.MEDIUM if entry_decision.route in {"coding", "automation"} else RiskLevel.LOW,
-                    required_tools=frozenset(route_tools),
-                    latency_requirement=LatencyClass.STANDARD,
-                    budgets=routing_budgets_from_settings(self.settings),
-                    task_id=turn_id,
-                    parent_task_id=f"{turn_id}:entry",
-                    session_id=session_id,
-                    workspace_id=str(self._stack.workspace_id or ""),
-                    repository_id=str(self._stack.repository_id or ""),
-                    execution_lane=entry_decision.route,
-                    expected_output_type="repository_patch" if entry_decision.route == "coding" else "artifact" if entry_decision.route == "artifact" else "text",
-                    subagents_allowed=bool(options.pop("subagents_allowed", False)),
-                    parallel_execution_allowed=bool(options.pop("parallel_execution_allowed", False)),
-                    main_model_requested_multi_agent=bool(options.pop("request_multi_agent", False)),
-                    main_model_requested_parallel=parallel_requested,
-                    multi_candidate_permitted=parallel_requested,
-                    isolation_available=bool(getattr(self.settings, "mana_managed_worktrees_enabled", False)),
-                    independent_verifier_available=any(
-                        profile.can_verify and ("verifier" in profile.supported_roles or "*" in profile.supported_roles)
-                        for profile in self.routing_authority.router.profiles
-                    ),
-                    maximum_concurrency=int(getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)),
-                ))
+                execution_decision = self.routing_authority.route(
+                    RoutingRequest(
+                        role=execution_role,
+                        task_description=text,
+                        task_type="coding"
+                        if entry_decision.route == "coding"
+                        else "artifact"
+                        if entry_decision.route == "artifact"
+                        else "routine",
+                        complexity=Complexity.MEDIUM
+                        if entry_decision.route == "coding"
+                        else Complexity.LOW,
+                        risk=RiskLevel.MEDIUM
+                        if entry_decision.route in {"coding", "automation"}
+                        else RiskLevel.LOW,
+                        required_tools=frozenset(route_tools),
+                        latency_requirement=LatencyClass.STANDARD,
+                        budgets=routing_budgets_from_settings(self.settings),
+                        task_id=turn_id,
+                        parent_task_id=f"{turn_id}:entry",
+                        session_id=session_id,
+                        workspace_id=str(self._stack.workspace_id or ""),
+                        repository_id=str(self._stack.repository_id or ""),
+                        execution_lane=entry_decision.route,
+                        expected_output_type="repository_patch"
+                        if entry_decision.route == "coding"
+                        else "artifact"
+                        if entry_decision.route == "artifact"
+                        else "text",
+                        subagents_allowed=bool(options.pop("subagents_allowed", False)),
+                        parallel_execution_allowed=bool(
+                            options.pop("parallel_execution_allowed", False)
+                        ),
+                        main_model_requested_multi_agent=bool(
+                            options.pop("request_multi_agent", False)
+                        ),
+                        main_model_requested_parallel=parallel_requested,
+                        multi_candidate_permitted=parallel_requested,
+                        isolation_available=bool(
+                            getattr(
+                                self.settings, "mana_managed_worktrees_enabled", False
+                            )
+                        ),
+                        independent_verifier_available=any(
+                            profile.can_verify
+                            and (
+                                "verifier" in profile.supported_roles
+                                or "*" in profile.supported_roles
+                            )
+                            for profile in self.routing_authority.router.profiles
+                        ),
+                        maximum_concurrency=int(
+                            getattr(
+                                self.settings, "mana_routing_max_concurrent_tasks", 4
+                            )
+                        ),
+                    )
+                )
                 state["latest_routing_decision"] = execution_decision.concise()
-                self._apply_selected_model(getattr(ask_service, "ask_agent", None), execution_decision.selected_model)
+                self._apply_selected_model(
+                    getattr(ask_service, "ask_agent", None),
+                    execution_decision.selected_model,
+                )
                 try:
-                    if entry_decision.route not in {"capability_error", "unsupported"} and not availability.available:
-                        result = ChatTurnResult(answer=availability.reason, error="route_unavailable", mode=f"route-{entry_decision.route}-unavailable", decision=entry_decision, payload={"route": entry_decision.route, "availability": availability.to_dict(), "routing_evidence": route_context.artifact_evidence})
+                    if (
+                        entry_decision.route not in {"capability_error", "unsupported"}
+                        and not availability.available
+                    ):
+                        result = ChatTurnResult(
+                            answer=availability.reason,
+                            error="route_unavailable",
+                            mode=f"route-{entry_decision.route}-unavailable",
+                            decision=entry_decision,
+                            payload={
+                                "route": entry_decision.route,
+                                "availability": availability.to_dict(),
+                                "routing_evidence": route_context.artifact_evidence,
+                            },
+                        )
                         raise _RoutePreflightComplete(result)
                     lane_id = self._lane_coordinator.select_lane(
                         entry_route=entry_decision.route,
                         model_lane=options.pop("lane_id", None),
                     )
-                    target_files = [str(item) for item in options.pop("target_files", [])]
+                    target_files = [
+                        str(item) for item in options.pop("target_files", [])
+                    ]
                     requested_input = max(1, len(text) // 4)
-                    requested_output = max(256, int(options.pop("reserved_output_tokens", 2048)))
+                    requested_output = max(
+                        256, int(options.pop("reserved_output_tokens", 2048))
+                    )
                     route_capabilities = {
-                        "coding": ("repository_read", "repository_write", "shell_read", "shell_write", "git_read", "test_execution"),
+                        "coding": (
+                            "repository_read",
+                            "repository_write",
+                            "shell_read",
+                            "shell_write",
+                            "git_read",
+                            "test_execution",
+                        ),
                         "repository": ("repository_read",),
                         "browser": ("browser",),
                         "search": ("web_search",),
@@ -1521,7 +1876,13 @@ class AgentChatGateway:
                         "gmail": ("email",),
                         "calendar": ("calendar",),
                         "computer": ("computer",),
-                        "automation": ("automation", "deployment", "shell_read", "shell_write"),
+                        "automation": (
+                            "automation",
+                            "deployment",
+                            "shell_read",
+                            "shell_write",
+                        ),
+                        "canvas": ("canvas",),
                         "artifact": ("artifact_read", "artifact_write"),
                         "remote_execution": ("remote_ssh_execute",),
                     }.get(entry_decision.route, ())
@@ -1572,8 +1933,12 @@ class AgentChatGateway:
                         if result.mode == "remote-awaiting-permission":
                             job_id = str(result.payload.get("job_id") or "")
                             if not job_id:
-                                raise RuntimeError("Remote permission request did not include a job ID.")
-                            self._remote_job_lanes[job_id] = reservation.execution.task_id
+                                raise RuntimeError(
+                                    "Remote permission request did not include a job ID."
+                                )
+                            self._remote_job_lanes[job_id] = (
+                                reservation.execution.task_id
+                            )
                             self._lane_coordinator.transition(
                                 reservation.execution.task_id,
                                 LaneTaskState.WAITING,
@@ -1582,11 +1947,20 @@ class AgentChatGateway:
                         else:
                             self._lane_coordinator.finish(
                                 reservation.execution.task_id,
-                                state=(LaneTaskState.FAILED if result.error else LaneTaskState.COMPLETED),
+                                state=(
+                                    LaneTaskState.FAILED
+                                    if result.error
+                                    else LaneTaskState.COMPLETED
+                                ),
                                 changed_files=result.changed_files,
                                 consumed_input_tokens=requested_input,
-                                consumed_output_tokens=max(0, len(result.answer or "") // 4),
-                                verification_state={"mode": result.mode, "error": result.error},
+                                consumed_output_tokens=max(
+                                    0, len(result.answer or "") // 4
+                                ),
+                                verification_state={
+                                    "mode": result.mode,
+                                    "error": result.error,
+                                },
                                 error=str(result.error or ""),
                             )
                         result.payload.update(
@@ -1616,7 +1990,14 @@ class AgentChatGateway:
                 memory_warning=memory_warning,
             )
         except BaseException as exc:
-            record_current("gateway.turn.failed", {"turn_id": turn_id, "error_type": type(exc).__name__, "error": str(exc)})
+            record_current(
+                "gateway.turn.failed",
+                {
+                    "turn_id": turn_id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             self._append_session_message(
                 session_id,
                 role="system",
@@ -1687,7 +2068,8 @@ class AgentChatGateway:
             self._append_session_message(
                 session_id,
                 role="system",
-                content=result.error or "Turn interrupted before an assistant response.",
+                content=result.error
+                or "Turn interrupted before an assistant response.",
                 turn_id=turn_id,
                 metadata={"state": "failed" if result.error else "interrupted"},
             )
@@ -1744,8 +2126,12 @@ class AgentChatGateway:
             if execution.parent_task_id or execution.session_id != context.session_id:
                 continue
             if execution.state not in {
-                LaneTaskState.ROUTING, LaneTaskState.QUEUED, LaneTaskState.RUNNING,
-                LaneTaskState.WAITING, LaneTaskState.BLOCKED, LaneTaskState.PAUSED,
+                LaneTaskState.ROUTING,
+                LaneTaskState.QUEUED,
+                LaneTaskState.RUNNING,
+                LaneTaskState.WAITING,
+                LaneTaskState.BLOCKED,
+                LaneTaskState.PAUSED,
             }:
                 continue
             persisted = board.get_task(execution.taskboard_task_id)
@@ -1791,7 +2177,9 @@ class AgentChatGateway:
         orchestrator = MultiTaskOrchestrator(
             llm=self._entry_router.llm,
             taskboard=board,
-            maximum_concurrency=int(getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)),
+            maximum_concurrency=int(
+                getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)
+            ),
         )
         try:
             plan = orchestrator.decompose(
@@ -1814,28 +2202,30 @@ class AgentChatGateway:
                 payload={"route": "multi_task", "root_task_id": root_task.task_id},
             )
 
-        root_model_decision = self.routing_authority.route(RoutingRequest(
-            role="planner",
-            task_description=plan.goal,
-            task_type="orchestration",
-            complexity=Complexity.MEDIUM,
-            risk=RiskLevel.MEDIUM,
-            required_capabilities=frozenset({"structured_output"}),
-            latency_requirement=LatencyClass.STANDARD,
-            budgets=routing_budgets_from_settings(self.settings),
-            task_id=root_task.task_id,
-            parent_task_id=f"{context.turn_id}:entry",
-            session_id=context.session_id,
-            workspace_id=board.store.workspace_id,
-            repository_id=board.store.repository_id,
-            execution_lane="multi_task",
-            expected_output_type="multi_task_result",
-            subagents_allowed=True,
-            parallel_execution_allowed=True,
-            main_model_requested_multi_agent=True,
-            main_model_requested_parallel=True,
-            maximum_concurrency=orchestrator.maximum_concurrency,
-        ))
+        root_model_decision = self.routing_authority.route(
+            RoutingRequest(
+                role="planner",
+                task_description=plan.goal,
+                task_type="orchestration",
+                complexity=Complexity.MEDIUM,
+                risk=RiskLevel.MEDIUM,
+                required_capabilities=frozenset({"structured_output"}),
+                latency_requirement=LatencyClass.STANDARD,
+                budgets=routing_budgets_from_settings(self.settings),
+                task_id=root_task.task_id,
+                parent_task_id=f"{context.turn_id}:entry",
+                session_id=context.session_id,
+                workspace_id=board.store.workspace_id,
+                repository_id=board.store.repository_id,
+                execution_lane="multi_task",
+                expected_output_type="multi_task_result",
+                subagents_allowed=True,
+                parallel_execution_allowed=True,
+                main_model_requested_multi_agent=True,
+                main_model_requested_parallel=True,
+                maximum_concurrency=orchestrator.maximum_concurrency,
+            )
+        )
         root_reservation = self._lane_coordinator.reserve(
             normalized_intent=plan.goal,
             lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
@@ -1886,15 +2276,17 @@ class AgentChatGateway:
                     prerequisite_results.append(
                         f"{dependency.title}:\n{dependency.result_summary}"
                     )
-            execution_item = item.model_copy(update={
-                "request": (
-                    item.request
-                    if not prerequisite_results
-                    else item.request
-                    + "\n\nValidated prerequisite results:\n\n"
-                    + "\n\n".join(prerequisite_results)
-                )
-            })
+            execution_item = item.model_copy(
+                update={
+                    "request": (
+                        item.request
+                        if not prerequisite_results
+                        else item.request
+                        + "\n\nValidated prerequisite results:\n\n"
+                        + "\n\n".join(prerequisite_results)
+                    )
+                }
+            )
             return self._execute_validated_child_route(
                 item=execution_item,
                 child_task_id=child_task_id,
@@ -1911,12 +2303,16 @@ class AgentChatGateway:
             root_task_id=root_task.task_id,
             plan=plan,
             execute_child=execute_child,
-            is_cancelled=lambda: root_reservation.execution.state == LaneTaskState.CANCELLED,
+            is_cancelled=lambda: (
+                root_reservation.execution.state == LaneTaskState.CANCELLED
+            ),
         )
         child_payloads = [asdict(item) for item in results]
         statuses = {item.status for item in results}
         changed_files = [path for item in results for path in item.changed_files]
-        approvals = [request_id for item in results for request_id in item.approval_request_ids]
+        approvals = [
+            request_id for item in results for request_id in item.approval_request_ids
+        ]
         if root_reservation.execution.state == LaneTaskState.CANCELLED:
             overall = "cancelled"
         elif statuses <= {"completed", "skipped"}:
@@ -1941,7 +2337,9 @@ class AgentChatGateway:
                 verification_state={"children": child_payloads, "status": overall},
                 error="one or more child tasks failed and no safe continuation remains",
             )
-        completed_count = sum(item.status in {"completed", "skipped"} for item in results)
+        completed_count = sum(
+            item.status in {"completed", "skipped"} for item in results
+        )
         board.update_orchestration(
             root_task.task_id,
             result_summary=f"{completed_count}/{len(results)} completed; overall status: {overall}",
@@ -1953,8 +2351,15 @@ class AgentChatGateway:
         lines = [f"Compound goal: {plan.goal}", ""]
         for item in results:
             detail = item.result or item.blocker or "No result was returned."
-            lines.append(f"- {item.title} [{item.route or 'unrouted'}]: {item.status} — {detail}")
-        lines.extend(["", f"Overall status: {overall.upper()} ({completed_count}/{len(results)} completed)."])
+            lines.append(
+                f"- {item.title} [{item.route or 'unrouted'}]: {item.status} — {detail}"
+            )
+        lines.extend(
+            [
+                "",
+                f"Overall status: {overall.upper()} ({completed_count}/{len(results)} completed).",
+            ]
+        )
         if approvals:
             lines.append("Approvals required: " + ", ".join(approvals))
         return ChatTurnResult(
@@ -1963,7 +2368,9 @@ class AgentChatGateway:
             mode="route-multi-task",
             decision=decision,
             changed_files=changed_files,
-            warnings=["The compound request completed only partially."] if overall != "done" else [],
+            warnings=["The compound request completed only partially."]
+            if overall != "done"
+            else [],
             payload={
                 "route": "multi_task",
                 "root_task_id": root_task.task_id,
@@ -1971,7 +2378,9 @@ class AgentChatGateway:
                 "overall_status": overall,
                 "progress": f"{completed_count}/{len(results)} completed",
                 "decomposition": plan.model_dump(mode="json"),
-                "local_id_map": dict(board.get_task(root_task.task_id).decomposition_id_map),
+                "local_id_map": dict(
+                    board.get_task(root_task.task_id).decomposition_id_map
+                ),
                 "children": child_payloads,
                 "approvals_required": approvals,
             },
@@ -1990,53 +2399,98 @@ class AgentChatGateway:
         sink: Any,
         options: dict[str, Any],
     ) -> Any:
-        from mana_agent.multi_agent.runtime.multi_task_orchestrator import MultiTaskChildResult
+        from mana_agent.multi_agent.runtime.multi_task_orchestrator import (
+            MultiTaskChildResult,
+        )
 
         registration = self._entry_route_registry.get(decision.route)
         availability = registration.availability()
         if decision.route == "artifact":
             artifact_evidence = dict(context.artifact_evidence)
             if decision.artifact_family:
-                artifact_evidence["artifact_families"] = sorted({
-                    *artifact_evidence.get("artifact_families", []),
-                    decision.artifact_family,
-                })
+                artifact_evidence["artifact_families"] = sorted(
+                    {
+                        *artifact_evidence.get("artifact_families", []),
+                        decision.artifact_family,
+                    }
+                )
             available, reason = artifact_handler_availability(artifact_evidence)
             availability = RouteAvailability(available, reason=reason)
         execution_role = {
-            "coding": "coding", "search": "research", "github": "research",
-            "browser": "research", "repository": "research", "memory": "research",
-            "gmail": "tool", "calendar": "tool", "computer": "tool",
-            "automation": "tool", "artifact": "tool", "remote_execution": "tool",
+            "coding": "coding",
+            "search": "research",
+            "github": "research",
+            "browser": "research",
+            "repository": "research",
+            "memory": "research",
+            "gmail": "tool",
+            "calendar": "tool",
+            "computer": "tool",
+            "automation": "tool",
+            "artifact": "tool",
+            "remote_execution": "tool",
+            "canvas": "tool",
         }.get(decision.route, "main")
         route_tools = registration.tools
-        execution_decision = self.routing_authority.route(RoutingRequest(
-            role=execution_role,
-            task_description=item.request,
-            task_type="coding" if decision.route == "coding" else "artifact" if decision.route == "artifact" else "routine",
-            complexity=Complexity.MEDIUM if decision.route == "coding" else Complexity.LOW,
-            risk=RiskLevel.MEDIUM if decision.route in {"coding", "automation"} else RiskLevel.LOW,
-            required_tools=frozenset(route_tools),
-            latency_requirement=LatencyClass.STANDARD,
-            budgets=routing_budgets_from_settings(self.settings),
-            task_id=child_task_id,
-            parent_task_id=root_lane_task_id,
-            session_id=context.session_id,
-            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
-            repository_id=self._lane_coordinator.taskboard.store.repository_id,
-            execution_lane=decision.route,
-            expected_output_type="repository_patch" if decision.route == "coding" else "artifact" if decision.route == "artifact" else "text",
-            maximum_concurrency=int(getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)),
-        ))
-        self._apply_selected_model(getattr(ask_service, "ask_agent", None), execution_decision.selected_model)
+        execution_decision = self.routing_authority.route(
+            RoutingRequest(
+                role=execution_role,
+                task_description=item.request,
+                task_type="coding"
+                if decision.route == "coding"
+                else "artifact"
+                if decision.route == "artifact"
+                else "routine",
+                complexity=Complexity.MEDIUM
+                if decision.route == "coding"
+                else Complexity.LOW,
+                risk=RiskLevel.MEDIUM
+                if decision.route in {"coding", "automation"}
+                else RiskLevel.LOW,
+                required_tools=frozenset(route_tools),
+                latency_requirement=LatencyClass.STANDARD,
+                budgets=routing_budgets_from_settings(self.settings),
+                task_id=child_task_id,
+                parent_task_id=root_lane_task_id,
+                session_id=context.session_id,
+                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                execution_lane=decision.route,
+                expected_output_type="repository_patch"
+                if decision.route == "coding"
+                else "artifact"
+                if decision.route == "artifact"
+                else "text",
+                maximum_concurrency=int(
+                    getattr(self.settings, "mana_routing_max_concurrent_tasks", 4)
+                ),
+            )
+        )
+        self._apply_selected_model(
+            getattr(ask_service, "ask_agent", None), execution_decision.selected_model
+        )
         lane_id = self._lane_coordinator.select_lane(entry_route=decision.route)
         capabilities = {
-            "coding": ("repository_read", "repository_write", "shell_read", "shell_write", "git_read", "test_execution"),
-            "repository": ("repository_read",), "browser": ("browser",),
-            "search": ("web_search",), "github": ("web_search",), "memory": ("memory",),
-            "gmail": ("email",), "calendar": ("calendar",), "computer": ("computer",),
+            "coding": (
+                "repository_read",
+                "repository_write",
+                "shell_read",
+                "shell_write",
+                "git_read",
+                "test_execution",
+            ),
+            "repository": ("repository_read",),
+            "browser": ("browser",),
+            "search": ("web_search",),
+            "github": ("web_search",),
+            "memory": ("memory",),
+            "gmail": ("email",),
+            "calendar": ("calendar",),
+            "computer": ("computer",),
             "automation": ("automation", "deployment", "shell_read", "shell_write"),
-            "artifact": ("artifact_read", "artifact_write"), "remote_execution": ("remote_ssh_execute",),
+            "canvas": ("canvas",),
+            "artifact": ("artifact_read", "artifact_write"),
+            "remote_execution": ("remote_ssh_execute",),
         }.get(decision.route, ())
         reservation = self._lane_coordinator.reserve(
             normalized_intent=item.request,
@@ -2046,10 +2500,14 @@ class AgentChatGateway:
             repository_id=self._lane_coordinator.taskboard.store.repository_id,
             target_files=[str(value) for value in options.get("target_files", [])],
             parent_task_id=root_lane_task_id,
-            root_task_id=self._lane_coordinator.inspect_task(root_lane_task_id).root_task_id,
+            root_task_id=self._lane_coordinator.inspect_task(
+                root_lane_task_id
+            ).root_task_id,
             model=f"{execution_decision.provider}/{execution_decision.selected_model}",
             requested_input_tokens=max(1, len(item.request) // 4),
-            requested_output_tokens=max(256, int(options.get("reserved_output_tokens", 2048))),
+            requested_output_tokens=max(
+                256, int(options.get("reserved_output_tokens", 2048))
+            ),
             capabilities=capabilities,
             routing_decision_id=execution_decision.decision_id,
             provider=execution_decision.provider,
@@ -2063,22 +2521,35 @@ class AgentChatGateway:
             routing_evidence=decision.to_dict(),
         )
         self._lane_coordinator.start(reservation)
-        if decision.route not in {"capability_error", "unsupported"} and not availability.available:
+        if (
+            decision.route not in {"capability_error", "unsupported"}
+            and not availability.available
+        ):
             result = ChatTurnResult(
                 answer=availability.reason,
                 error="route_unavailable",
                 mode=f"route-{decision.route}-unavailable",
                 decision=decision,
-                payload={"route": decision.route, "availability": availability.to_dict()},
+                payload={
+                    "route": decision.route,
+                    "availability": availability.to_dict(),
+                },
             )
         elif decision.route == "command":
             import shlex
+
             command = "/" + decision.command_name
             if decision.command_arguments:
-                command += " " + " ".join(shlex.quote(value) for value in decision.command_arguments)
-            command_result = self.dispatch_command(command, session_id=context.session_id)
+                command += " " + " ".join(
+                    shlex.quote(value) for value in decision.command_arguments
+                )
+            command_result = self.dispatch_command(
+                command, session_id=context.session_id
+            )
             result = ChatTurnResult(
-                answer=command_result.message if command_result else "Command dispatch failed.",
+                answer=command_result.message
+                if command_result
+                else "Command dispatch failed.",
                 error=None if command_result else "command_dispatch_failed",
                 mode="command",
                 decision=decision,
@@ -2109,7 +2580,9 @@ class AgentChatGateway:
                 LaneTaskState.WAITING,
                 reason="waiting for child-specific approval",
             )
-        elif result.error == "route_unavailable" or decision.route == "capability_error":
+        elif (
+            result.error == "route_unavailable" or decision.route == "capability_error"
+        ):
             status = "blocked"
             self._lane_coordinator.mark_blocked(
                 reservation.execution.task_id,
@@ -2130,7 +2603,11 @@ class AgentChatGateway:
                 changed_files=result.changed_files,
                 verification_state={"mode": result.mode, "status": "completed"},
             )
-        artifacts = [str(item.get("path")) for item in result.sources if isinstance(item, dict) and item.get("path")]
+        artifacts = [
+            str(item.get("path"))
+            for item in result.sources
+            if isinstance(item, dict) and item.get("path")
+        ]
         if result.changed_files:
             self._lane_coordinator.taskboard.add_files_touched(
                 child_task_id,
@@ -2139,7 +2616,9 @@ class AgentChatGateway:
         self._lane_coordinator.taskboard.update_orchestration(
             child_task_id,
             result_summary=result.answer[:4000],
-            verification_status=str(result.payload.get("verification_status") or result.mode),
+            verification_status=str(
+                result.payload.get("verification_status") or result.mode
+            ),
             output_artifacts=artifacts,
             approval_request_ids=approval_ids,
         )
@@ -2151,7 +2630,9 @@ class AgentChatGateway:
             status=status,
             result=result.answer,
             blocker=str(result.error or "") if status != "completed" else "",
-            verification_status=str(result.payload.get("verification_status") or result.mode),
+            verification_status=str(
+                result.payload.get("verification_status") or result.mode
+            ),
             changed_files=list(result.changed_files),
             artifacts=artifacts,
             approval_request_ids=approval_ids,
@@ -2164,7 +2645,9 @@ class AgentChatGateway:
 
         def visit(value: Any) -> None:
             if isinstance(value, dict):
-                request_id = value.get("permission_request_id") or value.get("confirmation_request_id")
+                request_id = value.get("permission_request_id") or value.get(
+                    "confirmation_request_id"
+                )
                 if request_id and str(request_id) not in found:
                     found.append(str(request_id))
                 for nested in value.values():
@@ -2214,6 +2697,7 @@ class AgentChatGateway:
             "gmail",
             "calendar",
             "computer",
+            "canvas",
         }:
             return ChatTurnResult(
                 answer="The model-selected route requires mutation, but this protocol session is read-only.",
@@ -2234,7 +2718,10 @@ class AgentChatGateway:
                 error=decision.error_code or "capability_unavailable",
                 mode="route-capability-error",
                 decision=decision,
-                payload={"route": decision.route, "required_sources": list(decision.required_sources)},
+                payload={
+                    "route": decision.route,
+                    "required_sources": list(decision.required_sources),
+                },
             )
         if not availability.available:
             message = availability.reason
@@ -2258,7 +2745,11 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": decision.route},
             )
-        if len(decision.required_sources) > 1 or decision.required_sources[0] in {"browser", "search", "github"}:
+        if len(decision.required_sources) > 1 or decision.required_sources[0] in {
+            "browser",
+            "search",
+            "github",
+        }:
             return self._execute_required_sources(
                 decision=decision,
                 text=execution_text,
@@ -2269,7 +2760,11 @@ class AgentChatGateway:
             try:
                 answer = self._chat_service.ask_conversation(execution_text)
             except Exception as exc:
-                return ChatTurnResult(answer="", error=f"Conversation request failed: {exc}", mode="route-error")
+                return ChatTurnResult(
+                    answer="",
+                    error=f"Conversation request failed: {exc}",
+                    mode="route-error",
+                )
             return ChatTurnResult(
                 answer=str(answer or "").strip(),
                 mode="route-conversation",
@@ -2305,6 +2800,18 @@ class AgentChatGateway:
                 callbacks=options.get("callbacks"),
             )
 
+        if decision.route == "canvas":
+            if lane_task_id:
+                for tool_name in registration.tools:
+                    self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
+            return self._execute_canvas_route(
+                decision=decision,
+                context=context,
+                text=execution_text,
+                ask_service=ask_service,
+                callbacks=options.get("callbacks"),
+            )
+
         if decision.route == "computer":
             if lane_task_id:
                 for tool_name in registration.tools:
@@ -2320,7 +2827,10 @@ class AgentChatGateway:
 
         if decision.route == "artifact":
             return self._execute_artifact_route(
-                decision=decision, context=context, text=text, ask_service=ask_service,
+                decision=decision,
+                context=context,
+                text=text,
+                ask_service=ask_service,
                 callbacks=options.get("callbacks"),
             )
 
@@ -2335,13 +2845,17 @@ class AgentChatGateway:
                 provider = str(remote_payload.get("provider", "") or "").strip()
                 if profile_name:
                     profile = get_profile(profile_name)
-                    remote_payload.update({
-                        "provider": "remote-ssh", "worker_id": "", "target": profile.target().model_dump(),
-                        "authentication": profile.authentication().model_dump(),
-                        "timeout_seconds": profile.connect_timeout_seconds,
-                        "connect_timeout_seconds": profile.connect_timeout_seconds,
-                        "known_hosts_file": str(profile.known_hosts_path()),
-                    })
+                    remote_payload.update(
+                        {
+                            "provider": "remote-ssh",
+                            "worker_id": "",
+                            "target": profile.target().model_dump(),
+                            "authentication": profile.authentication().model_dump(),
+                            "timeout_seconds": profile.connect_timeout_seconds,
+                            "connect_timeout_seconds": profile.connect_timeout_seconds,
+                            "known_hosts_file": str(profile.known_hosts_path()),
+                        }
+                    )
                 elif provider in {"", "remote-ssh", "local_ssh"}:
                     remote_payload["provider"] = "remote-ssh"
                     remote_payload["worker_id"] = ""
@@ -2361,62 +2875,130 @@ class AgentChatGateway:
                     else:
                         remote_payload["worker_id"] = worker_id
                 authentication = remote_payload.get("authentication")
-                if isinstance(authentication, dict) and authentication.get("mode") == "key":
+                if (
+                    isinstance(authentication, dict)
+                    and authentication.get("mode") == "key"
+                ):
                     # `key` is a documented model-schema alias for the precise
                     # worker-only `key_path` mode; it never selects a fallback
                     # provider and never reads the referenced key.
-                    remote_payload["authentication"] = {**authentication, "mode": "key_path"}
-                request = RemoteExecutionRequest.model_validate({
-                    **remote_payload,
-                    "job_id": f"remote_{context.turn_id}",
-                    "session_id": context.session_id,
-                })
+                    remote_payload["authentication"] = {
+                        **authentication,
+                        "mode": "key_path",
+                    }
+                request = RemoteExecutionRequest.model_validate(
+                    {
+                        **remote_payload,
+                        "job_id": f"remote_{context.turn_id}",
+                        "session_id": context.session_id,
+                    }
+                )
             except (ValueError, LookupError) as exc:
-                return ChatTurnResult(answer=f"Model-selected remote SSH request is invalid: {exc}", error="remote_request_invalid", mode="route-error", decision=decision, payload={"route": decision.route})
+                return ChatTurnResult(
+                    answer=f"Model-selected remote SSH request is invalid: {exc}",
+                    error="remote_request_invalid",
+                    mode="route-error",
+                    decision=decision,
+                    payload={"route": decision.route},
+                )
             if lane_task_id:
-                self._lane_coordinator.authorize_tool(lane_task_id, "remote_ssh_execute")
+                self._lane_coordinator.authorize_tool(
+                    lane_task_id, "remote_ssh_execute"
+                )
             job = self.remote_execution_service.submit(request)
             if job.state.value == "awaiting_permission":
                 permission = self.remote_execution_service.pending_permissions()[-1]
                 from mana_agent.chat.events import CodingActivityEvent
                 from mana_agent.chat.history import get_history
 
-                get_history().add(CodingActivityEvent(activity={
-                    "event_type": "remote_execution.waiting_permission",
-                    "title": "Remote SSH permission required",
-                    "metadata": {
-                        "permission_request_id": permission["permission_request_id"],
-                        "permission_scope": "remote.ssh.execute",
-                        "preview": f"{permission['target']} · {permission['command']}",
-                        "remote_permission": True,
-                    },
-                }, turn_id=context.turn_id))
+                get_history().add(
+                    CodingActivityEvent(
+                        activity={
+                            "event_type": "remote_execution.waiting_permission",
+                            "title": "Remote SSH permission required",
+                            "metadata": {
+                                "permission_request_id": permission[
+                                    "permission_request_id"
+                                ],
+                                "permission_scope": "remote.ssh.execute",
+                                "preview": f"{permission['target']} · {permission['command']}",
+                                "remote_permission": True,
+                            },
+                        },
+                        turn_id=context.turn_id,
+                    )
+                )
                 if sink is not None:
                     sink(
                         "remote_execution.waiting_permission",
                         "Remote SSH permission required",
                         metadata={
-                            "permission_request_id": permission["permission_request_id"],
+                            "permission_request_id": permission[
+                                "permission_request_id"
+                            ],
                             "permission_scope": "remote.ssh.execute",
                             "preview": f"{permission['target']} · {permission['command']}",
                             "remote_permission": True,
                         },
                     )
-                return ChatTurnResult(answer="Remote SSH permission is required for the exact selected request.", mode="remote-awaiting-permission", decision=decision, payload={"route": decision.route, "job_id": request.job_id, "permission_request": permission, "events": [event.model_dump(mode="json") for event in job.events]})
+                return ChatTurnResult(
+                    answer="Remote SSH permission is required for the exact selected request.",
+                    mode="remote-awaiting-permission",
+                    decision=decision,
+                    payload={
+                        "route": decision.route,
+                        "job_id": request.job_id,
+                        "permission_request": permission,
+                        "events": [
+                            event.model_dump(mode="json") for event in job.events
+                        ],
+                    },
+                )
             try:
                 job = run_sync(self.remote_execution_service.execute(request.job_id))
             except RuntimeError as exc:
-                return ChatTurnResult(answer=str(exc), error="remote_execution_unavailable", mode="remote-execution-unavailable", decision=decision, payload={"route": decision.route, "job_id": request.job_id})
+                return ChatTurnResult(
+                    answer=str(exc),
+                    error="remote_execution_unavailable",
+                    mode="remote-execution-unavailable",
+                    decision=decision,
+                    payload={"route": decision.route, "job_id": request.job_id},
+                )
             if request.provider == "remote-ssh":
                 output = _remote_job_output(job)
                 answer = f"Direct SSH job completed with state: {job.state.value}."
                 if output:
                     answer = f"{answer}\n\n{output}"
-                return ChatTurnResult(answer=answer, mode="remote-completed", decision=decision, payload={"route": decision.route, "provider": "remote-ssh", "job_id": request.job_id, "state": job.state.value, "events": [event.model_dump(mode="json") for event in job.events]})
-            return ChatTurnResult(answer="Remote job was assigned to the selected managed worker.", mode="remote-assigned", decision=decision, payload={"route": decision.route, "provider": "reverse-worker", "job_id": request.job_id, "state": job.state.value})
+                return ChatTurnResult(
+                    answer=answer,
+                    mode="remote-completed",
+                    decision=decision,
+                    payload={
+                        "route": decision.route,
+                        "provider": "remote-ssh",
+                        "job_id": request.job_id,
+                        "state": job.state.value,
+                        "events": [
+                            event.model_dump(mode="json") for event in job.events
+                        ],
+                    },
+                )
+            return ChatTurnResult(
+                answer="Remote job was assigned to the selected managed worker.",
+                mode="remote-assigned",
+                decision=decision,
+                payload={
+                    "route": decision.route,
+                    "provider": "reverse-worker",
+                    "job_id": request.job_id,
+                    "state": job.state.value,
+                },
+            )
 
         if decision.route in {"search", "github"}:
-            required_tool = "github_search" if decision.route == "github" else "web_search"
+            required_tool = (
+                "github_search" if decision.route == "github" else "web_search"
+            )
             try:
                 search_operation = decide_chat_route(
                     ask_service=ask_service,
@@ -2436,7 +3018,10 @@ class AgentChatGateway:
                     payload={"route": decision.route},
                 )
             selected = set(search_operation.selected_tools)
-            query = str((search_operation.tool_inputs.get(required_tool) or {}).get("query") or "").strip()
+            query = str(
+                (search_operation.tool_inputs.get(required_tool) or {}).get("query")
+                or ""
+            ).strip()
             if (
                 not search_operation.verifier_passed
                 or selected != {required_tool}
@@ -2461,7 +3046,9 @@ class AgentChatGateway:
                 intent="edit",
                 confidence=decision.confidence,
                 code_editing_needed=True,
-                flow_action="continue" if decision.reuse_active_route and state.get("active_flow_id") else "new",
+                flow_action="continue"
+                if decision.reuse_active_route and state.get("active_flow_id")
+                else "new",
                 reasoning_summary=decision.reason,
                 verifier_passed=True,
             ),
@@ -2520,19 +3107,32 @@ class AgentChatGateway:
         if agent is None or not callable(getattr(agent, "run", None)):
             return ChatTurnResult(
                 answer="Artifact handling is configured, but its local document tool executor is unavailable.",
-                error="artifact_executor_unavailable", mode="route-artifact-error", decision=decision,
-                payload={"route": "artifact", "routing_evidence": context.artifact_evidence},
+                error="artifact_executor_unavailable",
+                mode="route-artifact-error",
+                decision=decision,
+                payload={
+                    "route": "artifact",
+                    "routing_evidence": context.artifact_evidence,
+                },
             )
-        staging_workspace = (mana_home() / "artifacts" / context.session_id / context.turn_id).resolve()
+        staging_workspace = (
+            mana_home() / "artifacts" / context.session_id / context.turn_id
+        ).resolve()
         staging_workspace.mkdir(parents=True, exist_ok=True)
         staged: list[str] = []
         for reference in context.artifact_evidence.get("references", []):
-            if not isinstance(reference, dict) or reference.get("provenance") != "attachment":
+            if (
+                not isinstance(reference, dict)
+                or reference.get("provenance") != "attachment"
+            ):
                 continue
             source = Path(str(reference.get("path") or "")).expanduser()
             if not source.is_file():
                 continue
-            destination = staging_workspace / Path(str(reference.get("filename") or source.name)).name
+            destination = (
+                staging_workspace
+                / Path(str(reference.get("filename") or source.name)).name
+            )
             shutil.copy2(source, destination)
             staged.append(destination.name)
         execution_root = staging_workspace if staged else self.root
@@ -2541,8 +3141,13 @@ class AgentChatGateway:
         if original_root is None:
             return ChatTurnResult(
                 answer="Artifact handling requires an executor that supports isolated local files.",
-                error="artifact_executor_incompatible", mode="route-artifact-error", decision=decision,
-                payload={"route": "artifact", "routing_evidence": context.artifact_evidence},
+                error="artifact_executor_incompatible",
+                mode="route-artifact-error",
+                decision=decision,
+                payload={
+                    "route": "artifact",
+                    "routing_evidence": context.artifact_evidence,
+                },
             )
         location_instruction = (
             "Create the final artifact directly in the Mana-Agent launch directory using a relative basename. "
@@ -2562,7 +3167,8 @@ class AgentChatGateway:
         )
         before = {
             path.name: (path.stat().st_mtime_ns, path.stat().st_size)
-            for path in execution_root.iterdir() if path.is_file()
+            for path in execution_root.iterdir()
+            if path.is_file()
         }
         try:
             agent.project_root = execution_root
@@ -2599,11 +3205,22 @@ class AgentChatGateway:
                 run_id=context.turn_id,
             )
         except Exception as exc:
-            return ChatTurnResult(answer=str(exc), error=f"Artifact route failed: {exc}", mode="route-artifact-error", decision=decision, payload={"route": "artifact", "routing_evidence": context.artifact_evidence})
+            return ChatTurnResult(
+                answer=str(exc),
+                error=f"Artifact route failed: {exc}",
+                mode="route-artifact-error",
+                decision=decision,
+                payload={
+                    "route": "artifact",
+                    "routing_evidence": context.artifact_evidence,
+                },
+            )
         finally:
             agent.project_root = original_root
         outputs = [
-            str(path) for path in execution_root.iterdir() if path.is_file()
+            str(path)
+            for path in execution_root.iterdir()
+            if path.is_file()
             and before.get(path.name) != (path.stat().st_mtime_ns, path.stat().st_size)
         ]
         answer = str(getattr(response, "answer", response) or "").strip()
@@ -2620,10 +3237,16 @@ class AgentChatGateway:
                 "route": "artifact",
                 "routing_evidence": context.artifact_evidence,
                 "output_artifacts": outputs,
-                "selected_handler": sorted({
-                    *context.artifact_evidence.get("artifact_families", []),
-                    *([decision.artifact_family] if decision.artifact_family else []),
-                }),
+                "selected_handler": sorted(
+                    {
+                        *context.artifact_evidence.get("artifact_families", []),
+                        *(
+                            [decision.artifact_family]
+                            if decision.artifact_family
+                            else []
+                        ),
+                    }
+                ),
             },
         )
 
@@ -2647,19 +3270,29 @@ class AgentChatGateway:
             try:
                 if source == "browser":
                     result = self._execute_browser_source(
-                        text=text, target_urls=decision.target_urls, ask_service=ask_service, callbacks=callbacks
+                        text=text,
+                        target_urls=decision.target_urls,
+                        ask_service=ask_service,
+                        callbacks=callbacks,
                     )
                     evidence.append(result.answer)
                     trace.extend(result.trace)
                 elif source in {"search", "github"}:
-                    required_tool = "github_search" if source == "github" else "web_search"
+                    required_tool = (
+                        "github_search" if source == "github" else "web_search"
+                    )
                     source_decision = decide_chat_route(
                         ask_service=ask_service,
                         question=text,
                         root=self.root,
                     )
                     selected = set(source_decision.selected_tools)
-                    query = str((source_decision.tool_inputs.get(required_tool) or {}).get("query") or "").strip()
+                    query = str(
+                        (source_decision.tool_inputs.get(required_tool) or {}).get(
+                            "query"
+                        )
+                        or ""
+                    ).strip()
                     if (
                         not source_decision.verifier_passed
                         or selected != {required_tool}
@@ -2671,9 +3304,14 @@ class AgentChatGateway:
                             "No search was executed because the required search-operation decision was invalid."
                         )
                     answer, _sources, source_trace = run_web_research_answer(
-                        ask_service=ask_service, question=text, root=self.root, decision=source_decision
+                        ask_service=ask_service,
+                        question=text,
+                        root=self.root,
+                        decision=source_decision,
                     )
-                    if not answer or answer.startswith("No external search results were available"):
+                    if not answer or answer.startswith(
+                        "No external search results were available"
+                    ):
                         raise RuntimeError(answer or "search returned no evidence")
                     evidence.append(answer)
                     trace.extend(source_trace)
@@ -2684,10 +3322,18 @@ class AgentChatGateway:
                     evidence.append(result.answer)
                     trace.extend(result.trace)
                 else:
-                    raise RuntimeError(f"No exact executor is registered for required source '{source}'")
+                    raise RuntimeError(
+                        f"No exact executor is registered for required source '{source}'"
+                    )
                 executions[source] = {"status": "success"}
             except Exception as exc:
-                trace.append({"tool_name": source, "status": "failed", "result_summary": str(exc)})
+                trace.append(
+                    {
+                        "tool_name": source,
+                        "status": "failed",
+                        "result_summary": str(exc),
+                    }
+                )
                 executions[source] = {"status": "failed", "error": str(exc)}
                 return ChatTurnResult(
                     answer=(
@@ -2720,7 +3366,12 @@ class AgentChatGateway:
         )
 
     def _execute_browser_source(
-        self, *, text: str, target_urls: tuple[str, ...], ask_service: Any, callbacks: Any
+        self,
+        *,
+        text: str,
+        target_urls: tuple[str, ...],
+        ask_service: Any,
+        callbacks: Any,
     ) -> ChatTurnResult:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
@@ -2736,7 +3387,9 @@ class AgentChatGateway:
             callbacks=callbacks,
             system_prompt=BROWSER_AGENT_SYSTEM_PROMPT,
             tool_policy={
-                "allowed_tools": [contract.name for contract in browser_tool_contracts()],
+                "allowed_tools": [
+                    contract.name for contract in browser_tool_contracts()
+                ],
                 "disable_external_search": True,
                 "require_initial_tool_call": True,
             },
@@ -2762,7 +3415,10 @@ class AgentChatGateway:
                 "You are Mana-Agent's repository evidence executor. Use only repository read/search "
                 "tools and return grounded repository evidence. Do not use web, browser, memory, or connectors."
             ),
-            tool_policy={"allowed_tools": ["repo_search", "read_file"], "require_initial_tool_call": True},
+            tool_policy={
+                "allowed_tools": ["repo_search", "read_file"],
+                "require_initial_tool_call": True,
+            },
         )
         answer = str(getattr(response, "answer", response) or "").strip()
         if not answer:
@@ -2797,6 +3453,7 @@ class AgentChatGateway:
             now_utc,
         )
         from mana_agent.config.settings import default_index_dir
+
         automation_service = AutomationService(self.root)
         authoring_now_utc = now_utc()
         authoring_timezone = machine_timezone()
@@ -2817,11 +3474,14 @@ class AgentChatGateway:
         teach_context = "No eligible reviewed Teach flows are available."
         try:
             from mana_agent.teach.service import TeachService
+
             teach_service = TeachService()
             handoffs = []
             for flow in teach_service.storage.list_flows():
                 try:
-                    handoffs.append(teach_service.automation_handoff(flow.id, version=flow.version))
+                    handoffs.append(
+                        teach_service.automation_handoff(flow.id, version=flow.version)
+                    )
                 except Exception:
                     continue
             if handoffs:
@@ -2894,7 +3554,8 @@ class AgentChatGateway:
             )
         after_records = {item.id: item for item in automation_service.list()}
         changed = [
-            item for item_id, item in after_records.items()
+            item
+            for item_id, item in after_records.items()
             if item_id not in before or item.to_dict() != before[item_id]
         ]
         deleted_ids = sorted(set(before) - set(after_records))
@@ -2908,27 +3569,33 @@ class AgentChatGateway:
                     "name": item.name,
                     "interpreted_trigger": human_trigger(item.trigger),
                     "timezone": item.timezone,
-                    "next_run_at": item.next_run_at.isoformat() if item.next_run_at else None,
+                    "next_run_at": item.next_run_at.isoformat()
+                    if item.next_run_at
+                    else None,
                     "deployment_status": item.deployment.status,
                     "source": item.source,
                     "blocked_reason": item.deployment.blocked_reason,
                 }
                 persisted_cards.append(card)
-                lines.extend([
-                    f"- ID: {item.id}",
-                    f"  Name: {item.name}",
-                    f"  Trigger: {card['interpreted_trigger']}",
-                    f"  Timezone: {item.timezone}",
-                    f"  Next run: {card['next_run_at'] or 'none'}",
-                    f"  Deployment: {item.deployment.status}",
-                    f"  Source: {item.source}",
-                ])
+                lines.extend(
+                    [
+                        f"- ID: {item.id}",
+                        f"  Name: {item.name}",
+                        f"  Trigger: {card['interpreted_trigger']}",
+                        f"  Timezone: {item.timezone}",
+                        f"  Next run: {card['next_run_at'] or 'none'}",
+                        f"  Deployment: {item.deployment.status}",
+                        f"  Source: {item.source}",
+                    ]
+                )
                 if item.deployment.blocked_reason:
                     lines.append(f"  Blocked: {item.deployment.blocked_reason}")
             answer = "\n".join(lines)
         elif deleted_ids:
             answer = "Deleted persisted automation" + (
-                f": {deleted_ids[0]}" if len(deleted_ids) == 1 else f"s: {', '.join(deleted_ids)}"
+                f": {deleted_ids[0]}"
+                if len(deleted_ids) == 1
+                else f"s: {', '.join(deleted_ids)}"
             )
         return ChatTurnResult(
             answer=answer,
@@ -2941,6 +3608,252 @@ class AgentChatGateway:
                 "route": "automation",
                 "automation_records": persisted_cards,
                 "deleted_automation_ids": deleted_ids,
+            },
+        )
+
+    def _execute_canvas_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        ask_service: Any,
+        callbacks: Any,
+    ) -> ChatTurnResult:
+        """Execute only validated Canvas tools selected by the entry decision."""
+        ask_agent = getattr(ask_service, "ask_agent", None)
+        if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
+            return ChatTurnResult(
+                answer="Live Canvas requires the configured model tool executor.",
+                error="canvas_executor_unavailable",
+                mode="route-canvas-error",
+                decision=decision,
+                payload={"route": "canvas"},
+            )
+        from mana_agent.canvas.catalog import catalog_metadata
+        from mana_agent.canvas.runtime_tools import CANVAS_TOOL_NAMES
+        from mana_agent.canvas.service import canvas_service_for_root
+        from mana_agent.config.settings import default_index_dir
+
+        service = canvas_service_for_root(self.root)
+        before = {
+            item.surface_id: item.model_dump(mode="json")
+            for item in service.list_surfaces(context.session_id, include_deleted=True)
+        }
+        system_prompt = (
+            "You are Mana-Agent's dedicated Live Canvas executor. Use only canvas_* tools and only "
+            "because the validated entry decision selected the canvas route. Perform the requested "
+            "surface lifecycle directly; do not answer with raw A2UI JSON. Every tool call must use "
+            f"source_decision_id={context.turn_id!r}, session_id={context.session_id!r}, "
+            f"conversation_id={context.conversation_id!r}. Use a stable surface_id scoped to this "
+            "conversation and an owner containing agent_id='main' plus task_id equal to the turn ID. "
+            "Create a new surface with one canvas_create_surface call that includes its complete "
+            "initial component adjacency list with id='root' and initial data_model. Use later "
+            "update tools only for an existing complete surface. Each component is a flat object; "
+            "for example {'id':'root','component':'Column','children':['title']} and "
+            "{'id':'title','component':'Heading','text':'Hello'}. The component kind field is named "
+            "component, not type, and component is never a nested object. "
+            "Action declarations accept only name, context, side_effect, and permission_scope. "
+            "For a normal button use a read-only action such as {'name':'counter.press',"
+            "'context':{'count':{'path':'/count'}}}; omit permission_scope and never add target. "
+            "Declare actions explicitly; side-effect actions require a permission_scope and will "
+            "fail closed unless the runtime permission broker is attached. Never emit HTML, scripts, "
+            "CSS, commands, filesystem paths, prompts, secrets, or unsupported components. Do not "
+            "claim a surface changed unless its tool result confirms persistence. When the request is "
+            "ambiguous in a way that materially changes the interface, ask one focused question and "
+            "do not call a Canvas mutation tool. Initial catalog:\n"
+            + json.dumps(catalog_metadata(), ensure_ascii=False, default=str)
+            + "\nCurrent surfaces:\n"
+            + json.dumps(list(before.values()), ensure_ascii=False, default=str)
+        )
+        try:
+            response = ask_agent.run(
+                question=text,
+                index_dir=self._index_dir or default_index_dir(self.root),
+                k=self._resolved_k,
+                max_steps=max(8, int(self.config.agent_max_steps or 6)),
+                timeout_seconds=max(30, self._agent_timeout_seconds),
+                callbacks=callbacks,
+                system_prompt=system_prompt,
+                tool_policy={
+                    "allowed_tools": list(CANVAS_TOOL_NAMES),
+                    "disable_external_search": True,
+                    "require_initial_tool_call": True,
+                },
+                flow_id=context.session_id,
+                run_id=context.turn_id,
+            )
+        except Exception as exc:
+            return ChatTurnResult(
+                answer=str(exc),
+                error=f"Canvas route failed: {exc}",
+                mode="route-canvas-error",
+                decision=decision,
+                payload={"route": "canvas"},
+            )
+        after = {
+            item.surface_id: item.model_dump(mode="json")
+            for item in service.list_surfaces(context.session_id, include_deleted=True)
+        }
+        created_ids = set(after) - set(before)
+        incomplete_ids = [
+            surface_id
+            for surface_id in created_ids
+            if not after[surface_id].get("deleted")
+            and not after[surface_id].get("components")
+        ]
+        correction_error = ""
+        if incomplete_ids and service.config.validation_retry_limit > 0:
+            correction_prompt = (
+                "The prior Canvas execution is incomplete. It created these surfaces without a "
+                f"validated root component: {', '.join(sorted(incomplete_ids))}. Continue the same "
+                "model-decided request now. For every listed surface, call canvas_update_components "
+                "with an adjacency list containing id='root', then call canvas_update_data when the "
+                "component bindings need initial values. Do not create another surface and do not "
+                "claim completion until every tool result confirms persistence. Current snapshots:\n"
+                + json.dumps(
+                    [after[surface_id] for surface_id in incomplete_ids],
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+            try:
+                response = ask_agent.run(
+                    question=correction_prompt,
+                    index_dir=self._index_dir or default_index_dir(self.root),
+                    k=self._resolved_k,
+                    max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                    timeout_seconds=max(30, self._agent_timeout_seconds),
+                    callbacks=callbacks,
+                    system_prompt=system_prompt,
+                    tool_policy={
+                        "allowed_tools": [
+                            "canvas_update_components",
+                            "canvas_update_data",
+                            "canvas_get_surface",
+                            "canvas_list_surfaces",
+                            "canvas_delete_surface",
+                        ],
+                        "disable_external_search": True,
+                        "require_initial_tool_call": True,
+                    },
+                    flow_id=context.session_id,
+                    run_id=context.turn_id,
+                )
+            except Exception as exc:
+                correction_error = str(exc)
+            after = {
+                item.surface_id: item.model_dump(mode="json")
+                for item in service.list_surfaces(
+                    context.session_id, include_deleted=True
+                )
+            }
+            incomplete_ids = [
+                surface_id
+                for surface_id in created_ids
+                if surface_id in after
+                and not after[surface_id].get("deleted")
+                and not after[surface_id].get("components")
+            ]
+        if incomplete_ids:
+            rollback_errors: list[str] = []
+            for surface_id in incomplete_ids:
+                try:
+                    service.delete_surface(
+                        session_id=context.session_id,
+                        conversation_id=context.conversation_id,
+                        surface_id=surface_id,
+                        correlation_id=context.turn_id,
+                    )
+                except ValueError as exc:
+                    rollback_errors.append(f"{surface_id}: {exc}")
+            details = correction_error or "the model did not publish updateComponents"
+            if rollback_errors:
+                details += "; rollback failed: " + "; ".join(rollback_errors)
+            return ChatTurnResult(
+                answer=(
+                    "Live Canvas generation stopped safely because the model created a surface "
+                    "without a validated root component. No fallback UI was generated."
+                ),
+                error=f"Canvas lifecycle incomplete: {details}",
+                mode="route-canvas-error",
+                decision=decision,
+                payload={"route": "canvas", "incomplete_surface_ids": incomplete_ids},
+            )
+        changed = [
+            surface_id
+            for surface_id, snapshot in after.items()
+            if before.get(surface_id) != snapshot
+        ]
+        if changed:
+            from mana_agent.canvas.models import OwnerRef
+            from mana_agent.canvas.reducer import CanvasStateError
+
+            def resume_from_action(action: Any, snapshot: Any) -> None:
+                action_prompt = (
+                    "A validated renderer action was delivered to the Canvas surface you own. "
+                    "Use the update-only Canvas tools to apply the exact model-decided result to "
+                    "that existing surface. Do not create a surface. Do not claim completion "
+                    "unless a tool confirms a persisted change. Renderer action:\n"
+                    + json.dumps(action.model_dump(mode="json"), ensure_ascii=False, default=str)
+                    + "\nCurrent snapshot:\n"
+                    + json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False, default=str)
+                )
+                action_system_prompt = (
+                    "You are Mana-Agent's Live Canvas action executor. The gateway has already "
+                    "authenticated the action and matched it to a declared component action. Use "
+                    "only canvas_update_components, canvas_update_data, canvas_get_surface, or "
+                    "canvas_delete_surface. Every tool call must use "
+                    f"source_decision_id={action.correlation_id!r}, "
+                    f"session_id={action.session_id!r}, "
+                    f"conversation_id={action.conversation_id!r}, and "
+                    f"surface_id={action.surface_id!r}. Never emit executable browser content, "
+                    "commands, paths, prompts, or secrets."
+                )
+                prior_version = snapshot.version
+                try:
+                    ask_agent.run(
+                        question=action_prompt,
+                        index_dir=self._index_dir or default_index_dir(self.root),
+                        k=self._resolved_k,
+                        max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                        timeout_seconds=max(30, self._agent_timeout_seconds),
+                        callbacks=None,
+                        system_prompt=action_system_prompt,
+                        tool_policy={
+                            "allowed_tools": [
+                                "canvas_update_components",
+                                "canvas_update_data",
+                                "canvas_get_surface",
+                                "canvas_delete_surface",
+                            ],
+                            "disable_external_search": True,
+                            "require_initial_tool_call": True,
+                        },
+                        flow_id=context.session_id,
+                        run_id=action.correlation_id,
+                    )
+                except Exception as exc:
+                    raise CanvasStateError(
+                        f"Canvas action model execution failed: {exc}"
+                    ) from exc
+                updated = service.get_surface(action.session_id, action.surface_id)
+                if updated.version <= prior_version:
+                    raise CanvasStateError(
+                        "Canvas action completed without a persisted model-selected update."
+                    )
+
+            service.register_action_handler(
+                OwnerRef(task_id=context.turn_id), resume_from_action
+            )
+        return ChatTurnResult(
+            answer=str(getattr(response, "answer", response) or "").strip(),
+            mode="route-canvas",
+            decision=decision,
+            payload={
+                "route": "canvas",
+                "surface_ids": changed,
+                "canvas_url": f"/canvas?conversation_id={context.conversation_id}",
             },
         )
 
@@ -2982,7 +3895,9 @@ class AgentChatGateway:
                 callbacks=callbacks,
                 system_prompt=system_prompt,
                 tool_policy={
-                    "allowed_tools": [contract.name for contract in email_tool_contracts()],
+                    "allowed_tools": [
+                        contract.name for contract in email_tool_contracts()
+                    ],
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },
@@ -3030,7 +3945,9 @@ class AgentChatGateway:
                 payload={"route": "computer"},
             )
         from mana_agent.config.settings import default_index_dir
-        from mana_agent.integrations.computer_control.tool_contracts import computer_tool_contracts
+        from mana_agent.integrations.computer_control.tool_contracts import (
+            computer_tool_contracts,
+        )
 
         source_decision_id = f"{context.turn_id}:computer-entry-decision"
         system_prompt = (
@@ -3055,10 +3972,17 @@ class AgentChatGateway:
             "timeout, unavailable capability, or partial failure."
         )
         try:
-            from mana_agent.integrations.computer_control.context import computer_decision_scope
-            from mana_agent.integrations.computer_control.events import computer_event_scope
+            from mana_agent.integrations.computer_control.context import (
+                computer_decision_scope,
+            )
+            from mana_agent.integrations.computer_control.events import (
+                computer_event_scope,
+            )
 
-            with computer_decision_scope(source_decision_id), computer_event_scope(event_sink):
+            with (
+                computer_decision_scope(source_decision_id),
+                computer_event_scope(event_sink),
+            ):
                 response = ask_agent.run(
                     question=text,
                     index_dir=self._index_dir or default_index_dir(self.root),
@@ -3068,7 +3992,9 @@ class AgentChatGateway:
                     callbacks=callbacks,
                     system_prompt=system_prompt,
                     tool_policy={
-                        "allowed_tools": [contract.name for contract in computer_tool_contracts()],
+                        "allowed_tools": [
+                            contract.name for contract in computer_tool_contracts()
+                        ],
                         "disable_external_search": True,
                         "require_initial_tool_call": True,
                     },
@@ -3079,24 +4005,30 @@ class AgentChatGateway:
                 # process-local event stream cannot reach the owning TUI, so
                 # reconstruct only validated permission-required events from
                 # the structured tool result and publish them in this process.
-                from mana_agent.integrations.computer_control.events import publish_computer_event
+                from mana_agent.integrations.computer_control.events import (
+                    publish_computer_event,
+                )
                 from mana_agent.integrations.computer_control.models import (
                     ComputerControlEvent,
                     ExecutionState,
                 )
 
                 for permission in _computer_permission_requests_from_trace(response):
-                    publish_computer_event(ComputerControlEvent(
-                        event_type="waiting_permission",
-                        execution_id=permission["execution_id"],
-                        state=ExecutionState.WAITING_PERMISSION,
-                        message=permission["preview"],
-                        metadata={
-                            "permission_request_id": permission["permission_request_id"],
-                            "permission_scope": permission["permission_scope"],
-                            "preview": permission["preview"],
-                        },
-                    ))
+                    publish_computer_event(
+                        ComputerControlEvent(
+                            event_type="waiting_permission",
+                            execution_id=permission["execution_id"],
+                            state=ExecutionState.WAITING_PERMISSION,
+                            message=permission["preview"],
+                            metadata={
+                                "permission_request_id": permission[
+                                    "permission_request_id"
+                                ],
+                                "permission_scope": permission["permission_scope"],
+                                "preview": permission["preview"],
+                            },
+                        )
+                    )
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -3107,12 +4039,14 @@ class AgentChatGateway:
             )
         trace = []
         for item in _serialize_tool_traces(response):
-            trace.append({
-                "tool_name": str(item.get("tool_name") or "computer"),
-                "status": str(item.get("status") or ""),
-                "error_code": str(item.get("error_code") or ""),
-                "result_summary": "[computer-control tool content omitted]",
-            })
+            trace.append(
+                {
+                    "tool_name": str(item.get("tool_name") or "computer"),
+                    "status": str(item.get("status") or ""),
+                    "error_code": str(item.get("error_code") or ""),
+                    "result_summary": "[computer-control tool content omitted]",
+                }
+            )
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),
             sources=[],
@@ -3132,7 +4066,9 @@ class AgentChatGateway:
         # The gateway owns mutable session-bound memory and tool state. Serialize
         # cross-frontend turns while preserving concurrent protocol connections.
         async with self._async_turn_lock:
-            return await asyncio.to_thread(self.process_turn, session_id, text, **kwargs)
+            return await asyncio.to_thread(
+                self.process_turn, session_id, text, **kwargs
+            )
 
     # ------------------------------------------------------------------
     # Rich path (TUI + full console chat from chat_cli)
@@ -3173,7 +4109,9 @@ class AgentChatGateway:
         return self._lane_coordinator
 
     def get_ask_service(self) -> Any:
-        return getattr(self._chat_service, "_ask_service", None) or self._stack.ask_service
+        return (
+            getattr(self._chat_service, "_ask_service", None) or self._stack.ask_service
+        )
 
     def owns_coding_stack(self) -> bool:
         return self._coding_agent is not None

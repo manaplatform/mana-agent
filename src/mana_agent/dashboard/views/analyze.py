@@ -7,7 +7,10 @@ from pathlib import Path
 import streamlit as st
 
 from mana_agent.api.services.job_service import ApiJobStore
-from mana_agent.services.execution_event_hub import get_execution_event_hub, repository_id_for_root
+from mana_agent.services.execution_event_hub import (
+    get_execution_event_hub,
+    repository_id_for_root,
+)
 from mana_agent.ui.streamlit_helpers import (
     find_mana_root,
     get_last_analysis_summary,
@@ -19,7 +22,10 @@ from mana_agent.workspaces.paths import repository_analysis_dir
 
 
 def _run_analyze_job(root: Path, job_id: str, *, depth: str, with_llm: bool) -> None:
-    from mana_agent.services.project_analyze_service import ProjectAnalyzeOptions, ProjectAnalyzeService
+    from mana_agent.services.project_analyze_service import (
+        ProjectAnalyzeOptions,
+        ProjectAnalyzeService,
+    )
 
     jobs = ApiJobStore()
     repo_id = repository_id_for_root(root)
@@ -104,7 +110,12 @@ def render(root: Path | None = None) -> None:
         jobs = ApiJobStore()
         job = jobs.create(
             "repository_analyze",
-            {"repository_id": repo_id, "root": str(root), "depth": depth, "with_llm": with_llm},
+            {
+                "repository_id": repo_id,
+                "root": str(root),
+                "depth": depth,
+                "with_llm": with_llm,
+            },
         )
         st.session_state.analyze_job_id = job["job_id"]
         thread = threading.Thread(

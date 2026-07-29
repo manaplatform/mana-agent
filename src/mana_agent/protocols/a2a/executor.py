@@ -59,9 +59,15 @@ class ManaA2AExecutor:
         self.taskboard.update_status(local_id, TaskStatus.IN_PROGRESS)
         await event_queue.enqueue_event(new_text_status_update_event(task_id, context_id, TaskState.TASK_STATE_WORKING, "Mana-Agent accepted the task."))
         loop = asyncio.get_running_loop()
+        canvas_capabilities = self.mapper.canvas_capabilities(context)
 
         def sink(event: Any) -> None:
-            update = self.mapper.progress(task_id=task_id, context_id=context_id, event=event)
+            update = self.mapper.canvas(
+                task_id=task_id, context_id=context_id, event=event,
+                capabilities=canvas_capabilities,
+            )
+            if update is None:
+                update = self.mapper.progress(task_id=task_id, context_id=context_id, event=event)
             if update is not None:
                 loop.call_soon_threadsafe(asyncio.create_task, event_queue.enqueue_event(update))
 

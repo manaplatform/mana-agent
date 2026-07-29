@@ -40,6 +40,17 @@ def test_agent_card_advertises_only_implemented_public_capabilities() -> None:
     assert body["capabilities"].get("pushNotifications", False) is False
     assert {item["id"] for item in body["skills"]} == {"conversation", "verification"}
     assert "bearer" in body["securitySchemes"]
+    assert "application/a2ui+json" in body["defaultOutputModes"]
+    extension = body["capabilities"]["extensions"][0]
+    assert extension["params"]["supportedProtocolVersions"] == ["v0.9"]
+    assert extension["params"]["acceptsInlineCatalogs"] is False
+
+
+def test_agent_card_omits_optional_canvas_capability_when_disabled() -> None:
+    card = build_agent_card(public_base_url="https://agent.example", canvas_enabled=False)
+    body = MessageToDict(card)
+    assert "application/a2ui+json" not in body["defaultOutputModes"]
+    assert body["capabilities"].get("extensions", []) == []
 
 
 def test_task_store_is_durable_and_caller_scoped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

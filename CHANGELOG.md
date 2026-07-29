@@ -2,6 +2,17 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-29
+
+- Moved Live Canvas configuration guidance out of `.env` and into the authoritative `~/.mana/config.toml`, updated repository agent policy to prevent environment overrides, added a same-origin local catalog endpoint plus loopback-only HTTP catalog/resource support, fixed cross-port Streamlit iframe/WebSocket authentication and CSP, removed the magic `dashboard/pages` package that made direct routes bypass `st.navigation`, made initial surface creation atomic, normalized common A2UI component wire shapes, fixed omitted optional creation arguments, added validated correction/rollback for legacy incomplete surfaces, resumed the owning model with update-only tools after renderer actions, and made the one-time Gmail automation CI fixture choose a future 01:08 UTC timestamp instead of a date that expires during the test day.
+  - Verification: the full suite previously passed (1,439 passed, 4 skipped). The final run passed 1,437 tests with 4 skipped; its three interrupted CLI cases passed on isolated rerun, and its two `python`-PATH-dependent multi-agent cases passed when `venv/bin` was included in `PATH`. Focused Canvas/chat/config/API tests, exact failed-payload replay, browser reducer tests, Ruff, compilation, JavaScript syntax checks, and `git diff --check` passed. Browser validation used an isolated loopback dashboard/API pair.
+
+- Added the production Live Canvas/A2UI workspace across structured model routing, agent and workflow-node APIs, strict v0.9.1 protocol/catalog validation, deterministic surface reduction, durable events and snapshots, the shared gateway/WebSocket, authenticated renderer actions, A2A capability negotiation, the native Streamlit dashboard renderer, typed configuration, security documentation, and lifecycle tests. Side-effect actions fail closed unless the owning existing permission broker is attached; arbitrary executable browser content and inline catalogs remain disabled.
+  - Verification: Canvas/gateway/A2A/WebSocket tests passed (78 passed, 1 skipped); browser reducer tests passed (11 passed); changed-file Ruff, Python compilation, JavaScript syntax checks, and `git diff --check` passed. The full suite reached 1,433 passed and 4 skipped with 3 unrelated failures: a same-day automation fixture used an already elapsed UTC timestamp, and two tests expected `python` on `PATH` (both passed when the virtualenv was added to `PATH`).
+
+- Fixed dashboard chat session replacement: submitting `/new` now reconnects the embedded live chat to the replacement canonical session instead of leaving the deleted session in a working state. The sidebar New conversation control also clears its persistent selector value so it activates the new chat.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_conversation_service.py tests/test_api_conversations.py tests/test_dashboard_live_chat.py tests/test_dashboard_navigation.py` passed (19 passed, 1 skipped); `venv/bin/python -m py_compile src/mana_agent/dashboard/pages/chat.py` and `git diff --check` passed. Node.js was unavailable, so the browser reducer suite was not run.
+
 ## 2026-07-28
 
 - Fixed model-routed search follow-ups: the entry router now carries its

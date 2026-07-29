@@ -18,14 +18,30 @@ def render(root: Path | None = None) -> None:
     st.header("Observability")
     st.caption("Local redacted spans from the canonical ObservabilityStore.")
     f1, f2, f3 = st.columns(3)
-    status = f1.selectbox("Status", ["", "success", "failed", "running", "queued"], format_func=lambda v: v or "All")
+    status = f1.selectbox(
+        "Status",
+        ["", "success", "failed", "running", "queued"],
+        format_func=lambda v: v or "All",
+    )
     kind = f2.selectbox(
         "Span type",
-        ["", "session", "user_request", "routing", "reasoning", "tool", "subagent", "response", "error"],
+        [
+            "",
+            "session",
+            "user_request",
+            "routing",
+            "reasoning",
+            "tool",
+            "subagent",
+            "response",
+            "error",
+        ],
         format_func=lambda v: v or "All",
     )
     agent = f3.text_input("Agent", placeholder="main or subagent id")
-    spans = load_observability_spans(root, status=status, kind=kind, agent=agent, limit=500)
+    spans = load_observability_spans(
+        root, status=status, kind=kind, agent=agent, limit=500
+    )
     overview = get_observability_overview(root)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Traces", overview.get("trace_count", 0))

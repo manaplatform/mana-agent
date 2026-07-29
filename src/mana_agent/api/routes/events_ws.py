@@ -7,7 +7,9 @@ introduce a second event model. Disconnects cleanly and never block producers.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -31,7 +33,12 @@ async def conversation_events_ws(
     execution_id: str | None = Query(default=None),
     replay_limit: int = Query(default=100, ge=0, le=1000),
     after_sequence: int = Query(default=0, ge=0),
+    token: str | None = Query(default=None),
 ) -> None:
+    expected_token = str(os.getenv("MANA_API_TOKEN") or "").strip()
+    if expected_token and not hmac.compare_digest(str(token or ""), expected_token):
+        await websocket.close(code=4401, reason="Authentication required.")
+        return
     await websocket.accept()
     root_path = find_mana_root(None if not root else __import__("pathlib").Path(root))
     repo_id = repository_id or repository_id_for_path(root_path)
@@ -53,11 +60,27 @@ async def conversation_events_ws(
         await websocket.close(code=4404)
         return
 
-    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    from mana_agent.canvas.config import CanvasConfig
+    from mana_agent.config.settings import Settings
+
+    queue_limit = CanvasConfig.from_settings(Settings()).websocket_queue_size
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_limit)
     loop = asyncio.get_running_loop()
 
     def _enqueue(payload: dict[str, Any]) -> None:
-        queue.put_nowait(payload)
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait({
+                "type": "canvas.backpressure",
+                "status": "failed",
+                "conversation_id": conversation_id,
+                "message": "Live event queue overflowed; reconnect with the last sequence cursor.",
+            })
 
     def _on_event(payload: dict[str, Any]) -> None:
         if str(payload.get("conversation_id") or "") != conversation_id:

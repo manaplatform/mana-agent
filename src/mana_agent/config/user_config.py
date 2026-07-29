@@ -35,6 +35,7 @@ def secrets_file() -> Path:
 def model_cache_file() -> Path:
     return config_dir() / "model_cache.json"
 
+
 SECRET_KEYS = {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
@@ -162,6 +163,26 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_A2A_MAX_CONCURRENT_TASKS": 4,
     "MANA_A2A_DELEGATION_ENABLED": False,
     "MANA_A2A_MAX_DELEGATION_DEPTH": 3,
+    "MANA_CANVAS_ENABLED": True,
+    "MANA_CANVAS_PROTOCOL_VERSIONS": "v0.9",
+    "MANA_CANVAS_DEFAULT_PROTOCOL_VERSION": "v0.9",
+    "MANA_CANVAS_ALLOWED_CATALOGS": "https://mana-agent.dev/a2ui/catalogs/core/v1/catalog.json",
+    "MANA_CANVAS_ACCEPT_INLINE_CATALOGS": False,
+    "MANA_CANVAS_ALLOW_LOCALHOST": True,
+    "MANA_CANVAS_MAX_ACTIVE_SURFACES": 16,
+    "MANA_CANVAS_MAX_COMPONENTS": 250,
+    "MANA_CANVAS_MAX_EVENT_BYTES": 262144,
+    "MANA_CANVAS_MAX_DEPTH": 24,
+    "MANA_CANVAS_SNAPSHOT_INTERVAL": 20,
+    "MANA_CANVAS_GENERATION_TIMEOUT_SECONDS": 30,
+    "MANA_CANVAS_SURFACE_EXPIRY_SECONDS": 86400,
+    "MANA_CANVAS_ACTION_TIMEOUT_SECONDS": 900,
+    "MANA_CANVAS_VALIDATION_RETRY_LIMIT": 1,
+    "MANA_CANVAS_MAX_UPDATES_PER_SECOND": 20,
+    "MANA_CANVAS_WEBSOCKET_QUEUE_SIZE": 256,
+    "MANA_CANVAS_ALLOWED_IMAGE_SCHEMES": "https",
+    "MANA_CANVAS_ALLOWED_ARTIFACT_SCHEMES": "https,artifact",
+    "MANA_CANVAS_DEVELOPER_DIAGNOSTICS": False,
     "MANA_BROWSER_ENABLED": True,
     "MANA_BROWSER_HEADLESS": True,
     "MANA_BROWSER_TIMEOUT_SECONDS": 30,
@@ -213,7 +234,14 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     },
     "teach": {
         "enabled": True,
-        "event_sources": ["browser", "accessibility", "application", "filesystem", "keyboard", "pointer"],
+        "event_sources": [
+            "browser",
+            "accessibility",
+            "application",
+            "filesystem",
+            "keyboard",
+            "pointer",
+        ],
         "desktop_capture": False,
         "retention_days": 30,
         "screenshot_policy": "never",
@@ -248,7 +276,14 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_LANE_SESSION_TOKEN_BUDGET": 0,
     "MANA_LANE_GLOBAL_TOKEN_BUDGET": 0,
     "MANA_EXECUTION_DEFAULT_PROVIDER": "local-process",
-    "MANA_EXECUTION_ALLOWED_PROVIDERS": ["local-process", "local-docker", "remote-ssh", "kubernetes", "modal", "custom-http-runtime"],
+    "MANA_EXECUTION_ALLOWED_PROVIDERS": [
+        "local-process",
+        "local-docker",
+        "remote-ssh",
+        "kubernetes",
+        "modal",
+        "custom-http-runtime",
+    ],
     "MANA_EXECUTION_CLEANUP_ON_EXIT": True,
     "MANA_EXECUTION_IDLE_TIMEOUT_SECONDS": 900,
     "MANA_EXECUTION_MAX_LIFETIME_SECONDS": 7200,
@@ -363,6 +398,26 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_A2A_MAX_CONCURRENT_TASKS": "mana_a2a_max_concurrent_tasks",
     "MANA_A2A_DELEGATION_ENABLED": "mana_a2a_delegation_enabled",
     "MANA_A2A_MAX_DELEGATION_DEPTH": "mana_a2a_max_delegation_depth",
+    "MANA_CANVAS_ENABLED": "mana_canvas_enabled",
+    "MANA_CANVAS_PROTOCOL_VERSIONS": "mana_canvas_protocol_versions",
+    "MANA_CANVAS_DEFAULT_PROTOCOL_VERSION": "mana_canvas_default_protocol_version",
+    "MANA_CANVAS_ALLOWED_CATALOGS": "mana_canvas_allowed_catalogs",
+    "MANA_CANVAS_ACCEPT_INLINE_CATALOGS": "mana_canvas_accept_inline_catalogs",
+    "MANA_CANVAS_ALLOW_LOCALHOST": "mana_canvas_allow_localhost",
+    "MANA_CANVAS_MAX_ACTIVE_SURFACES": "mana_canvas_max_active_surfaces",
+    "MANA_CANVAS_MAX_COMPONENTS": "mana_canvas_max_components",
+    "MANA_CANVAS_MAX_EVENT_BYTES": "mana_canvas_max_event_bytes",
+    "MANA_CANVAS_MAX_DEPTH": "mana_canvas_max_depth",
+    "MANA_CANVAS_SNAPSHOT_INTERVAL": "mana_canvas_snapshot_interval",
+    "MANA_CANVAS_GENERATION_TIMEOUT_SECONDS": "mana_canvas_generation_timeout_seconds",
+    "MANA_CANVAS_SURFACE_EXPIRY_SECONDS": "mana_canvas_surface_expiry_seconds",
+    "MANA_CANVAS_ACTION_TIMEOUT_SECONDS": "mana_canvas_action_timeout_seconds",
+    "MANA_CANVAS_VALIDATION_RETRY_LIMIT": "mana_canvas_validation_retry_limit",
+    "MANA_CANVAS_MAX_UPDATES_PER_SECOND": "mana_canvas_max_updates_per_second",
+    "MANA_CANVAS_WEBSOCKET_QUEUE_SIZE": "mana_canvas_websocket_queue_size",
+    "MANA_CANVAS_ALLOWED_IMAGE_SCHEMES": "mana_canvas_allowed_image_schemes",
+    "MANA_CANVAS_ALLOWED_ARTIFACT_SCHEMES": "mana_canvas_allowed_artifact_schemes",
+    "MANA_CANVAS_DEVELOPER_DIAGNOSTICS": "mana_canvas_developer_diagnostics",
     "MANA_BROWSER_ENABLED": "mana_browser_enabled",
     "MANA_BROWSER_HEADLESS": "mana_browser_headless",
     "MANA_BROWSER_TIMEOUT_SECONDS": "mana_browser_timeout_seconds",
@@ -477,6 +532,26 @@ CONFIG_WRITE_ORDER = [
     "MANA_A2A_MAX_CONCURRENT_TASKS",
     "MANA_A2A_DELEGATION_ENABLED",
     "MANA_A2A_MAX_DELEGATION_DEPTH",
+    "MANA_CANVAS_ENABLED",
+    "MANA_CANVAS_PROTOCOL_VERSIONS",
+    "MANA_CANVAS_DEFAULT_PROTOCOL_VERSION",
+    "MANA_CANVAS_ALLOWED_CATALOGS",
+    "MANA_CANVAS_ACCEPT_INLINE_CATALOGS",
+    "MANA_CANVAS_ALLOW_LOCALHOST",
+    "MANA_CANVAS_MAX_ACTIVE_SURFACES",
+    "MANA_CANVAS_MAX_COMPONENTS",
+    "MANA_CANVAS_MAX_EVENT_BYTES",
+    "MANA_CANVAS_MAX_DEPTH",
+    "MANA_CANVAS_SNAPSHOT_INTERVAL",
+    "MANA_CANVAS_GENERATION_TIMEOUT_SECONDS",
+    "MANA_CANVAS_SURFACE_EXPIRY_SECONDS",
+    "MANA_CANVAS_ACTION_TIMEOUT_SECONDS",
+    "MANA_CANVAS_VALIDATION_RETRY_LIMIT",
+    "MANA_CANVAS_MAX_UPDATES_PER_SECOND",
+    "MANA_CANVAS_WEBSOCKET_QUEUE_SIZE",
+    "MANA_CANVAS_ALLOWED_IMAGE_SCHEMES",
+    "MANA_CANVAS_ALLOWED_ARTIFACT_SCHEMES",
+    "MANA_CANVAS_DEVELOPER_DIAGNOSTICS",
     "MANA_BROWSER_HEADLESS",
     "MANA_BROWSER_TIMEOUT_SECONDS",
     "MANA_BROWSER_PERSIST_AUTH",
@@ -557,15 +632,24 @@ def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> Non
     ensure_user_config_dir()
     ordered_keys = [key for key in CONFIG_WRITE_ORDER if key in values]
     ordered_keys.extend(sorted(key for key in values if key not in set(ordered_keys)))
-    lines = [f"{key} = {_toml_scalar(values[key])}" for key in ordered_keys if not isinstance(values[key], dict)]
+    lines = [
+        f"{key} = {_toml_scalar(values[key])}"
+        for key in ordered_keys
+        if not isinstance(values[key], dict)
+    ]
 
     def append_tables(prefix: str, table: dict[str, Any]) -> None:
-        scalar_items = [(key, value) for key, value in table.items() if not isinstance(value, dict)]
+        scalar_items = [
+            (key, value) for key, value in table.items() if not isinstance(value, dict)
+        ]
         if scalar_items:
             if lines and lines[-1] != "":
                 lines.append("")
             lines.append(f"[{prefix}]")
-            lines.extend(f"{_toml_key(key)} = {_toml_scalar(value)}" for key, value in scalar_items)
+            lines.extend(
+                f"{_toml_key(key)} = {_toml_scalar(value)}"
+                for key, value in scalar_items
+            )
         for key, value in table.items():
             if isinstance(value, dict):
                 append_tables(f"{prefix}.{key}", value)
@@ -577,7 +661,9 @@ def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> Non
     payload = "\n".join(lines).rstrip() + "\n"
     temp_path: Path | None = None
     try:
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
         temp_path = Path(temp_name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
@@ -588,7 +674,9 @@ def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> Non
     except OSError as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-        raise UserConfigError(f"Could not save {path.name}; the previous configuration was preserved.") from exc
+        raise UserConfigError(
+            f"Could not save {path.name}; the previous configuration was preserved."
+        ) from exc
     try:
         path.chmod(mode)
     except OSError:
@@ -691,7 +779,9 @@ def validate_base_url(value: str) -> str:
     return text.rstrip("/")
 
 
-def validate_positive_int(name: str, value: Any, *, minimum: int = 1, maximum: int = 1000) -> int:
+def validate_positive_int(
+    name: str, value: Any, *, minimum: int = 1, maximum: int = 1000
+) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
@@ -724,26 +814,34 @@ def validate_model_level(value: str) -> str:
     # Advanced role mapping may store a direct (preferably provider-qualified)
     # model ID. Symbolic level names remain strictly validated.
     if text.startswith("MODEL_LEVEL_") and text not in allowed:
-        raise UserConfigError(f"Model level must be one of: {', '.join(sorted(allowed))}.")
+        raise UserConfigError(
+            f"Model level must be one of: {', '.join(sorted(allowed))}."
+        )
     return text
 
 
 def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(values)
     if "computer_control" in cleaned:
-        from mana_agent.integrations.computer_control.config import ComputerControlSettings
+        from mana_agent.integrations.computer_control.config import (
+            ComputerControlSettings,
+        )
 
         raw_computer = cleaned["computer_control"]
         if not isinstance(raw_computer, dict):
             raise UserConfigError("computer_control must be a TOML table.")
-        cleaned["computer_control"] = ComputerControlSettings.model_validate(raw_computer).model_dump(mode="json")
+        cleaned["computer_control"] = ComputerControlSettings.model_validate(
+            raw_computer
+        ).model_dump(mode="json")
     if "teach" in cleaned:
         from mana_agent.teach.config import TeachSettings
 
         raw_teach = cleaned["teach"]
         if not isinstance(raw_teach, dict):
             raise UserConfigError("teach must be a TOML table.")
-        cleaned["teach"] = TeachSettings.model_validate(raw_teach).model_dump(mode="json")
+        cleaned["teach"] = TeachSettings.model_validate(raw_teach).model_dump(
+            mode="json"
+        )
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
     if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
@@ -760,12 +858,16 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         "MANA_LANE_GLOBAL_WORKER_LIMIT",
     ):
         if name in cleaned:
-            cleaned[name] = validate_positive_int(name, cleaned[name], minimum=1, maximum=1000)
+            cleaned[name] = validate_positive_int(
+                name, cleaned[name], minimum=1, maximum=1000
+            )
     for name in ("MANA_LANE_SESSION_TOKEN_BUDGET", "MANA_LANE_GLOBAL_TOKEN_BUDGET"):
         if name in cleaned:
             value = int(cleaned[name] or 0)
             if value < 0:
-                raise UserConfigError(f"{name} must be zero (unlimited) or a positive integer.")
+                raise UserConfigError(
+                    f"{name} must be zero (unlimited) or a positive integer."
+                )
             cleaned[name] = value
     for name in (
         "MANA_SEARCH_ENABLE_WEB",
@@ -789,16 +891,20 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         MemoryConfig(
             mode=str(cleaned.get("MANA_MEMORY_MODE") or "internal").lower(),
             provider=str(cleaned.get("MANA_MEMORY_PROVIDER") or "mana").lower(),
-            fallback_to_internal=bool(cleaned.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", False)),
+            fallback_to_internal=bool(
+                cleaned.get("MANA_MEMORY_FALLBACK_TO_INTERNAL", False)
+            ),
             api_key=str(
-                cleaned.get("SUPERMEMORY_API_KEY")
-                or cleaned.get("MEM0_API_KEY")
-                or ""
+                cleaned.get("SUPERMEMORY_API_KEY") or cleaned.get("MEM0_API_KEY") or ""
             ),
             secret_ref=str(cleaned.get("MANA_MEMORY_SECRET_REF") or ""),
             org_id=str(cleaned.get("MEM0_ORG_ID") or ""),
             project_id=str(cleaned.get("MEM0_PROJECT_ID") or ""),
-            base_url=str(cleaned.get("SUPERMEMORY_BASE_URL") or cleaned.get("MEM0_BASE_URL") or ""),
+            base_url=str(
+                cleaned.get("SUPERMEMORY_BASE_URL")
+                or cleaned.get("MEM0_BASE_URL")
+                or ""
+            ),
             timeout_seconds=float(cleaned.get("MANA_MEMORY_TIMEOUT_SECONDS") or 15),
         ).validate()
     for name in (
@@ -848,7 +954,12 @@ def load_model_cache(provider: str, base_url: str) -> CachedModels | None:
     item = data.get(provider_cache_key(provider, base_url))
     if not isinstance(item, dict):
         return None
-    models = [model for model in item.get("models", []) if (isinstance(model, dict) and str(model.get("id") or "").strip()) or (not isinstance(model, dict) and str(model).strip())]
+    models = [
+        model
+        for model in item.get("models", [])
+        if (isinstance(model, dict) and str(model.get("id") or "").strip())
+        or (not isinstance(model, dict) and str(model).strip())
+    ]
     return CachedModels(
         provider=str(item.get("provider") or provider),
         base_url=str(item.get("base_url") or base_url),
@@ -857,7 +968,9 @@ def load_model_cache(provider: str, base_url: str) -> CachedModels | None:
     )
 
 
-def save_model_cache(provider: str, base_url: str, models: list[str | dict[str, Any]]) -> None:
+def save_model_cache(
+    provider: str, base_url: str, models: list[str | dict[str, Any]]
+) -> None:
     ensure_user_config_dir()
     cache_file = model_cache_file()
     data: dict[str, Any] = {}
@@ -873,12 +986,21 @@ def save_model_cache(provider: str, base_url: str, models: list[str | dict[str, 
         "base_url": base_url.rstrip("/"),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "models": sorted(
-            {str(item.get("id")) if isinstance(item, dict) else str(item): item for item in models if (isinstance(item, dict) and item.get("id")) or (not isinstance(item, dict) and str(item).strip())}.values(),
-            key=lambda item: str(item.get("id")) if isinstance(item, dict) else str(item),
+            {
+                str(item.get("id")) if isinstance(item, dict) else str(item): item
+                for item in models
+                if (isinstance(item, dict) and item.get("id"))
+                or (not isinstance(item, dict) and str(item).strip())
+            }.values(),
+            key=lambda item: (
+                str(item.get("id")) if isinstance(item, dict) else str(item)
+            ),
         ),
     }
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=".model_cache.", suffix=".tmp", dir=str(config_dir()))
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".model_cache.", suffix=".tmp", dir=str(config_dir())
+    )
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -927,7 +1049,9 @@ def migrate_legacy_config() -> list[str]:
         config["MANA_AI_PROVIDER"] = provider
     from mana_agent.config.provider_registry import qualify_model_id
 
-    chat_model = str(config.get("OPENAI_CHAT_MODEL") or config.get("LLM_MODEL") or "").strip()
+    chat_model = str(
+        config.get("OPENAI_CHAT_MODEL") or config.get("LLM_MODEL") or ""
+    ).strip()
     if chat_model and not config.get("MANA_PRIMARY_MODEL"):
         config["MANA_PRIMARY_MODEL"] = qualify_model_id(provider, chat_model)
     embed_model = str(config.get("OPENAI_EMBED_MODEL") or "").strip()
@@ -943,7 +1067,9 @@ def migrate_legacy_config() -> list[str]:
                 backup.chmod(0o600)
             except OSError:
                 pass
-        messages.append(f"Moved legacy credentials to {current_secrets_file.name}; backup: {backup.name}.")
+        messages.append(
+            f"Moved legacy credentials to {current_secrets_file.name}; backup: {backup.name}."
+        )
     save_user_config(config, merge=False)
     if secrets:
         save_user_secrets(secrets, merge=False)

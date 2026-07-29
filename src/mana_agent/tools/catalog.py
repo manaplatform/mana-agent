@@ -27,6 +27,13 @@ class ToolCatalogEntry:
 # those tools are registered on AskAgent / ChatService (not every contract-only
 # name). Grouped by category for readable TUI output.
 _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
+    ("canvas_create_surface", "Create a validated durable A2UI surface.", "canvas"),
+    ("canvas_update_components", "Incrementally update allowlisted Canvas components.", "canvas"),
+    ("canvas_update_data", "Update a Canvas data model through a JSON Pointer.", "canvas"),
+    ("canvas_delete_surface", "Delete an owned Canvas surface.", "canvas"),
+    ("canvas_get_surface", "Load a durable Canvas surface snapshot.", "canvas"),
+    ("canvas_list_surfaces", "List Canvas surfaces for the active session.", "canvas"),
+    ("canvas_wait_for_action", "Wait for an action from the exact owning Canvas surface.", "canvas"),
     (
         "automation_create",
         "Create and deploy a typed durable automation from a model decision.",
@@ -209,6 +216,7 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
 
 # Preferred display order for categories in the TUI.
 CATEGORY_ORDER: tuple[str, ...] = (
+    "canvas",
     "search",
     "email",
     "computer",
@@ -224,6 +232,7 @@ CATEGORY_ORDER: tuple[str, ...] = (
 )
 
 CATEGORY_LABELS: dict[str, str] = {
+    "canvas": "Live Canvas",
     "search": "Search & research",
     "email": "Email",
     "computer": "Computer control",
@@ -262,6 +271,8 @@ def _category_for_name(name: str) -> str:
         return "browser"
     if n.startswith("document_"):
         return "document"
+    if n.startswith("canvas_"):
+        return "canvas"
     if n.startswith("git_") or n.startswith("git."):
         return "git"
     if n.startswith("mcp__") or n.startswith("mcp.") or n == "mcp":

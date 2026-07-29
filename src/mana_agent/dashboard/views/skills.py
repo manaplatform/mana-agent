@@ -17,7 +17,17 @@ def render(root: Path) -> None:
     storage = ProposalStorage()
 
     filters = st.columns(3)
-    status = filters[0].selectbox("Status", ["all", "pending_review", "needs_attention", "installed", "rejected", "quarantined"])
+    status = filters[0].selectbox(
+        "Status",
+        [
+            "all",
+            "pending_review",
+            "needs_attention",
+            "installed",
+            "rejected",
+            "quarantined",
+        ],
+    )
     minimum = filters[1].slider("Minimum confidence", 0.0, 1.0, 0.0, 0.05)
     risk = filters[2].selectbox("Risk", ["all", "low", "medium", "high", "critical"])
     proposals = storage.list(
@@ -29,7 +39,10 @@ def render(root: Path) -> None:
         st.info("No proposals match the current filters.")
         return
 
-    labels = {f"{item.display_name} · {item.status} · {item.confidence:.2f}": item.proposal_id for item in proposals}
+    labels = {
+        f"{item.display_name} · {item.status} · {item.confidence:.2f}": item.proposal_id
+        for item in proposals
+    }
     selected_label = st.selectbox("Proposal", list(labels))
     proposal_id = labels[selected_label]
     path, manifest, evidence, report, markdown = storage.load(proposal_id)
@@ -48,7 +61,12 @@ def render(root: Path) -> None:
         st.json(evidence.model_dump(mode="json"))
         st.json(report.model_dump(mode="json"))
         st.subheader("Required access")
-        st.write({"tools": manifest.required_tools, "permissions": manifest.required_permissions})
+        st.write(
+            {
+                "tools": manifest.required_tools,
+                "permissions": manifest.required_permissions,
+            }
+        )
         st.subheader("Installed version history")
         active = storage.paths.skills / manifest.name
         versions = []
@@ -57,32 +75,54 @@ def render(root: Path) -> None:
         st.json({"versions": versions})
     with editor_col:
         st.subheader("Proposed SKILL.md")
-        edited = st.text_area("Review or edit", markdown, height=700, key=f"proposal-editor-{proposal_id}")
-        if st.button("Save edit and revalidate", disabled=manifest.status not in {"pending_review", "needs_attention"}, use_container_width=True):
+        edited = st.text_area(
+            "Review or edit", markdown, height=700, key=f"proposal-editor-{proposal_id}"
+        )
+        if st.button(
+            "Save edit and revalidate",
+            disabled=manifest.status not in {"pending_review", "needs_attention"},
+            use_container_width=True,
+        ):
             try:
                 SkillCreator(storage=storage).edit(proposal_id, markdown=edited)
-                st.success("Saved; approval state reset to needs_attention and validation reran.")
+                st.success(
+                    "Saved; approval state reset to needs_attention and validation reran."
+                )
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 
-    reason = st.text_input("Reject or quarantine reason", key=f"proposal-reason-{proposal_id}")
+    reason = st.text_input(
+        "Reject or quarantine reason", key=f"proposal-reason-{proposal_id}"
+    )
     install_col, reject_col, quarantine_col = st.columns(3)
-    if install_col.button("Install", disabled=manifest.status not in {"pending_review", "needs_attention"}, use_container_width=True):
+    if install_col.button(
+        "Install",
+        disabled=manifest.status not in {"pending_review", "needs_attention"},
+        use_container_width=True,
+    ):
         try:
             storage.install(proposal_id, approved=True, version=manifest.version)
             st.success("Installed after revalidation.")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
-    if reject_col.button("Reject", disabled=manifest.status in {"installed", "quarantined"}, use_container_width=True):
+    if reject_col.button(
+        "Reject",
+        disabled=manifest.status in {"installed", "quarantined"},
+        use_container_width=True,
+    ):
         try:
             storage.reject(proposal_id, reason)
             st.warning("Proposal rejected and retained for deduplication.")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
-    if quarantine_col.button("Quarantine", disabled=manifest.status in {"installed", "quarantined"} or not reason.strip(), use_container_width=True):
+    if quarantine_col.button(
+        "Quarantine",
+        disabled=manifest.status in {"installed", "quarantined"} or not reason.strip(),
+        use_container_width=True,
+    ):
         try:
             storage.quarantine(proposal_id, reason)
             st.warning("Proposal moved to quarantine.")

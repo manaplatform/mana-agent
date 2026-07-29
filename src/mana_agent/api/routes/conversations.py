@@ -26,7 +26,9 @@ def _require_mutation_token(authorization: str | None) -> None:
         raise ManaApiError(401, "A valid API bearer token is required.")
 
 
-def _resolve_root(root: str | None = None, repository_id: str | None = None) -> tuple[Path, str]:
+def _resolve_root(
+    root: str | None = None, repository_id: str | None = None
+) -> tuple[Path, str]:
     if repository_id:
         try:
             repo = WorkspaceService().store.get_repository(repository_id)
@@ -38,7 +40,9 @@ def _resolve_root(root: str | None = None, repository_id: str | None = None) -> 
     return path, repository_id_for_path(path)
 
 
-def _service(root: str | None = None, repository_id: str | None = None) -> ConversationService:
+def _service(
+    root: str | None = None, repository_id: str | None = None
+) -> ConversationService:
     path, repo_id = _resolve_root(root=root, repository_id=repository_id)
     return ConversationService(root=path, repository_id=repo_id)
 
@@ -120,7 +124,8 @@ def dashboard_live_chat(
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
                 "default-src 'none'; script-src 'unsafe-inline'; "
-                "style-src 'unsafe-inline'; connect-src 'self' ws: wss:"
+                "style-src 'unsafe-inline'; connect-src 'self' ws: wss:; "
+                "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
             ),
             "Referrer-Policy": "no-referrer",
         },
@@ -148,7 +153,9 @@ def get_conversation(
 ) -> dict[str, Any]:
     service = _service(root=root, repository_id=repository_id)
     try:
-        payload = service.get_full(conversation_id, message_limit=message_limit, event_limit=event_limit)
+        payload = service.get_full(
+            conversation_id, message_limit=message_limit, event_limit=event_limit
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
     return {"ok": True, **payload}
@@ -166,7 +173,11 @@ def list_messages(
         messages = service.list_messages(conversation_id, limit=limit)
     except (FileNotFoundError, ValueError) as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
-    return {"ok": True, "conversation_id": conversation_id, "messages": [item.to_dict() for item in messages]}
+    return {
+        "ok": True,
+        "conversation_id": conversation_id,
+        "messages": [item.to_dict() for item in messages],
+    }
 
 
 @router.get("/conversations/{conversation_id}/events")
@@ -179,7 +190,9 @@ def list_events(
 ) -> dict[str, Any]:
     service = _service(root=root, repository_id=repository_id)
     try:
-        events = service.list_events(conversation_id, execution_id=execution_id, limit=limit)
+        events = service.list_events(
+            conversation_id, execution_id=execution_id, limit=limit
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
     return {
@@ -326,7 +339,11 @@ def get_execution_state(
     except (FileNotFoundError, ValueError) as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
     exec_id = execution_id or record.last_execution_id
-    events = service.list_events(conversation_id, execution_id=exec_id, limit=500) if exec_id else []
+    events = (
+        service.list_events(conversation_id, execution_id=exec_id, limit=500)
+        if exec_id
+        else []
+    )
     return {
         "ok": True,
         "conversation_id": conversation_id,

@@ -32,6 +32,7 @@ class _RouteModel:
             "gmail": ["gmail"], "calendar": ["calendar"], "browser": ["browser"],
             "search": ["search"], "github": ["github"], "repository": ["repository"],
             "memory": ["memory"], "automation": ["repository"],
+            "canvas": ["canvas"],
             "artifact": ["artifact"],
             "capability_error": ["gmail"],
         }
@@ -131,6 +132,7 @@ def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
         ("repository", "repository inspection"),
         ("memory", "memory retrieval"),
         ("automation", "automation"),
+        ("canvas", "Live Canvas"),
         ("artifact", "artifact operations"),
         ("unsupported", "safe stop"),
         ("capability_error", "missing capability"),
@@ -378,6 +380,18 @@ def test_entry_router_assigns_deferred_gmail_actions_only_to_automation() -> Non
     assert "select automation instead and do not select gmail as a preliminary action" in ENTRY_ROUTER_PROMPT
     assert "At 12:52, check my Gmail" in ENTRY_ROUTER_PROMPT
     assert "listing is not a prerequisite for creation" in ENTRY_ROUTER_PROMPT
+
+
+def test_entry_router_validates_canvas_as_an_explicit_model_route() -> None:
+    router = EntryRouter(llm=_RouteModel("canvas"), registry=_registry())
+    decision = router.route(
+        user_prompt="Open an interactive project planning canvas.",
+        context=EntryRouteContext(
+            session_id="session", conversation_id="session", turn_id="turn",
+        ),
+    )
+    assert decision.route == "canvas"
+    assert decision.required_sources == ("canvas",)
 
 
 def test_entry_router_requires_a_typed_automation_operation() -> None:
