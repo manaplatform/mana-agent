@@ -100,6 +100,15 @@ requests a bounded model correction with update-only Canvas tools. If the
 validated correction still leaves the surface incomplete, Mana rolls back that
 new surface and reports a `route-canvas-error`; it never generates a static
 fallback interface or leaves a permanent loading surface.
+New model-authored surfaces include their initial components and data model in
+the validated `canvas_create_surface` tool call, so the server publishes the
+create and initial update lifecycle without relying on a second model turn.
+The tool accepts the flattened Mana catalog shape and normalizes the protocol's
+common `type`/nested-component wire representations before applying the same
+catalog and security validation.
+After a renderer action is authenticated and matched to its declaration, the
+owning model executor resumes with update-only tools and must persist a surface
+change before the action is reported as successfully handled.
 The renderer uses `MANA_CANVAS_GENERATION_TIMEOUT_SECONDS` from
 `~/.mana/config.toml` to turn abandoned legacy surfaces into an explicit retry
 error instead of displaying an unbounded waiting state.

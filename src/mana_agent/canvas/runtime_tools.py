@@ -62,6 +62,31 @@ def _json(operation) -> str:
         )
 
 
+def _normalize_components(
+    components: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize supported A2UI wire shapes into Mana's flat catalog shape."""
+    normalized: list[dict[str, Any]] = []
+    for component in components:
+        row = dict(component)
+        component_value = row.get("component")
+        if component_value is None and isinstance(row.get("type"), str):
+            row["component"] = row.pop("type")
+        elif isinstance(component_value, dict):
+            nested = dict(component_value)
+            component_type = nested.pop("type", None)
+            if component_type is None and len(nested) == 1:
+                candidate, properties = next(iter(nested.items()))
+                if isinstance(properties, dict):
+                    component_type = candidate
+                    nested = dict(properties)
+            if isinstance(component_type, str):
+                row.pop("component")
+                row = {**nested, **row, "component": component_type}
+        normalized.append(row)
+    return normalized
+
+
 def _create_surface_with_content(
     *,
     service: Any,
@@ -71,19 +96,19 @@ def _create_surface_with_content(
     surface_id: str,
     owner: OwnerRef | dict[str, Any],
     components: list[dict[str, Any]],
-    data_model: dict[str, Any],
+    data_model: dict[str, Any] | None,
     retain_on_complete: bool,
 ) -> Any:
     """Publish a model-authored initial surface only when its full content validates."""
     from mana_agent.canvas.catalog import validate_components, validate_data_model
 
     validated_components = validate_components(
-        components,
+        _normalize_components(components),
         surface_id=surface_id,
         config=service.config,
         require_root=True,
     )
-    validated_data = validate_data_model(data_model, surface_id=surface_id)
+    validated_data = validate_data_model(data_model or {}, surface_id=surface_id)
     service.create_surface(
         session_id=session_id,
         conversation_id=conversation_id,
@@ -126,7 +151,7 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 f"{common}"
             ),
             args_schema=_Create,
-            func=lambda source_decision_id, session_id, conversation_id, surface_id, owner, components, data_model, retain_on_complete: (
+            func=lambda source_decision_id, session_id, conversation_id, surface_id, owner, components, data_model=None, retain_on_complete=True: (
                 _json(
                     lambda: _create_surface_with_content(
                         service=service,
@@ -144,7 +169,10 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
         ),
         StructuredTool.from_function(
             name="canvas_update_components",
-            description=f"Add or replace validated components. {common}",
+            description=(
+                "Add or replace validated components using the same supported A2UI wire shapes "
+                f"as canvas_create_surface. {common}"
+            ),
             args_schema=_Components,
             func=lambda source_decision_id, session_id, conversation_id, surface_id, components: (
                 _json(
@@ -152,7 +180,7 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                         session_id=session_id,
                         conversation_id=conversation_id,
                         surface_id=surface_id,
-                        components=components,
+                        components=_normalize_components(components),
                         correlation_id=source_decision_id,
                     )
                 )

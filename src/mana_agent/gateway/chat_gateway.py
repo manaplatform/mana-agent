@@ -3649,7 +3649,13 @@ class AgentChatGateway:
             "conversation and an owner containing agent_id='main' plus task_id equal to the turn ID. "
             "Create a new surface with one canvas_create_surface call that includes its complete "
             "initial component adjacency list with id='root' and initial data_model. Use later "
-            "update tools only for an existing complete surface. "
+            "update tools only for an existing complete surface. Each component is a flat object; "
+            "for example {'id':'root','component':'Column','children':['title']} and "
+            "{'id':'title','component':'Heading','text':'Hello'}. The component kind field is named "
+            "component, not type, and component is never a nested object. "
+            "Action declarations accept only name, context, side_effect, and permission_scope. "
+            "For a normal button use a read-only action such as {'name':'counter.press',"
+            "'context':{'count':{'path':'/count'}}}; omit permission_scope and never add target. "
             "Declare actions explicitly; side-effect actions require a permission_scope and will "
             "fail closed unless the runtime permission broker is attached. Never emit HTML, scripts, "
             "CSS, commands, filesystem paths, prompts, secrets, or unsupported components. Do not "
@@ -3779,6 +3785,67 @@ class AgentChatGateway:
             for surface_id, snapshot in after.items()
             if before.get(surface_id) != snapshot
         ]
+        if changed:
+            from mana_agent.canvas.models import OwnerRef
+            from mana_agent.canvas.reducer import CanvasStateError
+
+            def resume_from_action(action: Any, snapshot: Any) -> None:
+                action_prompt = (
+                    "A validated renderer action was delivered to the Canvas surface you own. "
+                    "Use the update-only Canvas tools to apply the exact model-decided result to "
+                    "that existing surface. Do not create a surface. Do not claim completion "
+                    "unless a tool confirms a persisted change. Renderer action:\n"
+                    + json.dumps(action.model_dump(mode="json"), ensure_ascii=False, default=str)
+                    + "\nCurrent snapshot:\n"
+                    + json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False, default=str)
+                )
+                action_system_prompt = (
+                    "You are Mana-Agent's Live Canvas action executor. The gateway has already "
+                    "authenticated the action and matched it to a declared component action. Use "
+                    "only canvas_update_components, canvas_update_data, canvas_get_surface, or "
+                    "canvas_delete_surface. Every tool call must use "
+                    f"source_decision_id={action.correlation_id!r}, "
+                    f"session_id={action.session_id!r}, "
+                    f"conversation_id={action.conversation_id!r}, and "
+                    f"surface_id={action.surface_id!r}. Never emit executable browser content, "
+                    "commands, paths, prompts, or secrets."
+                )
+                prior_version = snapshot.version
+                try:
+                    ask_agent.run(
+                        question=action_prompt,
+                        index_dir=self._index_dir or default_index_dir(self.root),
+                        k=self._resolved_k,
+                        max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                        timeout_seconds=max(30, self._agent_timeout_seconds),
+                        callbacks=None,
+                        system_prompt=action_system_prompt,
+                        tool_policy={
+                            "allowed_tools": [
+                                "canvas_update_components",
+                                "canvas_update_data",
+                                "canvas_get_surface",
+                                "canvas_delete_surface",
+                            ],
+                            "disable_external_search": True,
+                            "require_initial_tool_call": True,
+                        },
+                        flow_id=context.session_id,
+                        run_id=action.correlation_id,
+                    )
+                except Exception as exc:
+                    raise CanvasStateError(
+                        f"Canvas action model execution failed: {exc}"
+                    ) from exc
+                updated = service.get_surface(action.session_id, action.surface_id)
+                if updated.version <= prior_version:
+                    raise CanvasStateError(
+                        "Canvas action completed without a persisted model-selected update."
+                    )
+
+            service.register_action_handler(
+                OwnerRef(task_id=context.turn_id), resume_from_action
+            )
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),
             mode="route-canvas",

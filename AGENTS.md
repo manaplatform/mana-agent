@@ -6,7 +6,7 @@ These instructions apply to the entire repository.
 
 Mana-Agent is a repository-aware AI coding and analysis tool. It provides CLI workflows for chat, codebase analysis, planning, multi-agent execution, memory-aware decisions, tool routing, and automated code modification.
 
-Agents working in this repository must prioritize correctness, safety, maintainability, minimal changes, model-driven decisions, and verifiable results.
+Agents working in this repository must prioritize correctness, safety, maintainability, minimal changes, model-driven decisions, reviewable results, and clear user verification instructions.
 
 ---
 
@@ -21,9 +21,10 @@ Agents working in this repository must prioritize correctness, safety, maintaina
 * Do not modify unrelated files.
 * Do not remove existing behavior unless explicitly requested.
 * Do not commit, push, tag, release, or publish unless explicitly requested.
-* Run the most relevant checks or tests when code changes are made.
-* If checks cannot be run, clearly state why.
-* Do not use fallback logic for routing, tool choice, workflow choice, planning, search, editing, verification, or final response generation.
+* Do not execute tests, linters, type checks, builds, verification scripts, or other validation commands as part of the agent workflow.
+* After code changes, remind the user to verify the result and provide the exact recommended commands.
+* Never claim that a check passed unless the user supplied that result.
+* Do not use fallback logic for routing, tool choice, workflow choice, planning, search, editing, user-verification guidance, or final response generation.
 * All meaningful behavior must depend on explicit model decisions represented in code.
 
 ---
@@ -33,7 +34,7 @@ Agents working in this repository must prioritize correctness, safety, maintaina
 Use this workflow for most tasks:
 
 ```text
-Inspect → Understand → Plan → Model Decision → Validate Decision → Edit → Verify → Update CHANGELOG → Summarize
+Inspect → Understand → Plan → Model Decision → Validate Decision → Edit → Prepare User Verification → Update CHANGELOG → Summarize
 ```
 
 No workflow may skip the model decision step when a meaningful decision is required.
@@ -71,12 +72,12 @@ The plan should include:
 * Files likely to change.
 * Main implementation steps.
 * Required model decision objects or schemas.
-* Verification strategy.
+* Recommended user verification commands.
 * Any risks or compatibility concerns.
 
 ### 2.4 Model Decision
 
-Before selecting a workflow, tool, agent, search method, edit action, or verification path, Mana-Agent must obtain a structured model decision.
+Before selecting a workflow, tool, agent, search method, edit action, or user-verification guidance path, Mana-Agent must obtain a structured model decision.
 
 The decision must determine:
 
@@ -86,7 +87,7 @@ The decision must determine:
 * Required tools.
 * Required context.
 * Required files.
-* Required verification.
+* Required user verification guidance.
 * Whether the task is safe to continue.
 * Whether the task is complete.
 
@@ -125,24 +126,24 @@ When editing:
 * Avoid hidden global state.
 * Avoid any behavior that bypasses the model decision layer.
 
-### 2.7 Verify
+### 2.7 Prepare User Verification
 
-Run the most relevant checks for the changed area.
+Do not run verification or test commands. Determine the smallest relevant command set and give it to the user to run.
 
 Examples:
 
 ```bash
-python -m pytest
 python -m pytest tests/<relevant_test_file>.py
+python -m pytest
 python -m mana-agent --help
 python -m mana-agent chat --help
 python -m mana-agent analyze --help
 python -m mana-agent plan --help
 ```
 
-Use targeted tests first, then broader tests when core behavior changes.
+Recommend targeted commands first and broader commands only when core behavior changed.
 
-When changing model-decision behavior, tests must prove that invalid or missing model decisions stop safely and do not trigger fallback behavior.
+For model-decision changes, remind the user that coverage should confirm invalid or missing decisions stop safely without triggering fallback behavior. Clearly state that the agent did not run the commands.
 
 ### 2.8 Update CHANGELOG
 
@@ -154,7 +155,8 @@ Final responses should clearly include:
 
 * What changed.
 * Files changed.
-* Verification performed.
+* A clear statement that verification was not run by the agent.
+* Exact commands the user should run.
 * Any remaining risks or notes.
 
 ---
@@ -167,8 +169,8 @@ Each entry must include:
 
 * The date of the change.
 * A short summary of what changed.
-* Any verification performed.
-* A note when verification was not run.
+* A note that verification is user-owned.
+* The recommended verification commands.
 
 Recommended format:
 
@@ -176,16 +178,16 @@ Recommended format:
 ## YYYY-MM-DD
 
 - Updated <area> to <summary of change>.
-  - Verification: `<command>` passed.
+  - User verification: Run `<command>`.
 ```
 
-If verification was not run:
+Do not record a command as passed unless the user supplied that result. For normal agent-authored changes, use:
 
 ```markdown
 ## YYYY-MM-DD
 
 - Updated <area> to <summary of change>.
-  - Verification: Not run. Reason: <reason>.
+  - User verification required: `<command>`.
 ```
 
 Do not skip the changelog unless the user explicitly says not to update it.
@@ -208,7 +210,7 @@ Mana-Agent should provide:
 * Stable prompt construction.
 * Progressive skill loading.
 * Efficient token usage.
-* Reliable patching and verification.
+* Reliable patching and clear user verification guidance.
 * Extensible architecture for future agents, tools, and workflows.
 * Optional UI (dashboard/) and automation layers are lazy-loaded and must never affect core CLI or model-decision paths.
 
@@ -218,7 +220,7 @@ Mana-Agent must not depend on hardcoded keyword behavior or fallback functionali
 
 ## 5. Model-Decision-Only Execution Policy
 
-Mana-Agent must not use fallback logic for routing, planning, searching, tool selection, editing, verification, or final response generation.
+Mana-Agent must not use fallback logic for routing, planning, searching, tool selection, editing, user-verification guidance, or final response generation.
 
 All meaningful behavior must depend on explicit model decisions represented in code through typed decision objects, schemas, taskboard entries, agent messages, or structured planner outputs.
 
@@ -248,7 +250,7 @@ The model decision should determine:
 * Whether the task needs repo search.
 * Whether the task needs file reading.
 * Whether the task needs code modification.
-* Whether the task needs verification.
+* Which user verification commands should be recommended.
 * Whether the task needs summarization.
 * Which agent or sub-agent should handle the task.
 * Which tools are allowed for the next step.
@@ -287,12 +289,12 @@ Allowed deterministic logic includes:
 * Retry for transport or API errors.
 * Formatting model decisions for display.
 * Executing the exact tool call selected by the model decision.
-* Verifying that model-selected files, tools, or actions are valid.
+* Checking that model-selected files, tools, or actions are valid.
 * Checking whether selected files still exist.
 * Checking whether selected tools are registered.
 * Checking whether selected commands are allowed.
 
-Deterministic code must not choose the task intent, workflow, tool, agent, search behavior, file set, edit path, verification path, or final action unless that choice was already made by the model decision layer.
+Deterministic code must not choose the task intent, workflow, tool, agent, search behavior, file set, edit path, user-verification guidance, or final action unless that choice was already made by the model decision layer.
 
 ### 5.5 Decision Contract
 
@@ -304,7 +306,7 @@ User Input
   → Model Decision
   → Decision Validation
   → Tool / Agent Execution
-  → Verification
+  → User Verification Handoff
   → Model Summary / Final Response
 ```
 
@@ -391,10 +393,11 @@ When removing existing fallback behavior, replace it with:
 * A model prompt that requests the decision.
 * Strict schema validation.
 * Explicit failure handling.
-* Tests proving fallback behavior is not used.
+* Appropriate test coverage in the repository when the implementation requires it.
 * Clear changelog documentation.
+* Exact commands for the user to run.
 
-Tests should verify that when the model decision is missing or invalid, Mana-Agent stops safely instead of using keyword matching, default tools, default agents, or heuristic routing.
+Do not execute the tests. Tell the user that the relevant coverage should confirm missing or invalid model decisions stop safely instead of using keyword matching, default tools, default agents, or heuristic routing.
 
 ---
 
@@ -454,7 +457,7 @@ Verbose mode may show:
 * Memory usage.
 * Routing decisions.
 * Token usage.
-* Verification steps.
+* Recommended user verification commands.
 
 Chat mode must not route based on hardcoded keywords.
 
@@ -501,7 +504,7 @@ A good plan includes:
 * Affected files.
 * Architecture impact.
 * Step-by-step implementation.
-* Verification strategy.
+* Recommended user verification commands.
 * Rollback or safety notes when relevant.
 
 Plan mode should ask clarifying questions only when the task cannot be safely understood from repository context.
@@ -534,7 +537,7 @@ Agents must have:
 * Bounded responsibilities.
 * Permission-aware memory access.
 * Communication paths for decisions.
-* Verification steps before completion.
+* A user verification handoff before completion.
 * Typed decision inputs and outputs.
 
 The main agent is responsible for:
@@ -543,7 +546,7 @@ The main agent is responsible for:
 * Creating or updating the taskboard.
 * Decomposing work.
 * Delegating focused subtasks.
-* Verifying final results.
+* Reviewing the final diff and preparing user verification commands.
 * Producing the final response.
 * Ensuring every meaningful action is backed by a validated model decision.
 
@@ -558,7 +561,7 @@ Sub-agents are responsible for:
 
 Agents should communicate when decisions affect shared state, architecture, tool usage, memory, or final output.
 
-No agent or sub-agent may use fallback routing, fallback tool selection, fallback task creation, or fallback verification behavior.
+No agent or sub-agent may use fallback routing, fallback tool selection, fallback task creation, or fallback user-verification guidance.
 
 ---
 
@@ -572,7 +575,7 @@ The taskboard should track:
 * Current status.
 * Required files or tools.
 * Dependencies.
-* Verification requirements.
+* User verification requirements and commands.
 * Completion result.
 * Source model decision ID or decision object reference.
 
@@ -606,7 +609,7 @@ Memory must not:
 * Override fresh repository state.
 * Hide errors.
 * Cause stale decisions.
-* Bypass verification.
+* Hide or bypass the need for user verification.
 * Leak private or unrelated context.
 * Replace reading files when fresh code state is required.
 * Replace the model decision layer.
@@ -620,7 +623,7 @@ File-read memory should be invalidated when:
 * Branch changes.
 * Task scope changes.
 * The user requests a refresh.
-* Verification output contradicts cached assumptions.
+* User-provided verification output contradicts cached assumptions.
 * The model decision requires fresh context.
 
 ---
@@ -645,7 +648,7 @@ Ephemeral Prompt
   - selected files
   - retrieved context
   - latest tool results
-  - verification output
+  - user-provided verification output
   - current decision request
 ```
 
@@ -702,7 +705,6 @@ Prefer batch operations when possible:
 * Batch file reads.
 * Batch searches.
 * Batch patches.
-* Single verification scripts.
 
 Avoid:
 
@@ -793,7 +795,7 @@ Preferred style:
 * Dataclasses or typed models when helpful.
 * Deterministic logic for validation and execution.
 * Typed decision models.
-* Readable tests.
+* Readable code and test files.
 * Clear separation of responsibilities.
 
 Avoid:
@@ -812,11 +814,21 @@ Avoid:
 
 ---
 
-## 18. Testing Guidelines
+## 18. User Testing and Verification Handoff
 
-When changing behavior, add or update tests.
+The agent must not execute tests, linters, type checks, builds, or verification scripts.
 
-Tests should cover:
+When behavior changes:
+
+* Review existing test coverage to understand expected behavior.
+* Add or update test files when the requested implementation requires coverage.
+* Do not run those tests.
+* Give the user the smallest relevant test command first.
+* Give broader suite commands only when core systems changed.
+* State explicitly: `Verification was not run by the agent.`
+* Never claim success based on inspection alone.
+
+Suggested coverage may include:
 
 * Normal path.
 * Edge cases.
@@ -827,15 +839,10 @@ Tests should cover:
 * Multi-agent routing when relevant.
 * Tool execution behavior when relevant.
 * Model decision behavior when relevant.
-* Invalid model decision behavior.
-* Missing model decision behavior.
+* Invalid or missing model decisions.
 * No fallback execution behavior.
 
-Do not remove tests unless they are obsolete and replaced by better coverage.
-
-Prefer targeted tests for fast verification, then run broader tests when core systems change.
-
-When removing fallback behavior, tests must prove:
+When removing fallback behavior, tell the user to verify that:
 
 * Missing decisions fail safely.
 * Invalid decisions fail safely.
@@ -888,7 +895,7 @@ git.help
 
 `git.help(all=true)` must discover local Git commands from `git help -a`; do not maintain a permanent hardcoded inventory of every Git command. `git.generic` must pass argv lists to `subprocess.run(["git", *args], shell=False)` in the resolved repository root and return structured, redacted output.
 
-Before committing, inspect `git status --short`, `git diff`, and `git diff --staged`; stage only files relevant to the current task; generate the commit message from the staged diff, request, changed files, and verification result. Do not use `git add .` unless the model has verified all changed files are relevant.
+Before committing, inspect `git status --short`, `git diff`, and `git diff --staged`; stage only files relevant to the current task; generate the commit message from the staged diff, request, changed files, and any user-provided verification result. Do not use `git add .` unless inspection confirms all changed files are relevant.
 
 Before pushing, inspect status, current branch, remotes, and upstream. Push with `-u origin <branch>` only when no upstream exists. Never force-push by default.
 
@@ -908,7 +915,7 @@ For conflict resolution:
 * Inspect both sides of the conflict.
 * Preserve intended behavior from both sides when possible.
 * Keep the resolution focused.
-* Run relevant tests after resolving.
+* Give the user the relevant post-resolution test commands.
 * Continue rebase only after conflicts are fully resolved.
 
 Do not use fallback conflict resolution strategies such as blindly accepting one side unless the user explicitly requested that exact behavior.
@@ -936,7 +943,7 @@ When model-decision behavior changes, documentation must explain:
 * What decision object is used.
 * What happens when the decision is invalid.
 * That no fallback behavior is executed.
-* How the behavior is verified.
+* How the user can verify the behavior, including exact commands.
 
 ---
 
@@ -1004,7 +1011,6 @@ Mana-Agent should be efficient with:
 * Subprocesses.
 * Prompt construction.
 * Memory lookups.
-* Test execution.
 * Model decision calls.
 
 Avoid repeated expensive work.
@@ -1071,7 +1077,7 @@ Release automation should be reliable and reproducible.
 
 A professional release workflow should:
 
-* Run tests.
+* Include automated test gates in CI or the release pipeline.
 * Build packages.
 * Create artifacts.
 * Publish only from trusted branches or tags.
@@ -1089,7 +1095,7 @@ version = "0.1.0"
 version = "1.0.0"
 ```
 
-Release workflows may use deterministic checks, but release decisions should remain explicit and safe.
+Release workflows may use deterministic checks in automation, but agents must not execute those checks themselves. Release decisions should remain explicit and safe, and the user should receive the commands or pipeline trigger needed for verification.
 
 Do not publish through fallback behavior when required release metadata or validation is missing.
 
@@ -1101,7 +1107,7 @@ Preserve existing behavior unless the task explicitly requires a breaking change
 
 Before changing behavior, check:
 
-* Existing tests.
+* Existing test coverage and expectations.
 * CLI help output.
 * Public function names.
 * Configuration keys.
@@ -1133,7 +1139,7 @@ A task is complete only when:
 * Relevant files were inspected.
 * Changes are minimal and focused.
 * User changes were preserved.
-* Relevant tests or checks were run when possible.
+* The final response states that verification was not run by the agent and provides exact user commands.
 * `CHANGELOG.md` was updated.
 * Documentation was updated when needed.
 * No unrelated files were modified.
@@ -1156,8 +1162,9 @@ Implemented:
 Changed:
 - ...
 
-Verified:
-- ...
+User verification:
+- Not run by the agent.
+- Run: `...`
 
 Notes:
 - ...
@@ -1175,7 +1182,7 @@ If the task is large, complete it in safe, logical steps.
 
 If there is uncertainty, inspect the repository first. Ask only when the ambiguity blocks safe progress.
 
-Always prefer a correct, verified, maintainable solution over a fast but fragile one.
+Always prefer a correct, reviewable, maintainable solution with clear user verification steps over a fast but fragile one.
 
 Do not use fallback behavior to avoid uncertainty.
 
