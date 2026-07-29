@@ -465,6 +465,16 @@
             node.className = "activity";
             addText(node, "div", `${event.title || type} · ${eventStatus(event)}`);
             if (eventSummary(event)) addText(node, "div", eventSummary(event), "logs");
+            if (type === "canvas.createSurface") {
+              const link = document.createElement("a");
+              const canvas = metadata.canvas_event || {};
+              link.textContent = "Open Live Canvas";
+              link.href = `${config.apiBase}/api/v1/dashboard/live-canvas?conversation_id=${encodeURIComponent(config.sessionId)}&root=${encodeURIComponent(config.root)}&surface_id=${encodeURIComponent(canvas.surface_id || metadata.surface_id || "")}`;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.style.color = "#93c5fd";
+              node.appendChild(link);
+            }
           }
           timeline.appendChild(node);
         }

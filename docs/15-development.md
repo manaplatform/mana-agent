@@ -19,6 +19,7 @@ When working in this project, start with the code that defines the feature:
 - `src/mana_agent/multi_agent/runtime/` for agent orchestration and tool handling.
 - `src/mana_agent/tools/` for mutation and contract behavior.
 - `src/mana_agent/services/` for service-layer logic.
+- `src/mana_agent/canvas/` for A2UI contracts, validation, reduction, persistence, and runtime tools.
 - `src/mana_agent/parsers/` and `src/mana_agent/renderers/` for input/output processing.
 - `tests/` for behavior coverage and fixtures.
 
@@ -30,6 +31,7 @@ When working in this project, start with the code that defines the feature:
 - If a change affects documented behavior, update the doc set alongside code.
 - Confirm any file-creation task uses the requested path exactly; this project
   includes logic to detect misplaced deliverables and treat them as failures.
+- Catalog changes must update the native renderer and both Python and browser tests; breaking component schemas require a new catalog major URI.
 
 ## Verification Notes
 

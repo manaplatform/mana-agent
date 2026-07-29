@@ -83,6 +83,7 @@ Use Mana-Agent to:
 | Remote connectors | Gmail access and Telegram bot interaction through the same tool-aware chat runtime. |
 | Protocol gateway | ACP v1 editor access and A2A 1.0 server/client delegation through the shared gateway, sessions, task board, memory, lanes, and tool policy. |
 | Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automation inspection, and settings. |
+| Live Canvas | Durable A2UI surfaces, interactive actions, workflow activity, and reconnect recovery. |
 | Automations | Typed persistent jobs authored in chat and deployed through hidden platform schedulers. |
 | Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and repository-local runtime data. |
 | Mana Eval Lab | Reproducible multi-variant runs, immutable trajectories, replay, leaderboards, paired regression reports, and fail-closed CI gates. |
@@ -869,6 +870,7 @@ Dashboard pages include:
 | --- | --- |
 | Overview | Repository status, index health, recent activity, and quick actions. |
 | Chat | Repository-grounded questions and coding-agent workflows. |
+| Live Canvas | Interactive A2UI surfaces, workflow activity, actions, and recovery. |
 | Analysis | Run analysis and inspect reports and diagrams. |
 | Taskboard | Active and completed tasks, agents, workers, and state. |
 | Processes | Persistent service health, managed logs, stop, and restart controls. |
@@ -1151,6 +1153,7 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/17-browser-automation.md`](docs/17-browser-automation.md) | Browser automation setup and safety. |
 | [`docs/18-telegram-connector.md`](docs/18-telegram-connector.md) | Telegram bot setup, polling/webhook deployment, security, and troubleshooting. |
 | [`docs/27-automations.md`](docs/27-automations.md) | Unified automation schema, migration, deployment, execution, and Teach handoff. |
+| [`docs/live-canvas.md`](docs/live-canvas.md) | A2UI lifecycle, catalog, gateway, actions, recovery, security, and component development. |
 | [`docs/adaptive-coding-runtime.md`](docs/adaptive-coding-runtime.md) | Adaptive coding runtime overview and behavior. |
 | [`docs/multi-agent-routing.md`](docs/multi-agent-routing.md) | Multi-agent routing architecture and decision flow. |
 

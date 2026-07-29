@@ -126,6 +126,9 @@ class SessionService:
             if self.browser_closer is not None:
                 self.browser_closer(session_id)
             self._clear_memory(record)
+            from mana_agent.canvas.store import CanvasStore
+
+            CanvasStore().delete_session(session_id)
             self.workspaces.delete_session(session_id)
             for frontend, active in list(self._active_by_frontend.items()):
                 if active == session_id:

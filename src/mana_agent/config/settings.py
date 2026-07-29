@@ -165,6 +165,27 @@ class Settings(BaseSettings):
     mana_a2a_max_concurrent_tasks: int = Field(default=4, alias="MANA_A2A_MAX_CONCURRENT_TASKS")
     mana_a2a_delegation_enabled: bool = Field(default=False, alias="MANA_A2A_DELEGATION_ENABLED")
     mana_a2a_max_delegation_depth: int = Field(default=3, alias="MANA_A2A_MAX_DELEGATION_DEPTH")
+    mana_canvas_enabled: bool = Field(default=True, alias="MANA_CANVAS_ENABLED")
+    mana_canvas_protocol_versions: str = Field(default="v0.9", alias="MANA_CANVAS_PROTOCOL_VERSIONS")
+    mana_canvas_default_protocol_version: str = Field(default="v0.9", alias="MANA_CANVAS_DEFAULT_PROTOCOL_VERSION")
+    mana_canvas_allowed_catalogs: str = Field(
+        default="https://mana-agent.dev/a2ui/catalogs/core/v1/catalog.json",
+        alias="MANA_CANVAS_ALLOWED_CATALOGS",
+    )
+    mana_canvas_accept_inline_catalogs: bool = Field(default=False, alias="MANA_CANVAS_ACCEPT_INLINE_CATALOGS")
+    mana_canvas_max_active_surfaces: int = Field(default=16, alias="MANA_CANVAS_MAX_ACTIVE_SURFACES")
+    mana_canvas_max_components: int = Field(default=250, alias="MANA_CANVAS_MAX_COMPONENTS")
+    mana_canvas_max_event_bytes: int = Field(default=262_144, alias="MANA_CANVAS_MAX_EVENT_BYTES")
+    mana_canvas_max_depth: int = Field(default=24, alias="MANA_CANVAS_MAX_DEPTH")
+    mana_canvas_snapshot_interval: int = Field(default=20, alias="MANA_CANVAS_SNAPSHOT_INTERVAL")
+    mana_canvas_surface_expiry_seconds: int = Field(default=86_400, alias="MANA_CANVAS_SURFACE_EXPIRY_SECONDS")
+    mana_canvas_action_timeout_seconds: int = Field(default=900, alias="MANA_CANVAS_ACTION_TIMEOUT_SECONDS")
+    mana_canvas_validation_retry_limit: int = Field(default=1, alias="MANA_CANVAS_VALIDATION_RETRY_LIMIT")
+    mana_canvas_max_updates_per_second: int = Field(default=20, alias="MANA_CANVAS_MAX_UPDATES_PER_SECOND")
+    mana_canvas_websocket_queue_size: int = Field(default=256, alias="MANA_CANVAS_WEBSOCKET_QUEUE_SIZE")
+    mana_canvas_allowed_image_schemes: str = Field(default="https", alias="MANA_CANVAS_ALLOWED_IMAGE_SCHEMES")
+    mana_canvas_allowed_artifact_schemes: str = Field(default="https,artifact", alias="MANA_CANVAS_ALLOWED_ARTIFACT_SCHEMES")
+    mana_canvas_developer_diagnostics: bool = Field(default=False, alias="MANA_CANVAS_DEVELOPER_DIAGNOSTICS")
     mana_browser_enabled: bool = Field(default=True, alias="MANA_BROWSER_ENABLED")
     mana_browser_headless: bool = Field(default=True, alias="MANA_BROWSER_HEADLESS")
     mana_browser_timeout_seconds: int = Field(default=30, alias="MANA_BROWSER_TIMEOUT_SECONDS")
@@ -272,6 +293,9 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: object) -> None:
         _ = __context
+        from mana_agent.canvas.config import CanvasConfig
+
+        CanvasConfig.from_settings(self)
 
 
 def default_index_dir(target_path: str | Path) -> Path:

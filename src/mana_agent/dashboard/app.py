@@ -23,6 +23,7 @@ from mana_agent.dashboard.pages import (
     analyze,
     automations,
     chat,
+    canvas,
     computer_control,
     connectors,
     fleet,
@@ -67,6 +68,7 @@ pages = {
     "Workspace": [
         _page(overview.render, title="Overview", icon="🏠", url_path="overview", default=True),
         _page(chat.render, title="Chat", icon="💬", url_path="chat"),
+        _page(canvas.render, title="Live Canvas", icon="🖼️", url_path="canvas"),
         _page(analyze.render, title="Analyze", icon="🔬", url_path="analyze"),
         _page(reports.render, title="Reports", icon="📄", url_path="reports"),
         _page(skills.render, title="Skill Workshop", icon="🧩", url_path="skill-workshop"),

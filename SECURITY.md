@@ -206,6 +206,14 @@ and revocation instructions are in
 
 ---
 
+# Live Canvas Security
+
+## Live Canvas
+
+Live Canvas treats model-generated UI as untrusted data. It accepts only the versioned A2UI lifecycle and Mana's allowlisted native catalog. Raw HTML, JavaScript, CSS, dynamic script loading, browser evaluation, unsafe URLs, hidden client permission scopes, cross-session actions, and replayed actions are rejected. Side-effect actions must pass through an attached existing permission broker and fail closed otherwise. Payload, tree, component, rate, surface, timeout, expiry, and connection-queue limits apply before browser rendering. See [`docs/live-canvas.md`](docs/live-canvas.md) for the complete trust boundary and limitations.
+
+---
+
 # Supply Chain Security
 
 Mana-Agent attempts to reduce supply-chain risk by encouraging:

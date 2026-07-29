@@ -626,6 +626,16 @@ class AgentChatGateway:
                     "automation_enable", "automation_disable", "automation_run_now",
                 ),
             ),
+            RouteRegistration(
+                "canvas",
+                "Validated durable A2UI Live Canvas operations.",
+                lambda: self._available(bool(getattr(self.settings, "mana_canvas_enabled", True)), "Live Canvas is disabled."),
+                (
+                    "canvas_create_surface", "canvas_update_components", "canvas_update_data",
+                    "canvas_delete_surface", "canvas_get_surface", "canvas_list_surfaces",
+                    "canvas_wait_for_action",
+                ),
+            ),
             RouteRegistration("unsupported", "Safe stop when no registered route applies.", lambda: self._available()),
             RouteRegistration("capability_error", "Explicit stop for an unavailable required capability.", lambda: self._available()),
         )
@@ -1465,6 +1475,7 @@ class AgentChatGateway:
                     "calendar": "tool",
                     "computer": "tool",
                     "automation": "tool",
+                    "canvas": "tool",
                     "artifact": "tool",
                     "remote_execution": "tool",
                 }.get(entry_decision.route, "main")
@@ -1522,6 +1533,7 @@ class AgentChatGateway:
                         "calendar": ("calendar",),
                         "computer": ("computer",),
                         "automation": ("automation", "deployment", "shell_read", "shell_write"),
+                        "canvas": ("canvas",),
                         "artifact": ("artifact_read", "artifact_write"),
                         "remote_execution": ("remote_ssh_execute",),
                     }.get(entry_decision.route, ())
@@ -2008,6 +2020,7 @@ class AgentChatGateway:
             "browser": "research", "repository": "research", "memory": "research",
             "gmail": "tool", "calendar": "tool", "computer": "tool",
             "automation": "tool", "artifact": "tool", "remote_execution": "tool",
+            "canvas": "tool",
         }.get(decision.route, "main")
         route_tools = registration.tools
         execution_decision = self.routing_authority.route(RoutingRequest(
@@ -2036,6 +2049,7 @@ class AgentChatGateway:
             "search": ("web_search",), "github": ("web_search",), "memory": ("memory",),
             "gmail": ("email",), "calendar": ("calendar",), "computer": ("computer",),
             "automation": ("automation", "deployment", "shell_read", "shell_write"),
+            "canvas": ("canvas",),
             "artifact": ("artifact_read", "artifact_write"), "remote_execution": ("remote_ssh_execute",),
         }.get(decision.route, ())
         reservation = self._lane_coordinator.reserve(
@@ -2214,6 +2228,7 @@ class AgentChatGateway:
             "gmail",
             "calendar",
             "computer",
+            "canvas",
         }:
             return ChatTurnResult(
                 answer="The model-selected route requires mutation, but this protocol session is read-only.",
@@ -2303,6 +2318,15 @@ class AgentChatGateway:
                 text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
+            )
+
+        if decision.route == "canvas":
+            if lane_task_id:
+                for tool_name in registration.tools:
+                    self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
+            return self._execute_canvas_route(
+                decision=decision, context=context, text=execution_text,
+                ask_service=ask_service, callbacks=options.get("callbacks"),
             )
 
         if decision.route == "computer":
@@ -2941,6 +2965,88 @@ class AgentChatGateway:
                 "route": "automation",
                 "automation_records": persisted_cards,
                 "deleted_automation_ids": deleted_ids,
+            },
+        )
+
+    def _execute_canvas_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        ask_service: Any,
+        callbacks: Any,
+    ) -> ChatTurnResult:
+        """Execute only validated Canvas tools selected by the entry decision."""
+        ask_agent = getattr(ask_service, "ask_agent", None)
+        if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
+            return ChatTurnResult(
+                answer="Live Canvas requires the configured model tool executor.",
+                error="canvas_executor_unavailable", mode="route-canvas-error",
+                decision=decision, payload={"route": "canvas"},
+            )
+        from mana_agent.canvas.catalog import catalog_metadata
+        from mana_agent.canvas.runtime_tools import CANVAS_TOOL_NAMES
+        from mana_agent.canvas.service import canvas_service_for_root
+        from mana_agent.config.settings import default_index_dir
+
+        service = canvas_service_for_root(self.root)
+        before = {
+            item.surface_id: item.model_dump(mode="json")
+            for item in service.list_surfaces(context.session_id, include_deleted=True)
+        }
+        system_prompt = (
+            "You are Mana-Agent's dedicated Live Canvas executor. Use only canvas_* tools and only "
+            "because the validated entry decision selected the canvas route. Perform the requested "
+            "surface lifecycle directly; do not answer with raw A2UI JSON. Every tool call must use "
+            f"source_decision_id={context.turn_id!r}, session_id={context.session_id!r}, "
+            f"conversation_id={context.conversation_id!r}. Use a stable surface_id scoped to this "
+            "conversation and an owner containing agent_id='main' plus task_id equal to the turn ID. "
+            "Create the surface before updates. Components use an adjacency list with id='root'. "
+            "Declare actions explicitly; side-effect actions require a permission_scope and will "
+            "fail closed unless the runtime permission broker is attached. Never emit HTML, scripts, "
+            "CSS, commands, filesystem paths, prompts, secrets, or unsupported components. Do not "
+            "claim a surface changed unless its tool result confirms persistence. When the request is "
+            "ambiguous in a way that materially changes the interface, ask one focused question and "
+            "do not call a Canvas mutation tool. Initial catalog:\n"
+            + json.dumps(catalog_metadata(), ensure_ascii=False, default=str)
+            + "\nCurrent surfaces:\n"
+            + json.dumps(list(before.values()), ensure_ascii=False, default=str)
+        )
+        try:
+            response = ask_agent.run(
+                question=text,
+                index_dir=self._index_dir or default_index_dir(self.root),
+                k=self._resolved_k,
+                max_steps=max(8, int(self.config.agent_max_steps or 6)),
+                timeout_seconds=max(30, self._agent_timeout_seconds),
+                callbacks=callbacks,
+                system_prompt=system_prompt,
+                tool_policy={
+                    "allowed_tools": list(CANVAS_TOOL_NAMES),
+                    "disable_external_search": True,
+                    "require_initial_tool_call": True,
+                },
+                flow_id=context.session_id,
+                run_id=context.turn_id,
+            )
+        except Exception as exc:
+            return ChatTurnResult(
+                answer=str(exc), error=f"Canvas route failed: {exc}",
+                mode="route-canvas-error", decision=decision,
+                payload={"route": "canvas"},
+            )
+        after = {
+            item.surface_id: item.model_dump(mode="json")
+            for item in service.list_surfaces(context.session_id, include_deleted=True)
+        }
+        changed = [surface_id for surface_id, snapshot in after.items() if before.get(surface_id) != snapshot]
+        return ChatTurnResult(
+            answer=str(getattr(response, "answer", response) or "").strip(),
+            mode="route-canvas", decision=decision,
+            payload={
+                "route": "canvas", "surface_ids": changed,
+                "canvas_url": f"/canvas?conversation_id={context.conversation_id}",
             },
         )
 

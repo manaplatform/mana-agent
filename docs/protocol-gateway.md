@@ -22,3 +22,7 @@ Missing SDKs fail with an installation instruction. Mana-Agent does not substitu
 Security boundaries include absolute workspace-scoped paths, fail-closed bearer authentication for A2A, caller-scoped task reads, request/artifact limits, secret redaction, HTTPS/public-address validation for remote agents, explicit context packages, and delegation-loop limits. The public Agent Card contains capabilities, not local paths, model names, prompts, or credentials.
 
 Features intentionally not advertised are embedded ACP media/resources, ACP client filesystem/terminal delegation, A2A push notifications, authenticated extended cards, and unrestricted local-file artifacts. These remain disabled until their full approval, persistence, and access-control paths are available.
+
+## Live Canvas traffic
+
+Canvas reuses the authenticated conversation WebSocket and durable `ExecutionEventHub`. Events have `canvas.*` types and a validated `metadata.canvas_event` envelope, so clients can separate them from chat, tool, permission, log, worker, and agent events without a second bus. Reconnect uses the existing conversation cursor plus the Canvas surface snapshot endpoint. Queue overflow emits `canvas.backpressure` with a recovery instruction. See [Live Canvas and A2UI](./live-canvas.md).

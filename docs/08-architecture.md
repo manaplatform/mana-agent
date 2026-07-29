@@ -335,5 +335,6 @@ src/mana_agent/
 ## Related Docs
 
 - [Overview](./01-overview.md)
+- [Live Canvas and A2UI](./live-canvas.md)
 - [Project Diagram](./07-diagram.md)
 - [README](../README.md)
