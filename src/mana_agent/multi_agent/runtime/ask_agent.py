@@ -1818,6 +1818,8 @@ class AskAgent:
         if bool(get_setting("MANA_CANVAS_ENABLED", True)):
             from mana_agent.canvas.runtime_tools import build_canvas_langchain_tools
             canvas_tools = build_canvas_langchain_tools(self.project_root)
+        from mana_agent.media.runtime_tools import build_media_langchain_tools
+        media_tools = build_media_langchain_tools(self.project_root)
 
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
@@ -1829,6 +1831,7 @@ class AskAgent:
             *teach_tools,
             *automation_tools,
             *canvas_tools,
+            *media_tools,
             *mcp_tools,
             *list(getattr(self, "tools", []) or []),
         ]

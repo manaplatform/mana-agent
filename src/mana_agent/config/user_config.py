@@ -191,6 +191,48 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_BROWSER_UPLOAD_ROOTS": "",
     "MANA_BROWSER_ARTIFACT_DIR": "",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": 30,
+    "media": {
+        "image": {
+            "enabled": False,
+            "provider": "",
+            "model": "",
+            "credential_ref": "",
+            "base_url": "",
+            "timeout_seconds": 120,
+            "max_output_bytes": 52428800,
+            "defaults": {"size": "1024x1024", "quality": "auto", "output_format": "png"},
+        },
+        "voice": {
+            "enabled": False,
+            "provider": "",
+            "model": "",
+            "credential_ref": "",
+            "base_url": "",
+            "timeout_seconds": 120,
+            "max_output_bytes": 52428800,
+            "defaults": {"voice": "alloy", "output_format": "mp3", "speed": 1.0},
+        },
+        "video": {
+            "enabled": False,
+            "provider": "",
+            "model": "",
+            "credential_ref": "",
+            "base_url": "",
+            "timeout_seconds": 600,
+            "max_output_bytes": 524288000,
+            "max_duration_seconds": 120,
+            "defaults": {"duration_seconds": 4, "resolution": "720x1280"},
+        },
+        "permissions": {
+            "media.image.generate": "allow",
+            "media.voice.generate": "allow",
+            "media.video.generate": "allow",
+            "media.artifact.write": "allow",
+            "media.status.read": "allow",
+            "media.generation.cancel": "allow",
+        },
+        "artifact_retention_days": 30,
+    },
     "MANA_COMPUTER_CONTROL_ENABLED": False,
     "computer_control": {
         "enabled": False,
@@ -306,6 +348,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
 
 
 FIELD_NAME_BY_ENV: dict[str, str] = {
+    "media": "media",
     "MANA_AI_PROVIDER": "mana_ai_provider",
     "MANA_PRIMARY_MODEL": "mana_primary_model",
     "MANA_EMBEDDING_MODEL": "mana_embedding_model",
@@ -559,6 +602,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_UPLOAD_ROOTS",
     "MANA_BROWSER_ARTIFACT_DIR",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
+    "media",
     "MANA_COMPUTER_CONTROL_ENABLED",
     "computer_control",
     "MANA_CODING_BACKEND",
@@ -611,6 +655,8 @@ def load_user_secrets() -> dict[str, Any]:
 
 
 def _toml_scalar(value: Any) -> str:
+    if value is None:
+        raise UserConfigError("TOML configuration cannot serialize an unset value.")
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
@@ -635,12 +681,14 @@ def _write_toml(path: Path, values: dict[str, Any], *, mode: int = 0o600) -> Non
     lines = [
         f"{key} = {_toml_scalar(values[key])}"
         for key in ordered_keys
-        if not isinstance(values[key], dict)
+        if values[key] is not None and not isinstance(values[key], dict)
     ]
 
     def append_tables(prefix: str, table: dict[str, Any]) -> None:
         scalar_items = [
-            (key, value) for key, value in table.items() if not isinstance(value, dict)
+            (key, value)
+            for key, value in table.items()
+            if value is not None and not isinstance(value, dict)
         ]
         if scalar_items:
             if lines and lines[-1] != "":
@@ -822,6 +870,13 @@ def validate_model_level(value: str) -> str:
 
 def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(values)
+    if "media" in cleaned:
+        from mana_agent.media.config import MediaConfig
+
+        raw_media = cleaned["media"]
+        if not isinstance(raw_media, dict):
+            raise UserConfigError("media must be a TOML table.")
+        cleaned["media"] = MediaConfig.model_validate(raw_media).model_dump(mode="json")
     if "computer_control" in cleaned:
         from mana_agent.integrations.computer_control.config import (
             ComputerControlSettings,

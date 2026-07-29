@@ -25,6 +25,10 @@ class ModelCapability(str, Enum):
 class ModelPurpose(str, Enum):
     AGENT = "agent"
     EMBEDDING = "embedding"
+    IMAGE = "image"
+    VOICE = "voice"
+    VIDEO = "video"
+    MULTIMODAL_INPUT = "multimodal_input"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,17 @@ class ModelDescriptor:
     def supports(self, purpose: ModelPurpose) -> bool:
         if purpose is ModelPurpose.EMBEDDING:
             return ModelCapability.EMBEDDING in self.capabilities
+        if purpose is ModelPurpose.IMAGE:
+            return ModelCapability.IMAGE_GENERATION in self.capabilities
+        if purpose is ModelPurpose.VOICE:
+            return bool(
+                self.capabilities
+                & {ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION}
+            )
+        if purpose is ModelPurpose.VIDEO:
+            return ModelCapability.VIDEO_GENERATION in self.capabilities
+        if purpose is ModelPurpose.MULTIMODAL_INPUT:
+            return ModelCapability.IMAGE_INPUT in self.capabilities
         return ModelCapability.TEXT_GENERATION in self.capabilities
 
 
@@ -58,6 +73,15 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "text-embedding-3-small": frozenset({ModelCapability.EMBEDDING}),
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),
+    "gpt-image-1": frozenset({ModelCapability.IMAGE_GENERATION}),
+    "gpt-image-1-mini": frozenset({ModelCapability.IMAGE_GENERATION}),
+    "dall-e-2": frozenset({ModelCapability.IMAGE_GENERATION}),
+    "dall-e-3": frozenset({ModelCapability.IMAGE_GENERATION}),
+    "tts-1": frozenset({ModelCapability.TEXT_TO_SPEECH}),
+    "tts-1-hd": frozenset({ModelCapability.TEXT_TO_SPEECH}),
+    "gpt-4o-mini-tts": frozenset({ModelCapability.TEXT_TO_SPEECH}),
+    "sora-2": frozenset({ModelCapability.VIDEO_GENERATION}),
+    "sora-2-pro": frozenset({ModelCapability.VIDEO_GENERATION}),
 }
 
 _NON_TEXT_MARKERS: tuple[tuple[ModelCapability, tuple[str, ...]], ...] = (
@@ -135,3 +159,23 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
 
 def filter_models(models: Iterable[ModelDescriptor], purpose: ModelPurpose) -> list[ModelDescriptor]:
     return [model for model in models if model.supports(purpose)]
+
+
+def search_models(
+    models: Iterable[ModelDescriptor],
+    *,
+    purpose: ModelPurpose,
+    query: str = "",
+) -> list[ModelDescriptor]:
+    """Capability-first filtering with an optional user-visible search term."""
+    compatible = filter_models(models, purpose)
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return compatible
+    return [
+        model
+        for model in compatible
+        if needle in model.id.casefold()
+        or needle in model.provider.casefold()
+        or needle in model.qualified_id.casefold()
+    ]

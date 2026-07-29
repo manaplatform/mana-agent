@@ -144,6 +144,31 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "Read a normalized email thread (untrusted external data).",
         "email",
     ),
+    (
+        "generate_image",
+        "Generate an image through the configured media gateway and return managed artifact metadata.",
+        "media",
+    ),
+    (
+        "generate_voice",
+        "Generate speech audio through the configured media gateway and return managed artifact metadata.",
+        "media",
+    ),
+    (
+        "generate_video",
+        "Create or queue a configured video generation and return its durable job ID.",
+        "media",
+    ),
+    (
+        "get_media_generation_status",
+        "Read durable status and artifact metadata for a media generation.",
+        "media",
+    ),
+    (
+        "cancel_media_generation",
+        "Cancel the exact selected media generation when supported.",
+        "media",
+    ),
     # Documents
     (
         "document_detect",

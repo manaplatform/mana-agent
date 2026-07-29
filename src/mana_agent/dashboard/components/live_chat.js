@@ -465,6 +465,16 @@
             node.className = "activity";
             addText(node, "div", `${event.title || type} · ${eventStatus(event)}`);
             if (eventSummary(event)) addText(node, "div", eventSummary(event), "logs");
+            if (type.startsWith("media_generation_")) {
+              const mediaLabel = [
+                metadata.media_type,
+                metadata.provider && metadata.model ? `${metadata.provider}/${metadata.model}` : "",
+                metadata.progress != null ? `${Math.round(Number(metadata.progress) * 100)}%` : "",
+              ].filter(Boolean).join(" · ");
+              if (mediaLabel) addText(node, "div", mediaLabel, "meta");
+              if (metadata.artifact_id) addText(node, "div", `Artifact: ${metadata.artifact_id}`, "logs");
+              if (metadata.error) addText(node, "div", metadata.error, "permission-error");
+            }
             if (type === "canvas.createSurface") {
               const link = document.createElement("a");
               const canvas = metadata.canvas_event || {};

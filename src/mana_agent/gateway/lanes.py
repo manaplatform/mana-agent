@@ -14,6 +14,7 @@ class _ValueEnum(str, Enum):
 
 class LaneId(_ValueEnum):
     ARTIFACT = "artifact"
+    MEDIA = "media"
     CODING = "coding"
     RESEARCH = "research"
     REVIEW = "review"
@@ -164,6 +165,33 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             default_priority=LanePriority.INTERACTIVE, can_create_subagents=False, requires_repository=False,
             requires_write_access=False, lock_policy=LockMode.NONE, timeout_seconds=900,
         ),
+        LaneId.MEDIA: LaneContract(
+            lane_id=LaneId.MEDIA,
+            display_name="Media",
+            description="Executes configured image, voice, and video generation jobs.",
+            owns=("image generation", "voice generation", "video generation", "media job lifecycle"),
+            handoff_targets=(),
+            allowed_tools=(
+                "media.image.generate",
+                "media.voice.generate",
+                "media.video.generate",
+                "media.artifact.write",
+                "media.status.read",
+                "media.generation.cancel",
+            ),
+            denied_tools=WRITE_CAPABILITIES + ("secrets",),
+            allowed_models=(),
+            max_concurrent_jobs=2,
+            max_subagents=0,
+            token_budget=10_000,
+            cost_budget=100.0,
+            default_priority=LanePriority.INTERACTIVE,
+            can_create_subagents=False,
+            requires_repository=False,
+            requires_write_access=False,
+            lock_policy=LockMode.NONE,
+            timeout_seconds=3600,
+        ),
         LaneId.CODING: LaneContract(
             lane_id=LaneId.CODING, display_name="Coding", description="Implements repository changes.",
             owns=("implementation", "repository mutations"),
@@ -273,6 +301,7 @@ INTENT_LANES: dict[str, LaneId] = {
 ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "multi_task": LaneId.RESEARCH,
     "artifact": LaneId.ARTIFACT,
+    "media": LaneId.MEDIA,
     "coding": LaneId.CODING,
     "browser": LaneId.RESEARCH,
     "search": LaneId.RESEARCH,
@@ -308,6 +337,11 @@ def select_lane(*, entry_route: str = "", intent: str = "", model_lane: str | La
 TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "repo_search": frozenset({"repository_read"}), "repo_batch_search": frozenset({"repository_read"}),
     "read_file": frozenset({"repository_read"}), "repo_batch_read": frozenset({"repository_read"}),
+    "generate_image": frozenset({"media.image.generate", "media.artifact.write"}),
+    "generate_voice": frozenset({"media.voice.generate", "media.artifact.write"}),
+    "generate_video": frozenset({"media.video.generate", "media.artifact.write"}),
+    "get_media_generation_status": frozenset({"media.status.read"}),
+    "cancel_media_generation": frozenset({"media.generation.cancel"}),
     "list_files": frozenset({"repository_read"}), "find_symbols": frozenset({"repository_read"}),
     "semantic_search": frozenset({"repository_read"}), "call_graph": frozenset({"repository_read"}),
     "read_skill": frozenset({"repository_read"}),

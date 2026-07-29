@@ -168,6 +168,13 @@ _TYPE_TO_KIND = {
     "test.started": "tool",
     "test.finished": "tool",
     "approval.required": "routing",
+    "media_generation_requested": "tool",
+    "media_generation_queued": "tool",
+    "media_generation_started": "tool",
+    "media_generation_progress": "tool",
+    "media_generation_completed": "tool",
+    "media_generation_failed": "error",
+    "media_generation_cancelled": "tool",
     "warning": "error",
     "error": "error",
 }
@@ -270,6 +277,8 @@ def normalize_event_kind(value: str) -> str:
         return _TYPE_TO_KIND.get(_RAW_KIND_TO_TYPE[normalized], "reasoning")
     if normalized.startswith(("tool.", "command.", "file.", "patch.", "test.")):
         return "tool"
+    if normalized.startswith("media_generation_"):
+        return "error" if normalized.endswith("_failed") else "tool"
     if normalized.startswith(("assistant.", "turn.")):
         return "response"
     if normalized.startswith(("agent.", "reasoning.")):

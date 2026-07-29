@@ -85,7 +85,8 @@ Use Mana-Agent to:
 | Dashboard | Repository overview, chat, analysis, taskboard, traces, observability, automation inspection, and settings. |
 | Live Canvas | Durable A2UI surfaces, interactive actions, workflow activity, and reconnect recovery. |
 | Automations | Typed persistent jobs authored in chat and deployed through hidden platform schedulers. |
-| Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and repository-local runtime data. |
+| Media generation | Optional capability-filtered image, voice/audio, and durable video generation through the gateway. |
+| Artifacts | JSON, Markdown, HTML, DOT, GraphML, Mermaid, traces, and managed image/audio/video outputs. |
 | Mana Eval Lab | Reproducible multi-variant runs, immutable trajectories, replay, leaderboards, paired regression reports, and fail-closed CI gates. |
 
 ## Mana Eval Lab
@@ -140,7 +141,7 @@ flowchart LR
 
 The model chooses capabilities from tool metadata and active policy. Fixed chat keywords should not silently replace model routing for repository, connector, search, or mutation work.
 
-Every chat turn first passes through the gateway's typed entry router. It selects a registered conversation, coding, connector, search, repository, automation, or `multi_task` orchestration path from live runtime availability before any response is generated. A compound turn creates one root TaskBoard item and independently routed children with explicit dependencies; safe independent work can run concurrently through the existing lanes and locks, while partial failures and child-specific approvals remain visible. One session is opened per chat, reused for all turns, and explicitly finalized on exit or `/new`; see [entry routing and chat sessions](docs/21-entry-routing-and-chat-sessions.md).
+Every chat turn first passes through the gateway's typed entry router. It selects a registered conversation, coding, connector, search, repository, media, automation, or `multi_task` orchestration path from live runtime availability before any response is generated. A compound turn creates one root TaskBoard item and independently routed children with explicit dependencies; safe independent work can run concurrently through the existing lanes and locks, while partial failures and child-specific approvals remain visible. One session is opened per chat, reused for all turns, and explicitly finalized on exit or `/new`; see [entry routing and chat sessions](docs/21-entry-routing-and-chat-sessions.md).
 
 Local computer control is an explicit `computer` route and remains disabled
 until configured. It exposes narrow tools rather than raw OS command execution,
@@ -303,6 +304,14 @@ capability-filtered agent models, the separate embedding model, web search, and
 GitHub authentication are configured here. Existing provider credentials can
 be left unchanged, replaced, or explicitly removed; masked placeholders are
 never saved as credentials.
+
+Image, voice/audio, and video generation are optional sections. Each selector
+shows only models with the required declared capability; unknown models are not
+assumed compatible. Metadata, audio, and video remain under
+`~/.mana/artifacts/media/`; completed images are written directly to the launch
+directory with safe `media_*` names. Media generation does not create a
+workspace `.mana` directory. See
+[`docs/23-media-generation.md`](docs/23-media-generation.md).
 
 Mana-managed settings are stored under:
 
@@ -1134,6 +1143,7 @@ Protocol adapters are optional: use `pip install "mana-agent[acp]"`, `pip instal
 | [`docs/04-commands.md`](docs/04-commands.md) | CLI command reference. |
 | [`docs/19-experience-to-skill-workshop.md`](docs/19-experience-to-skill-workshop.md) | Verified experience, proposal review, installation, and quarantine. |
 | [`docs/21-entry-routing-and-chat-sessions.md`](docs/21-entry-routing-and-chat-sessions.md) | Typed entry routing, connector availability, and chat-session lifecycle. |
+| [`docs/23-media-generation.md`](docs/23-media-generation.md) | Optional image, voice/audio, and video generation, managed artifacts, permissions, and durable jobs. |
 | [`docs/24-fleet.md`](docs/24-fleet.md) | Fleet architecture, trust, workers, CLI, permissions, and operations. |
 | [`docs/25-cross-platform-verification.md`](docs/25-cross-platform-verification.md) | Verification matrices, outcomes, Eval configuration, and recovery. |
 | [`docs/26-teach-mode.md`](docs/26-teach-mode.md) | Demonstration recording, flow compilation, verification, replay, scheduling, privacy, and packages. |
