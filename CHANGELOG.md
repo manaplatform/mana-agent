@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Bumped the package and documented version to `v0.1.3`.
+  - User verification required: `python -m pytest tests/test_package_version.py`.
+
 - Added optional production media generation for images, speech/audio, and
   durable video jobs. This includes capability-filtered model selection, typed
   model-driven entry decisions, a Media lane, provider-neutral contracts, a
