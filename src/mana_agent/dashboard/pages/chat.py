@@ -14,6 +14,10 @@ def _api_base() -> str:
     return str(st.session_state.get("mana_api_base") or "").strip().rstrip("/")
 
 
+def _conversation_label(title: str, conversation_id: str) -> str:
+    return f"{title[:40]} · {conversation_id[-8:]}"
+
+
 def render(root: Path | None = None) -> None:
     root = root or find_mana_root()
     service = conversation_service_for_root(root)
@@ -29,17 +33,21 @@ def render(root: Path | None = None) -> None:
         if st.button("➕ New conversation", use_container_width=True, key="chat_new_conv"):
             created = service.create(title="New conversation")
             st.session_state.active_conversation_id = created.conversation_id
+            # Streamlit preserves selectbox values across reruns. Reset it before
+            # rendering the widget so the prior conversation cannot overwrite the
+            # newly activated one below.
+            st.session_state.chat_conv_select = _conversation_label(created.title, created.conversation_id)
             st.rerun()
         conversations = service.list(limit=50)
         labels = {
-            f"{item.title[:40]} · {item.conversation_id[-8:]}": item.conversation_id
+            _conversation_label(item.title, item.conversation_id): item.conversation_id
             for item in conversations
         }
         if not labels:
             created = service.create(title="New conversation")
             st.session_state.active_conversation_id = created.conversation_id
             conversations = [created]
-            labels = {f"{created.title} · {created.conversation_id[-8:]}": created.conversation_id}
+            labels = {_conversation_label(created.title, created.conversation_id): created.conversation_id}
         active = st.session_state.get("active_conversation_id")
         options = list(labels.keys())
         default_idx = 0
@@ -59,6 +67,7 @@ def render(root: Path | None = None) -> None:
         if st.button("Delete chat", type="secondary", use_container_width=True, disabled=not confirm_delete, key=f"delete_{conversation_id}"):
             service.delete(conversation_id)
             st.session_state.pop("active_conversation_id", None)
+            st.session_state.pop("chat_conv_select", None)
             st.rerun()
 
     conversation_id = st.session_state.active_conversation_id

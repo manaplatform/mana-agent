@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-29
+
+- Fixed dashboard chat session replacement: submitting `/new` now reconnects the embedded live chat to the replacement canonical session instead of leaving the deleted session in a working state. The sidebar New conversation control also clears its persistent selector value so it activates the new chat.
+  - Verification: `PYTHONPATH=src venv/bin/python -m pytest -q tests/test_conversation_service.py tests/test_api_conversations.py tests/test_dashboard_live_chat.py tests/test_dashboard_navigation.py` passed (19 passed, 1 skipped); `venv/bin/python -m py_compile src/mana_agent/dashboard/pages/chat.py` and `git diff --check` passed. Node.js was unavailable, so the browser reducer suite was not run.
+
 ## 2026-07-28
 
 - Fixed model-routed search follow-ups: the entry router now carries its

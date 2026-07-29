@@ -479,6 +479,27 @@
 
     const dispatchEvent = (event) => { reduce(state, { type: "event", event }); render(); };
     const socketUrl = () => `${config.wsBase}/api/v1/ws/conversations/${encodeURIComponent(config.sessionId)}?root=${encodeURIComponent(config.root)}&replay_limit=1000&after_sequence=${state.lastSequence}`;
+    const switchSession = (sessionId) => {
+      const replacementId = text(sessionId);
+      if (!replacementId || replacementId === config.sessionId) return;
+      config.sessionId = replacementId;
+      state.sessionId = replacementId;
+      state.messages.clear();
+      state.tools.clear();
+      state.activities.clear();
+      state.permissionRequests.clear();
+      state.seenSequences.clear();
+      state.seenUnsequenced.clear();
+      state.lastSequence = 0;
+      state.submitting = false;
+      state.runStatus = "idle";
+      state.error = "";
+      reduce(state, { type: "socket", ready: false });
+      // Keep the Streamlit shell informed when it later gains a message bridge.
+      // The embedded client itself immediately reconnects to the new session.
+      window.parent.postMessage({ type: "mana-live-chat.session-replaced", conversationId: replacementId }, "*");
+      if (socket) socket.close();
+    };
     const connect = () => {
       if (closed) return;
       socket = new WebSocket(socketUrl());
@@ -516,6 +537,14 @@
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+        // Commands such as /new replace the canonical session. They have no
+        // turn.finished event, so explicitly bind the live client to the
+        // replacement instead of leaving the old, deleted session "working".
+        if (payload.conversation_id && payload.conversation_id !== config.sessionId) {
+          switchSession(payload.conversation_id);
+          render();
+          return;
+        }
         reduce(state, { type: "hydrate", messages: [payload.user_message, payload.assistant_message].filter(Boolean), events: payload.events || [] });
         render();
       } catch (error) {
