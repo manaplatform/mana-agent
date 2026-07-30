@@ -716,6 +716,53 @@ def test_server_request_structured_output_schema_is_closed() -> None:
     assert "arguments" not in server_decision_schema["properties"]
 
 
+def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
+    gateway = object.__new__(AgentChatGateway)
+    gateway.server_management_service = SimpleNamespace(
+        list_servers=lambda: [
+            SimpleNamespace(
+                server_id="mana-agent-server-1",
+                name="production",
+                mode="managed_admin",
+                provider="ssh",
+                operating_system="ubuntu",
+                architecture="x86_64",
+                allowed_capabilities={"inspect", "package.write"},
+            )
+        ]
+    )
+
+    availability = gateway._server_route_availability()
+    package_contract = next(
+        contract
+        for contract in availability.details["tool_contracts"]
+        if contract["tool_name"] == "server_package_install"
+    )
+
+    assert availability.available is True
+    assert availability.details["server_catalog"] == [
+        {
+            "server_id": "mana-agent-server-1",
+            "name": "production",
+            "mode": "managed_admin",
+            "provider": "ssh",
+            "operating_system": "ubuntu",
+            "architecture": "x86_64",
+            "allowed_capabilities": ["inspect", "package.write"],
+        }
+    ]
+    assert package_contract == {
+        "tool_name": "server_package_install",
+        "action": "package",
+        "required_capability": "package.write",
+        "read_only": False,
+        "consequential": True,
+        "destructive": False,
+    }
+    assert "exactly from the selected entry" in ENTRY_ROUTER_PROMPT
+    assert "route availability tool_contracts" in ENTRY_ROUTER_PROMPT
+
+
 def test_server_route_decodes_closed_arguments_json() -> None:
     registry = EntryRouteRegistry()
     registry.register(

@@ -9,14 +9,21 @@ All notable repository changes should be recorded here.
   models and decoding exact tool arguments from validated JSON text before the
   existing server decision and tool-contract checks. The canonical required
   source vocabulary now also includes the `server` source advertised by the
-  route contract. Invalid JSON, non-object arguments, and invalid server
-  decisions stop without executing a fallback.
+  route contract. Server route availability now gives the model the exact tool
+  risk/capability contracts and a non-secret enrolled-server catalog, preventing
+  it from guessing capability names while preserving strict validation. Invalid
+  JSON, non-object arguments, and invalid server decisions stop without
+  executing a fallback.
   - User verification reported before the fix: OpenAI rejected
     `EntryRoutingOutput.server_request` because its object schema did not set
     `additionalProperties` to `false`.
   - User verification reported after the schema fix: `46 passed, 1 failed`;
     the server decision was rejected because `server` was absent from the
     canonical source vocabulary.
+  - User verification reported after the vocabulary fix: the Nginx installation
+    decision reached strict validation but guessed a `required_capability` that
+    did not match the authoritative `server_package_install` contract; no tool
+    was executed.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
 
 - Fixed configuration saving on headless Linux when the Python `keyring`

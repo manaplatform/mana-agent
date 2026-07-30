@@ -521,6 +521,40 @@ class AgentChatGateway:
             }
         )
 
+    def _server_route_availability(self) -> RouteAvailability:
+        """Expose non-secret server and tool contracts required by the routing model."""
+        servers = self.server_management_service.list_servers()
+        return self._available(
+            bool(servers),
+            "No servers are enrolled. Enroll and pin a host key before using server tools.",
+            details={
+                "enrolled_servers": len(servers),
+                "server_catalog": [
+                    {
+                        "server_id": server.server_id,
+                        "name": server.name,
+                        "mode": server.mode,
+                        "provider": server.provider,
+                        "operating_system": server.operating_system,
+                        "architecture": server.architecture,
+                        "allowed_capabilities": sorted(server.allowed_capabilities),
+                    }
+                    for server in servers
+                ],
+                "tool_contracts": [
+                    {
+                        "tool_name": spec.name,
+                        "action": spec.action.value,
+                        "required_capability": spec.capability,
+                        "read_only": spec.read_only,
+                        "consequential": spec.consequential,
+                        "destructive": spec.destructive,
+                    }
+                    for spec in SERVER_TOOL_SPECS.values()
+                ],
+            },
+        )
+
     def _json_setting(self, name: str) -> dict[str, Any]:
         value = getattr(self.settings, name, "{}")
         if isinstance(value, dict):
@@ -726,11 +760,7 @@ class AgentChatGateway:
             RouteRegistration(
                 "server",
                 "Typed management of explicitly enrolled Linux servers.",
-                lambda: self._available(
-                    bool(self.server_management_service.list_servers()),
-                    "No servers are enrolled. Enroll and pin a host key before using server tools.",
-                    details={"enrolled_servers": len(self.server_management_service.list_servers())},
-                ),
+                self._server_route_availability,
                 tuple(SERVER_TOOL_SPECS),
             ),
             RouteRegistration(

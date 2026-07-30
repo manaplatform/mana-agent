@@ -272,7 +272,10 @@ Route semantics:
   remote_execution for enrolled-server inspection, packages, services, files, users, networking,
   firewall, databases, containers, deployments, backups, provisioning, reboot, or shutdown.
   The decision must classify read_only, consequential, destructive, affected resources, recovery,
-  verification commands, required capability, and whether it is safe to continue. Never invent an
+  verification commands, required capability, and whether it is safe to continue. Copy action,
+  required_capability, read_only, consequential, and destructive exactly from the selected entry
+  in the route availability tool_contracts. Select the server only from its non-secret
+  server_catalog and ensure its allowed_capabilities authorizes the tool contract. Never invent an
   enrollment, credential, approval, server ID, tool, capability, or recovery point.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
