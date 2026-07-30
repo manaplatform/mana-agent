@@ -102,7 +102,10 @@ observability = [
 email = ["google-api-python-client>=2.0,<3.0", "google-auth-oauthlib>=1.2,<2.0", "keyring>=24.0,<26.0"]
 full = [
   "playwright>=1.45,<2.0",
-  "pynput>=1.7,<2.0",
+  # Linux desktop capture needs native input headers and is intentionally
+  # installed through the explicit `teach-desktop` extra instead of making
+  # headless/server `full` installs compile evdev.
+  "pynput>=1.7,<2.0; sys_platform != 'linux'",
   "pyobjc-framework-Quartz>=10,<13; sys_platform == 'darwin'",
   "pyobjc-framework-Cocoa>=10,<13; sys_platform == 'darwin'",
   "pyobjc-framework-ApplicationServices>=10,<13; sys_platform == 'darwin'",

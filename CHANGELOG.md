@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed `mana-agent[full]` installation on headless Linux servers by excluding
+  the native `pynput`/`evdev` desktop-input stack on Linux. Native Linux Teach
+  Mode capture remains available through the explicit `teach-desktop` extra
+  after installing the platform input headers.
+  - User verification reported before the fix: editable `mana-agent` wheel built successfully, but the transitive `evdev` wheel failed because `linux/input.h` and `linux/input-event-codes.h` were unavailable.
+  - User verification required: `python -m pytest tests/test_package_version.py`.
+  - User verification required on Linux: `python -m pip install -e ".[full]"`.
+
 - Fixed direct construction of server SSH argv to inherit the model-validated
   connection timeout and pinned known-hosts path from `RemoteExecutionRequest`
   when callers do not provide explicit overrides.

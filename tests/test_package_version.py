@@ -57,3 +57,11 @@ def test_langchain_constraints_are_resolvable_and_consistent() -> None:
 
     assert package_constraints == expected
     assert requirements_constraints == expected
+
+
+def test_full_extra_does_not_build_linux_desktop_input_dependencies() -> None:
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    optional = pyproject["project"]["optional-dependencies"]
+
+    assert "pynput>=1.7,<2.0; sys_platform != 'linux'" in optional["full"]
+    assert "pynput>=1.7,<2.0" in optional["teach-desktop"]
