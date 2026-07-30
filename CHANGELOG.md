@@ -7,6 +7,9 @@ All notable repository changes should be recorded here.
 - Fixed enrolled-server generic shell actions by publishing the required exact
   `argv` string-list shape in the server tool contract and rejecting malformed,
   empty, or null-containing argv values before an approval or execution attempt.
+  The non-secret server catalog now also exposes the configured remote login
+  user, and generic-shell home-directory examples use a relative path rather
+  than an invalid placeholder absolute path.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
 
 - Fixed the managed-memory secret-store regression test on Windows by limiting

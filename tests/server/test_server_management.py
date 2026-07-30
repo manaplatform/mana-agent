@@ -234,18 +234,18 @@ def test_shell_execute_requires_an_exact_non_empty_argv_list() -> None:
     shell = decision(
         action="shell",
         tool_name="server_shell_execute",
-        arguments={"argv": ["mkdir", "-p", "/home/root/mana-agent-test"]},
+        arguments={"argv": ["mkdir", "-p", "mana-agent-test"]},
         required_capability="shell",
         read_only=False,
         consequential=True,
-        affected_resources=["directory:/home/root/mana-agent-test"],
+        affected_resources=["directory:home/mana-agent-test"],
     )
 
     validate_tool_arguments(shell)
-    assert build_tool_argv(shell) == ["mkdir", "-p", "/home/root/mana-agent-test"]
+    assert build_tool_argv(shell) == ["mkdir", "-p", "mana-agent-test"]
 
     invalid = shell.model_copy(
-        update={"arguments": {"argv": "mkdir -p /home/root/mana-agent-test"}}
+        update={"arguments": {"argv": "mkdir -p mana-agent-test"}}
     )
     with pytest.raises(ValueError, match="exact argv string list"):
         validate_tool_arguments(invalid)

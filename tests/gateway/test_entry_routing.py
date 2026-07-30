@@ -724,6 +724,7 @@ def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
             SimpleNamespace(
                 server_id="mana-agent-server-1",
                 name="production",
+                username="ubuntu",
                 mode="managed_admin",
                 provider="ssh",
                 operating_system="ubuntu",
@@ -745,6 +746,7 @@ def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
         {
             "server_id": "mana-agent-server-1",
             "name": "production",
+            "login_user": "ubuntu",
             "mode": "managed_admin",
             "provider": "ssh",
             "operating_system": "ubuntu",
@@ -770,10 +772,11 @@ def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
         if contract["tool_name"] == "server_shell_execute"
     )
     assert shell_contract["arguments_json_example"] == (
-        '{"argv":["mkdir","-p","/home/user/mana-agent-test"]}'
+        '{"argv":["mkdir","-p","mana-agent-test"]}'
     )
     assert "exactly from the selected entry" in ENTRY_ROUTER_PROMPT
     assert "route availability tool_contracts" in ENTRY_ROUTER_PROMPT
+    assert "server catalog's login_user" in ENTRY_ROUTER_PROMPT
     assert "capability_error is only for a route-wide unavailable" in ENTRY_ROUTER_PROMPT
 
 

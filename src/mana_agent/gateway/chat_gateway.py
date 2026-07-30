@@ -535,6 +535,7 @@ class AgentChatGateway:
                     {
                         "server_id": server.server_id,
                         "name": server.name,
+                        "login_user": server.username,
                         "mode": server.mode,
                         "provider": server.provider,
                         "operating_system": server.operating_system,

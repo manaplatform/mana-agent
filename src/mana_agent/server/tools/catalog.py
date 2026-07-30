@@ -49,7 +49,7 @@ SERVER_TOOL_SPECS = {
             "shell",
             False,
             True,
-            arguments_json_example='{"argv":["mkdir","-p","/home/user/mana-agent-test"]}',
+            arguments_json_example='{"argv":["mkdir","-p","mana-agent-test"]}',
         ),
         _spec("server_shell_session_start", ServerActionKind.SHELL, "shell", False, True),
         _spec("server_shell_session_write", ServerActionKind.SHELL, "shell", False, True),

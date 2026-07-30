@@ -284,6 +284,9 @@ Route semantics:
   the specific authorization guidance; capability_error is only for a route-wide unavailable
   source. Never invent an enrollment, credential, approval, server ID, tool, capability, or
   recovery point.
+  The server catalog's login_user is the configured remote SSH user. For a path in that
+  user's home directory, use a relative argv path with no cwd (for example
+  ["mkdir", "-p", "mana-agent-test"]); do not copy a placeholder absolute home path.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
   one. Return a complete typed media_request. Never route media generation to artifact, coding, or
