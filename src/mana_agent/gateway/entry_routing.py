@@ -274,7 +274,10 @@ Route semantics:
   The decision must classify read_only, consequential, destructive, affected resources, recovery,
   verification commands, required capability, and whether it is safe to continue. Copy action,
   required_capability, read_only, consequential, and destructive exactly from the selected entry
-  in the route availability tool_contracts. Select the server only from its non-secret
+  in the route availability tool_contracts, and follow that entry's non-empty
+  arguments_json_example. For a package action whose manager is not established by server_catalog
+  evidence, explicitly select manager "auto"; runtime discovery must observe one unambiguous
+  supported manager. Select the server only from its non-secret
   server_catalog. If that enrolled server lacks the tool's required capability, still select the
   server route with the exact decision and safe_to_continue=false so server preflight can return
   the specific authorization guidance; capability_error is only for a route-wide unavailable
@@ -700,6 +703,7 @@ class EntryRouter:
                 )
             try:
                 from mana_agent.server.models import ServerActionDecision
+                from mana_agent.server.runtime_tools import validate_tool_arguments
                 from mana_agent.server.tools import validate_tool_decision
 
                 raw_server_decision = server_request.get("decision")
@@ -717,6 +721,7 @@ class EntryRouter:
                     decision_payload
                 )
                 validate_tool_decision(validated_server_decision)
+                validate_tool_arguments(validated_server_decision)
             except Exception as exc:
                 raise EntryRoutingError(
                     "Model decision failed: entry_route. No response was generated. "

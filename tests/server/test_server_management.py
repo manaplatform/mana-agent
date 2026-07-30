@@ -14,9 +14,14 @@ from mana_agent.server.connection import ServerConnectionFactory
 from mana_agent.server.executor import ServerApprovalRequired, ServerDecisionError, ServerExecutor, action_key
 from mana_agent.server.firewall import FirewallPlan, FirewallRule
 from mana_agent.server.models import ServerActionDecision, ServerApproval, ServerDefinition, ServerPlan, ServerPlanStep
-from mana_agent.server.packages import detect_package_manager, package_install_argv
+from mana_agent.server.packages import (
+    detect_package_manager,
+    package_install_auto_argv,
+    package_install_argv,
+)
 from mana_agent.server.plans import ServerPlanExecutor
 from mana_agent.server.registry import ServerRegistry
+from mana_agent.server.runtime_tools import build_tool_argv, validate_tool_arguments
 from mana_agent.server.tools import SERVER_TOOL_SPECS, validate_tool_decision
 
 
@@ -188,6 +193,41 @@ def test_package_manager_requires_unambiguous_evidence() -> None:
     with pytest.raises(ValueError, match="Multiple"):
         detect_package_manager("fedora", {"dnf", "yum"})
     assert package_install_argv("apt", ["nginx"])[-1] == "nginx"
+
+
+def test_package_install_requires_typed_arguments_before_execution() -> None:
+    install = decision(
+        action="package",
+        tool_name="server_package_install",
+        arguments={"packages": ["nginx"]},
+        required_capability="package.write",
+        read_only=False,
+        consequential=True,
+        affected_resources=["package:nginx"],
+    )
+
+    with pytest.raises(ValueError, match="package manager must be one of"):
+        validate_tool_arguments(install)
+
+
+def test_package_install_auto_manager_uses_bounded_remote_discovery() -> None:
+    install = decision(
+        action="package",
+        tool_name="server_package_install",
+        arguments={"manager": "auto", "packages": ["nginx"]},
+        required_capability="package.write",
+        read_only=False,
+        consequential=True,
+        affected_resources=["package:nginx"],
+    )
+
+    argv = build_tool_argv(install)
+
+    assert argv[:2] == ["sh", "-c"]
+    assert "manager_count" in argv[2]
+    assert "Expected exactly one supported package manager" in argv[2]
+    assert "sudo apt-get install -y -- nginx" in argv[2]
+    assert package_install_auto_argv(["nginx"]) == argv
 
 
 def test_firewall_plan_preserves_management_port() -> None:

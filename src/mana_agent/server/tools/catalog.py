@@ -15,10 +15,27 @@ class ServerToolSpec:
     read_only: bool
     consequential: bool = False
     destructive: bool = False
+    arguments_json_example: str = ""
 
 
-def _spec(name: str, action: ServerActionKind, capability: str, read_only: bool, consequential: bool = False, destructive: bool = False) -> ServerToolSpec:
-    return ServerToolSpec(name, action, capability, read_only, consequential, destructive)
+def _spec(
+    name: str,
+    action: ServerActionKind,
+    capability: str,
+    read_only: bool,
+    consequential: bool = False,
+    destructive: bool = False,
+    arguments_json_example: str = "",
+) -> ServerToolSpec:
+    return ServerToolSpec(
+        name,
+        action,
+        capability,
+        read_only,
+        consequential,
+        destructive,
+        arguments_json_example,
+    )
 
 
 SERVER_TOOL_SPECS = {
@@ -45,7 +62,17 @@ SERVER_TOOL_SPECS = {
         _spec("server_service_restart", ServerActionKind.SERVICE, "service.write", False, True),
         _spec("server_service_enable", ServerActionKind.SERVICE, "service.write", False, True),
         _spec("server_package_search", ServerActionKind.INSPECT, "package.read", True),
-        _spec("server_package_install", ServerActionKind.PACKAGE, "package.write", False, True),
+        _spec(
+            "server_package_install",
+            ServerActionKind.PACKAGE,
+            "package.write",
+            False,
+            True,
+            arguments_json_example=(
+                '{"manager":"auto|apt|dnf|yum|pacman|apk|zypper|brew",'
+                '"packages":["nginx"]}'
+            ),
+        ),
         _spec("server_package_remove", ServerActionKind.PACKAGE, "package.write", False, True),
         _spec("server_package_update", ServerActionKind.PACKAGE, "package.write", False, True),
         _spec("server_user_create", ServerActionKind.USER, "user.write", False, True),

@@ -549,6 +549,7 @@ class AgentChatGateway:
                         "read_only": spec.read_only,
                         "consequential": spec.consequential,
                         "destructive": spec.destructive,
+                        "arguments_json_example": spec.arguments_json_example,
                     }
                     for spec in SERVER_TOOL_SPECS.values()
                 ],

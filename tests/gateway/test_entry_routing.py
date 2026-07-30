@@ -758,6 +758,10 @@ def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
         "read_only": False,
         "consequential": True,
         "destructive": False,
+        "arguments_json_example": (
+            '{"manager":"auto|apt|dnf|yum|pacman|apk|zypper|brew",'
+            '"packages":["nginx"]}'
+        ),
     }
     assert "exactly from the selected entry" in ENTRY_ROUTER_PROMPT
     assert "route availability tool_contracts" in ENTRY_ROUTER_PROMPT

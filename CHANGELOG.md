@@ -20,9 +20,11 @@ All notable repository changes should be recorded here.
   it from guessing capability names while preserving strict validation. A
   server-level authorization denial now remains on the server route, returns
   exact `server authorize` guidance before any execution, and can be resolved
-  through the new explicit capability-granting CLI command. Invalid JSON,
-  non-object arguments, and invalid server decisions stop without executing a
-  fallback.
+  through the new explicit capability-granting CLI command. Package-install
+  arguments are now validated before approval/argv construction, and the model
+  can explicitly select bounded `auto` discovery that refuses zero or multiple
+  observed package managers instead of guessing one. Invalid JSON, non-object
+  arguments, and invalid server decisions stop without executing a fallback.
   - User verification reported before the fix: OpenAI rejected
     `EntryRoutingOutput.server_request` because its object schema did not set
     `additionalProperties` to `false`.
@@ -37,6 +39,9 @@ All notable repository changes should be recorded here.
     identified that `mana-agent-server-1` lacks `package.write`, but represented
     the resource-level denial as a route-wide `capability_error`; no tool was
     executed.
+  - User verification reported after granting `package.write`: the Nginx decision
+    omitted its package manager and surfaced a raw `'manager'` error; no server
+    action was executed.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
   - User verification required: `python -m mana_agent server authorize --help`.
 

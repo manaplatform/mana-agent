@@ -6,11 +6,22 @@ from .backups import postgres_backup_argv
 from .containers import container_list_argv
 from .filesystem import atomic_write_script, list_directory_argv, read_file_argv
 from .models import ServerActionDecision
-from .packages import package_install_argv, package_remove_argv
+from .packages import (
+    package_install_auto_argv,
+    package_install_argv,
+    package_remove_argv,
+    validate_package_arguments,
+)
 from .processes import process_list_argv, process_signal_argv
 from .services import service_argv, service_logs_argv
 from .tools import validate_tool_decision
 from .users import user_create_argv, user_delete_argv
+
+
+def validate_tool_arguments(decision: ServerActionDecision) -> None:
+    """Validate model-selected arguments before approval or argv construction."""
+    if decision.tool_name == "server_package_install":
+        validate_package_arguments(decision.arguments)
 
 
 def build_tool_argv(decision: ServerActionDecision) -> list[str]:
@@ -48,7 +59,10 @@ def build_tool_argv(decision: ServerActionDecision) -> list[str]:
     if name == "server_log_read":
         return service_logs_argv(str(args["manager"]), str(args["service"]), int(args.get("lines") or 100))  # type: ignore[arg-type]
     if name == "server_package_install":
-        return package_install_argv(str(args["manager"]), list(args.get("packages") or []))  # type: ignore[arg-type]
+        manager, packages = validate_package_arguments(args)
+        if manager == "auto":
+            return package_install_auto_argv(packages)
+        return package_install_argv(manager, packages)
     if name == "server_package_remove":
         return package_remove_argv(str(args["manager"]), list(args.get("packages") or []), purge=bool(args.get("purge")))  # type: ignore[arg-type]
     if name == "server_user_create":
