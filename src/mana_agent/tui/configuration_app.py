@@ -13,7 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, Switch, TabbedContent, TabPane
 
 from mana_agent.config.catalog_service import ModelCatalogService, ProviderValidationError
-from mana_agent.config.model_catalog import ModelPurpose, filter_models
+from mana_agent.config.model_catalog import ModelPurpose, filter_models, search_models
 from mana_agent.config.provider_registry import PROVIDERS
 from mana_agent.config.session import ConfigurationDraft
 from mana_agent.config.user_config import migrate_legacy_config
@@ -147,8 +147,17 @@ class ManaConfigurationApp(App[bool]):
 
     def compose(self) -> ComposeResult:
         values = self.draft.values
+        media = values.get("media") if isinstance(values.get("media"), dict) else {}
+        image_media = media.get("image") if isinstance(media.get("image"), dict) else {}
+        voice_media = media.get("voice") if isinstance(media.get("voice"), dict) else {}
+        video_media = media.get("video") if isinstance(media.get("video"), dict) else {}
         provider_id = str(values.get("MANA_AI_PROVIDER") or "openai")
         provider_options = [(item.display_name, item.id) for item in PROVIDERS.all()]
+        media_provider_options = [
+            (item.display_name, item.id)
+            for item in PROVIDERS.all()
+            if item.id in {"openai", "custom"}
+        ]
         search_options = [("Disabled", "disabled"), *((item.display_name, item.id) for item in SEARCH_PROVIDERS)]
         github_source = str(values.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "disabled")
         yield Header()
@@ -187,6 +196,45 @@ class ManaConfigurationApp(App[bool]):
                 yield Label("Embedding model", classes="section-title")
                 yield Static("Only embedding-capable models are offered after catalog refresh.", classes="hint")
                 yield Select(self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True), id="embedding-model", allow_blank=False)
+            with TabPane("Image generation", id="media-image"):
+                yield Switch(value=bool(image_media.get("enabled", False)), id="media-image-enabled")
+                yield Label("Enable image generation", classes="hint")
+                yield Select(media_provider_options, value=str(image_media.get("provider") or "openai"), id="media-image-provider", allow_blank=False)
+                yield Input(placeholder="Search compatible image models", id="media-image-search")
+                yield Select(self._media_model_options(image_media, "gpt-image-1"), id="media-image-model", allow_blank=False)
+                yield Input(value=str(image_media.get("credential_ref") or ""), placeholder="Credential reference (defaults to provider key)", id="media-image-credential")
+                yield Input(value=str(image_media.get("base_url") or ""), placeholder="Custom base URL (optional)", id="media-image-base-url")
+                yield Input(value=str(image_media.get("timeout_seconds") or 120), placeholder="Timeout seconds", id="media-image-timeout")
+                yield Input(value=str(image_media.get("max_output_bytes") or 52428800), placeholder="Maximum output bytes", id="media-image-max-bytes")
+                yield Input(value=str((image_media.get("defaults") or {}).get("size") or "1024x1024"), placeholder="Default size", id="media-image-default-size")
+                yield Input(value=str((image_media.get("defaults") or {}).get("quality") or "auto"), placeholder="Default quality", id="media-image-default-quality")
+                yield Input(value=str((image_media.get("defaults") or {}).get("output_format") or "png"), placeholder="Default format", id="media-image-default-format")
+            with TabPane("Voice generation", id="media-voice"):
+                yield Switch(value=bool(voice_media.get("enabled", False)), id="media-voice-enabled")
+                yield Label("Enable voice/audio generation", classes="hint")
+                yield Select(media_provider_options, value=str(voice_media.get("provider") or "openai"), id="media-voice-provider", allow_blank=False)
+                yield Input(placeholder="Search compatible voice models", id="media-voice-search")
+                yield Select(self._media_model_options(voice_media, "gpt-4o-mini-tts"), id="media-voice-model", allow_blank=False)
+                yield Input(value=str(voice_media.get("credential_ref") or ""), placeholder="Credential reference (defaults to provider key)", id="media-voice-credential")
+                yield Input(value=str(voice_media.get("base_url") or ""), placeholder="Custom base URL (optional)", id="media-voice-base-url")
+                yield Input(value=str(voice_media.get("timeout_seconds") or 120), placeholder="Timeout seconds", id="media-voice-timeout")
+                yield Input(value=str(voice_media.get("max_output_bytes") or 52428800), placeholder="Maximum output bytes", id="media-voice-max-bytes")
+                yield Input(value=str((voice_media.get("defaults") or {}).get("voice") or "alloy"), placeholder="Default voice", id="media-voice-default")
+                yield Input(value=str((voice_media.get("defaults") or {}).get("output_format") or "mp3"), placeholder="Default format", id="media-voice-default-format")
+                yield Input(value=str((voice_media.get("defaults") or {}).get("speed") or 1.0), placeholder="Default speed", id="media-voice-default-speed")
+            with TabPane("Video generation", id="media-video"):
+                yield Switch(value=bool(video_media.get("enabled", False)), id="media-video-enabled")
+                yield Label("Enable video generation", classes="hint")
+                yield Select(media_provider_options, value=str(video_media.get("provider") or "openai"), id="media-video-provider", allow_blank=False)
+                yield Input(placeholder="Search compatible video models", id="media-video-search")
+                yield Select(self._media_model_options(video_media, "sora-2"), id="media-video-model", allow_blank=False)
+                yield Input(value=str(video_media.get("credential_ref") or ""), placeholder="Credential reference (defaults to provider key)", id="media-video-credential")
+                yield Input(value=str(video_media.get("base_url") or ""), placeholder="Custom base URL (optional)", id="media-video-base-url")
+                yield Input(value=str(video_media.get("timeout_seconds") or 600), placeholder="Timeout seconds", id="media-video-timeout")
+                yield Input(value=str(video_media.get("max_output_bytes") or 524288000), placeholder="Maximum output bytes", id="media-video-max-bytes")
+                yield Input(value="" if video_media.get("max_duration_seconds") is None else str(video_media.get("max_duration_seconds")), placeholder="Maximum duration seconds (optional)", id="media-video-max-duration")
+                yield Input(value=str((video_media.get("defaults") or {}).get("duration_seconds") or 4), placeholder="Default duration seconds", id="media-video-default-duration")
+                yield Input(value=str((video_media.get("defaults") or {}).get("resolution") or "720x1280"), placeholder="Default resolution", id="media-video-default-resolution")
             with TabPane("Coding runtime", id="coding-runtime"):
                 yield Label("Coding backend", classes="section-title")
                 yield Select(
@@ -342,6 +390,23 @@ class ManaConfigurationApp(App[bool]):
             levels.append((f"Direct: {current}", current))
         return levels
 
+    @staticmethod
+    def _media_model_options(values: dict[str, Any], default: str) -> list[tuple[str, str]]:
+        model = str(values.get("model") or default)
+        return [(f"{model}  · current/manual", model)]
+
+    def _input_int(self, selector: str, default: int) -> int:
+        value = self.query_one(selector, Input).value.strip()
+        return int(value) if value else default
+
+    def _optional_input_int(self, selector: str) -> int | None:
+        value = self.query_one(selector, Input).value.strip()
+        return int(value) if value else None
+
+    def _input_float(self, selector: str, default: float) -> float:
+        value = self.query_one(selector, Input).value.strip()
+        return float(value) if value else default
+
     def _overview_text(self) -> str:
         v = self.draft.values
         provider = str(v.get("MANA_AI_PROVIDER") or "openai")
@@ -439,6 +504,54 @@ class ManaConfigurationApp(App[bool]):
             ],
         })
         self.draft.values["computer_control"] = computer
+        existing_media = self.draft.values.get("media")
+        media = dict(existing_media) if isinstance(existing_media, dict) else {}
+        media["image"] = {
+            **(dict(media.get("image") or {}) if isinstance(media.get("image"), dict) else {}),
+            "enabled": self.query_one("#media-image-enabled", Switch).value,
+            "provider": str(self.query_one("#media-image-provider", Select).value),
+            "model": str(self.query_one("#media-image-model", Select).value),
+            "credential_ref": self.query_one("#media-image-credential", Input).value.strip(),
+            "base_url": self.query_one("#media-image-base-url", Input).value.strip(),
+            "timeout_seconds": self._input_int("#media-image-timeout", 120),
+            "max_output_bytes": self._input_int("#media-image-max-bytes", 52428800),
+            "defaults": {
+                "size": self.query_one("#media-image-default-size", Input).value.strip() or "1024x1024",
+                "quality": self.query_one("#media-image-default-quality", Input).value.strip() or "auto",
+                "output_format": self.query_one("#media-image-default-format", Input).value.strip() or "png",
+            },
+        }
+        media["voice"] = {
+            **(dict(media.get("voice") or {}) if isinstance(media.get("voice"), dict) else {}),
+            "enabled": self.query_one("#media-voice-enabled", Switch).value,
+            "provider": str(self.query_one("#media-voice-provider", Select).value),
+            "model": str(self.query_one("#media-voice-model", Select).value),
+            "credential_ref": self.query_one("#media-voice-credential", Input).value.strip(),
+            "base_url": self.query_one("#media-voice-base-url", Input).value.strip(),
+            "timeout_seconds": self._input_int("#media-voice-timeout", 120),
+            "max_output_bytes": self._input_int("#media-voice-max-bytes", 52428800),
+            "defaults": {
+                "voice": self.query_one("#media-voice-default", Input).value.strip() or "alloy",
+                "output_format": self.query_one("#media-voice-default-format", Input).value.strip() or "mp3",
+                "speed": self._input_float("#media-voice-default-speed", 1.0),
+            },
+        }
+        media["video"] = {
+            **(dict(media.get("video") or {}) if isinstance(media.get("video"), dict) else {}),
+            "enabled": self.query_one("#media-video-enabled", Switch).value,
+            "provider": str(self.query_one("#media-video-provider", Select).value),
+            "model": str(self.query_one("#media-video-model", Select).value),
+            "credential_ref": self.query_one("#media-video-credential", Input).value.strip(),
+            "base_url": self.query_one("#media-video-base-url", Input).value.strip(),
+            "timeout_seconds": self._input_int("#media-video-timeout", 600),
+            "max_output_bytes": self._input_int("#media-video-max-bytes", 524288000),
+            "max_duration_seconds": self._optional_input_int("#media-video-max-duration"),
+            "defaults": {
+                "duration_seconds": self._input_int("#media-video-default-duration", 4),
+                "resolution": self.query_one("#media-video-default-resolution", Input).value.strip() or "720x1280",
+            },
+        }
+        self.draft.values["media"] = media
         self.draft.set_secret(self._provider_secret_name(provider), self.query_one("#provider-api-key", Input).value)
         self.draft.set_secret("MANA_WEB_SEARCH_API_KEY", self.query_one("#search-api-key", Input).value)
         self.draft.set_secret("MANA_GITHUB_TOKEN", self.query_one("#github-token", Input).value)
@@ -481,6 +594,11 @@ class ManaConfigurationApp(App[bool]):
             self._provider_validated = True
             text_models = filter_models(models, ModelPurpose.AGENT)
             embedding_models = filter_models(models, ModelPurpose.EMBEDDING)
+            media_models = {
+                "#media-image-model": filter_models(models, ModelPurpose.IMAGE),
+                "#media-voice-model": filter_models(models, ModelPurpose.VOICE),
+                "#media-video-model": filter_models(models, ModelPurpose.VIDEO),
+            }
             for selector in ("#high-model", "#coding-model", "#fast-model"):
                 widget = self.query_one(selector, Select)
                 current = str(widget.value)
@@ -496,7 +614,20 @@ class ManaConfigurationApp(App[bool]):
                 embed_options.append((f"{current_embed} · manual", current_embed))
             embed.set_options(embed_options)
             embed.value = current_embed if current_embed in {value for _, value in embed_options} else (embed_options[0][1] if embed_options else Select.BLANK)
-            status.update(f"Connected · {len(text_models)} agent model(s), {len(embedding_models)} embedding model(s)")
+            for selector, compatible in media_models.items():
+                widget = self.query_one(selector, Select)
+                current = str(widget.value)
+                options = [(self._model_label(item), item.id) for item in compatible]
+                if current and current not in {value for _, value in options}:
+                    options.append((f"{current} · manual", current))
+                widget.set_options(options)
+                widget.value = current if current in {value for _, value in options} else (options[0][1] if options else Select.BLANK)
+            status.update(
+                f"Connected · {len(text_models)} agent, {len(embedding_models)} embedding, "
+                f"{len(media_models['#media-image-model'])} image, "
+                f"{len(media_models['#media-voice-model'])} voice, "
+                f"{len(media_models['#media-video-model'])} video model(s)"
+            )
             return
         if button_id == "test-memory":
             self._collect()
@@ -556,7 +687,7 @@ class ManaConfigurationApp(App[bool]):
             self.action_cancel()
         elif button_id in {"continue", "back"}:
             tabs = self.query_one(TabbedContent)
-            order = ["overview", "providers", "models", "embeddings", "coding-runtime", "memory", "search", "github", "protocols", "computer-control", "review"]
+            order = ["overview", "providers", "models", "embeddings", "media-image", "media-voice", "media-video", "coding-runtime", "memory", "search", "github", "protocols", "computer-control", "review"]
             current = order.index(tabs.active)
             tabs.active = order[min(len(order) - 1, current + (1 if button_id == "continue" else -1))]
 
@@ -617,6 +748,28 @@ class ManaConfigurationApp(App[bool]):
             self._update_memory_fields()
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        media_search = {
+            "media-image-search": ("#media-image-model", ModelPurpose.IMAGE),
+            "media-voice-search": ("#media-voice-model", ModelPurpose.VOICE),
+            "media-video-search": ("#media-video-model", ModelPurpose.VIDEO),
+        }.get(str(event.input.id or ""))
+        if media_search and self._models:
+            selector, purpose = media_search
+            widget = self.query_one(selector, Select)
+            current = str(widget.value)
+            compatible = search_models(
+                self._models, purpose=purpose, query=event.value
+            )
+            options = [(self._model_label(item), item.id) for item in compatible]
+            if current and current not in {value for _, value in options}:
+                options.append((f"{current} · current", current))
+            widget.set_options(options)
+            widget.value = (
+                current
+                if current in {value for _, value in options}
+                else (options[0][1] if options else Select.BLANK)
+            )
+            return
         if event.input.id in {"provider-api-key", "provider-base-url"} and event.value:
             self._provider_validated = False
         elif event.input.id in {"search-api-key", "search-engine-id", "search-endpoint"} and event.value:

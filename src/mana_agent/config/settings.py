@@ -377,6 +377,7 @@ class Settings(BaseSettings):
     mana_browser_artifact_dir: str = Field(
         default="", alias="MANA_BROWSER_ARTIFACT_DIR"
     )
+    media: dict[str, Any] = Field(default_factory=dict, alias="media")
     mana_browser_profile_max_age_days: int = Field(
         default=30, alias="MANA_BROWSER_PROFILE_MAX_AGE_DAYS"
     )

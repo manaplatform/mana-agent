@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
+from mana_agent.media.models import MediaOperationDecision
 
 
 EntryRouteName = Literal[
@@ -29,6 +30,7 @@ EntryRouteName = Literal[
     "canvas",
     "remote_execution",
     "artifact",
+    "media",
     "command",
     "unsupported",
     "capability_error",
@@ -40,12 +42,12 @@ AutomationOperation = Literal[
 
 RequiredSource = Literal[
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "remote_execution", "canvas", "internal_knowledge", "none",
+    "memory", "artifact", "media", "remote_execution", "canvas", "internal_knowledge", "none",
 ]
 
 REQUIRED_SOURCES: set[str] = {
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "remote_execution", "canvas", "internal_knowledge", "none",
+    "memory", "artifact", "media", "remote_execution", "canvas", "internal_knowledge", "none",
 }
 TOOL_SOURCES = REQUIRED_SOURCES - {"internal_knowledge", "none"}
 
@@ -101,6 +103,7 @@ class EntryRoutingDecision:
     command_arguments: tuple[str, ...] = ()
     remote_request: dict[str, Any] = field(default_factory=dict)
     artifact_family: str = ""
+    media_request: dict[str, Any] = field(default_factory=dict)
     automation_operation: AutomationOperation | str = ""
     source: str = "model"
 
@@ -158,6 +161,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     command_arguments: list[str] = Field(default_factory=list)
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
+    media_request: MediaOperationDecision | None = None
     automation_operation: Literal[
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
@@ -239,6 +243,9 @@ Route semantics:
   requested concise findings (counts, top entries, and relevant samples) rather
   than streaming an entire log; its stdout is shown back in chat after approval.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
+- media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
+  one. Return a complete typed media_request. Never route media generation to artifact, coding, or
+  conversation. The configured media provider/model is authoritative; never select a fallback.
 - gmail: inspect or act on the user's Gmail/email account immediately in the current turn through
   registered email tools. Do not select gmail when the requested mailbox action is deferred,
   scheduled for a specified time, or recurring.
@@ -295,13 +302,13 @@ required_sources is required for every decision and must never be omitted or emp
 ["none"] for conversation and unsupported. Use the route's corresponding source for ordinary
 single-source decisions: coding/repository/automation -> ["repository"], gmail -> ["gmail"],
 calendar -> ["calendar"], browser -> ["browser"], search -> ["search"], github -> ["github"],
-canvas -> ["canvas"],
+canvas -> ["canvas"], media -> ["media"],
 and memory -> ["memory"]. capability_error must name the unavailable tool source. Do not use an
 empty array for a request that needs no external information.
 
 Return JSON only:
 {
-  "route": "multi_task|conversation|coding|remote_execution|artifact|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|canvas|unsupported|capability_error",
+  "route": "multi_task|conversation|coding|remote_execution|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|canvas|unsupported|capability_error",
   "confidence": 0.0,
   "reason": "short routing reason",
   "required_sources": ["browser"],
@@ -314,6 +321,7 @@ Return JSON only:
   "command_arguments": ["list"],
   "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
   "artifact_family": "",
+  "media_request": null,
   "automation_operation": ""
 }
 
@@ -331,6 +339,10 @@ Examples:
   public indexing/discovery is independently required; both sources are mandatory if selected.
 - “Find competitors for example.com” -> search, ["search"].
 - “Improve metadata in this repository” -> coding, ["repository"].
+- “Create an image of a lunar greenhouse” -> media, ["media"], media_request.operation=image.generate with the exact prompt.
+- “Read this response aloud” -> media, ["media"], media_request.operation=voice.generate with the exact text to speak.
+- “Turn this prompt into a four-second video” -> media, ["media"], media_request.operation=video.generate with prompt and duration_seconds=4.
+- “Check media generation media_abc” -> media, ["media"], media_request.operation=generation.status with generation_id=media_abc.
 - “Check my latest Gmail” -> gmail, ["gmail"], even when Gmail is unavailable; use
   capability_error with GMAIL_NOT_AVAILABLE rather than repository, memory, or conversation.
 - “At 12:52, check my Gmail” -> automation, ["repository"], automation_operation=create; create
@@ -380,6 +392,7 @@ class EntryRouter:
                 "coding": [["repository"]],
                 "remote_execution": [["remote_execution"]],
                 "artifact": [["artifact"]],
+                "media": [["media"]],
                 "gmail": [["gmail"]],
                 "calendar": [["calendar"]],
                 "computer": [["computer"]],
@@ -497,6 +510,11 @@ class EntryRouter:
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: capability_error requires an unavailable tool source.")
         if route not in {"multi_task", "conversation", "command", "unsupported", "capability_error"} and not any(source in TOOL_SOURCES for source in sources):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: executable route requires a tool source.")
+        if route == "media" and sources != ("media",):
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                'Reason: media route requires required_sources=["media"].'
+            )
         target_urls = tuple(str(item).strip() for item in (payload.get("target_urls") or []) if str(item).strip())
         if not isinstance(payload.get("target_urls") or [], list) or any(not url.startswith(("http://", "https://")) for url in target_urls):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: target_urls must contain valid HTTP(S) URLs.")
@@ -539,6 +557,22 @@ class EntryRouter:
                     "Reason: command route selected an unknown command."
                 )
         remote_request = payload.get("remote_request") or {}
+        media_request = payload.get("media_request")
+        if route == "media":
+            try:
+                media_request = MediaOperationDecision.model_validate(media_request).model_dump(
+                    mode="json"
+                )
+            except Exception as exc:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    f"Reason: media route requires a valid media_request: {exc}."
+                ) from exc
+        elif media_request:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: media_request is only valid for the media route."
+            )
         artifact_family = str(payload.get("artifact_family") or "").strip().lower()
         allowed_artifact_families = {
             "spreadsheet", "document", "presentation", "pdf", "image",
@@ -636,6 +670,7 @@ class EntryRouter:
             ),
             remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
             artifact_family=artifact_family,
+            media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,
         )
 

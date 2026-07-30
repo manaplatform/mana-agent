@@ -2,6 +2,31 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-30
+
+- Bumped the package and documented version to `v0.1.3`.
+  - User verification required: `python -m pytest tests/test_package_version.py`.
+
+- Added optional production media generation for images, speech/audio, and
+  durable video jobs. This includes capability-filtered model selection, typed
+  model-driven entry decisions, a Media lane, provider-neutral contracts, a
+  real OpenAI-compatible adapter, safe retries and idempotency, persisted
+  status/cancellation, atomic MIME-validated managed artifacts, compact agent
+  tools, safe live events, TUI/dashboard presentation, permission scopes,
+  documentation, and mocked regression coverage. Existing installations remain
+  media-disabled and retain text/chat behavior; invalid or missing media
+  decisions stop without a fallback provider or model.
+  - Fixed optional media duration fields so unset values are omitted from TOML,
+    while legacy `"None"`/`"null"` values are normalized back to unset during
+    configuration loading.
+  - Media metadata, generation JSON, audio, and video remain under
+    `~/.mana/artifacts/media/`; completed image binaries alone are written
+    directly to the Mana-Agent launch directory with safe `media_*` names,
+    without creating a workspace `.mana` directory.
+  - User verification required: `python -m pytest tests/test_media_generation.py tests/gateway/test_entry_routing.py tests/gateway/test_lane_coordinator.py tests/test_chat_first_configuration.py tests/test_tui_user_config.py tests/test_dashboard_live_chat.py`.
+  - User verification required: `python -m pytest`.
+  - User verification required: `python -m mana_agent --configure`.
+
 ## 2026-07-29
 
 - Moved Live Canvas configuration guidance out of `.env` and into the authoritative `~/.mana/config.toml`, updated repository agent policy to prevent environment overrides, added a same-origin local catalog endpoint plus loopback-only HTTP catalog/resource support, fixed cross-port Streamlit iframe/WebSocket authentication and CSP, removed the magic `dashboard/pages` package that made direct routes bypass `st.navigation`, made initial surface creation atomic, normalized common A2UI component wire shapes, fixed omitted optional creation arguments, added validated correction/rollback for legacy incomplete surfaces, resumed the owning model with update-only tools after renderer actions, and made the one-time Gmail automation CI fixture choose a future 01:08 UTC timestamp instead of a date that expires during the test day.

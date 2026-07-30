@@ -78,6 +78,14 @@ from mana_agent.integrations.computer_control.context import (
     authenticated_computer_client,
 )
 from mana_agent.remote_execution.service import RemoteExecutionService
+from mana_agent.media import (
+    ImageGenerationRequest,
+    MediaOperationDecision,
+    MediaService,
+    VideoGenerationRequest,
+    VoiceGenerationRequest,
+)
+from mana_agent.media.errors import MediaError
 
 logger = logging.getLogger(__name__)
 _REMOTE_OUTPUT_LIMIT = 65_536
@@ -360,6 +368,11 @@ class AgentChatGateway:
 
         self.command_registry = build_default_registry()
         self.remote_execution_service = RemoteExecutionService()
+        self.media_service = MediaService(
+            event_sink=self._event_sink,
+            settings_values=None,
+            workspace_root=self.root,
+        )
         from mana_agent.fleet import (
             FleetConfig,
             FleetRegistry,
@@ -420,6 +433,58 @@ class AgentChatGateway:
         # Gateway construction must not create a workspace/chat session. The
         # frontend opens exactly one session through create_session(), and all
         # route/model/connector work reuses that identity.
+
+    # ------------------------------------------------------------------
+    # Typed media gateway operations
+    # ------------------------------------------------------------------
+
+    def generate_image(
+        self, session_id: str, request: ImageGenerationRequest, *, turn_id: str = ""
+    ) -> Any:
+        return self.media_service.generate_image(
+            request, session_id=session_id, turn_id=turn_id
+        )
+
+    def generate_voice(
+        self, session_id: str, request: VoiceGenerationRequest, *, turn_id: str = ""
+    ) -> Any:
+        return self.media_service.generate_speech(
+            request, session_id=session_id, turn_id=turn_id
+        )
+
+    def generate_video(
+        self, session_id: str, request: VideoGenerationRequest, *, turn_id: str = ""
+    ) -> Any:
+        return self.media_service.generate_video(
+            request, session_id=session_id, turn_id=turn_id
+        )
+
+    def get_media_generation_status(
+        self, session_id: str, generation_id: str, *, turn_id: str = ""
+    ) -> Any:
+        return self.media_service.get_generation_status(
+            generation_id, session_id=session_id, turn_id=turn_id
+        )
+
+    def cancel_media_generation(
+        self, session_id: str, generation_id: str, *, turn_id: str = ""
+    ) -> Any:
+        return self.media_service.cancel_generation(
+            generation_id, session_id=session_id, turn_id=turn_id
+        )
+
+    def get_media_artifact(self, session_id: str, artifact_id: str) -> Any:
+        return self.media_service.get_artifact(artifact_id, session_id=session_id)
+
+    def export_media_artifact(
+        self, session_id: str, artifact_id: str, relative_destination: str
+    ) -> Path:
+        return self.media_service.export_artifact(
+            artifact_id,
+            session_id=session_id,
+            workspace_root=self.root,
+            relative_destination=relative_destination,
+        )
 
     # ------------------------------------------------------------------
     # Session management
@@ -660,6 +725,18 @@ class AgentChatGateway:
                 "User-provided document and media artifact operations.",
                 lambda: self._available(True),
                 ("artifact_read", "artifact_write"),
+            ),
+            RouteRegistration(
+                "media",
+                "Configured image, voice/audio, and video generation plus durable job lifecycle.",
+                lambda: self._available(details=self.media_service.availability()),
+                (
+                    "generate_image",
+                    "generate_voice",
+                    "generate_video",
+                    "get_media_generation_status",
+                    "cancel_media_generation",
+                ),
             ),
             RouteRegistration(
                 "command",
@@ -1762,6 +1839,7 @@ class AgentChatGateway:
                     "automation": "tool",
                     "canvas": "tool",
                     "artifact": "tool",
+                    "media": "tool",
                     "remote_execution": "tool",
                 }.get(entry_decision.route, "main")
                 parallel_requested = bool(
@@ -1775,7 +1853,7 @@ class AgentChatGateway:
                         task_type="coding"
                         if entry_decision.route == "coding"
                         else "artifact"
-                        if entry_decision.route == "artifact"
+                        if entry_decision.route in {"artifact", "media"}
                         else "routine",
                         complexity=Complexity.MEDIUM
                         if entry_decision.route == "coding"
@@ -1884,6 +1962,7 @@ class AgentChatGateway:
                         ),
                         "canvas": ("canvas",),
                         "artifact": ("artifact_read", "artifact_write"),
+                        "media": self._media_route_capabilities(entry_decision),
                         "remote_execution": ("remote_ssh_execute",),
                     }.get(entry_decision.route, ())
                     reservation = self._lane_coordinator.reserve(
@@ -2428,6 +2507,7 @@ class AgentChatGateway:
             "computer": "tool",
             "automation": "tool",
             "artifact": "tool",
+            "media": "tool",
             "remote_execution": "tool",
             "canvas": "tool",
         }.get(decision.route, "main")
@@ -2439,7 +2519,7 @@ class AgentChatGateway:
                 task_type="coding"
                 if decision.route == "coding"
                 else "artifact"
-                if decision.route == "artifact"
+                if decision.route in {"artifact", "media"}
                 else "routine",
                 complexity=Complexity.MEDIUM
                 if decision.route == "coding"
@@ -2490,6 +2570,7 @@ class AgentChatGateway:
             "automation": ("automation", "deployment", "shell_read", "shell_write"),
             "canvas": ("canvas",),
             "artifact": ("artifact_read", "artifact_write"),
+            "media": self._media_route_capabilities(decision),
             "remote_execution": ("remote_ssh_execute",),
         }.get(decision.route, ())
         reservation = self._lane_coordinator.reserve(
@@ -2691,14 +2772,16 @@ class AgentChatGateway:
             if bool(options.get("_isolated_child_prompt"))
             else _conversation_prompt(state, text)
         )
-        if bool(options.get("protocol_read_only")) and decision.route in {
-            "coding",
-            "automation",
-            "gmail",
-            "calendar",
-            "computer",
-            "canvas",
-        }:
+        media_mutation = (
+            decision.route == "media"
+            and str(decision.media_request.get("operation") or "")
+            != "generation.status"
+        )
+        if bool(options.get("protocol_read_only")) and (
+            decision.route
+            in {"coding", "automation", "gmail", "calendar", "computer", "canvas"}
+            or media_mutation
+        ):
             return ChatTurnResult(
                 answer="The model-selected route requires mutation, but this protocol session is read-only.",
                 error="protocol_read_only_denied",
@@ -2832,6 +2915,22 @@ class AgentChatGateway:
                 text=text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
+            )
+
+        if decision.route == "media":
+            if lane_task_id:
+                operation_tool = {
+                    "image.generate": "generate_image",
+                    "voice.generate": "generate_voice",
+                    "video.generate": "generate_video",
+                    "generation.status": "get_media_generation_status",
+                    "generation.cancel": "cancel_media_generation",
+                }.get(str(decision.media_request.get("operation") or ""))
+                if operation_tool:
+                    self._lane_coordinator.authorize_tool(lane_task_id, operation_tool)
+            return self._execute_media_route(
+                decision=decision,
+                context=context,
             )
 
         if decision.route == "remote_execution":
@@ -3092,6 +3191,132 @@ class AgentChatGateway:
         )
         result.payload.setdefault("route", decision.route)
         return result
+
+    def _execute_media_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+    ) -> ChatTurnResult:
+        """Execute only the validated media operation selected by the entry model."""
+        try:
+            media = MediaOperationDecision.model_validate(decision.media_request)
+            defaults: dict[str, Any]
+            if media.operation == "image.generate":
+                defaults = dict(self.media_service.config.image.defaults)
+                request = ImageGenerationRequest(
+                    prompt=media.prompt,
+                    model=media.model,
+                    size=media.size or str(defaults.get("size") or "1024x1024"),
+                    count=media.count,
+                    quality=media.quality or str(defaults.get("quality") or "auto"),
+                    output_format=media.output_format
+                    or str(defaults.get("output_format") or "png"),
+                    background=media.background,
+                    reference_artifact_ids=media.reference_artifact_ids,
+                )
+                result = self.media_service.generate_image(
+                    request,
+                    session_id=context.session_id,
+                    turn_id=context.turn_id,
+                )
+            elif media.operation == "voice.generate":
+                defaults = dict(self.media_service.config.voice.defaults)
+                request = VoiceGenerationRequest(
+                    text=media.text,
+                    model=media.model,
+                    voice=media.voice or str(defaults.get("voice") or "alloy"),
+                    output_format=media.output_format
+                    or str(defaults.get("output_format") or "mp3"),
+                    speed=media.speed
+                    if media.speed is not None
+                    else float(defaults.get("speed") or 1.0),
+                    instructions=media.instructions,
+                )
+                result = self.media_service.generate_speech(
+                    request,
+                    session_id=context.session_id,
+                    turn_id=context.turn_id,
+                )
+            elif media.operation == "video.generate":
+                defaults = dict(self.media_service.config.video.defaults)
+                request = VideoGenerationRequest(
+                    prompt=media.prompt,
+                    model=media.model,
+                    duration_seconds=media.duration_seconds
+                    or int(defaults.get("duration_seconds") or 4),
+                    aspect_ratio=media.aspect_ratio,
+                    resolution=media.resolution
+                    or str(defaults.get("resolution") or "720x1280"),
+                    reference_artifact_ids=media.reference_artifact_ids,
+                )
+                result = self.media_service.generate_video(
+                    request,
+                    session_id=context.session_id,
+                    turn_id=context.turn_id,
+                )
+            elif media.operation == "generation.status":
+                result = self.media_service.get_generation_status(
+                    media.generation_id,
+                    session_id=context.session_id,
+                    turn_id=context.turn_id,
+                )
+            else:
+                result = self.media_service.cancel_generation(
+                    media.generation_id,
+                    session_id=context.session_id,
+                    turn_id=context.turn_id,
+                )
+        except MediaError as exc:
+            return ChatTurnResult(
+                answer=exc.detail,
+                error=exc.code,
+                mode="route-media-error",
+                decision=decision,
+                payload={"route": "media"},
+            )
+        except ValueError:
+            return ChatTurnResult(
+                answer="The model-selected media request contains invalid parameters.",
+                error="media_request_invalid",
+                mode="route-media-error",
+                decision=decision,
+                payload={"route": "media"},
+            )
+
+        primary = result.primary_artifact
+        if primary is not None:
+            answer = (
+                f"{result.media_type.value.title()} generation completed. "
+                f"Artifact `{primary.artifact_id}` was saved to `{primary.local_path}`."
+            )
+        else:
+            answer = (
+                f"{result.media_type.value.title()} generation `{result.generation_id}` "
+                f"is {result.status.value}."
+            )
+        return ChatTurnResult(
+            answer=answer,
+            mode=f"route-media-{result.status.value}",
+            decision=decision,
+            payload={
+                "route": "media",
+                "generation": result.model_dump(mode="json"),
+            },
+        )
+
+    @staticmethod
+    def _media_route_capabilities(
+        decision: EntryRoutingDecision,
+    ) -> tuple[str, ...]:
+        operation = str(decision.media_request.get("operation") or "")
+        return {
+            "image.generate": ("media.image.generate", "media.artifact.write"),
+            "voice.generate": ("media.voice.generate", "media.artifact.write"),
+            "video.generate": ("media.video.generate", "media.artifact.write"),
+            "generation.status": ("media.status.read",),
+            "generation.cancel": ("media.generation.cancel",),
+        }.get(operation, ())
 
     def _execute_artifact_route(
         self,
