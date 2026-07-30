@@ -20,8 +20,22 @@ from .users import user_create_argv, user_delete_argv
 
 def validate_tool_arguments(decision: ServerActionDecision) -> None:
     """Validate model-selected arguments before approval or argv construction."""
+    if decision.tool_name == "server_shell_execute":
+        _shell_argv(decision.arguments)
     if decision.tool_name == "server_package_install":
         validate_package_arguments(decision.arguments)
+
+
+def _shell_argv(arguments: dict[str, object]) -> list[str]:
+    """Return the explicitly selected generic-shell argv or fail closed."""
+    argv = arguments.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or any(not isinstance(item, str) or not item or "\x00" in item for item in argv)
+    ):
+        raise ValueError("server_shell_execute requires a non-empty exact argv string list.")
+    return argv
 
 
 def build_tool_argv(decision: ServerActionDecision) -> list[str]:
@@ -32,10 +46,7 @@ def build_tool_argv(decision: ServerActionDecision) -> list[str]:
     if name in {"server_connect"}:
         return ["true"]
     if name == "server_shell_execute":
-        argv = args.get("argv")
-        if not isinstance(argv, list) or not argv or any(not isinstance(item, str) for item in argv):
-            raise ValueError("server_shell_execute requires an exact argv string list.")
-        return argv
+        return _shell_argv(args)
     if name == "server_file_read":
         return read_file_argv(str(args.get("path") or ""))
     if name == "server_directory_list":

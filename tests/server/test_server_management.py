@@ -230,6 +230,27 @@ def test_package_install_auto_manager_uses_bounded_remote_discovery() -> None:
     assert package_install_auto_argv(["nginx"]) == argv
 
 
+def test_shell_execute_requires_an_exact_non_empty_argv_list() -> None:
+    shell = decision(
+        action="shell",
+        tool_name="server_shell_execute",
+        arguments={"argv": ["mkdir", "-p", "/home/root/mana-agent-test"]},
+        required_capability="shell",
+        read_only=False,
+        consequential=True,
+        affected_resources=["directory:/home/root/mana-agent-test"],
+    )
+
+    validate_tool_arguments(shell)
+    assert build_tool_argv(shell) == ["mkdir", "-p", "/home/root/mana-agent-test"]
+
+    invalid = shell.model_copy(
+        update={"arguments": {"argv": "mkdir -p /home/root/mana-agent-test"}}
+    )
+    with pytest.raises(ValueError, match="exact argv string list"):
+        validate_tool_arguments(invalid)
+
+
 def test_firewall_plan_preserves_management_port() -> None:
     with pytest.raises(ValueError, match="management"):
         FirewallPlan(manager="ufw", allow=[FirewallRule(port=443)], management_port=22).validate_management_access()

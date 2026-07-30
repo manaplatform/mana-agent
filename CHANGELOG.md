@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed enrolled-server generic shell actions by publishing the required exact
+  `argv` string-list shape in the server tool contract and rejecting malformed,
+  empty, or null-containing argv values before an approval or execution attempt.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
+
 - Fixed the managed-memory secret-store regression test on Windows by limiting
   the POSIX mode-bit assertion for `secrets.toml` to platforms that expose
   those permission bits. The test still verifies secret isolation and

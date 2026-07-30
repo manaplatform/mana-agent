@@ -43,7 +43,14 @@ SERVER_TOOL_SPECS = {
     for item in (
         _spec("server_connect", ServerActionKind.INSPECT, "inspect", True),
         _spec("server_inspect", ServerActionKind.INSPECT, "inspect", True),
-        _spec("server_shell_execute", ServerActionKind.SHELL, "shell", False, True),
+        _spec(
+            "server_shell_execute",
+            ServerActionKind.SHELL,
+            "shell",
+            False,
+            True,
+            arguments_json_example='{"argv":["mkdir","-p","/home/user/mana-agent-test"]}',
+        ),
         _spec("server_shell_session_start", ServerActionKind.SHELL, "shell", False, True),
         _spec("server_shell_session_write", ServerActionKind.SHELL, "shell", False, True),
         _spec("server_shell_session_resize", ServerActionKind.SHELL, "shell", False, True),
