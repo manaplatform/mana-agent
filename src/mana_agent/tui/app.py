@@ -337,7 +337,8 @@ class ManaChatApp(App):
                 content=f"Computer action completed after permission approval: {result.message}"
             ))
         except Exception as exc:
-            self.notify(f"Computer permission action failed: {exc}", severity="error")
+            action_name = "Server approval" if choice.server else "Computer permission"
+            self.notify(f"{action_name} action failed: {exc}", severity="error")
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""

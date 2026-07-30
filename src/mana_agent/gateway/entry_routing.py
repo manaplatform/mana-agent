@@ -148,12 +148,12 @@ class EntryRoutingRemoteRequest(_StrictRoutingOutput):
 class EntryRoutingServerDecision(_StrictRoutingOutput):
     """Closed model-boundary representation of a server action decision."""
 
-    decision_id: str
-    server_id: str
+    decision_id: str = Field(min_length=1)
+    server_id: str = Field(min_length=1)
     action: ServerActionKind
-    tool_name: str
+    tool_name: str = Field(min_length=1)
     arguments_json: str = "{}"
-    required_capability: str
+    required_capability: str = Field(min_length=1)
     read_only: bool
     consequential: bool
     destructive: bool = False
@@ -161,7 +161,7 @@ class EntryRoutingServerDecision(_StrictRoutingOutput):
     recovery_plan: str | None = None
     verification_commands: list[list[str]] = Field(default_factory=list)
     safe_to_continue: bool
-    reason: str
+    reason: str = Field(min_length=1)
 
 
 class EntryRoutingServerRequest(_StrictRoutingOutput):
@@ -272,7 +272,8 @@ Route semantics:
   remote_execution for enrolled-server inspection, packages, services, files, users, networking,
   firewall, databases, containers, deployments, backups, provisioning, reboot, or shutdown.
   The decision must classify read_only, consequential, destructive, affected resources, recovery,
-  verification commands, required capability, and whether it is safe to continue. Copy action,
+  verification commands, required capability, and whether it is safe to continue. Set decision_id
+  to a non-empty unique opaque identifier for this exact model decision. Copy action,
   required_capability, read_only, consequential, and destructive exactly from the selected entry
   in the route availability tool_contracts, and follow that entry's non-empty
   arguments_json_example. For a package action whose manager is not established by server_catalog

@@ -694,6 +694,13 @@ def test_local_confirmation_command_executes_pending_action(tmp_path: Path, monk
     assert result.data["result"]["state"] == "completed"
 
 
+def test_server_approval_is_not_exposed_as_a_text_command() -> None:
+    assert all(
+        item.canonical_name != "server-approval"
+        for item in command_definitions()
+    )
+
+
 def test_local_permission_command_executes_pending_action(tmp_path: Path, monkeypatch) -> None:
     config = settings(
         tmp_path,

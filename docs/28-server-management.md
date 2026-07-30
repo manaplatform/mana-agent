@@ -61,9 +61,8 @@ typed tool catalog and asks for confirmation unless `--yes` is supplied.
 Consequential chat actions return a session-bound one-time approval request
 with the exact command preview. The TUI opens an approval modal and the dashboard
 renders an inline approval card; both offer only **Deny** and **Approve once**.
-The displayed `/server-approval <approval-request-id>` command remains available
-as a local fallback. Approval resumes only that exact decision and cannot be
-reused or submitted from another session.
+There is no text-command approval fallback. Approval resumes only that exact
+decision and cannot be reused or submitted from another session.
 
 ## Operating modes
 

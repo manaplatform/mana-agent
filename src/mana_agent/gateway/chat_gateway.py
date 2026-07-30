@@ -749,7 +749,6 @@ class AgentChatGateway:
             raise LookupError("Server approval request was not found or was already consumed.")
         if str(pending["session_id"]) != str(session_id):
             raise PermissionError("Server approval belongs to a different session.")
-        self._pending_server_approvals.pop(approval_request_id)
         decision = ServerActionDecision.model_validate(pending["decision"])
         approval = ServerApproval(
             approval_id=approval_request_id,
@@ -759,6 +758,13 @@ class AgentChatGateway:
             approved_by="user",
         )
         lane_task_id = str(pending.get("lane_task_id") or "")
+        if lane_task_id:
+            self._lane_coordinator.transition(
+                lane_task_id,
+                LaneTaskState.RUNNING,
+                reason="server action approved by the user",
+            )
+        self._pending_server_approvals.pop(approval_request_id)
         try:
             outcome = run_sync(
                 self.server_management_service.execute(
@@ -822,14 +828,13 @@ class AgentChatGateway:
             raise LookupError("Server approval request was not found or was already consumed.")
         if str(pending["session_id"]) != str(session_id):
             raise PermissionError("Server approval belongs to a different session.")
-        self._pending_server_approvals.pop(approval_request_id)
         lane_task_id = str(pending.get("lane_task_id") or "")
         if lane_task_id:
-            self._lane_coordinator.finish(
+            self._lane_coordinator.cancel_task(
                 lane_task_id,
-                state=LaneTaskState.CANCELLED,
-                error="Server action denied by the user.",
+                reason="Server action denied by the user.",
             )
+        self._pending_server_approvals.pop(approval_request_id)
         return {
             "status": "denied",
             "approval_request_id": approval_request_id,
@@ -2173,6 +2178,7 @@ class AgentChatGateway:
                                 error=str(exc),
                             )
                             raise
+                        approval_ids = self._approval_request_ids(result.payload)
                         if result.mode == "remote-awaiting-permission":
                             job_id = str(result.payload.get("job_id") or "")
                             if not job_id:
@@ -2186,6 +2192,12 @@ class AgentChatGateway:
                                 reservation.execution.task_id,
                                 LaneTaskState.WAITING,
                                 reason="waiting for remote SSH permission",
+                            )
+                        elif approval_ids:
+                            self._lane_coordinator.transition(
+                                reservation.execution.task_id,
+                                LaneTaskState.WAITING,
+                                reason="waiting for interactive approval",
                             )
                         else:
                             self._lane_coordinator.finish(
@@ -3196,10 +3208,7 @@ class AgentChatGateway:
                         metadata=approval_metadata,
                     )
                 return ChatTurnResult(
-                    answer=(
-                        f"{exc}\nCommand: {command_preview}\n"
-                        f"Approve once with `/server-approval {approval_request_id}`."
-                    ),
+                    answer="Server action approval is waiting in the approval prompt.",
                     mode="server-awaiting-approval",
                     decision=decision,
                     payload={
@@ -3210,7 +3219,6 @@ class AgentChatGateway:
                         "exact_action_key": exc.exact_action_key,
                         "confirmation_request_id": approval_request_id,
                         "command_preview": command_preview,
-                        "approval_command": f"/server-approval {approval_request_id}",
                     },
                 )
             except (ValueError, LookupError, NotImplementedError, ServerDecisionError) as exc:

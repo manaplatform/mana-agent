@@ -238,6 +238,8 @@ def test_missing_worker_at_permission_resume_uses_direct_ssh(monkeypatch) -> Non
 
 def test_server_approval_is_session_bound_exact_and_single_use() -> None:
     captured: dict[str, Any] = {}
+    transitions: list[tuple[str, str, str]] = []
+    finishes: list[tuple[str, str]] = []
 
     async def execute(decision, argv, **kwargs):
         captured.update({"decision": decision, "argv": argv, **kwargs})
@@ -265,6 +267,14 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
     })
     gateway = object.__new__(AgentChatGateway)
     gateway.server_management_service = SimpleNamespace(execute=execute)
+    gateway._lane_coordinator = SimpleNamespace(
+        transition=lambda task_id, state, *, reason: transitions.append(
+            (task_id, state.value, reason)
+        ),
+        finish=lambda task_id, *, state, **_kwargs: finishes.append(
+            (task_id, state.value)
+        ),
+    )
     gateway._pending_server_approvals = {
         "server_approval_1": {
             "session_id": "session-1",
@@ -275,7 +285,7 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
             "timeout_seconds": 60,
             "pty": False,
             "environment": {},
-            "lane_task_id": "",
+            "lane_task_id": "lane-task",
         }
     }
 
@@ -300,6 +310,10 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
     assert captured["approval"].decision_id == "decision-1"
     assert captured["approval"].exact_action_key == "exact-key"
     assert gateway._pending_server_approvals == {}
+    assert transitions == [
+        ("lane-task", "running", "server action approved by the user")
+    ]
+    assert finishes == [("lane-task", "completed")]
     try:
         gateway.server_approval_command("server_approval_1", session_id="session-1")
     except LookupError as exc:
@@ -309,11 +323,11 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
 
 
 def test_server_approval_denial_consumes_request_without_execution() -> None:
-    finishes: list[tuple[str, str, str]] = []
+    cancellations: list[tuple[str, str]] = []
     gateway = object.__new__(AgentChatGateway)
     gateway._lane_coordinator = SimpleNamespace(
-        finish=lambda task_id, *, state, error: finishes.append(
-            (task_id, state.value, error)
+        cancel_task=lambda task_id, *, reason: cancellations.append(
+            (task_id, reason)
         )
     )
     gateway._pending_server_approvals = {
@@ -330,8 +344,8 @@ def test_server_approval_denial_consumes_request_without_execution() -> None:
 
     assert result["status"] == "denied"
     assert gateway._pending_server_approvals == {}
-    assert finishes == [
-        ("lane-task", "cancelled", "Server action denied by the user.")
+    assert cancellations == [
+        ("lane-task", "Server action denied by the user.")
     ]
 
 

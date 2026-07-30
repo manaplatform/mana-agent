@@ -711,6 +711,7 @@ def test_server_request_structured_output_schema_is_closed() -> None:
     server_decision_schema = schema["$defs"]["EntryRoutingServerDecision"]
 
     assert server_request_schema["additionalProperties"] is False
+    assert server_decision_schema["properties"]["decision_id"]["minLength"] == 1
     assert server_decision_schema["additionalProperties"] is False
     assert "arguments_json" in server_decision_schema["properties"]
     assert "arguments" not in server_decision_schema["properties"]

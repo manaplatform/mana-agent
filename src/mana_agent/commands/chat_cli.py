@@ -2083,7 +2083,7 @@ def chat(
                 continue
             shared_prefixes = (
                 "/new", "/sessions", "/session", "/processes", "/connect",
-                "/disconnect", "/server-approval", "/help",
+                "/disconnect", "/help",
             )
             if question.strip().lower().startswith(shared_prefixes):
                 result = gateway.dispatch_command(
