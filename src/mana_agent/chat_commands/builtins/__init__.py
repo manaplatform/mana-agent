@@ -182,6 +182,19 @@ def _remote_worker(context: CommandContext, args: list[str]) -> CommandResult:
     return CommandResult(status="success", message=str(result.pop("message")), data=result)
 
 
+def _server_approval(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None or not hasattr(context.gateway, "server_approval_command"):
+        raise RuntimeError("Server approval is unavailable in this gateway.")
+    if len(args) != 1:
+        raise ValueError("Usage: /server-approval <approval-request-id>")
+    result = context.gateway.server_approval_command(args[0], session_id=context.session_id)
+    return CommandResult(
+        status="success" if result.get("status") == "succeeded" else "error",
+        message=str(result.get("message") or ""),
+        data=result,
+    )
+
+
 def _fleet(context: CommandContext, args: list[str]) -> CommandResult:
     if context.gateway is None or not hasattr(context.gateway, "fleet_command"):
         raise RuntimeError(
@@ -319,6 +332,14 @@ def definitions() -> list[CommandDefinition]:
             handler=_automations,
         ),
         CommandDefinition(canonical_name="remote-worker", description="Model-selected remote worker lifecycle: register, start, or stop an external SSH worker.", argument_schema="<register|start|stop> <worker-id>", argument_model=RemoteWorkerArguments, required_capability="gateway", confirmation_actions=frozenset({"stop"}), handler=_remote_worker),
+        CommandDefinition(
+            canonical_name="server-approval",
+            description="Approve and execute one exact pending server action.",
+            argument_schema="<approval-request-id>",
+            required_capability="gateway",
+            frontends=frozenset({"cli", "tui", "dashboard"}),
+            handler=_server_approval,
+        ),
         CommandDefinition(
             canonical_name="fleet",
             description="Inspect or execute a typed Fleet verification workflow.",

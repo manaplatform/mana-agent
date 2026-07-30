@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
 import shutil
 import threading
 import uuid
@@ -393,6 +394,7 @@ class AgentChatGateway:
             store=self.fleet_store,
         )
         self._remote_job_lanes: dict[str, str] = {}
+        self._pending_server_approvals: dict[str, dict[str, Any]] = {}
         self._entry_route_registry = (
             entry_route_registry or self._build_entry_route_registry()
         )
@@ -730,6 +732,82 @@ class AgentChatGateway:
             "status": job.state.value,
             "job_id": job.request.job_id,
             "message": "Approved remote SSH job was dispatched to its selected external worker.",
+        }
+
+    def server_approval_command(
+        self,
+        approval_request_id: str,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Consume and execute one exact session-bound server approval."""
+        from mana_agent.execution.manager import run_sync
+        from mana_agent.server.models import ServerActionDecision, ServerApproval
+
+        pending = self._pending_server_approvals.get(approval_request_id)
+        if pending is None:
+            raise LookupError("Server approval request was not found or was already consumed.")
+        if str(pending["session_id"]) != str(session_id):
+            raise PermissionError("Server approval belongs to a different session.")
+        self._pending_server_approvals.pop(approval_request_id)
+        decision = ServerActionDecision.model_validate(pending["decision"])
+        approval = ServerApproval(
+            approval_id=approval_request_id,
+            decision_id=decision.decision_id,
+            server_id=decision.server_id,
+            exact_action_key=str(pending["exact_action_key"]),
+            approved_by="user",
+        )
+        lane_task_id = str(pending.get("lane_task_id") or "")
+        try:
+            outcome = run_sync(
+                self.server_management_service.execute(
+                    decision,
+                    list(pending["argv"]),
+                    approval=approval,
+                    session_id=session_id,
+                    cwd=pending.get("cwd"),
+                    timeout_seconds=int(pending["timeout_seconds"]),
+                    pty=bool(pending["pty"]),
+                    environment=dict(pending["environment"]),
+                )
+            )
+        except Exception as exc:
+            if lane_task_id:
+                self._lane_coordinator.finish(
+                    lane_task_id,
+                    state=LaneTaskState.FAILED,
+                    error=str(exc),
+                )
+            raise
+        serialized = outcome.model_dump(mode="json")
+        succeeded = (
+            outcome.exit_code == 0 and not outcome.timed_out and not outcome.cancelled
+        )
+        if lane_task_id:
+            self._lane_coordinator.finish(
+                lane_task_id,
+                state=LaneTaskState.COMPLETED if succeeded else LaneTaskState.FAILED,
+                verification_state={"server_result": serialized},
+                error="" if succeeded else "Approved server action did not complete successfully.",
+            )
+        output = "\n".join(
+            value
+            for value in (str(outcome.stdout).strip(), str(outcome.stderr).strip())
+            if value
+        )
+        summary = (
+            "Approved server action completed."
+            if succeeded
+            else f"Approved server action exited with code {outcome.exit_code}."
+        )
+        if output:
+            summary = f"{summary}\n\nRemote command output:\n{output}"
+        return {
+            "status": "succeeded" if succeeded else "failed",
+            "approval_request_id": approval_request_id,
+            "result": serialized,
+            "message": summary,
         }
 
     def _build_entry_route_registry(self) -> EntryRouteRegistry:
@@ -1156,6 +1234,13 @@ class AgentChatGateway:
             self._sessions[session_id] = self._new_session_state(session_id)
         return self._sessions[session_id]
 
+    def _discard_server_approvals(self, session_id: str) -> None:
+        self._pending_server_approvals = {
+            request_id: pending
+            for request_id, pending in self._pending_server_approvals.items()
+            if str(pending.get("session_id") or "") != str(session_id)
+        }
+
     def start_new_conversation(
         self, session_id: str, *, frontend: str | None = None
     ) -> str:
@@ -1167,6 +1252,7 @@ class AgentChatGateway:
         )
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
+        self._discard_server_approvals(session_id)
         self._chat_session_id = None
         return self.create_session(
             frontend=selected_frontend, session_id=record.session_id
@@ -1200,6 +1286,7 @@ class AgentChatGateway:
         self.session_service.delete(session_id, gateway=self)
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
+        self._discard_server_approvals(session_id)
         if self._chat_session_id == session_id:
             self._chat_session_id = None
 
@@ -1220,6 +1307,7 @@ class AgentChatGateway:
             status = "abandoned" if abandoned else "closed"
         if sid == self._chat_session_id:
             self._chat_session_id = None
+        self._discard_server_approvals(sid)
         self._active.discard(sid)
         if sid in self._sessions:
             self._sessions[sid]["session_status"] = status
@@ -3025,14 +3113,49 @@ class AgentChatGateway:
                         )
                     )
             except ServerApprovalRequired as exc:
+                approval_request_id = f"server_approval_{uuid.uuid4().hex}"
+                preview_argv = list(argv)
+                if (
+                    server_decision.tool_name
+                    in {"server_file_write", "server_file_patch"}
+                    and preview_argv
+                ):
+                    preview_argv[-1] = "<redacted-file-content>"
+                command_preview = shlex.join(preview_argv)
+                self._pending_server_approvals[approval_request_id] = {
+                    "session_id": context.session_id,
+                    "decision": server_decision.model_dump(mode="json"),
+                    "argv": list(argv),
+                    "exact_action_key": exc.exact_action_key,
+                    "cwd": str(server_decision.arguments.get("cwd") or "") or None,
+                    "timeout_seconds": int(
+                        server_decision.arguments.get("timeout_seconds") or 60
+                    ),
+                    "pty": bool(server_decision.arguments.get("pty", False)),
+                    "environment": {
+                        str(key): str(value)
+                        for key, value in dict(
+                            server_decision.arguments.get("environment") or {}
+                        ).items()
+                    },
+                    "lane_task_id": lane_task_id,
+                }
                 return ChatTurnResult(
-                    answer=str(exc),
+                    answer=(
+                        f"{exc}\nCommand: {command_preview}\n"
+                        f"Approve once with `/server-approval {approval_request_id}`."
+                    ),
                     mode="server-awaiting-approval",
                     decision=decision,
                     payload={
                         "route": "server",
-                        "decision_id": decision.server_request.get("decision", {}).get("decision_id"),
+                        "decision_id": decision.server_request.get(
+                            "decision", {}
+                        ).get("decision_id"),
                         "exact_action_key": exc.exact_action_key,
+                        "confirmation_request_id": approval_request_id,
+                        "command_preview": command_preview,
+                        "approval_command": f"/server-approval {approval_request_id}",
                     },
                 )
             except (ValueError, LookupError, NotImplementedError, ServerDecisionError) as exc:

@@ -58,6 +58,11 @@ Add capabilities to an existing enrollment only through the explicit
 `server authorize` command. It validates capability names against the installed
 typed tool catalog and asks for confirmation unless `--yes` is supplied.
 
+Consequential chat actions return a session-bound one-time approval request
+with the exact command preview. Execute the displayed
+`/server-approval <approval-request-id>` command to resume that exact decision;
+the approval cannot be reused or submitted from another session.
+
 ## Operating modes
 
 - `inspect_only` permits only decisions whose registered tool contract is
