@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed configuration saving on headless Linux when the Python `keyring`
+  package has no recommended backend. External Mem0/Supermemory credentials now
+  use an explicit `mana-secrets:` reference to Mana's atomic mode-0600
+  `secrets.toml`; usable OS keyrings remain preferred, and normal `config.toml`,
+  summaries, logs, and draft persistence do not expose the credential.
+  - User verification required: `python -m pytest tests/test_memory_architecture.py tests/test_tui_user_config.py`.
+  - User verification required on the affected host: `python -m mana_agent --configure`.
+
 - Fixed `mana-agent[full]` installation on headless Linux servers by excluding
   the native `pynput`/`evdev` desktop-input stack on Linux. Native Linux Teach
   Mode capture remains available through the explicit `teach-desktop` extra

@@ -268,7 +268,7 @@ class ManaConfigurationApp(App[bool]):
                     id="memory-provider",
                     allow_blank=False,
                 )
-                yield Input(password=True, placeholder="External memory API key (stored in the OS keyring)", id="memory-api-key")
+                yield Input(password=True, placeholder="External memory API key (stored securely)", id="memory-api-key")
                 yield Input(value=str(values.get("MEM0_ORG_ID") or ""), placeholder="Organization ID (optional)", id="mem0-org-id")
                 yield Input(value=str(values.get("MEM0_PROJECT_ID") or ""), placeholder="Project ID (optional)", id="mem0-project-id")
                 yield Input(value=str(values.get("MEM0_BASE_URL") or ""), placeholder="Custom base URL (optional)", id="mem0-base-url")
@@ -787,9 +787,9 @@ class ManaConfigurationApp(App[bool]):
         for selector in ("#mem0-org-id", "#mem0-project-id", "#mem0-base-url"):
             self.query_one(selector).display = external and provider == "mem0"
         self.query_one("#memory-api-key", Input).placeholder = (
-            "Supermemory API key (stored in the OS keyring)"
+            "Supermemory API key (stored securely)"
             if provider == "supermemory"
-            else "Mem0 API key (stored in the OS keyring)"
+            else "Mem0 API key (stored securely)"
         ) if external else "External memory API key"
         self.query_one("#memory-hint", Static).update(
             (

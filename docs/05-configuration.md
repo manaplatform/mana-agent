@@ -83,14 +83,16 @@ When no saved user config exists, the CLI prints the Mana banner first, then sta
 Saved files:
 
 - `~/.mana/config.toml` for non-secret settings.
-- `~/.mana/secrets.toml` for API keys and tokens.
+- `~/.mana/secrets.toml` for API keys and tokens. The file is written atomically
+  with owner-only permissions where supported.
 - `~/.mana/model_cache.json` for fetched model IDs keyed by provider/base URL.
 
-External-memory credentials are an exception to the legacy secrets file: the
-Memory tab stores the API key in the operating-system keyring and writes only a
-`MANA_MEMORY_SECRET_REF` reference to `config.toml`. Headless deployments should
-inject `MEM0_API_KEY` or `SUPERMEMORY_API_KEY` directly through their secret
-manager/environment.
+The Memory tab stores its API key in a recommended operating-system keyring
+when one is available. On headless systems without a recommended keyring
+backend, it stores the key in Mana's protected `secrets.toml`; normal
+`config.toml` data contains only an explicit `mana-secrets:`
+`MANA_MEMORY_SECRET_REF`. Managed deployments may instead inject `MEM0_API_KEY`
+or `SUPERMEMORY_API_KEY` through their secret manager/environment.
 
 The config directory is created with private permissions where the OS allows it. Secret values are masked in display output.
 

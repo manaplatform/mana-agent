@@ -12,7 +12,6 @@ from mana_agent.memory import (
     MemoryConfig,
     MemoryConfigurationError,
     MemoryContent,
-    MemoryDependencyError,
     MemoryHealthStatus,
     MemoryScope,
     MemorySearchRequest,
@@ -463,6 +462,40 @@ def test_low_level_config_writer_never_persists_supermemory_key(tmp_path: Path, 
     persisted = (tmp_path / "config.toml").read_text(encoding="utf-8") + (tmp_path / "secrets.toml").read_text(encoding="utf-8")
     assert "SUPERMEMORY_API_KEY" not in persisted
     assert "never-write-this" not in persisted
+
+
+def test_memory_secret_store_uses_protected_mana_store_without_keyring_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mana_agent.config.user_config import save_effective_user_config
+    from mana_agent.memory.config import MemorySecretStore
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    monkeypatch.setattr(MemorySecretStore, "_recommended_keyring", staticmethod(lambda: None))
+    store = MemorySecretStore()
+
+    reference = store.set("memory-secret-value", provider="mem0")
+
+    assert reference == "mana-secrets:MEM0_API_KEY"
+    assert store.get(reference) == "memory-secret-value"
+    config_path = tmp_path / "config.toml"
+    assert not config_path.exists() or "memory-secret-value" not in config_path.read_text(encoding="utf-8")
+    assert "memory-secret-value" in (tmp_path / "secrets.toml").read_text(encoding="utf-8")
+    assert (tmp_path / "secrets.toml").stat().st_mode & 0o077 == 0
+
+    save_effective_user_config({"MANA_MEMORY_SECRET_REF": reference}, merge=False)
+    assert store.get(reference) == "memory-secret-value"
+
+    assert store.set("rotated-memory-secret", reference, provider="mem0") == reference
+    assert store.get(reference) == "rotated-memory-secret"
+
+
+def test_memory_secret_store_rejects_unknown_mana_secret_reference() -> None:
+    from mana_agent.memory.config import MemorySecretStore
+
+    with pytest.raises(MemoryConfigurationError, match="invalid"):
+        MemorySecretStore().get("mana-secrets:UNREGISTERED_SECRET")
 
 
 def test_configuration_tui_conditionally_shows_external_fields() -> None:
