@@ -67,15 +67,17 @@ class ServerExecutor:
         from .tools import validate_tool_decision
 
         validate_tool_decision(decision)
-        if not decision.safe_to_continue:
-            raise ServerDecisionError(
-                f"Model decision {decision.decision_id!r} is not safe to continue. No server action was executed."
-            )
         server = self.registry.get(decision.server_id)
         if decision.required_capability not in server.allowed_capabilities:
             raise ServerDecisionError(
                 f"Server {server.server_id!r} does not authorize capability {decision.required_capability!r}. "
-                "No server action was executed."
+                "No server action was executed. Grant it explicitly with "
+                f"`mana-agent server authorize {server.server_id} "
+                f"--capability {decision.required_capability}`."
+            )
+        if not decision.safe_to_continue:
+            raise ServerDecisionError(
+                f"Model decision {decision.decision_id!r} is not safe to continue. No server action was executed."
             )
         if server.mode == "inspect_only" and not decision.read_only:
             raise ServerDecisionError("Server is inspect_only. No mutating server action was executed.")

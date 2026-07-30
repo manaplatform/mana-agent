@@ -761,6 +761,7 @@ def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
     }
     assert "exactly from the selected entry" in ENTRY_ROUTER_PROMPT
     assert "route availability tool_contracts" in ENTRY_ROUTER_PROMPT
+    assert "capability_error is only for a route-wide unavailable" in ENTRY_ROUTER_PROMPT
 
 
 def test_server_route_decodes_closed_arguments_json() -> None:

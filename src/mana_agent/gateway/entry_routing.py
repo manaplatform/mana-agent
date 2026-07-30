@@ -275,8 +275,11 @@ Route semantics:
   verification commands, required capability, and whether it is safe to continue. Copy action,
   required_capability, read_only, consequential, and destructive exactly from the selected entry
   in the route availability tool_contracts. Select the server only from its non-secret
-  server_catalog and ensure its allowed_capabilities authorizes the tool contract. Never invent an
-  enrollment, credential, approval, server ID, tool, capability, or recovery point.
+  server_catalog. If that enrolled server lacks the tool's required capability, still select the
+  server route with the exact decision and safe_to_continue=false so server preflight can return
+  the specific authorization guidance; capability_error is only for a route-wide unavailable
+  source. Never invent an enrollment, credential, approval, server ID, tool, capability, or
+  recovery point.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
   one. Return a complete typed media_request. Never route media generation to artifact, coding, or

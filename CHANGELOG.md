@@ -11,9 +11,12 @@ All notable repository changes should be recorded here.
   source vocabulary now also includes the `server` source advertised by the
   route contract. Server route availability now gives the model the exact tool
   risk/capability contracts and a non-secret enrolled-server catalog, preventing
-  it from guessing capability names while preserving strict validation. Invalid
-  JSON, non-object arguments, and invalid server decisions stop without
-  executing a fallback.
+  it from guessing capability names while preserving strict validation. A
+  server-level authorization denial now remains on the server route, returns
+  exact `server authorize` guidance before any execution, and can be resolved
+  through the new explicit capability-granting CLI command. Invalid JSON,
+  non-object arguments, and invalid server decisions stop without executing a
+  fallback.
   - User verification reported before the fix: OpenAI rejected
     `EntryRoutingOutput.server_request` because its object schema did not set
     `additionalProperties` to `false`.
@@ -24,7 +27,12 @@ All notable repository changes should be recorded here.
     decision reached strict validation but guessed a `required_capability` that
     did not match the authoritative `server_package_install` contract; no tool
     was executed.
+  - User verification reported after exposing tool contracts: the model correctly
+    identified that `mana-agent-server-1` lacks `package.write`, but represented
+    the resource-level denial as a route-wide `capability_error`; no tool was
+    executed.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
+  - User verification required: `python -m mana_agent server authorize --help`.
 
 - Fixed configuration saving on headless Linux when the Python `keyring`
   package has no recommended backend. External Mem0/Supermemory credentials now

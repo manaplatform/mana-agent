@@ -40,6 +40,7 @@ mana-agent ssh test production-api
 mana-agent server enroll production-api --server-id api-1 --mode inspect_only --capability inspect
 mana-agent server list
 mana-agent server status api-1
+mana-agent server authorize api-1 --capability package.write
 ```
 
 Use `--use-agent` instead of `--identity` to keep authentication entirely in
@@ -52,6 +53,10 @@ capability set. Examples include `package.write`, `service.write`,
 `filesystem.read`, `filesystem.write`, `network.read`, `firewall.write`,
 `database.backup`, `database.restore`, `container.read`, `container.write`,
 `deployment`, `power`, and `shell`.
+
+Add capabilities to an existing enrollment only through the explicit
+`server authorize` command. It validates capability names against the installed
+typed tool catalog and asks for confirmation unless `--yes` is supplied.
 
 ## Operating modes
 

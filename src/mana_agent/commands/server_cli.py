@@ -10,6 +10,7 @@ from mana_agent.remote_execution.profiles import get_profile
 from mana_agent.server.credentials import register_key_path
 from mana_agent.server.models import ServerDefinition
 from mana_agent.server.service import ServerManagementService
+from mana_agent.server.tools import SERVER_TOOL_SPECS
 
 
 server_app = typer.Typer(
@@ -77,6 +78,42 @@ def server_list() -> None:
 def server_status(server: str) -> None:
     """Show enrollment, permission mode, provider, and last connection state."""
     typer.echo(json.dumps(_safe_server(ServerManagementService().server(server)), indent=2, default=str))
+
+
+@server_app.command("authorize")
+def server_authorize(
+    server: str,
+    capability: list[str] | None = typer.Option(None, "--capability"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    """Explicitly add typed server capabilities to an existing enrollment."""
+    requested = {str(item).strip() for item in capability or [] if str(item).strip()}
+    if not requested:
+        raise typer.BadParameter("at least one --capability is required")
+    known = {spec.capability for spec in SERVER_TOOL_SPECS.values()}
+    unknown = sorted(requested - known)
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown server capability: {', '.join(unknown)}; choose from {', '.join(sorted(known))}"
+        )
+    service = ServerManagementService()
+    enrolled = service.server(server)
+    additions = requested - enrolled.allowed_capabilities
+    if not additions:
+        typer.echo(f"Server {enrolled.server_id!r} already has the requested capabilities.")
+        return
+    if not yes and not typer.confirm(
+        f"Authorize {', '.join(sorted(additions))} on {enrolled.name} ({enrolled.server_id})?",
+        default=False,
+    ):
+        raise typer.Abort()
+    updated = enrolled.model_copy(
+        update={"allowed_capabilities": enrolled.allowed_capabilities | additions}
+    )
+    service.registry.update(updated)
+    typer.echo(
+        f"Authorized {', '.join(sorted(additions))} on {updated.name!r} ({updated.server_id})."
+    )
 
 
 @server_app.command("inspect")

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
+from mana_agent.commands import server_cli
 from mana_agent.remote_execution.providers.local_ssh import build_ssh_argv
 from mana_agent.server.audit import ServerAuditLog
 from mana_agent.server.connection import ServerConnectionFactory
@@ -108,6 +110,46 @@ def test_unsafe_decision_stops_without_execution(tmp_path: Path) -> None:
     executor = ServerExecutor(registry=registry, audit=ServerAuditLog(tmp_path / "audit.jsonl"))
     with pytest.raises(ServerDecisionError, match="No server action was executed"):
         executor.validate_decision(decision(safe_to_continue=False))
+
+
+def test_missing_capability_returns_explicit_authorization_guidance(tmp_path: Path) -> None:
+    registry = ServerRegistry(tmp_path / "registry.json")
+    registry.add(server(tmp_path, allowed_capabilities={"inspect"}))
+    executor = ServerExecutor(registry=registry, audit=ServerAuditLog(tmp_path / "audit.jsonl"))
+    install = decision(
+        action="package",
+        tool_name="server_package_install",
+        required_capability="package.write",
+        read_only=False,
+        consequential=True,
+        affected_resources=["package:nginx"],
+        safe_to_continue=False,
+    )
+
+    with pytest.raises(
+        ServerDecisionError,
+        match=r"server authorize server-1 --capability package\.write",
+    ):
+        executor.validate_decision(install)
+
+
+def test_server_authorize_adds_an_explicit_known_capability(tmp_path: Path, monkeypatch) -> None:
+    registry = ServerRegistry(tmp_path / "registry.json")
+    registry.add(server(tmp_path, allowed_capabilities={"inspect"}))
+    service = type(
+        "ServerServiceStub",
+        (),
+        {"registry": registry, "server": staticmethod(registry.get)},
+    )()
+    monkeypatch.setattr(server_cli, "ServerManagementService", lambda: service)
+
+    result = CliRunner().invoke(
+        server_cli.server_app,
+        ["authorize", "server-1", "--capability", "package.write", "--yes"],
+    )
+
+    assert result.exit_code == 0
+    assert registry.get("server-1").allowed_capabilities == {"inspect", "package.write"}
 
 
 def test_consequential_action_requires_exact_approval(tmp_path: Path) -> None:
