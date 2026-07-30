@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, get_args
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,10 +47,7 @@ RequiredSource = Literal[
     "memory", "artifact", "media", "remote_execution", "server", "canvas", "internal_knowledge", "none",
 ]
 
-REQUIRED_SOURCES: set[str] = {
-    "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "media", "remote_execution", "canvas", "internal_knowledge", "none",
-}
+REQUIRED_SOURCES: set[str] = set(get_args(RequiredSource))
 TOOL_SOURCES = REQUIRED_SOURCES - {"internal_knowledge", "none"}
 
 

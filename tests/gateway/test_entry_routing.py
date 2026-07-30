@@ -538,6 +538,7 @@ def test_router_exposes_exact_required_source_contract_to_model() -> None:
     assert captured["required_source_rules"]["multi_task"] == [["none"]]
     assert "command" not in captured["required_source_vocabulary"]
     assert "repository" in captured["required_source_vocabulary"]
+    assert "server" in captured["required_source_vocabulary"]
 
 
 def test_multi_task_route_is_registered_and_requires_no_parent_sources() -> None:

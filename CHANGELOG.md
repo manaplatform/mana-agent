@@ -7,11 +7,16 @@ All notable repository changes should be recorded here.
 - Fixed strict structured-output registration for enrolled-server routing by
   replacing the arbitrary `server_request` object with closed typed boundary
   models and decoding exact tool arguments from validated JSON text before the
-  existing server decision and tool-contract checks. Invalid JSON, non-object
-  arguments, and invalid server decisions stop without executing a fallback.
+  existing server decision and tool-contract checks. The canonical required
+  source vocabulary now also includes the `server` source advertised by the
+  route contract. Invalid JSON, non-object arguments, and invalid server
+  decisions stop without executing a fallback.
   - User verification reported before the fix: OpenAI rejected
     `EntryRoutingOutput.server_request` because its object schema did not set
     `additionalProperties` to `false`.
+  - User verification reported after the schema fix: `46 passed, 1 failed`;
+    the server decision was rejected because `server` was absent from the
+    canonical source vocabulary.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
 
 - Fixed configuration saving on headless Linux when the Python `keyring`
