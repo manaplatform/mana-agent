@@ -482,7 +482,8 @@ def test_memory_secret_store_uses_protected_mana_store_without_keyring_backend(
     config_path = tmp_path / "config.toml"
     assert not config_path.exists() or "memory-secret-value" not in config_path.read_text(encoding="utf-8")
     assert "memory-secret-value" in (tmp_path / "secrets.toml").read_text(encoding="utf-8")
-    assert (tmp_path / "secrets.toml").stat().st_mode & 0o077 == 0
+    if sys.platform != "win32":
+        assert (tmp_path / "secrets.toml").stat().st_mode & 0o077 == 0
 
     save_effective_user_config({"MANA_MEMORY_SECRET_REF": reference}, merge=False)
     assert store.get(reference) == "memory-secret-value"

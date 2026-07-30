@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed the managed-memory secret-store regression test on Windows by limiting
+  the POSIX mode-bit assertion for `secrets.toml` to platforms that expose
+  those permission bits. The test still verifies secret isolation and
+  retrieval on every platform.
+  - User verification required: `python -m pytest tests/test_memory_architecture.py::test_memory_secret_store_uses_protected_mana_store_without_keyring_backend`.
+
 - Fixed strict structured-output registration for enrolled-server routing by
   replacing the arbitrary `server_request` object with closed typed boundary
   models and decoding exact tool arguments from validated JSON text before the
