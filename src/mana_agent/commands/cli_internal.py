@@ -71,6 +71,7 @@ from .email_cli import connector_app
 from .protocols_cli import a2a_app, acp_app
 from .worker_cli import worker_app, workers_app
 from .ssh_cli import ssh_app
+from .server_cli import server_app
 from mana_agent.workspaces.paths import repository_analysis_dir, repository_dir, repository_id_for_path
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ app.add_typer(session_app, name="session")
 app.add_typer(worker_app, name="worker")
 app.add_typer(workers_app, name="workers")
 app.add_typer(ssh_app, name="ssh")
+app.add_typer(server_app, name="server")
 app.command("search")(search_command)
 app.command("impact")(impact_command)
 

@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping
 
+from mana_agent.server.tools import SERVER_TOOL_SPECS
+
 
 class _ValueEnum(str, Enum):
     def __str__(self) -> str:
@@ -247,7 +249,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.OPERATIONS, display_name="Operations", description="Handles deployment, infrastructure, and monitoring.",
             owns=("deployment", "infrastructure checks", "monitoring"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute"),
+            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
             max_concurrent_jobs=1, max_subagents=0, token_budget=25_000, cost_budget=12.0,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
@@ -314,6 +316,7 @@ ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "automation": LaneId.OPERATIONS,
     "canvas": LaneId.OPERATIONS,
     "remote_execution": LaneId.OPERATIONS,
+    "server": LaneId.OPERATIONS,
     "conversation": LaneId.RESEARCH,
     "unsupported": LaneId.RESEARCH,
     "capability_error": LaneId.RESEARCH,
@@ -356,6 +359,9 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "git_diff": frozenset({"git_read"}),
     "remote_ssh_execute": frozenset({"remote_ssh_execute"}),
 }
+
+for _server_tool in SERVER_TOOL_SPECS:
+    TOOL_CAPABILITIES[_server_tool] = frozenset({"server"})
 
 for _automation_tool in (
     "automation_create", "automation_get", "automation_list", "automation_status",

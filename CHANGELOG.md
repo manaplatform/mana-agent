@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Added the provider-neutral Server Management module with persistent authorized
+  enrollment, secret references, strict host-key pinning, pooled OpenSSH
+  transport, typed model decisions and tools, per-server mutation locks,
+  consequential/destructive approval contracts, redacted audit evidence,
+  package/service/file/network/database/container helpers, health inspection,
+  desired-state rollback, deployment/backup/provider contracts, CLI and
+  read-only dashboard APIs, Operations-lane routing, A2A capability metadata,
+  documentation, and isolated mocked coverage. Invalid or missing decisions,
+  capabilities, credentials, host keys, approvals, recovery points, managers,
+  providers, and runtime adapters stop without fallback execution.
+  - User verification required: `python -m pytest tests/server/test_server_management.py tests/remote_execution/test_remote_execution.py tests/gateway/test_entry_routing.py tests/gateway/test_lane_coordinator.py tests/test_api_workspaces.py tests/test_a2a_protocol.py`.
+  - User verification required: `python -m pytest`.
+  - User verification required: `python -m mana_agent server --help`.
+
 - Bumped the package and documented version to `v0.1.3`.
   - User verification required: `python -m pytest tests/test_package_version.py`.
 

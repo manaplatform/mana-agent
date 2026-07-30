@@ -242,6 +242,7 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
 # Preferred display order for categories in the TUI.
 CATEGORY_ORDER: tuple[str, ...] = (
     "canvas",
+    "server",
     "search",
     "email",
     "computer",
@@ -474,6 +475,17 @@ def list_auto_chat_tools(
 
     for name, description, category in _BUILTIN_AUTO_CHAT_TOOLS:
         _merge_entry(by_name, name, description, category)
+
+    from mana_agent.server.tools import SERVER_TOOL_SPECS
+
+    for spec in SERVER_TOOL_SPECS.values():
+        access = "Inspect" if spec.read_only else "Manage"
+        _merge_entry(
+            by_name,
+            spec.name,
+            f"{access} an explicitly enrolled server through a validated server decision.",
+            "server",
+        )
 
     # Enrich descriptions for tools already in the catalog. Do not add
     # contract-only names that are not wired into auto-chat AskAgent.

@@ -78,6 +78,8 @@ from mana_agent.integrations.computer_control.context import (
     authenticated_computer_client,
 )
 from mana_agent.remote_execution.service import RemoteExecutionService
+from mana_agent.server import ServerManagementService
+from mana_agent.server.tools import SERVER_TOOL_SPECS
 from mana_agent.media import (
     ImageGenerationRequest,
     MediaOperationDecision,
@@ -368,6 +370,7 @@ class AgentChatGateway:
 
         self.command_registry = build_default_registry()
         self.remote_execution_service = RemoteExecutionService()
+        self.server_management_service = ServerManagementService()
         self.media_service = MediaService(
             event_sink=self._event_sink,
             settings_values=None,
@@ -719,6 +722,16 @@ class AgentChatGateway:
                 "Structured direct SSH or managed-worker execution.",
                 self._remote_execution_route_availability,
                 ("remote_ssh_execute",),
+            ),
+            RouteRegistration(
+                "server",
+                "Typed management of explicitly enrolled Linux servers.",
+                lambda: self._available(
+                    bool(self.server_management_service.list_servers()),
+                    "No servers are enrolled. Enroll and pin a host key before using server tools.",
+                    details={"enrolled_servers": len(self.server_management_service.list_servers())},
+                ),
+                tuple(SERVER_TOOL_SPECS),
             ),
             RouteRegistration(
                 "artifact",
@@ -1841,6 +1854,7 @@ class AgentChatGateway:
                     "artifact": "tool",
                     "media": "tool",
                     "remote_execution": "tool",
+                    "server": "tool",
                 }.get(entry_decision.route, "main")
                 parallel_requested = bool(
                     options.pop("request_parallel_candidates", False)
@@ -1858,9 +1872,13 @@ class AgentChatGateway:
                         complexity=Complexity.MEDIUM
                         if entry_decision.route == "coding"
                         else Complexity.LOW,
-                        risk=RiskLevel.MEDIUM
-                        if entry_decision.route in {"coding", "automation"}
-                        else RiskLevel.LOW,
+                        risk=(
+                            RiskLevel.HIGH
+                            if entry_decision.route == "server"
+                            else RiskLevel.MEDIUM
+                            if entry_decision.route in {"coding", "automation"}
+                            else RiskLevel.LOW
+                        ),
                         required_tools=frozenset(route_tools),
                         latency_requirement=LatencyClass.STANDARD,
                         budgets=routing_budgets_from_settings(self.settings),
@@ -1964,6 +1982,7 @@ class AgentChatGateway:
                         "artifact": ("artifact_read", "artifact_write"),
                         "media": self._media_route_capabilities(entry_decision),
                         "remote_execution": ("remote_ssh_execute",),
+                        "server": ("server",),
                     }.get(entry_decision.route, ())
                     reservation = self._lane_coordinator.reserve(
                         normalized_intent=text,
@@ -2509,6 +2528,7 @@ class AgentChatGateway:
             "artifact": "tool",
             "media": "tool",
             "remote_execution": "tool",
+            "server": "tool",
             "canvas": "tool",
         }.get(decision.route, "main")
         route_tools = registration.tools
@@ -2524,9 +2544,13 @@ class AgentChatGateway:
                 complexity=Complexity.MEDIUM
                 if decision.route == "coding"
                 else Complexity.LOW,
-                risk=RiskLevel.MEDIUM
-                if decision.route in {"coding", "automation"}
-                else RiskLevel.LOW,
+                risk=(
+                    RiskLevel.HIGH
+                    if decision.route == "server"
+                    else RiskLevel.MEDIUM
+                    if decision.route in {"coding", "automation"}
+                    else RiskLevel.LOW
+                ),
                 required_tools=frozenset(route_tools),
                 latency_requirement=LatencyClass.STANDARD,
                 budgets=routing_budgets_from_settings(self.settings),
@@ -2572,6 +2596,7 @@ class AgentChatGateway:
             "artifact": ("artifact_read", "artifact_write"),
             "media": self._media_route_capabilities(decision),
             "remote_execution": ("remote_ssh_execute",),
+            "server": ("server",),
         }.get(decision.route, ())
         reservation = self._lane_coordinator.reserve(
             normalized_intent=item.request,
@@ -2931,6 +2956,68 @@ class AgentChatGateway:
             return self._execute_media_route(
                 decision=decision,
                 context=context,
+            )
+
+        if decision.route == "server":
+            from mana_agent.execution.manager import run_sync
+            from mana_agent.server.executor import ServerApprovalRequired, ServerDecisionError
+            from mana_agent.server.models import ServerActionDecision
+            from mana_agent.server.runtime_tools import build_tool_argv
+
+            try:
+                server_decision = ServerActionDecision.model_validate(
+                    decision.server_request.get("decision")
+                )
+                if lane_task_id:
+                    self._lane_coordinator.authorize_tool(lane_task_id, server_decision.tool_name)
+                if server_decision.tool_name == "server_inspect":
+                    outcome = run_sync(
+                        self.server_management_service.inspect(
+                            server_decision,
+                            session_id=context.session_id,
+                        )
+                    )
+                else:
+                    argv = build_tool_argv(server_decision)
+                    outcome = run_sync(
+                        self.server_management_service.execute(
+                            server_decision,
+                            argv,
+                            session_id=context.session_id,
+                            cwd=str(server_decision.arguments.get("cwd") or "") or None,
+                            timeout_seconds=int(server_decision.arguments.get("timeout_seconds") or 60),
+                            pty=bool(server_decision.arguments.get("pty", False)),
+                            environment={
+                                str(key): str(value)
+                                for key, value in dict(server_decision.arguments.get("environment") or {}).items()
+                            },
+                        )
+                    )
+            except ServerApprovalRequired as exc:
+                return ChatTurnResult(
+                    answer=str(exc),
+                    mode="server-awaiting-approval",
+                    decision=decision,
+                    payload={
+                        "route": "server",
+                        "decision_id": decision.server_request.get("decision", {}).get("decision_id"),
+                        "exact_action_key": exc.exact_action_key,
+                    },
+                )
+            except (ValueError, LookupError, NotImplementedError, ServerDecisionError) as exc:
+                return ChatTurnResult(
+                    answer=f"Server action was not executed: {exc}",
+                    error="server_decision_invalid",
+                    mode="route-error",
+                    decision=decision,
+                    payload={"route": "server", "no_action_executed": True},
+                )
+            serialized = outcome.model_dump(mode="json")
+            return ChatTurnResult(
+                answer=json.dumps(serialized, indent=2, default=str),
+                mode="server-completed",
+                decision=decision,
+                payload={"route": "server", "result": serialized},
             )
 
         if decision.route == "remote_execution":

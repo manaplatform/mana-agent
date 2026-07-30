@@ -29,6 +29,7 @@ EntryRouteName = Literal[
     "automation",
     "canvas",
     "remote_execution",
+    "server",
     "artifact",
     "media",
     "command",
@@ -42,7 +43,7 @@ AutomationOperation = Literal[
 
 RequiredSource = Literal[
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "media", "remote_execution", "canvas", "internal_knowledge", "none",
+    "memory", "artifact", "media", "remote_execution", "server", "canvas", "internal_knowledge", "none",
 ]
 
 REQUIRED_SOURCES: set[str] = {
@@ -102,6 +103,7 @@ class EntryRoutingDecision:
     command_name: str = ""
     command_arguments: tuple[str, ...] = ()
     remote_request: dict[str, Any] = field(default_factory=dict)
+    server_request: dict[str, Any] = field(default_factory=dict)
     artifact_family: str = ""
     media_request: dict[str, Any] = field(default_factory=dict)
     automation_operation: AutomationOperation | str = ""
@@ -160,6 +162,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     command_name: str = ""
     command_arguments: list[str] = Field(default_factory=list)
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
+    server_request: dict[str, Any] = Field(default_factory=dict)
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
     media_request: MediaOperationDecision | None = None
     automation_operation: Literal[
@@ -242,6 +245,13 @@ Route semantics:
   For an approved analysis request, choose a bounded command that emits the
   requested concise findings (counts, top entries, and relevant samples) rather
   than streaming an entire log; its stdout is shown back in chat after approval.
+- server: management of an explicitly enrolled Linux server. Return a complete server_request
+  containing a strict ServerActionDecision and exact tool arguments. Use server rather than
+  remote_execution for enrolled-server inspection, packages, services, files, users, networking,
+  firewall, databases, containers, deployments, backups, provisioning, reboot, or shutdown.
+  The decision must classify read_only, consequential, destructive, affected resources, recovery,
+  verification commands, required capability, and whether it is safe to continue. Never invent an
+  enrollment, credential, approval, server ID, tool, capability, or recovery point.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
   one. Return a complete typed media_request. Never route media generation to artifact, coding, or
@@ -300,7 +310,7 @@ fallback. Direct URL signals are supplied separately; do not treat them as repos
 
 required_sources is required for every decision and must never be omitted or empty. Use exactly
 ["none"] for conversation and unsupported. Use the route's corresponding source for ordinary
-single-source decisions: coding/repository/automation -> ["repository"], gmail -> ["gmail"],
+single-source decisions: coding/repository/automation -> ["repository"], server -> ["server"], gmail -> ["gmail"],
 calendar -> ["calendar"], browser -> ["browser"], search -> ["search"], github -> ["github"],
 canvas -> ["canvas"], media -> ["media"],
 and memory -> ["memory"]. capability_error must name the unavailable tool source. Do not use an
@@ -308,7 +318,7 @@ empty array for a request that needs no external information.
 
 Return JSON only:
 {
-  "route": "multi_task|conversation|coding|remote_execution|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|canvas|unsupported|capability_error",
+  "route": "multi_task|conversation|coding|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|canvas|unsupported|capability_error",
   "confidence": 0.0,
   "reason": "short routing reason",
   "required_sources": ["browser"],
@@ -320,6 +330,7 @@ Return JSON only:
   "command_name": "sessions",
   "command_arguments": ["list"],
   "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
+  "server_request": {},
   "artifact_family": "",
   "media_request": null,
   "automation_operation": ""
@@ -391,6 +402,7 @@ class EntryRouter:
                 "unsupported": [["none"]],
                 "coding": [["repository"]],
                 "remote_execution": [["remote_execution"]],
+                "server": [["server"]],
                 "artifact": [["artifact"]],
                 "media": [["media"]],
                 "gmail": [["gmail"]],
@@ -515,6 +527,11 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 'Reason: media route requires required_sources=["media"].'
             )
+        if route == "server" and sources != ("server",):
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                'Reason: server route requires required_sources=["server"].'
+            )
         target_urls = tuple(str(item).strip() for item in (payload.get("target_urls") or []) if str(item).strip())
         if not isinstance(payload.get("target_urls") or [], list) or any(not url.startswith(("http://", "https://")) for url in target_urls):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: target_urls must contain valid HTTP(S) URLs.")
@@ -528,7 +545,7 @@ class EntryRouter:
         if route == "capability_error" and not error_code:
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: capability_error requires error_code.")
         availability = {row["name"]: bool(row["availability"]["available"]) for row in self.registry.snapshot()}
-        source_routes = {"browser": "browser", "search": "search", "github": "github", "repository": "repository", "gmail": "gmail", "calendar": "calendar", "computer": "computer", "memory": "memory", "remote_execution": "remote_execution"}
+        source_routes = {"browser": "browser", "search": "search", "github": "github", "repository": "repository", "gmail": "gmail", "calendar": "calendar", "computer": "computer", "memory": "memory", "remote_execution": "remote_execution", "server": "server"}
         unavailable = [source for source in sources if source in source_routes and not availability.get(source_routes[source], False)]
         if unavailable and route != "capability_error":
             raise EntryRoutingError(
@@ -557,6 +574,7 @@ class EntryRouter:
                     "Reason: command route selected an unknown command."
                 )
         remote_request = payload.get("remote_request") or {}
+        server_request = payload.get("server_request") or {}
         media_request = payload.get("media_request")
         if route == "media":
             try:
@@ -646,6 +664,34 @@ class EntryRouter:
                     "Model decision failed: entry_route. No response was generated. "
                     "Reason: reverse-worker requests must use the available managed worker ID."
                 )
+        if route == "server":
+            if not isinstance(server_request, dict) or not server_request:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: server route requires a structured server_request."
+                )
+            try:
+                from mana_agent.server.models import ServerActionDecision
+                from mana_agent.server.tools import validate_tool_decision
+
+                validated_server_decision = ServerActionDecision.model_validate(
+                    server_request.get("decision")
+                )
+                validate_tool_decision(validated_server_decision)
+            except Exception as exc:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    f"Reason: invalid server decision: {exc}."
+                ) from exc
+            server_request = {
+                **server_request,
+                "decision": validated_server_decision.model_dump(mode="json"),
+            }
+        elif server_request:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: server_request is only valid for the server route."
+            )
         if not isinstance(raw_command_arguments, list) or any(not isinstance(item, str) for item in raw_command_arguments):
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
@@ -669,6 +715,7 @@ class EntryRouter:
                 else ()
             ),
             remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
+            server_request=dict(server_request) if isinstance(server_request, dict) else {},
             artifact_family=artifact_family,
             media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,

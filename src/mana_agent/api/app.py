@@ -17,6 +17,7 @@ from mana_agent.api.routes.fleet import router as fleet_router
 from mana_agent.api.routes.repository_analyze import router as repository_analyze_router
 from mana_agent.api.routes.workspaces import router as workspaces_router
 from mana_agent.api.routes.teach import router as teach_router
+from mana_agent.api.routes.servers import router as servers_router
 from mana_agent.config.user_config import load_effective_settings, validate_bool
 
 
@@ -100,6 +101,7 @@ def create_app(
     app.include_router(fleet_router)
     app.include_router(workspaces_router)
     app.include_router(teach_router)
+    app.include_router(servers_router)
     app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:
         from mana_agent.github_autopilot.webhook import router as github_autopilot_router

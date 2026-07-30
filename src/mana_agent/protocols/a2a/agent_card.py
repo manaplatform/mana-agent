@@ -12,6 +12,10 @@ DEFAULT_SKILLS = {
     "code-review": ("Code review", "Review changes and report actionable findings."),
     "verification": ("Verification", "Run model-selected checks and report results."),
     "documentation": ("Documentation", "Create or update repository documentation."),
+    "server-management": (
+        "Server management",
+        "Inspect and manage explicitly enrolled Linux servers through approval-gated typed tools.",
+    ),
 }
 
 
