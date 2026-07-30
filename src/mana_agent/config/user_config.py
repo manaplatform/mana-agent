@@ -49,6 +49,7 @@ SECRET_KEYS = {
     "TELEGRAM_WEBHOOK_SECRET",
 }
 NON_PERSISTED_SECRET_KEYS = {"MEM0_API_KEY", "SUPERMEMORY_API_KEY"}
+MANAGED_SECRET_KEYS = frozenset(NON_PERSISTED_SECRET_KEYS)
 
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
@@ -744,8 +745,32 @@ def save_user_config(values: dict[str, Any], *, merge: bool = True) -> None:
 
 
 def save_user_secrets(values: dict[str, Any], *, merge: bool = True) -> None:
-    current = load_user_secrets() if merge else {}
+    existing = load_user_secrets()
+    current = existing if merge else {
+        key: value for key, value in existing.items() if key in MANAGED_SECRET_KEYS
+    }
     current.update({key: value for key, value in values.items() if key in SECRET_KEYS})
+    _write_toml(secrets_file(), current, mode=0o600)
+
+
+def save_managed_user_secret(name: str, value: str) -> None:
+    """Persist one allowlisted non-config secret in Mana's protected store."""
+    if name not in MANAGED_SECRET_KEYS:
+        raise UserConfigError(f"Secret {name!r} is not an allowlisted managed secret.")
+    clean_value = str(value).strip()
+    if not clean_value:
+        raise UserConfigError(f"Secret {name!r} cannot be empty.")
+    current = load_user_secrets()
+    current[name] = clean_value
+    _write_toml(secrets_file(), current, mode=0o600)
+
+
+def delete_managed_user_secret(name: str) -> None:
+    """Remove one allowlisted managed secret without affecting other credentials."""
+    if name not in MANAGED_SECRET_KEYS:
+        raise UserConfigError(f"Secret {name!r} is not an allowlisted managed secret.")
+    current = load_user_secrets()
+    current.pop(name, None)
     _write_toml(secrets_file(), current, mode=0o600)
 
 
@@ -815,7 +840,7 @@ def mask_secret(value: Any) -> str:
 def masked_config_summary() -> dict[str, Any]:
     values = load_effective_settings(include_env=True)
     return {
-        key: mask_secret(value) if key in SECRET_KEYS else value
+        key: mask_secret(value) if key in SECRET_KEYS | MANAGED_SECRET_KEYS else value
         for key, value in sorted(values.items())
     }
 

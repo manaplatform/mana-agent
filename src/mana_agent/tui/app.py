@@ -243,7 +243,11 @@ class ManaChatApp(App):
         if not isinstance(event, CodingActivityEvent):
             return
         activity = event.activity
-        if activity.get("event_type") not in {"computer.waiting_permission", "remote_execution.waiting_permission"}:
+        if activity.get("event_type") not in {
+            "computer.waiting_permission",
+            "remote_execution.waiting_permission",
+            "server.waiting_approval",
+        }:
             return
         metadata = activity.get("metadata") or {}
         request_id = str(metadata.get("permission_request_id") or "")
@@ -260,6 +264,7 @@ class ManaChatApp(App):
             scope=str(metadata.get("permission_scope") or ""),
             preview=str(metadata.get("preview") or activity.get("title") or ""),
             remote=bool(metadata.get("remote_permission")),
+            server=bool(metadata.get("server_approval")),
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
@@ -271,6 +276,7 @@ class ManaChatApp(App):
                 scope=event.scope,
                 preview=event.preview,
                 remote=event.remote,
+                server=event.server,
             ),
             self._apply_computer_permission,
         )
@@ -290,6 +296,20 @@ class ManaChatApp(App):
         )
 
         try:
+            if choice.server:
+                command = (
+                    self.gateway.server_approval_command
+                    if choice.decision is not None
+                    else self.gateway.deny_server_approval_command
+                )
+                result = await asyncio.to_thread(
+                    command,
+                    choice.request_id,
+                    session_id=self._gateway_session_id or "",
+                )
+                self.notify(result["message"])
+                self.history.add(AssistantMessageEvent(content=result["message"]))
+                return
             if choice.remote:
                 if choice.decision is None:
                     self.notify("Remote SSH request denied.", severity="warning")
@@ -317,7 +337,8 @@ class ManaChatApp(App):
                 content=f"Computer action completed after permission approval: {result.message}"
             ))
         except Exception as exc:
-            self.notify(f"Computer permission action failed: {exc}", severity="error")
+            action_name = "Server approval" if choice.server else "Computer permission"
+            self.notify(f"{action_name} action failed: {exc}", severity="error")
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""

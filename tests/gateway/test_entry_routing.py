@@ -14,7 +14,13 @@ from mana_agent.gateway import (
     RouteAvailability,
     RouteRegistration,
 )
-from mana_agent.gateway.entry_routing import ENTRY_ROUTER_PROMPT, EntryRouteContext, EntryRoutingDecision, EntryRoutingError
+from mana_agent.gateway.entry_routing import (
+    ENTRY_ROUTER_PROMPT,
+    EntryRouteContext,
+    EntryRoutingDecision,
+    EntryRoutingError,
+    EntryRoutingOutput,
+)
 from mana_agent.gateway.entry_routing import gmail_route_availability
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -532,6 +538,7 @@ def test_router_exposes_exact_required_source_contract_to_model() -> None:
     assert captured["required_source_rules"]["multi_task"] == [["none"]]
     assert "command" not in captured["required_source_vocabulary"]
     assert "repository" in captured["required_source_vocabulary"]
+    assert "server" in captured["required_source_vocabulary"]
 
 
 def test_multi_task_route_is_registered_and_requires_no_parent_sources() -> None:
@@ -695,6 +702,131 @@ def test_router_uses_structured_output_when_model_supports_it() -> None:
 
     assert decision.route == "conversation"
     assert calls[0][1:] == ("json_schema", True)
+
+
+def test_server_request_structured_output_schema_is_closed() -> None:
+    schema = EntryRoutingOutput.model_json_schema()
+
+    server_request_schema = schema["$defs"]["EntryRoutingServerRequest"]
+    server_decision_schema = schema["$defs"]["EntryRoutingServerDecision"]
+
+    assert server_request_schema["additionalProperties"] is False
+    assert server_decision_schema["properties"]["decision_id"]["minLength"] == 1
+    assert server_decision_schema["additionalProperties"] is False
+    assert "arguments_json" in server_decision_schema["properties"]
+    assert "arguments" not in server_decision_schema["properties"]
+
+
+def test_server_route_availability_exposes_exact_non_secret_contracts() -> None:
+    gateway = object.__new__(AgentChatGateway)
+    gateway.server_management_service = SimpleNamespace(
+        list_servers=lambda: [
+            SimpleNamespace(
+                server_id="mana-agent-server-1",
+                name="production",
+                username="ubuntu",
+                mode="managed_admin",
+                provider="ssh",
+                operating_system="ubuntu",
+                architecture="x86_64",
+                allowed_capabilities={"inspect", "package.write"},
+            )
+        ]
+    )
+
+    availability = gateway._server_route_availability()
+    package_contract = next(
+        contract
+        for contract in availability.details["tool_contracts"]
+        if contract["tool_name"] == "server_package_install"
+    )
+
+    assert availability.available is True
+    assert availability.details["server_catalog"] == [
+        {
+            "server_id": "mana-agent-server-1",
+            "name": "production",
+            "login_user": "ubuntu",
+            "mode": "managed_admin",
+            "provider": "ssh",
+            "operating_system": "ubuntu",
+            "architecture": "x86_64",
+            "allowed_capabilities": ["inspect", "package.write"],
+        }
+    ]
+    assert package_contract == {
+        "tool_name": "server_package_install",
+        "action": "package",
+        "required_capability": "package.write",
+        "read_only": False,
+        "consequential": True,
+        "destructive": False,
+        "arguments_json_example": (
+            '{"manager":"auto|apt|dnf|yum|pacman|apk|zypper|brew",'
+            '"packages":["nginx"]}'
+        ),
+    }
+    shell_contract = next(
+        contract
+        for contract in availability.details["tool_contracts"]
+        if contract["tool_name"] == "server_shell_execute"
+    )
+    assert shell_contract["arguments_json_example"] == (
+        '{"argv":["mkdir","-p","mana-agent-test"]}'
+    )
+    assert "exactly from the selected entry" in ENTRY_ROUTER_PROMPT
+    assert "route availability tool_contracts" in ENTRY_ROUTER_PROMPT
+    assert "server catalog's login_user" in ENTRY_ROUTER_PROMPT
+    assert "capability_error is only for a route-wide unavailable" in ENTRY_ROUTER_PROMPT
+
+
+def test_server_route_decodes_closed_arguments_json() -> None:
+    registry = EntryRouteRegistry()
+    registry.register(
+        RouteRegistration(
+            "server",
+            "enrolled server management",
+            lambda: RouteAvailability(available=True),
+        )
+    )
+    model = SimpleNamespace(
+        invoke=lambda _messages: SimpleNamespace(content=json.dumps({
+            "route": "server",
+            "confidence": 0.98,
+            "reason": "Install nginx on the enrolled server.",
+            "required_sources": ["server"],
+            "target_urls": [],
+            "server_request": {
+                "decision": {
+                    "decision_id": "decision-1",
+                    "server_id": "production-1",
+                    "action": "package",
+                    "tool_name": "server_package_install",
+                    "arguments_json": json.dumps({"manager": "apt", "packages": ["nginx"]}),
+                    "required_capability": "package.write",
+                    "read_only": False,
+                    "consequential": True,
+                    "destructive": False,
+                    "affected_resources": ["package:nginx"],
+                    "recovery_plan": "Remove nginx if verification fails.",
+                    "verification_commands": [["nginx", "-v"]],
+                    "safe_to_continue": True,
+                    "reason": "The user requested nginx installation.",
+                }
+            },
+        }))
+    )
+
+    decision = EntryRouter(llm=model, registry=registry).route(
+        user_prompt="install nginx.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert decision.route == "server"
+    assert decision.server_request["decision"]["arguments"] == {
+        "manager": "apt",
+        "packages": ["nginx"],
+    }
 
 
 def test_remote_routing_requires_direct_ssh_without_a_managed_worker() -> None:

@@ -213,6 +213,9 @@ Mana-Agent should provide:
 * Reliable patching and clear user verification guidance.
 * Extensible architecture for future agents, tools, and workflows.
 * Optional UI (dashboard/) and automation layers are lazy-loaded and must never affect core CLI or model-decision paths.
+* Server management reuses the enrolled-server registry, strict host-key pinning,
+  typed server decisions/tools, per-server mutation locks, approvals, redacted
+  audit evidence, and the existing gateway/automation/event infrastructure.
 
 Mana-Agent must not depend on hardcoded keyword behavior or fallback functionality.
 

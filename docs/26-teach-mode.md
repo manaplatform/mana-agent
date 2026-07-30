@@ -26,6 +26,18 @@ mana-agent teach doctor
 mana-agent teach start "Export my weekly report" --desktop
 ```
 
+On Linux, native input capture is not included by `mana-agent[full]` because
+`pynput` builds the Linux `evdev` extension and requires system input headers.
+Install those headers before the explicit desktop extra. For Ubuntu/Debian:
+
+```bash
+sudo apt-get install build-essential python3-dev linux-libc-dev
+pip install "mana-agent[teach-desktop]"
+```
+
+Headless Linux servers do not need this extra; semantic Teach Mode and server
+management remain available without it.
+
 On macOS, approve the exact terminal/Python/Mana-Agent executable under
 **Privacy & Security → Accessibility** and **Input Monitoring**. Mana stores its
 own grants separately under `~/.mana/teach/grants.json`; it cannot and does not

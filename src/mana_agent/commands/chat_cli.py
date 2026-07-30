@@ -2081,7 +2081,10 @@ def chat(
                 else:
                     console.print("[green]Browser action approved for this exact page and target. Ask Mana-Agent to continue.[/green]")
                 continue
-            shared_prefixes = ("/new", "/sessions", "/session", "/processes", "/connect", "/disconnect", "/help")
+            shared_prefixes = (
+                "/new", "/sessions", "/session", "/processes", "/connect",
+                "/disconnect", "/help",
+            )
             if question.strip().lower().startswith(shared_prefixes):
                 result = gateway.dispatch_command(
                     question, session_id=chat_ui_state.session_id, frontend="cli"

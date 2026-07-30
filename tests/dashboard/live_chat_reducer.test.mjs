@@ -96,6 +96,7 @@ test("computer permission requests remain actionable until a local decision even
     requestId: "permission-1",
     scope: "computer.screenshot.capture",
     preview: "Capture the full screen.",
+    kind: "computer",
     status: "pending",
     decision: "",
   }]);
@@ -111,6 +112,41 @@ test("computer permission requests remain actionable until a local decision even
   });
   assert.equal(snapshot(state).permissionRequests[0].status, "decided");
   assert.equal(snapshot(state).permissionRequests[0].decision, "allow_once");
+});
+
+test("server approval requests use the shared actionable permission state", () => {
+  const state = createState("session-1");
+  reduce(state, {
+    type: "event",
+    event: event(1, "server.waiting_approval", {
+      metadata: {
+        permission_request_id: "server-approval-1",
+        permission_scope: "server.action.execute",
+        preview: "sudo apt-get install -y -- nginx",
+        server_approval: true,
+      },
+    }),
+  });
+  assert.deepEqual(snapshot(state).permissionRequests, [{
+    requestId: "server-approval-1",
+    scope: "server.action.execute",
+    preview: "sudo apt-get install -y -- nginx",
+    kind: "server",
+    status: "pending",
+    decision: "",
+  }]);
+  reduce(state, {
+    type: "event",
+    event: event(2, "server.approval_decided", {
+      status: "success",
+      metadata: {
+        permission_request_id: "server-approval-1",
+        decision: "approve",
+      },
+    }),
+  });
+  assert.equal(snapshot(state).permissionRequests[0].status, "decided");
+  assert.equal(snapshot(state).permissionRequests[0].decision, "approve");
 });
 
 test("out-of-order terminal events and failed submissions remain visible", () => {

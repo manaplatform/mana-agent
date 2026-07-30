@@ -73,6 +73,12 @@ class ComputerPermissionDecisionRequest(BaseModel):
     repository_id: str | None = None
 
 
+class ServerApprovalDecisionRequest(BaseModel):
+    decision: str = Field(pattern=r"^(deny|approve)$")
+    root: str | None = None
+    repository_id: str | None = None
+
+
 @router.get("/conversations")
 def list_conversations(
     root: str | None = None,
@@ -324,6 +330,60 @@ def decide_computer_permission_in_chat(
         "executed": executed,
         "result": result_payload,
     }
+
+
+@router.post(
+    "/conversations/{conversation_id}/server-approvals/{approval_request_id}"
+)
+def decide_server_approval_in_chat(
+    conversation_id: str,
+    approval_request_id: str,
+    payload: ServerApprovalDecisionRequest,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Approve or deny one exact pending server action from trusted dashboard chat."""
+    _require_mutation_token(authorization)
+    service = _service(root=payload.root, repository_id=payload.repository_id)
+    try:
+        service.get_or_raise(conversation_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+
+    from mana_agent.ui.streamlit_helpers import decide_dashboard_server_approval
+
+    try:
+        result = decide_dashboard_server_approval(
+            conversation_id,
+            approval_request_id,
+            approve=payload.decision == "approve",
+            root=service.root,
+        )
+    except (LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise ManaApiError(409, str(exc)) from exc
+    status = (
+        "cancelled"
+        if payload.decision == "deny"
+        else "success"
+        if result.get("status") == "succeeded"
+        else "failed"
+    )
+    get_execution_event_hub().emit(
+        "server.approval_decided",
+        title=(
+            "Server action approved"
+            if payload.decision == "approve"
+            else "Server action denied"
+        ),
+        conversation_id=conversation_id,
+        repository_id=service.repository_id,
+        status=status,
+        metadata={
+            "permission_request_id": approval_request_id,
+            "decision": payload.decision,
+            "server_approval": True,
+        },
+    )
+    return {"ok": True, "decision": payload.decision, "result": result}
 
 
 @router.get("/conversations/{conversation_id}/execution")

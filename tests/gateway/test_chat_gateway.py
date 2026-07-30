@@ -31,6 +31,7 @@ from mana_agent.remote_execution.models import RemoteExecutionEvent, RemoteExecu
 from mana_agent.remote_execution.providers.local_ssh import LocalSSHProvider
 from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.remote_execution.target_policy import TargetPolicy, TargetPolicyMode
+from mana_agent.server.models import ServerActionDecision
 from mana_agent.services.chat_session_history import ChatSessionHistory
 
 
@@ -233,6 +234,119 @@ def test_missing_worker_at_permission_resume_uses_direct_ssh(monkeypatch) -> Non
     assert transitions == [("lane-task", "running", "remote SSH permission approved")]
     assert finishes == [("lane-task", "completed")]
     assert gateway._remote_job_lanes == {}
+
+
+def test_server_approval_is_session_bound_exact_and_single_use() -> None:
+    captured: dict[str, Any] = {}
+    transitions: list[tuple[str, str, str]] = []
+    finishes: list[tuple[str, str]] = []
+
+    async def execute(decision, argv, **kwargs):
+        captured.update({"decision": decision, "argv": argv, **kwargs})
+        return SimpleNamespace(
+            exit_code=0,
+            timed_out=False,
+            cancelled=False,
+            stdout="installed",
+            stderr="",
+            model_dump=lambda **_kwargs: {"exit_code": 0, "stdout": "installed"},
+        )
+
+    decision = ServerActionDecision.model_validate({
+        "decision_id": "decision-1",
+        "server_id": "server-1",
+        "action": "package",
+        "tool_name": "server_package_install",
+        "arguments": {"manager": "auto", "packages": ["nginx"]},
+        "required_capability": "package.write",
+        "read_only": False,
+        "consequential": True,
+        "affected_resources": ["package:nginx"],
+        "safe_to_continue": True,
+        "reason": "Install nginx.",
+    })
+    gateway = object.__new__(AgentChatGateway)
+    gateway.server_management_service = SimpleNamespace(execute=execute)
+    gateway._lane_coordinator = SimpleNamespace(
+        transition=lambda task_id, state, *, reason: transitions.append(
+            (task_id, state.value, reason)
+        ),
+        finish=lambda task_id, *, state, **_kwargs: finishes.append(
+            (task_id, state.value)
+        ),
+    )
+    gateway._pending_server_approvals = {
+        "server_approval_1": {
+            "session_id": "session-1",
+            "decision": decision.model_dump(mode="json"),
+            "argv": ["sh", "-c", "install-nginx"],
+            "exact_action_key": "exact-key",
+            "cwd": None,
+            "timeout_seconds": 60,
+            "pty": False,
+            "environment": {},
+            "lane_task_id": "lane-task",
+        }
+    }
+
+    try:
+        gateway.server_approval_command(
+            "server_approval_1",
+            session_id="session-2",
+        )
+    except PermissionError as exc:
+        assert "different session" in str(exc)
+    else:
+        raise AssertionError("server approvals must remain session bound")
+
+    result = gateway.server_approval_command(
+        "server_approval_1",
+        session_id="session-1",
+    )
+
+    assert result["status"] == "succeeded"
+    assert "Remote command output:\ninstalled" in result["message"]
+    assert captured["argv"] == ["sh", "-c", "install-nginx"]
+    assert captured["approval"].decision_id == "decision-1"
+    assert captured["approval"].exact_action_key == "exact-key"
+    assert gateway._pending_server_approvals == {}
+    assert transitions == [
+        ("lane-task", "running", "server action approved by the user")
+    ]
+    assert finishes == [("lane-task", "completed")]
+    try:
+        gateway.server_approval_command("server_approval_1", session_id="session-1")
+    except LookupError as exc:
+        assert "already consumed" in str(exc)
+    else:
+        raise AssertionError("server approvals must be single use")
+
+
+def test_server_approval_denial_consumes_request_without_execution() -> None:
+    cancellations: list[tuple[str, str]] = []
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = SimpleNamespace(
+        cancel_task=lambda task_id, *, reason: cancellations.append(
+            (task_id, reason)
+        )
+    )
+    gateway._pending_server_approvals = {
+        "server_approval_1": {
+            "session_id": "session-1",
+            "lane_task_id": "lane-task",
+        }
+    }
+
+    result = gateway.deny_server_approval_command(
+        "server_approval_1",
+        session_id="session-1",
+    )
+
+    assert result["status"] == "denied"
+    assert gateway._pending_server_approvals == {}
+    assert cancellations == [
+        ("lane-task", "Server action denied by the user.")
+    ]
 
 
 def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:

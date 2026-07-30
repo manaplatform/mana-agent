@@ -61,11 +61,24 @@ class RemoteExecutionRequest(StrictModel):
     working_directory: str | None = None
     connect_timeout_seconds: int = Field(default=15, gt=0, le=600)
     known_hosts_file: str | None = None
+    jump_host: str | None = None
+    agent_forwarding: bool = False
+    keepalive_seconds: int = Field(default=30, ge=0, le=600)
+    control_path: str | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=60, gt=0, le=3600)
     read_only: bool = True
     pty: bool = False
     permission_request_id: str = ""
     requested_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: dict[str, str]) -> dict[str, str]:
+        import re
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key in value):
+            raise ValueError("Remote environment variable names must be valid identifiers")
+        return value
 
     def exact_action_key(self) -> str:
         """Stable, non-secret identity binding approvals to the exact action."""

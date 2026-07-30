@@ -7,10 +7,16 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
-from mana_agent.config.user_config import load_effective_settings
-from mana_agent.memory.errors import MemoryConfigurationError, MemoryDependencyError
+from mana_agent.config.user_config import (
+    delete_managed_user_secret,
+    load_effective_settings,
+    load_user_secrets,
+    save_managed_user_secret,
+)
+from mana_agent.memory.errors import MemoryConfigurationError
 
 KEYRING_SERVICE = "mana-agent-memory"
+MANA_SECRETS_REFERENCE_PREFIX = "mana-secrets:"
 _EXTERNAL_PROVIDER_ENV = {
     "mem0": "MEM0_API_KEY",
     "supermemory": "SUPERMEMORY_API_KEY",
@@ -96,31 +102,70 @@ class MemoryConfig:
 
 
 class MemorySecretStore:
-    """OS-keyring storage; normal configuration contains only the reference."""
+    """Secure credential storage with explicit keyring/Mana-secret references."""
 
     @staticmethod
-    def _keyring():
+    def _recommended_keyring():
         try:
             import keyring
-        except ImportError as exc:
-            raise MemoryDependencyError(
-                "External memory credentials require the optional keyring dependency: pip install 'mana-agent[mem0]' or 'mana-agent[supermemory]'."
+        except ImportError:
+            return None
+        try:
+            backend = keyring.get_keyring()
+            priority = float(getattr(backend, "priority", 0) or 0)
+        except Exception:
+            return None
+        return keyring if priority > 0 else None
+
+    @staticmethod
+    def _secret_name(provider: str) -> str:
+        try:
+            return _EXTERNAL_PROVIDER_ENV[provider]
+        except KeyError as exc:
+            raise MemoryConfigurationError(
+                f"Memory provider {provider!r} has no registered credential name."
             ) from exc
-        return keyring
 
     def set(self, api_key: str, reference: str = "", *, provider: str = "mem0") -> str:
         prefix = _EXTERNAL_PROVIDER_SECRET_PREFIX.get(provider, provider or "memory")
         ref = reference or f"{prefix}:{uuid.uuid4().hex}"
-        self._keyring().set_password(KEYRING_SERVICE, ref, api_key)
-        return ref
+        if reference.startswith(MANA_SECRETS_REFERENCE_PREFIX):
+            secret_name = self._secret_name(provider)
+            save_managed_user_secret(secret_name, api_key)
+            return f"{MANA_SECRETS_REFERENCE_PREFIX}{secret_name}"
+        keyring = self._recommended_keyring()
+        if keyring is not None:
+            keyring.set_password(KEYRING_SERVICE, ref, api_key)
+            return ref
+        secret_name = self._secret_name(provider)
+        save_managed_user_secret(secret_name, api_key)
+        return f"{MANA_SECRETS_REFERENCE_PREFIX}{secret_name}"
 
     def get(self, reference: str) -> str:
+        if reference.startswith(MANA_SECRETS_REFERENCE_PREFIX):
+            secret_name = reference.removeprefix(MANA_SECRETS_REFERENCE_PREFIX)
+            if secret_name not in set(_EXTERNAL_PROVIDER_ENV.values()):
+                raise MemoryConfigurationError("The configured Mana memory secret reference is invalid.")
+            return str(load_user_secrets().get(secret_name) or "")
         try:
-            return str(self._keyring().get_password(KEYRING_SERVICE, reference) or "")
-        except MemoryDependencyError:
-            raise
+            keyring = self._recommended_keyring()
+            if keyring is None:
+                raise MemoryConfigurationError(
+                    "The configured memory credential uses an OS keyring, but no recommended keyring backend is available."
+                )
+            return str(keyring.get_password(KEYRING_SERVICE, reference) or "")
         except Exception as exc:
+            if isinstance(exc, MemoryConfigurationError):
+                raise
             raise MemoryConfigurationError("The configured Mem0 secret reference could not be read.") from exc
 
     def delete(self, reference: str) -> None:
-        self._keyring().delete_password(KEYRING_SERVICE, reference)
+        if reference.startswith(MANA_SECRETS_REFERENCE_PREFIX):
+            delete_managed_user_secret(reference.removeprefix(MANA_SECRETS_REFERENCE_PREFIX))
+            return
+        keyring = self._recommended_keyring()
+        if keyring is None:
+            raise MemoryConfigurationError(
+                "The configured memory credential uses an OS keyring, but no recommended keyring backend is available."
+            )
+        keyring.delete_password(KEYRING_SERVICE, reference)

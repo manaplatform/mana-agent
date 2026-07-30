@@ -733,3 +733,41 @@ def coding_tool_contracts_payload() -> dict[str, Any]:
     """JSON-friendly contract payload."""
 
     return {"tools": [item.model_dump() for item in coding_tool_contracts()]}
+
+
+def server_tool_contracts() -> list[ToolContract]:
+    """Contracts for model-selected operations on explicitly enrolled servers."""
+    from mana_agent.server.tools import SERVER_TOOL_SPECS
+
+    result = []
+    for spec in SERVER_TOOL_SPECS.values():
+        result.append(
+            ToolContract(
+                name=spec.name,
+                description=("Inspect" if spec.read_only else "Manage") + " an explicitly enrolled Linux server.",
+                input_schema=_schema(
+                    {
+                        "decision": {"type": "object"},
+                        "approval": {"type": ["object", "null"]},
+                    },
+                    ["decision"],
+                ),
+                output_schema=_schema(
+                    {
+                        "server_id": {"type": "string"},
+                        "command_id": {"type": "string"},
+                        "exit_code": {"type": ["integer", "null"]},
+                        "stdout": {"type": "string"},
+                        "stderr": {"type": "string"},
+                        "changed_system": {"type": "boolean"},
+                    }
+                ),
+                error_format=_schema({"error": {"type": "string"}, "no_action_executed": {"type": "boolean"}}),
+                safety_rules=[
+                    "Require a valid ServerActionDecision matching this exact tool contract.",
+                    "Require explicit enrollment, host-key pinning, capability authorization, and operating-mode permission.",
+                    "Require exact approval for consequential actions and preserve a redacted audit event.",
+                ],
+            )
+        )
+    return result

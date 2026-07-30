@@ -4,6 +4,108 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed enrolled-server generic shell actions by publishing the required exact
+  `argv` string-list shape in the server tool contract and rejecting malformed,
+  empty, or null-containing argv values before an approval or execution attempt.
+  The non-secret server catalog now also exposes the configured remote login
+  user, and generic-shell home-directory examples use a relative path rather
+  than an invalid placeholder absolute path.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
+
+- Fixed the managed-memory secret-store regression test on Windows by limiting
+  the POSIX mode-bit assertion for `secrets.toml` to platforms that expose
+  those permission bits. The test still verifies secret isolation and
+  retrieval on every platform.
+  - User verification required: `python -m pytest tests/test_memory_architecture.py::test_memory_secret_store_uses_protected_mana_store_without_keyring_backend`.
+
+- Fixed strict structured-output registration for enrolled-server routing by
+  replacing the arbitrary `server_request` object with closed typed boundary
+  models and decoding exact tool arguments from validated JSON text before the
+  existing server decision and tool-contract checks. The canonical required
+  source vocabulary now also includes the `server` source advertised by the
+  route contract. Server route availability now gives the model the exact tool
+  risk/capability contracts and a non-secret enrolled-server catalog, preventing
+  it from guessing capability names while preserving strict validation. A
+  server-level authorization denial now remains on the server route, returns
+  exact `server authorize` guidance before any execution, and can be resolved
+  through the new explicit capability-granting CLI command. Package-install
+  arguments are now validated before approval/argv construction, and the model
+  can explicitly select bounded `auto` discovery that refuses zero or multiple
+  observed package managers instead of guessing one. Consequential server
+  actions now persist a session-bound, single-use approval containing the exact
+  validated decision and argv. The TUI and dashboard now surface native
+  deny/approve-once requests that resume only that action, with no text-command
+  approval fallback. Pending approval lanes remain waiting until the GUI decision
+  legally resumes or cancels them. Server decision schemas now require non-empty
+  identifiers at the structured model boundary.
+  Invalid JSON, non-object arguments, and invalid server decisions stop without
+  executing a fallback.
+  - User verification reported before the fix: OpenAI rejected
+    `EntryRoutingOutput.server_request` because its object schema did not set
+    `additionalProperties` to `false`.
+  - User verification reported after the schema fix: `46 passed, 1 failed`;
+    the server decision was rejected because `server` was absent from the
+    canonical source vocabulary.
+  - User verification reported after the vocabulary fix: the Nginx installation
+    decision reached strict validation but guessed a `required_capability` that
+    did not match the authoritative `server_package_install` contract; no tool
+    was executed.
+  - User verification reported after exposing tool contracts: the model correctly
+    identified that `mana-agent-server-1` lacks `package.write`, but represented
+    the resource-level denial as a route-wide `capability_error`; no tool was
+    executed.
+  - User verification reported after granting `package.write`: the Nginx decision
+    omitted its package manager and surfaced a raw `'manager'` error; no server
+    action was executed.
+  - User verification reported after package argument validation: the Nginx
+    action reached the consequential approval gate, which previously had no
+    resumable server approval UI path; no server action was executed.
+  - User verification reported after native approval UI was added: one model
+    response supplied an empty `decision_id`, and approving a later valid request
+    failed because its lane had already been marked done; no fallback action was
+    executed.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/server/test_server_management.py tests/test_api_conversations.py tests/test_computer_control.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required: `python -m mana_agent server authorize --help`.
+  - User verification required: run `/help` in chat and confirm there is no
+    `/server-approval` command.
+
+- Fixed configuration saving on headless Linux when the Python `keyring`
+  package has no recommended backend. External Mem0/Supermemory credentials now
+  use an explicit `mana-secrets:` reference to Mana's atomic mode-0600
+  `secrets.toml`; usable OS keyrings remain preferred, and normal `config.toml`,
+  summaries, logs, and draft persistence do not expose the credential.
+  - User verification required: `python -m pytest tests/test_memory_architecture.py tests/test_tui_user_config.py`.
+  - User verification required on the affected host: `python -m mana_agent --configure`.
+
+- Fixed `mana-agent[full]` installation on headless Linux servers by excluding
+  the native `pynput`/`evdev` desktop-input stack on Linux. Native Linux Teach
+  Mode capture remains available through the explicit `teach-desktop` extra
+  after installing the platform input headers.
+  - User verification reported before the fix: editable `mana-agent` wheel built successfully, but the transitive `evdev` wheel failed because `linux/input.h` and `linux/input-event-codes.h` were unavailable.
+  - User verification required: `python -m pytest tests/test_package_version.py`.
+  - User verification required on Linux: `python -m pip install -e ".[full]"`.
+
+- Fixed direct construction of server SSH argv to inherit the model-validated
+  connection timeout and pinned known-hosts path from `RemoteExecutionRequest`
+  when callers do not provide explicit overrides.
+  - User verification reported before the fix: `78 passed, 1 failed` for the focused server, remote-execution, entry-routing, and lane-coordinator suite.
+  - User verification required: `PYTHONPATH=src python -m pytest tests/server/test_server_management.py::test_connection_uses_pinned_hosts_keepalive_jump_and_pool tests/remote_execution/test_remote_execution.py`.
+
+- Added the provider-neutral Server Management module with persistent authorized
+  enrollment, secret references, strict host-key pinning, pooled OpenSSH
+  transport, typed model decisions and tools, per-server mutation locks,
+  consequential/destructive approval contracts, redacted audit evidence,
+  package/service/file/network/database/container helpers, health inspection,
+  desired-state rollback, deployment/backup/provider contracts, CLI and
+  read-only dashboard APIs, Operations-lane routing, A2A capability metadata,
+  documentation, and isolated mocked coverage. Invalid or missing decisions,
+  capabilities, credentials, host keys, approvals, recovery points, managers,
+  providers, and runtime adapters stop without fallback execution.
+  - User verification required: `python -m pytest tests/server/test_server_management.py tests/remote_execution/test_remote_execution.py tests/gateway/test_entry_routing.py tests/gateway/test_lane_coordinator.py tests/test_api_workspaces.py tests/test_a2a_protocol.py`.
+  - User verification required: `python -m pytest`.
+  - User verification required: `python -m mana_agent server --help`.
+
 - Bumped the package and documented version to `v0.1.3`.
   - User verification required: `python -m pytest tests/test_package_version.py`.
 

@@ -87,6 +87,48 @@ def test_conversation_create_list_get_and_message(
     assert roles == ["user", "assistant"]
 
 
+def test_dashboard_server_approval_endpoint_resumes_cached_exact_action(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = str(tmp_path / "repo")
+    created = client.post(
+        "/api/v1/conversations",
+        json={"title": "Server approval", "root": root},
+    )
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    calls: list[dict[str, object]] = []
+
+    def decide(conversation_id, approval_request_id, **kwargs):
+        calls.append({
+            "conversation_id": conversation_id,
+            "approval_request_id": approval_request_id,
+            **kwargs,
+        })
+        return {
+            "status": "succeeded",
+            "approval_request_id": approval_request_id,
+            "message": "Approved server action completed.",
+        }
+
+    monkeypatch.setattr(
+        "mana_agent.ui.streamlit_helpers.decide_dashboard_server_approval",
+        decide,
+    )
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/server-approvals/server_approval_1",
+        json={"decision": "approve", "root": root},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["status"] == "succeeded"
+    assert calls[0]["conversation_id"] == conversation_id
+    assert calls[0]["approval_request_id"] == "server_approval_1"
+    assert calls[0]["approve"] is True
+
+
 def test_missing_conversation_returns_404(client: TestClient, tmp_path: Path) -> None:
     root = str(tmp_path / "repo")
     response = client.get(
