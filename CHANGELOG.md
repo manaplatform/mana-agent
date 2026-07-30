@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed strict structured-output registration for enrolled-server routing by
+  replacing the arbitrary `server_request` object with closed typed boundary
+  models and decoding exact tool arguments from validated JSON text before the
+  existing server decision and tool-contract checks. Invalid JSON, non-object
+  arguments, and invalid server decisions stop without executing a fallback.
+  - User verification reported before the fix: OpenAI rejected
+    `EntryRoutingOutput.server_request` because its object schema did not set
+    `additionalProperties` to `false`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/server/test_server_management.py`.
+
 - Fixed configuration saving on headless Linux when the Python `keyring`
   package has no recommended backend. External Mem0/Supermemory credentials now
   use an explicit `mana-secrets:` reference to Mana's atomic mode-0600

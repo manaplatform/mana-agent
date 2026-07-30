@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 from mana_agent.media.models import MediaOperationDecision
+from mana_agent.server.models import ServerActionKind
 
 
 EntryRouteName = Literal[
@@ -147,6 +148,29 @@ class EntryRoutingRemoteRequest(_StrictRoutingOutput):
     pty: bool = False
 
 
+class EntryRoutingServerDecision(_StrictRoutingOutput):
+    """Closed model-boundary representation of a server action decision."""
+
+    decision_id: str
+    server_id: str
+    action: ServerActionKind
+    tool_name: str
+    arguments_json: str = "{}"
+    required_capability: str
+    read_only: bool
+    consequential: bool
+    destructive: bool = False
+    affected_resources: list[str] = Field(default_factory=list)
+    recovery_plan: str | None = None
+    verification_commands: list[list[str]] = Field(default_factory=list)
+    safe_to_continue: bool
+    reason: str
+
+
+class EntryRoutingServerRequest(_StrictRoutingOutput):
+    decision: EntryRoutingServerDecision
+
+
 class EntryRoutingOutput(_StrictRoutingOutput):
     """Schema enforced at the model boundary before routing validation."""
 
@@ -162,7 +186,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     command_name: str = ""
     command_arguments: list[str] = Field(default_factory=list)
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
-    server_request: dict[str, Any] = Field(default_factory=dict)
+    server_request: EntryRoutingServerRequest | None = None
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
     media_request: MediaOperationDecision | None = None
     automation_operation: Literal[
@@ -246,7 +270,8 @@ Route semantics:
   requested concise findings (counts, top entries, and relevant samples) rather
   than streaming an entire log; its stdout is shown back in chat after approval.
 - server: management of an explicitly enrolled Linux server. Return a complete server_request
-  containing a strict ServerActionDecision and exact tool arguments. Use server rather than
+  containing a strict ServerActionDecision. Put the exact tool arguments in arguments_json as a
+  JSON object encoded in a string; use "{}" when the tool takes no arguments. Use server rather than
   remote_execution for enrolled-server inspection, packages, services, files, users, networking,
   firewall, databases, containers, deployments, backups, provisioning, reboot, or shutdown.
   The decision must classify read_only, consequential, destructive, affected resources, recovery,
@@ -330,7 +355,7 @@ Return JSON only:
   "command_name": "sessions",
   "command_arguments": ["list"],
   "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
-  "server_request": {},
+  "server_request": null,
   "artifact_family": "",
   "media_request": null,
   "automation_operation": ""
@@ -574,7 +599,7 @@ class EntryRouter:
                     "Reason: command route selected an unknown command."
                 )
         remote_request = payload.get("remote_request") or {}
-        server_request = payload.get("server_request") or {}
+        server_request = payload.get("server_request")
         media_request = payload.get("media_request")
         if route == "media":
             try:
@@ -674,8 +699,19 @@ class EntryRouter:
                 from mana_agent.server.models import ServerActionDecision
                 from mana_agent.server.tools import validate_tool_decision
 
+                raw_server_decision = server_request.get("decision")
+                if not isinstance(raw_server_decision, dict):
+                    raise ValueError("server_request.decision must be an object")
+                decision_payload = dict(raw_server_decision)
+                arguments_json = decision_payload.pop("arguments_json", None)
+                if not isinstance(arguments_json, str):
+                    raise ValueError("server decision arguments_json must be a JSON string")
+                arguments = json.loads(arguments_json)
+                if not isinstance(arguments, dict):
+                    raise ValueError("server decision arguments_json must encode a JSON object")
+                decision_payload["arguments"] = arguments
                 validated_server_decision = ServerActionDecision.model_validate(
-                    server_request.get("decision")
+                    decision_payload
                 )
                 validate_tool_decision(validated_server_decision)
             except Exception as exc:
@@ -687,7 +723,7 @@ class EntryRouter:
                 **server_request,
                 "decision": validated_server_decision.model_dump(mode="json"),
             }
-        elif server_request:
+        elif server_request is not None:
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: server_request is only valid for the server route."
