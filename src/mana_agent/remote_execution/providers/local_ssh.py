@@ -10,12 +10,20 @@ from pathlib import Path
 from mana_agent.remote_execution.models import RemoteExecutionEvent, RemoteExecutionRequest
 
 
-def build_ssh_argv(request: RemoteExecutionRequest, *, ssh_binary: str = "ssh", connect_timeout_seconds: int = 15, known_hosts_file: str | None = None) -> list[str]:
+def build_ssh_argv(
+    request: RemoteExecutionRequest,
+    *,
+    ssh_binary: str = "ssh",
+    connect_timeout_seconds: int | None = None,
+    known_hosts_file: str | None = None,
+) -> list[str]:
     """Return an argv-only OpenSSH invocation with strict host-key checking."""
     target = request.target
-    args = [ssh_binary, "-p", str(target.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", f"ConnectTimeout={connect_timeout_seconds}"]
-    if known_hosts_file:
-        args.extend(["-o", f"UserKnownHostsFile={str(Path(known_hosts_file).expanduser())}"])
+    effective_timeout = connect_timeout_seconds or request.connect_timeout_seconds
+    effective_known_hosts = known_hosts_file or request.known_hosts_file
+    args = [ssh_binary, "-p", str(target.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", f"ConnectTimeout={effective_timeout}"]
+    if effective_known_hosts:
+        args.extend(["-o", f"UserKnownHostsFile={str(Path(effective_known_hosts).expanduser())}"])
     if request.keepalive_seconds:
         args.extend(["-o", f"ServerAliveInterval={request.keepalive_seconds}", "-o", "ServerAliveCountMax=3"])
     if request.control_path:

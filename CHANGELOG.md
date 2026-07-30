@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-30
 
+- Fixed direct construction of server SSH argv to inherit the model-validated
+  connection timeout and pinned known-hosts path from `RemoteExecutionRequest`
+  when callers do not provide explicit overrides.
+  - User verification reported before the fix: `78 passed, 1 failed` for the focused server, remote-execution, entry-routing, and lane-coordinator suite.
+  - User verification required: `PYTHONPATH=src python -m pytest tests/server/test_server_management.py::test_connection_uses_pinned_hosts_keepalive_jump_and_pool tests/remote_execution/test_remote_execution.py`.
+
 - Added the provider-neutral Server Management module with persistent authorized
   enrollment, secret references, strict host-key pinning, pooled OpenSSH
   transport, typed model decisions and tools, per-server mutation locks,
