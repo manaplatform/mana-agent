@@ -54,6 +54,7 @@ __all__ = [
     "trigger_automation",
     "run_dashboard_chat",
     "close_dashboard_chat_session",
+    "decide_dashboard_server_approval",
     "list_schedules",
     "create_schedule",
     "schedule_status",
@@ -91,6 +92,27 @@ def close_dashboard_chat_session(conversation_id: str, root: Path | None = None)
     _DASHBOARD_EVENT_FORWARDERS.pop(key, None)
     if gateway is not None and hasattr(gateway, "close_session"):
         gateway.close_session()
+
+
+def decide_dashboard_server_approval(
+    conversation_id: str,
+    approval_request_id: str,
+    *,
+    approve: bool,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve one pending approval on the exact cached dashboard gateway."""
+    resolved = find_mana_root(root)
+    key = (str(resolved.resolve()), str(conversation_id or "dashboard-default"))
+    gateway = _DASHBOARD_GATEWAYS.get(key)
+    if gateway is None:
+        raise LookupError("The dashboard server approval session is no longer active.")
+    command = (
+        gateway.server_approval_command
+        if approve
+        else gateway.deny_server_approval_command
+    )
+    return command(approval_request_id, session_id=conversation_id)
 
 
 def _close_all_dashboard_chat_sessions() -> None:

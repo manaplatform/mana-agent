@@ -308,6 +308,33 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
         raise AssertionError("server approvals must be single use")
 
 
+def test_server_approval_denial_consumes_request_without_execution() -> None:
+    finishes: list[tuple[str, str, str]] = []
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = SimpleNamespace(
+        finish=lambda task_id, *, state, error: finishes.append(
+            (task_id, state.value, error)
+        )
+    )
+    gateway._pending_server_approvals = {
+        "server_approval_1": {
+            "session_id": "session-1",
+            "lane_task_id": "lane-task",
+        }
+    }
+
+    result = gateway.deny_server_approval_command(
+        "server_approval_1",
+        session_id="session-1",
+    )
+
+    assert result["status"] == "denied"
+    assert gateway._pending_server_approvals == {}
+    assert finishes == [
+        ("lane-task", "cancelled", "Server action denied by the user.")
+    ]
+
+
 def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "mana_agent.commands.cli_internal.build_ask_service",

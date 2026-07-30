@@ -810,6 +810,32 @@ class AgentChatGateway:
             "message": summary,
         }
 
+    def deny_server_approval_command(
+        self,
+        approval_request_id: str,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Deny and consume one exact session-bound server approval."""
+        pending = self._pending_server_approvals.get(approval_request_id)
+        if pending is None:
+            raise LookupError("Server approval request was not found or was already consumed.")
+        if str(pending["session_id"]) != str(session_id):
+            raise PermissionError("Server approval belongs to a different session.")
+        self._pending_server_approvals.pop(approval_request_id)
+        lane_task_id = str(pending.get("lane_task_id") or "")
+        if lane_task_id:
+            self._lane_coordinator.finish(
+                lane_task_id,
+                state=LaneTaskState.CANCELLED,
+                error="Server action denied by the user.",
+            )
+        return {
+            "status": "denied",
+            "approval_request_id": approval_request_id,
+            "message": "Server action denied. No server command was executed.",
+        }
+
     def _build_entry_route_registry(self) -> EntryRouteRegistry:
         registry = EntryRouteRegistry()
         registrations = (
@@ -3140,6 +3166,35 @@ class AgentChatGateway:
                     },
                     "lane_task_id": lane_task_id,
                 }
+                approval_metadata = {
+                    "permission_request_id": approval_request_id,
+                    "permission_scope": "server.action.execute",
+                    "preview": command_preview,
+                    "server_approval": True,
+                    "decision_id": server_decision.decision_id,
+                    "server_id": server_decision.server_id,
+                    "tool_name": server_decision.tool_name,
+                    "affected_resources": list(server_decision.affected_resources),
+                }
+                from mana_agent.chat.events import CodingActivityEvent
+                from mana_agent.chat.history import get_history
+
+                get_history().add(
+                    CodingActivityEvent(
+                        activity={
+                            "event_type": "server.waiting_approval",
+                            "title": "Server action approval required",
+                            "metadata": approval_metadata,
+                        },
+                        turn_id=context.turn_id,
+                    )
+                )
+                if sink is not None:
+                    sink(
+                        "server.waiting_approval",
+                        "Server action approval required",
+                        metadata=approval_metadata,
+                    )
                 return ChatTurnResult(
                     answer=(
                         f"{exc}\nCommand: {command_preview}\n"

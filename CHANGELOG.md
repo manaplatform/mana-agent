@@ -25,7 +25,9 @@ All notable repository changes should be recorded here.
   can explicitly select bounded `auto` discovery that refuses zero or multiple
   observed package managers instead of guessing one. Consequential server
   actions now persist a session-bound, single-use approval containing the exact
-  validated decision and argv; `/server-approval <id>` resumes only that action.
+  validated decision and argv. The TUI and dashboard now surface native
+  deny/approve-once requests that resume only that action; `/server-approval
+  <id>` remains a local fallback.
   Invalid JSON, non-object arguments, and invalid server decisions stop without
   executing a fallback.
   - User verification reported before the fix: OpenAI rejected
@@ -48,7 +50,8 @@ All notable repository changes should be recorded here.
   - User verification reported after package argument validation: the Nginx
     action reached the consequential approval gate, which previously had no
     resumable server approval command; no server action was executed.
-  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/server/test_server_management.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/server/test_server_management.py tests/test_api_conversations.py tests/test_computer_control.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
   - User verification required: `python -m mana_agent server authorize --help`.
   - User verification required: run `/help` in chat and confirm
     `/server-approval <approval-request-id>` is listed.

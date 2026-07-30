@@ -782,3 +782,29 @@ def test_tui_chat_opens_permission_decision_screen() -> None:
             assert app.screen.scope == "computer.screenshot.capture"
 
     run(exercise())
+
+
+def test_tui_chat_opens_server_approval_screen() -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history)
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            history.add(CodingActivityEvent(activity={
+                "event_id": "server-approval-test",
+                "event_type": "server.waiting_approval",
+                "status": "waiting_permission",
+                "title": "Server action approval required",
+                "metadata": {
+                    "permission_request_id": "server-approval-test",
+                    "permission_scope": "server.action.execute",
+                    "preview": "sudo apt-get install -y -- nginx",
+                    "server_approval": True,
+                },
+            }))
+            await pilot.pause()
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app.screen.server is True
+            assert app.screen.scope == "server.action.execute"
+
+    run(exercise())
