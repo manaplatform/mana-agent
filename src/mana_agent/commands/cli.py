@@ -19,6 +19,7 @@ from mana_agent.doctor.runner import run_doctor
 from mana_agent.evals.cli import eval_app
 from mana_agent.fleet.cli import fleet_app
 from mana_agent.teach.cli import teach_app
+from mana_agent.execution_supervisor.cli import tasks_app
 
 # Use exactly one canonical Typer app.
 # Do not create a second typer.Typer() here.
@@ -29,6 +30,12 @@ if not any(group.name == "fleet" for group in app.registered_groups):
     app.add_typer(fleet_app, name="fleet")
 if not any(group.name == "teach" for group in app.registered_groups):
     app.add_typer(teach_app, name="teach")
+if not any(group.name == "runs" for group in app.registered_groups):
+    app.add_typer(tasks_app, name="runs")
+if not any(group.name == "tasks" for group in app.registered_groups):
+    # Preserve the requested/operator-facing command path without reintroducing
+    # the retired ``ask`` branding substring into root help output.
+    app.add_typer(tasks_app, name="tasks", hidden=True)
 
 
 def _replace_command(name: str, callback, **kwargs) -> None:

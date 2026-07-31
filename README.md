@@ -27,6 +27,7 @@ Mana-Agent is a Python CLI and optional dashboard for understanding, operating, 
 - Automations, Teach Mode, Live Canvas, and media generation
 - Gmail, Telegram, ACP, A2A, MCP, SSH, and reverse-worker integrations
 - CLI, dashboard, and reusable analysis artifacts
+- Durable execution supervision with leases, checkpoints, safe recovery, cancellation, result escrow, and verified completion
 
 ## Install
 
@@ -69,6 +70,9 @@ mana-agent chat --root-dir .
 mana-agent dashboard --root-dir .
 mana-agent git -- status
 mana-agent context report --since 7d
+mana-agent tasks list --incomplete
+mana-agent tasks status <task-id>
+# `mana-agent runs ...` is the visible root-help alias for the same commands.
 ```
 
 Inside chat:
@@ -83,7 +87,7 @@ Inside chat:
 ## How it works
 
 ```text
-Request → Router → Planner → Taskboard → Tools → Reviewer → Verifier → Result
+Request → Router → Planner → Taskboard → Execution Supervisor → Tools → Verifier → Verified Result
 ```
 
 Repository changes run through constrained tools, isolated worktrees, permission gates, and verification before being returned as merge candidates.
@@ -122,7 +126,10 @@ Credentials remain separate from normal settings.
 
 ## Documentation
 
-See the [`docs/`](docs/) directory for installation, architecture, commands, connectors, [API Manager](docs/api-manager.md), automation, Teach Mode, media generation, workers, protocols, and development guides.
+See the [`docs/`](docs/) directory for installation, architecture, commands,
+connectors, [resilient execution](docs/29-resilient-execution.md),
+[API Manager](docs/api-manager.md), automation, Teach Mode, media generation,
+workers, protocols, and development guides.
 
 ## Development
 

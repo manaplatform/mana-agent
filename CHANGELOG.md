@@ -4,6 +4,25 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Added the resilient execution supervisor across gateway lanes, Fleet workers,
+  A2A delegation, scheduled automations, task attempts, CLI/API management,
+  shared live events, and the dashboard. Supervised tasks
+  now use atomic durable records, validated transitions, leases and bounded
+  heartbeats, schema-versioned checkpoints, child result escrow, explicit
+  side-effect retry safety, cancellation propagation, startup recovery, budget
+  enforcement, and verified completion artifact manifests. Missing/invalid
+  recovery decisions and ambiguous non-idempotent work stop without fallback.
+  Verification-pending lanes retain their durable review state without holding
+  released worker/provider capacity, atomic supervisor writes retry transient
+  Windows replace denials, and the task-management group is visible as `runs`
+  while retaining `tasks` as a hidden compatibility alias.
+  - User verification reported before the follow-up fix: the targeted suite completed with `5 failed, 169 passed`; three failures were released-capacity waits blocked by `verifying`, one was a transient `PermissionError` during atomic replacement, and one was the retired `ask` substring appearing inside `tasks` in root help.
+  - User verification reported after those fixes: the targeted suite completed with `1 failed, 173 passed`; the remaining failure was test instrumentation for the lane store also counting three successful supervisor-store replacements through Python's shared `os` module object. Supervisor atomic replacement is now independently bound and has direct transient-denial coverage.
+  - User verification required: `python -m pytest tests/execution_supervisor tests/gateway/test_lane_coordinator.py tests/gateway/test_multi_task_orchestration.py tests/fleet/test_fleet_core.py tests/test_a2a_protocol.py tests/test_automation_service.py tests/test_api_conversations.py tests/test_chat_websocket.py tests/test_cli_smoke.py tests/test_dashboard_helpers.py`.
+  - User verification required: `python -m pytest`.
+
+## 2026-07-31
+
 - Made `ContextCostGovernor` a required `AskAgent` constructor dependency and
   propagated it through gateway, worker, Telegram, and TUI factories with the
   active session identity. Removed compatibility calls that retried ask-service

@@ -338,3 +338,4 @@ src/mana_agent/
 - [Live Canvas and A2UI](./live-canvas.md)
 - [Project Diagram](./07-diagram.md)
 - [README](../README.md)
+- [Resilient Execution Supervisor](./29-resilient-execution.md)

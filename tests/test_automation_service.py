@@ -179,6 +179,34 @@ def test_restart_reloads_definition_and_next_run(tmp_path: Path) -> None:
     assert restarted.next_run_at == automation.next_run_at
 
 
+def test_retry_enabled_automation_requires_explicit_side_effect_safety(tmp_path: Path) -> None:
+    with pytest.raises(
+        service.AutomationValidationError,
+        match="retry-safe side-effect classification",
+    ):
+        create_automation(
+            tmp_path,
+            name="Unsafe retry",
+            trigger=CronTrigger(expression="0 2 * * *", timezone="UTC"),
+            job=AgentPromptJob(prompt="Perform an external action."),
+            timezone_name="UTC",
+            retry_policy={"maximum_attempts": 2},
+            deploy=False,
+        )
+
+    safe = create_automation(
+        tmp_path,
+        name="Read-only retry",
+        trigger=CronTrigger(expression="0 3 * * *", timezone="UTC"),
+        job=AgentPromptJob(prompt="Read and summarize."),
+        timezone_name="UTC",
+        retry_policy={"maximum_attempts": 2},
+        side_effect_classification="read_only",
+        deploy=False,
+    )
+    assert safe.side_effect_classification == "read_only"
+
+
 def test_legacy_migration_preserves_ids_runs_invalid_records_and_is_idempotent(tmp_path: Path) -> None:
     path = service.config_path(tmp_path)
     path.parent.mkdir(parents=True)

@@ -1,0 +1,1120 @@
+"""Durable orchestration for root tasks, child tasks, attempts, and results."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable, Iterable
+from uuid import uuid4
+
+from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+from mana_agent.execution_supervisor.errors import (
+    BudgetExceededError,
+    CompletionVerificationError,
+    ConcurrentUpdateError,
+    ExecutionSupervisorError,
+    InvalidTransitionError,
+    LeaseConflictError,
+    RetrySafetyError,
+    StaleLeaseError,
+)
+from mana_agent.execution_supervisor.models import (
+    AttemptRecord,
+    CancellationStatus,
+    CheckpointRecord,
+    CompletionContract,
+    EscrowResult,
+    ExecutionEvent,
+    ExecutionState,
+    ParentProgress,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoverySummary,
+    RetryBudget,
+    RetryCategory,
+    SideEffectClassification,
+    TaskRecord,
+    TERMINAL_STATES,
+    VerificationStatus,
+    WaitPolicy,
+    utc_now,
+)
+from mana_agent.execution_supervisor.retry import RetryPolicy
+from mana_agent.execution_supervisor.state_machine import validate_transition
+from mana_agent.execution_supervisor.store import ExecutionStore, LocalExecutionStore
+from mana_agent.execution_supervisor.verifier import ArtifactVerifier
+
+EventSink = Callable[[str, dict[str, Any]], None]
+Clock = Callable[[], datetime]
+
+
+def _token_hash(token: str) -> str:
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+class ExecutionSupervisor:
+    """Coordinates durable task state without selecting models, tools, or agents.
+
+    Routing and escalation choices enter through typed ``RecoveryDecision``
+    objects. The supervisor validates and executes them; it never substitutes a
+    default worker, model, tool, or workflow when the decision is invalid.
+    """
+
+    def __init__(
+        self,
+        config: ExecutionSupervisorConfig | None = None,
+        *,
+        store: ExecutionStore | None = None,
+        verifier: ArtifactVerifier | None = None,
+        event_sink: EventSink | None = None,
+        clock: Clock = utc_now,
+    ) -> None:
+        self.config = config or ExecutionSupervisorConfig()
+        self.store = store or LocalExecutionStore(self.config.root)
+        self.verifier = verifier or ArtifactVerifier()
+        self.retry_policy = RetryPolicy(self.config)
+        self.event_sink = event_sink
+        self.clock = clock
+        self._last_live_heartbeat: dict[str, datetime] = {}
+        self.startup_recovery_summary: RecoverySummary | None = None
+        if self.config.startup_recovery:
+            self.reconnect_tree()
+            self.startup_recovery_summary = self.recover()
+
+    def _emit(self, event_type: str, task: TaskRecord, **details: Any) -> ExecutionEvent:
+        event_details = {
+            "assigned_agent": task.assigned_agent,
+            "assigned_model": task.assigned_model,
+            "assigned_worker": task.assigned_worker,
+            "runtime_provider": task.runtime_provider,
+            "lease_owner": task.lease_owner,
+            "checkpoint_id": task.checkpoint_id,
+            "retry_count": task.retry_count,
+            "side_effect_classification": task.side_effect_classification.value,
+            "verification_status": task.verification_status.value,
+            "token_usage": task.token_usage,
+            "estimated_cost": task.estimated_cost,
+            "actual_cost": task.actual_cost,
+            **details,
+        }
+        event = ExecutionEvent(
+            event_type=event_type,
+            task_id=task.task_id,
+            parent_task_id=task.parent_task_id,
+            root_task_id=task.root_task_id,
+            attempt_id=task.attempt_id,
+            state=task.state,
+            created_at=self.clock(),
+            details=event_details,
+        )
+        self.store.append_event(event)
+        if event_type == "heartbeat":
+            previous = self._last_live_heartbeat.get(task.task_id)
+            if previous is not None and (event.created_at - previous).total_seconds() < 60:
+                return event
+            self._last_live_heartbeat[task.task_id] = event.created_at
+        if self.event_sink is not None:
+            self.event_sink(event_type, event.model_dump(mode="json"))
+        else:
+            # The shared event hub is the existing transport for TUI,
+            # dashboard, API, and connector observers. Import lazily so the
+            # domain layer remains usable without the optional UI services.
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            get_execution_event_hub().publish(
+                {
+                    "type": event_type,
+                    "kind": event_type,
+                    "status": "success" if event_type == "task_completed" else "running",
+                    "message": event_type.replace("_", " "),
+                    "execution_id": task.task_id,
+                    "metadata": {
+                        "execution_supervisor": True,
+                        **event.model_dump(mode="json"),
+                    },
+                },
+                persist=False,
+            )
+        return event
+
+    def create_task(
+        self,
+        *,
+        task_id: str | None = None,
+        parent_task_id: str | None = None,
+        task_type: str = "task",
+        assigned_agent: str = "",
+        assigned_model: str = "",
+        runtime_provider: str = "",
+        workspace_path: str | Path = "",
+        routing_decision_id: str,
+        side_effect_classification: SideEffectClassification,
+        completion_contract: Iterable[CompletionContract] = (),
+        dependency_task_ids: Iterable[str] = (),
+        idempotency_key: str = "",
+        compensation_strategy: str = "",
+        token_budget: int | None = None,
+        estimated_cost: float = 0.0,
+        monetary_budget: float | None = None,
+        deadline_at: datetime | None = None,
+        wait_policy: WaitPolicy = WaitPolicy.WAIT_ALL,
+        minimum_success_count: int | None = None,
+    ) -> TaskRecord:
+        if not self.config.enabled:
+            raise ExecutionSupervisorError(
+                "execution supervisor is disabled; unsupervised execution was not started"
+            )
+        identifier = task_id or f"task_{uuid4()}"
+        contracts = list(completion_contract)
+        dependencies = list(dependency_task_ids)
+        idempotency_hash = (
+            _token_hash(f"idempotency:{idempotency_key}") if idempotency_key else ""
+        )
+        existing = self.store.get_task_or_none(identifier)
+        if existing is not None:
+            if (
+                existing.parent_task_id != parent_task_id
+                or existing.task_type != task_type
+                or existing.routing_decision_id != routing_decision_id
+                or existing.side_effect_classification != side_effect_classification
+                or existing.idempotency_key != idempotency_hash
+                or existing.compensation_strategy != compensation_strategy
+                or existing.completion_contract != contracts
+                or existing.dependency_task_ids != dependencies
+            ):
+                raise ConcurrentUpdateError(
+                    f"task identity {identifier} already exists with a different immutable contract"
+                )
+            if existing.parent_task_id:
+                durable_parent = self.store.get_task(existing.parent_task_id)
+                if existing.task_id not in durable_parent.child_task_ids:
+                    def relink(current: TaskRecord) -> None:
+                        if existing.task_id not in current.child_task_ids:
+                            current.child_task_ids.append(existing.task_id)
+                            current.updated_at = self.clock()
+                    self.store.update_task(durable_parent.task_id, relink)
+                    self._emit(
+                        "child_reconnected",
+                        existing,
+                        parent_task_id=durable_parent.task_id,
+                    )
+            return existing
+        if not routing_decision_id.strip():
+            raise ValueError("a validated routing decision ID is required")
+        if monetary_budget is not None and estimated_cost > monetary_budget:
+            raise BudgetExceededError(
+                "model-selected estimated task cost exceeds the task monetary budget"
+            )
+        parent = self.store.get_task(parent_task_id) if parent_task_id else None
+        depth = 0
+        cursor = parent
+        while cursor is not None:
+            depth += 1
+            cursor = self.store.get_task(cursor.parent_task_id) if cursor.parent_task_id else None
+        if depth > self.config.max_child_depth:
+            raise ValueError("maximum supervised child depth exceeded")
+        if parent and len(parent.child_task_ids) >= self.config.max_children_per_task:
+            raise ValueError("maximum supervised children per task exceeded")
+        if parent:
+            root_subtasks = sum(
+                item.root_task_id == parent.root_task_id and item.parent_task_id is not None
+                for item in self.store.list_tasks()
+            )
+            if root_subtasks >= self.config.max_total_subtasks:
+                raise ValueError("maximum total supervised subtasks exceeded")
+        budget = RetryBudget(
+            infrastructure=self.config.default_retry_budget,
+            model=self.config.default_retry_budget,
+            tool=self.config.default_retry_budget,
+            verification=self.config.default_retry_budget,
+            lease_loss=self.config.default_retry_budget,
+            replan=self.config.max_replans,
+        )
+        selected_deadline = deadline_at or (
+            self.clock() + timedelta(seconds=self.config.default_task_deadline_seconds)
+        )
+        if parent is not None and parent.deadline_at is not None:
+            selected_deadline = min(selected_deadline, parent.deadline_at)
+        task = TaskRecord(
+            task_id=identifier,
+            parent_task_id=parent_task_id,
+            root_task_id=parent.root_task_id if parent else identifier,
+            task_type=task_type,
+            assigned_agent=assigned_agent,
+            assigned_model=assigned_model,
+            runtime_provider=runtime_provider,
+            retry_budget=budget,
+            idempotency_key=idempotency_hash,
+            compensation_strategy=compensation_strategy,
+            side_effect_classification=side_effect_classification,
+            completion_contract=contracts,
+            dependency_task_ids=dependencies,
+            token_budget=token_budget,
+            estimated_cost=max(0.0, estimated_cost),
+            monetary_budget=monetary_budget,
+            deadline_at=selected_deadline,
+            wait_policy=wait_policy,
+            minimum_success_count=minimum_success_count,
+            max_child_depth=self.config.max_child_depth,
+            max_children=self.config.max_children_per_task,
+            max_total_subtasks=self.config.max_total_subtasks,
+            max_concurrent_children=self.config.max_concurrent_children,
+            routing_decision_id=routing_decision_id,
+            workspace_path=str(Path(workspace_path).expanduser().resolve()) if workspace_path else "",
+        )
+        self.store.create_task(task)
+        if parent is not None:
+            def link(current: TaskRecord) -> None:
+                if identifier not in current.child_task_ids:
+                    current.child_task_ids.append(identifier)
+                    current.updated_at = self.clock()
+            parent, _ = self.store.update_task(parent.task_id, link)
+            self._emit("child_created", task, parent_task_id=parent.task_id)
+        self._emit("task_created", task)
+        return task
+
+    def transition(
+        self,
+        task_id: str,
+        target: ExecutionState,
+        *,
+        reason: str = "",
+        recovery_reason: str = "",
+    ) -> TaskRecord:
+        prior: ExecutionState | None = None
+
+        def update(task: TaskRecord) -> None:
+            nonlocal prior
+            prior = task.state
+            validate_transition(task.state, target)
+            task.state = target
+            task.updated_at = self.clock()
+            if target == ExecutionState.RUNNING and task.started_at is None:
+                task.started_at = task.updated_at
+            if target == ExecutionState.CANCELLING:
+                task.cancellation_status = CancellationStatus.REQUESTED
+                task.cancellation_reason = reason
+            if target in TERMINAL_STATES:
+                task.finished_at = task.updated_at
+                task.lease_owner = ""
+                task.lease_token = ""
+                task.lease_expires_at = None
+                task.retry_not_before = None
+            elif target == ExecutionState.QUEUED:
+                task.lease_owner = ""
+                task.lease_token = ""
+                task.lease_expires_at = None
+                task.retry_not_before = None
+            if reason:
+                task.failure_reason = reason if target == ExecutionState.FAILED else task.failure_reason
+            if recovery_reason:
+                task.recovery_reason = recovery_reason
+
+        try:
+            task, _ = self.store.update_task(task_id, update)
+        except InvalidTransitionError as exc:
+            current = self.store.get_task(task_id)
+            self._emit(
+                "invalid_transition",
+                current,
+                source=current.state.value,
+                target=target.value,
+                reason=str(exc),
+            )
+            raise
+        event_name = {
+            ExecutionState.QUEUED: "task_queued",
+            ExecutionState.RUNNING: "task_started",
+            ExecutionState.WAITING: "child_waiting",
+            ExecutionState.RETRY_SCHEDULED: "retry_scheduled",
+            ExecutionState.REPLANNING: "replan_started",
+            ExecutionState.CANCELLING: "cancellation_requested",
+            ExecutionState.CANCELLED: "task_cancelled",
+            ExecutionState.FAILED: "task_failed",
+            ExecutionState.COMPLETED: "task_completed",
+        }.get(target, f"task_{target.value}")
+        if target in TERMINAL_STATES and task.attempt_id:
+            attempt = self.store.get_attempt(task.attempt_id)
+            if attempt is not None:
+                attempt.state = target.value
+                attempt.finished_at = task.finished_at
+                if target == ExecutionState.FAILED:
+                    attempt.failure_reason = reason
+                self.store.save_attempt(attempt)
+        self._emit(event_name, task, previous_state=prior.value if prior else "", reason=reason or recovery_reason)
+        return task
+
+    def queue(self, task_id: str) -> TaskRecord:
+        task = self.store.get_task(task_id)
+        if task.state == ExecutionState.QUEUED:
+            return task
+        return self.transition(task_id, ExecutionState.QUEUED)
+
+    def acquire_lease(self, task_id: str, *, owner: str, worker: str = "") -> tuple[TaskRecord, str]:
+        if not owner.strip():
+            raise ValueError("lease owner is required")
+        lease_token = uuid4().hex
+        now = self.clock()
+        current = self.store.get_task(task_id)
+        if current.state != ExecutionState.QUEUED:
+            raise LeaseConflictError(f"task is not leaseable from state {current.state.value}")
+        if current.assigned_worker and worker != current.assigned_worker:
+            raise LeaseConflictError(
+                f"lease claimant {worker or '<unset>'} does not match the model-selected "
+                f"worker {current.assigned_worker}"
+            )
+        if current.deadline_at is not None and current.deadline_at <= now:
+            self.transition(task_id, ExecutionState.FAILED, reason="task wall-clock deadline exceeded")
+            raise BudgetExceededError("task wall-clock deadline exceeded")
+
+        def claim(task: TaskRecord) -> AttemptRecord:
+            if task.state != ExecutionState.QUEUED:
+                raise LeaseConflictError(f"task is not leaseable from state {task.state.value}")
+            if task.lease_token and task.lease_expires_at and task.lease_expires_at > now:
+                raise LeaseConflictError("task already holds an active lease")
+            if task.parent_task_id:
+                active_siblings = sum(
+                    item.parent_task_id == task.parent_task_id
+                    and item.task_id != task.task_id
+                    and item.state in {
+                        ExecutionState.LEASED,
+                        ExecutionState.RUNNING,
+                        ExecutionState.CHECKPOINTING,
+                        ExecutionState.WAITING,
+                    }
+                    for item in self.store.list_tasks()
+                )
+                if active_siblings >= self.config.max_concurrent_children:
+                    raise LeaseConflictError("maximum concurrent supervised children reached")
+            attempt = AttemptRecord(
+                task_id=task.task_id,
+                number=len(task.attempt_ids) + 1,
+                state="leased",
+                lease_owner=owner,
+                lease_token=_token_hash(lease_token),
+                lease_expires_at=now + timedelta(seconds=self.config.lease_seconds),
+                estimated_cost=task.estimated_cost,
+            )
+            task.state = ExecutionState.LEASED
+            task.attempt_id = attempt.attempt_id
+            task.attempt_ids.append(attempt.attempt_id)
+            task.assigned_worker = worker
+            task.lease_owner = owner
+            task.lease_token = _token_hash(lease_token)
+            task.lease_expires_at = attempt.lease_expires_at
+            task.heartbeat_at = now
+            task.updated_at = now
+            return attempt
+
+        task, attempt = self.store.update_task_and_attempt(task_id, claim)
+        self._emit("lease_acquired", task, lease_owner=owner, lease_expires_at=task.lease_expires_at)
+        return task, lease_token
+
+    def _validate_lease(self, task: TaskRecord, *, attempt_id: str, lease_token: str) -> None:
+        if task.attempt_id != attempt_id:
+            raise StaleLeaseError("attempt no longer owns the task")
+        if not hmac.compare_digest(task.lease_token, _token_hash(lease_token)):
+            raise StaleLeaseError("lease token is stale or invalid")
+        if task.lease_expires_at is None or task.lease_expires_at <= self.clock():
+            raise StaleLeaseError("lease has expired")
+        if task.deadline_at is not None and task.deadline_at <= self.clock():
+            raise BudgetExceededError("task wall-clock deadline exceeded")
+
+    def start(self, task_id: str, *, attempt_id: str, lease_token: str) -> TaskRecord:
+        def update(task: TaskRecord) -> None:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            validate_transition(task.state, ExecutionState.RUNNING)
+            task.state = ExecutionState.RUNNING
+            task.started_at = task.started_at or self.clock()
+            task.updated_at = self.clock()
+        task, _ = self.store.update_task(task_id, update)
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt:
+            attempt.state = "running"
+            attempt.started_at = task.started_at
+            self.store.save_attempt(attempt)
+        self._emit("task_started", task)
+        return task
+
+    def release_lease(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        reason: str,
+    ) -> TaskRecord:
+        """Release a claimed-but-not-started attempt without retrying executed work."""
+
+        current = self.store.get_task(task_id)
+        self._validate_lease(current, attempt_id=attempt_id, lease_token=lease_token)
+        if current.state != ExecutionState.LEASED:
+            raise LeaseConflictError(
+                "only a leased attempt that has not started may be released directly"
+            )
+        task = self.transition(
+            task_id,
+            ExecutionState.QUEUED,
+            recovery_reason=reason or "lease released before execution",
+        )
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt is not None:
+            attempt.state = "released"
+            attempt.finished_at = self.clock()
+            attempt.recovery_reason = reason
+            self.store.save_attempt(attempt)
+        self._emit("lease_released", task, released_attempt_id=attempt_id, reason=reason)
+        return task
+
+    def heartbeat(self, task_id: str, *, attempt_id: str, lease_token: str) -> TaskRecord:
+        now = self.clock()
+        def renew(task: TaskRecord) -> None:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.state not in {ExecutionState.LEASED, ExecutionState.RUNNING, ExecutionState.CHECKPOINTING, ExecutionState.WAITING}:
+                raise LeaseConflictError(f"task state does not accept heartbeats: {task.state.value}")
+            task.heartbeat_at = now
+            task.lease_expires_at = now + timedelta(seconds=self.config.lease_seconds)
+            task.updated_at = now
+        task, _ = self.store.update_task(task_id, renew)
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt:
+            attempt.lease_expires_at = task.lease_expires_at
+            self.store.save_attempt(attempt)
+        self._emit("heartbeat", task, lease_expires_at=task.lease_expires_at)
+        return task
+
+    def resume_running(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+    ) -> TaskRecord:
+        """Resume an existing, still-valid leased attempt without creating a rival attempt."""
+
+        def resume(task: TaskRecord) -> None:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.state == ExecutionState.RUNNING:
+                task.heartbeat_at = task.updated_at = self.clock()
+                return
+            if task.state not in {ExecutionState.LEASED, ExecutionState.WAITING}:
+                raise LeaseConflictError(
+                    f"task cannot resume its active attempt from state {task.state.value}"
+                )
+            validate_transition(task.state, ExecutionState.RUNNING)
+            task.state = ExecutionState.RUNNING
+            task.heartbeat_at = task.updated_at = self.clock()
+            task.started_at = task.started_at or task.updated_at
+
+        task, _ = self.store.update_task(task_id, resume)
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt is not None:
+            attempt.state = "running"
+            attempt.started_at = attempt.started_at or task.started_at
+            self.store.save_attempt(attempt)
+        self._emit("task_resumed", task, reused_attempt=True)
+        return task
+
+    def checkpoint(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        resume_payload: dict[str, Any],
+        completed_steps: Iterable[str] = (),
+        pending_steps: Iterable[str] = (),
+        tool_results: Iterable[dict[str, Any]] = (),
+        workspace_reference: str = "",
+        git_reference: str = "",
+        generated_files: Iterable[str] = (),
+    ) -> CheckpointRecord:
+        original_state = self.store.get_task(task_id).state
+        if original_state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
+            raise LeaseConflictError(f"task cannot checkpoint from state {original_state.value}")
+
+        def begin(task: TaskRecord) -> None:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            validate_transition(task.state, ExecutionState.CHECKPOINTING)
+            task.state = ExecutionState.CHECKPOINTING
+            task.updated_at = self.clock()
+
+        checkpointing, _ = self.store.update_task(task_id, begin)
+        self._emit("task_checkpointing", checkpointing)
+
+        def persist(task: TaskRecord) -> CheckpointRecord:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.state != ExecutionState.CHECKPOINTING:
+                raise LeaseConflictError(f"task cannot checkpoint from state {task.state.value}")
+            checkpoint = CheckpointRecord(
+                task_id=task.task_id,
+                attempt_id=attempt_id,
+                state_version=task.state_version,
+                resume_payload=resume_payload,
+                completed_steps=list(completed_steps),
+                pending_steps=list(pending_steps),
+                tool_results=list(tool_results),
+                workspace_reference=workspace_reference,
+                git_reference=git_reference,
+                generated_files=list(generated_files),
+            )
+            task.checkpoint_id = checkpoint.checkpoint_id
+            task.checkpoint_count += 1
+            validate_transition(task.state, original_state)
+            task.state = original_state
+            task.updated_at = self.clock()
+            return checkpoint
+        task, checkpoint = self.store.update_task_and_checkpoint(task_id, persist)
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt:
+            attempt.checkpoint_id = checkpoint.checkpoint_id
+            self.store.save_attempt(attempt)
+        self._emit("checkpoint_saved", task, checkpoint_id=checkpoint.checkpoint_id)
+        return checkpoint
+
+    def submit_result(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        payload: dict[str, Any],
+        token_usage: int = 0,
+        actual_cost: float = 0.0,
+    ) -> TaskRecord:
+        current = self.store.get_task(task_id)
+        projected_tokens = current.token_usage + max(0, token_usage)
+        projected_cost = current.actual_cost + max(0.0, actual_cost)
+        over_tokens = current.token_budget is not None and projected_tokens > current.token_budget
+        over_cost = current.monetary_budget is not None and projected_cost > current.monetary_budget
+        if over_tokens or over_cost:
+            reason = "execution budget exceeded before result acceptance"
+            self.transition(task_id, ExecutionState.FAILED, reason=reason)
+            raise BudgetExceededError(reason)
+        ancestors: list[TaskRecord] = []
+        parent_id = current.parent_task_id
+        while parent_id:
+            ancestor = self.store.get_task(parent_id)
+            ancestors.append(ancestor)
+            parent_id = ancestor.parent_task_id
+        for ancestor in ancestors:
+            ancestor_tokens = ancestor.token_usage + max(0, token_usage)
+            ancestor_cost = ancestor.actual_cost + max(0.0, actual_cost)
+            if (
+                ancestor.token_budget is not None
+                and ancestor_tokens > ancestor.token_budget
+            ) or (
+                ancestor.monetary_budget is not None
+                and ancestor_cost > ancestor.monetary_budget
+            ):
+                reason = f"ancestor task budget exceeded: {ancestor.task_id}"
+                self.transition(task_id, ExecutionState.FAILED, reason=reason)
+                raise BudgetExceededError(reason)
+
+        def escrow(task: TaskRecord) -> EscrowResult:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
+                raise LeaseConflictError(f"task cannot publish a result from state {task.state.value}")
+            validate_transition(task.state, ExecutionState.COMPLETED_PENDING_VERIFICATION)
+            result = EscrowResult(
+                task_id=task.task_id,
+                parent_task_id=task.parent_task_id,
+                attempt_id=attempt_id,
+                lease_token_hash=_token_hash(lease_token),
+                payload=payload,
+            )
+            task.result_id = result.result_id
+            task.token_usage += max(0, token_usage)
+            task.actual_cost += max(0.0, actual_cost)
+            task.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
+            task.updated_at = self.clock()
+            return result
+        task, result = self.store.update_task_and_result(task_id, escrow)
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt is not None:
+            attempt.token_usage += max(0, token_usage)
+            attempt.actual_cost += max(0.0, actual_cost)
+            self.store.save_attempt(attempt)
+        for ancestor in ancestors:
+            def aggregate(parent: TaskRecord) -> None:
+                parent.token_usage += max(0, token_usage)
+                parent.actual_cost += max(0.0, actual_cost)
+                parent.updated_at = self.clock()
+            self.store.update_task(ancestor.task_id, aggregate)
+        self._emit("result_escrowed", task, result_id=result.result_id)
+        self._emit("verification_started", task)
+        return self.verify_completion(task_id)
+
+    def set_completion_contract(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        contracts: Iterable[CompletionContract],
+    ) -> TaskRecord:
+        selected = list(contracts)
+        if not selected:
+            raise ValueError("at least one explicit completion contract is required")
+        def update(task: TaskRecord) -> None:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            task.completion_contract = selected
+            task.updated_at = self.clock()
+        task, _ = self.store.update_task(task_id, update)
+        self._emit("completion_contract_updated", task, contract_count=len(selected))
+        return task
+
+    def verify_completion(self, task_id: str) -> TaskRecord:
+        task = self.store.get_task(task_id)
+        if task.state != ExecutionState.COMPLETED_PENDING_VERIFICATION:
+            raise CompletionVerificationError("task is not awaiting completion verification")
+        result = self.store.get_result(task.result_id)
+        if result is None:
+            self._emit("verification_failed", task, reason="result escrow is missing")
+            raise CompletionVerificationError("durable result escrow is missing")
+        if not self.config.verify_completion_artifacts:
+            self._emit(
+                "verification_failed",
+                task,
+                reason=(
+                    "completion verification is disabled; the claimed result remains in escrow "
+                    "and cannot be advertised as completed"
+                ),
+            )
+            raise CompletionVerificationError(
+                "completion verification is disabled; claimed result remains in escrow"
+            )
+        attempt = self.store.get_attempt(result.attempt_id)
+        workspace = Path(task.workspace_path) if task.workspace_path else Path.cwd()
+        try:
+            report = self.verifier.verify(
+                task.completion_contract,
+                workspace=workspace,
+                result_payload=result.payload,
+                attempt_started_at=attempt.started_at if attempt else None,
+            )
+        except Exception as exc:
+            self._emit(
+                "verification_failed",
+                task,
+                reason=f"completion verifier failed safely: {type(exc).__name__}: {exc}",
+            )
+            raise CompletionVerificationError(
+                "completion verifier failed; claimed result remains in escrow"
+            ) from exc
+        result.artifacts = list(report.artifacts)
+        self.store.save_result(result)
+        def apply_report(current: TaskRecord) -> None:
+            if current.result_id != result.result_id:
+                raise CompletionVerificationError("task result changed during verification")
+            current.completion_artefacts = list(report.artifacts)
+            current.verification_status = report.status
+            current.updated_at = self.clock()
+            if report.status == VerificationStatus.PASSED:
+                validate_transition(current.state, ExecutionState.COMPLETED)
+                current.state = ExecutionState.COMPLETED
+                current.finished_at = current.updated_at
+                current.lease_owner = ""
+                current.lease_token = ""
+                current.lease_expires_at = None
+        task, _ = self.store.update_task(task_id, apply_report)
+        self.store.save_artifact_manifest(
+            task_id,
+            {
+                "task_id": task_id,
+                "attempt_id": result.attempt_id,
+                "artefacts": [item.model_dump(mode="json") for item in report.artifacts],
+                "verification": report.model_dump(mode="json"),
+            },
+        )
+        if report.status == VerificationStatus.PASSED:
+            for artifact in report.artifacts:
+                self._emit("artefact_verified", task, artifact=artifact.model_dump(mode="json"))
+            self._emit("task_completed", task, result_id=result.result_id)
+            attempt = self.store.get_attempt(result.attempt_id)
+            if attempt:
+                attempt.state = "completed"
+                attempt.finished_at = task.finished_at
+                self.store.save_attempt(attempt)
+        else:
+            self._emit("verification_failed", task, checks=report.checks)
+        return task
+
+    def acknowledge_result(self, result_id: str, *, parent_task_id: str) -> EscrowResult:
+        result = self.store.get_result(result_id)
+        if result is None:
+            raise CompletionVerificationError(f"unknown escrow result: {result_id}")
+        if result.parent_task_id != parent_task_id:
+            raise CompletionVerificationError("result does not belong to the acknowledging parent")
+        if result.acknowledged_at is None:
+            result.acknowledged_at = self.clock()
+            result.acknowledged_by = parent_task_id
+            self.store.save_result(result)
+        task = self.store.get_task(result.task_id)
+        self._emit("result_acknowledged", task, result_id=result_id, parent_task_id=parent_task_id)
+        return result
+
+    def mark_irreversible_side_effect(
+        self, task_id: str, *, attempt_id: str, lease_token: str
+    ) -> TaskRecord:
+        def update(task: TaskRecord) -> None:
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            task.irreversible_side_effect_started = True
+            task.updated_at = self.clock()
+        task, _ = self.store.update_task(task_id, update)
+        self._emit("side_effect_phase_started", task, irreversible=True)
+        return task
+
+    def cancellation_requested(self, task_id: str) -> bool:
+        return self.store.get_task(task_id).state in {ExecutionState.CANCELLING, ExecutionState.CANCELLED}
+
+    def cancel_attempt(self, task_id: str, *, attempt_id: str, reason: str) -> list[str]:
+        task = self.store.get_task(task_id)
+        if task.attempt_id != attempt_id:
+            raise StaleLeaseError(
+                f"attempt {attempt_id} is not the active attempt for task {task_id}"
+            )
+        return self.cancel(task_id, reason=reason, propagate=False)
+
+    def cancel(self, task_id: str, *, reason: str, propagate: bool = True) -> list[str]:
+        root = self.store.get_task(task_id)
+        targets: list[TaskRecord] = []
+        pending = [root]
+        while pending:
+            current = pending.pop()
+            targets.append(current)
+            if propagate:
+                pending.extend(self.store.get_task(child) for child in current.child_task_ids)
+        changed: list[str] = []
+        blocked: list[str] = []
+        for current in reversed(targets):
+            if current.state in TERMINAL_STATES:
+                continue
+            if current.irreversible_side_effect_started:
+                def block(task: TaskRecord) -> None:
+                    task.cancellation_status = CancellationStatus.BLOCKED_BY_SIDE_EFFECT
+                    task.cancellation_reason = reason
+                    task.updated_at = self.clock()
+                task, _ = self.store.update_task(current.task_id, block)
+                self._emit("cancellation_blocked", task, reason=reason)
+                blocked.append(current.task_id)
+                continue
+            self.transition(current.task_id, ExecutionState.CANCELLING, reason=reason)
+            def finish(task: TaskRecord) -> None:
+                validate_transition(task.state, ExecutionState.CANCELLED)
+                task.state = ExecutionState.CANCELLED
+                task.cancellation_status = CancellationStatus.COMPLETED
+                task.cancellation_reason = reason
+                task.finished_at = task.updated_at = self.clock()
+                task.lease_owner = ""
+                task.lease_token = ""
+                task.lease_expires_at = None
+                task.retry_not_before = None
+            task, _ = self.store.update_task(current.task_id, finish)
+            if task.attempt_id:
+                attempt = self.store.get_attempt(task.attempt_id)
+                if attempt is not None:
+                    attempt.state = "cancelled"
+                    attempt.finished_at = task.finished_at
+                    attempt.failure_reason = reason
+                    self.store.save_attempt(attempt)
+            self._emit("task_cancelled", task, reason=reason)
+            changed.append(current.task_id)
+        if blocked and root.task_id in changed:
+            def mark_partial(task: TaskRecord) -> None:
+                task.cancellation_status = CancellationStatus.PARTIALLY_COMPLETED
+                task.updated_at = self.clock()
+            partial, _ = self.store.update_task(root.task_id, mark_partial)
+            self._emit(
+                "cancellation_partially_completed",
+                partial,
+                reason=reason,
+                blocked_descendants=blocked,
+            )
+        return changed
+
+    def retry(self, task_id: str, decision: RecoveryDecision) -> TaskRecord:
+        task = self.store.get_task(task_id)
+        self.retry_policy.validate(task, decision)
+        checkpoint = None
+        if decision.action == RecoveryAction.RESUME_CHECKPOINT:
+            checkpoint = self.store.get_checkpoint(decision.resume_checkpoint_id or task.checkpoint_id)
+            if checkpoint is None:
+                raise RetrySafetyError("selected checkpoint is missing or corrupt")
+        backoff = self.retry_policy.backoff_seconds(task, decision.retry_category)
+        target_state = (
+            ExecutionState.REPLANNING
+            if decision.action == RecoveryAction.REPLAN
+            else ExecutionState.RETRY_SCHEDULED
+        )
+        def schedule(current: TaskRecord) -> None:
+            validate_transition(current.state, target_state)
+            current.state = target_state
+            current.retry_count += 1
+            current.retry_usage[decision.retry_category.value] = int(
+                current.retry_usage.get(decision.retry_category.value, 0)
+            ) + 1
+            current.recovery_reason = decision.reason
+            current.retry_not_before = (
+                self.clock()
+                if target_state == ExecutionState.REPLANNING
+                else self.clock() + timedelta(seconds=backoff)
+            )
+            current.lease_owner = ""
+            current.lease_token = ""
+            current.lease_expires_at = None
+            current.assigned_agent = decision.selected_agent or current.assigned_agent
+            current.assigned_model = decision.selected_model or current.assigned_model
+            current.assigned_worker = decision.selected_worker
+            current.updated_at = self.clock()
+        task, _ = self.store.update_task(task_id, schedule)
+        self._emit(
+            "replan_started" if target_state == ExecutionState.REPLANNING else "retry_scheduled",
+            task,
+            decision_id=decision.decision_id,
+            category=decision.retry_category.value,
+            backoff_seconds=backoff,
+            retry_not_before=task.retry_not_before,
+            checkpoint_id=checkpoint.checkpoint_id if checkpoint else "",
+        )
+        if decision.action == RecoveryAction.REASSIGN or any(
+            (decision.selected_agent, decision.selected_worker, decision.selected_model)
+        ):
+            self._emit(
+                "worker_reassigned",
+                task,
+                decision_id=decision.decision_id,
+                selected_agent=decision.selected_agent,
+                selected_worker=decision.selected_worker,
+                selected_model=decision.selected_model,
+            )
+        return task
+
+    def resume_checkpoint(self, task_id: str) -> CheckpointRecord:
+        task = self.store.get_task(task_id)
+        if not task.checkpoint_id:
+            raise RetrySafetyError("task has no validated checkpoint to resume")
+        checkpoint = self.store.get_checkpoint(task.checkpoint_id)
+        if checkpoint is None or checkpoint.task_id != task.task_id:
+            raise RetrySafetyError("selected checkpoint is missing, corrupt, or belongs to another task")
+        return checkpoint
+
+    def release_retry(self, task_id: str) -> TaskRecord:
+        current = self.store.get_task(task_id)
+        if current.state not in {ExecutionState.RETRY_SCHEDULED, ExecutionState.REPLANNING}:
+            raise RetrySafetyError(
+                f"task cannot resume from recovery state {current.state.value}"
+            )
+        if (
+            current.state == ExecutionState.RETRY_SCHEDULED
+            and current.retry_not_before is not None
+            and self.clock() < current.retry_not_before
+        ):
+            raise RetrySafetyError(
+                f"retry backoff is active until {current.retry_not_before.isoformat()}"
+            )
+        reason = (
+            "validated replan completed"
+            if current.state == ExecutionState.REPLANNING
+            else "retry backoff elapsed"
+        )
+        task = self.transition(task_id, ExecutionState.QUEUED, recovery_reason=reason)
+        self._emit("replan_completed" if current.state == ExecutionState.REPLANNING else "retry_started", task)
+        return task
+
+    def recover(self) -> RecoverySummary:
+        """Recover expired work deterministically; safe to invoke repeatedly."""
+        summary = RecoverySummary()
+        now = self.clock()
+        for initial in self.store.list_tasks(incomplete_only=True):
+            summary.scanned += 1
+            task = self.store.get_task(initial.task_id)
+            checkpoints = self.store.checkpoints_for_task(task.task_id)
+            if checkpoints:
+                latest = checkpoints[-1]
+                if latest.attempt_id == task.attempt_id and latest.checkpoint_id != task.checkpoint_id:
+                    def relink_checkpoint(current: TaskRecord) -> None:
+                        current.checkpoint_id = latest.checkpoint_id
+                        current.checkpoint_count = max(current.checkpoint_count, len(checkpoints))
+                        current.updated_at = now
+                    task, _ = self.store.update_task(task.task_id, relink_checkpoint)
+                    self._emit(
+                        "checkpoint_recovered",
+                        task,
+                        checkpoint_id=latest.checkpoint_id,
+                        action="relinked_after_interrupted_atomic_write",
+                    )
+            if not task.result_id and task.attempt_id and task.lease_token:
+                orphaned_results = [
+                    result
+                    for result in self.store.results_for_task(task.task_id)
+                    if result.attempt_id == task.attempt_id
+                    and hmac.compare_digest(result.lease_token_hash, task.lease_token)
+                ]
+                if orphaned_results:
+                    recovered_result = orphaned_results[-1]
+                    def relink_result(current: TaskRecord) -> None:
+                        if current.attempt_id != recovered_result.attempt_id:
+                            raise StaleLeaseError("interrupted result belongs to a stale attempt")
+                        validate_transition(
+                            current.state,
+                            ExecutionState.COMPLETED_PENDING_VERIFICATION,
+                        )
+                        current.result_id = recovered_result.result_id
+                        current.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
+                        current.updated_at = now
+                    task, _ = self.store.update_task(task.task_id, relink_result)
+                    self._emit(
+                        "result_escrow_recovered",
+                        task,
+                        result_id=recovered_result.result_id,
+                        action="relinked_after_interrupted_atomic_write",
+                    )
+            if task.state == ExecutionState.CANCELLING:
+                self.cancel(task.task_id, reason=task.cancellation_reason or "recovered pending cancellation")
+                summary.recovered.append(task.task_id)
+                continue
+            if task.state == ExecutionState.COMPLETED_PENDING_VERIFICATION:
+                try:
+                    recovered = self.verify_completion(task.task_id)
+                except CompletionVerificationError:
+                    summary.intervention_required.append(task.task_id)
+                else:
+                    (summary.recovered if recovered.state == ExecutionState.COMPLETED else summary.intervention_required).append(task.task_id)
+                    self._emit("task_recovered", recovered, action="completion_reverified")
+                continue
+            if task.deadline_at is not None and task.deadline_at <= now:
+                if task.state not in TERMINAL_STATES:
+                    task = self.transition(
+                        task.task_id,
+                        ExecutionState.FAILED,
+                        reason="task wall-clock deadline exceeded during recovery",
+                    )
+                summary.intervention_required.append(task.task_id)
+                continue
+            active = task.state in {
+                ExecutionState.LEASED,
+                ExecutionState.RUNNING,
+                ExecutionState.CHECKPOINTING,
+                ExecutionState.WAITING,
+            }
+            if not active or task.lease_expires_at is None or task.lease_expires_at > now:
+                summary.unchanged.append(task.task_id)
+                continue
+            attempt = self.store.get_attempt(task.attempt_id)
+            if attempt:
+                attempt.state = "lost"
+                attempt.finished_at = now
+                attempt.failure_reason = "lease expired before terminal result publication"
+                attempt.recovery_reason = "startup recovery"
+                self.store.save_attempt(attempt)
+            self._emit("lease_expired", task, lease_owner=task.lease_owner)
+            decision = self.retry_policy.automatic_recovery_decision(
+                task,
+                category=RetryCategory.LEASE_LOSS,
+                reason="active lease expired during execution",
+            )
+            if decision is None:
+                def fail(current: TaskRecord) -> None:
+                    validate_transition(current.state, ExecutionState.FAILED)
+                    current.state = ExecutionState.FAILED
+                    current.finished_at = current.updated_at = now
+                    current.failure_reason = (
+                        f"ambiguous {current.side_effect_classification.value} execution lost its lease; "
+                        "manual review is required because the external action may already have occurred"
+                    )
+                    current.recovery_reason = "automatic retry refused by side-effect policy"
+                    current.lease_owner = ""
+                    current.lease_token = ""
+                    current.lease_expires_at = None
+                task, _ = self.store.update_task(task.task_id, fail)
+                self._emit("task_failed", task, reason=task.failure_reason)
+                summary.intervention_required.append(task.task_id)
+                continue
+            try:
+                task = self.retry(task.task_id, decision)
+            except RetrySafetyError as exc:
+                def fail_invalid_recovery(current: TaskRecord) -> None:
+                    validate_transition(current.state, ExecutionState.FAILED)
+                    current.state = ExecutionState.FAILED
+                    current.finished_at = current.updated_at = now
+                    current.failure_reason = (
+                        "automatic recovery decision failed validation; no fallback action "
+                        f"was executed: {exc}"
+                    )
+                    current.recovery_reason = "manual recovery decision required"
+                    current.lease_owner = ""
+                    current.lease_token = ""
+                    current.lease_expires_at = None
+                task, _ = self.store.update_task(task.task_id, fail_invalid_recovery)
+                self._emit("task_failed", task, reason=task.failure_reason)
+                summary.intervention_required.append(task.task_id)
+                continue
+            self._emit("task_recovered", task, action=decision.action.value)
+            summary.retry_scheduled.append(task.task_id)
+        return summary
+
+    def parent_progress(self, task_id: str, *, now: datetime | None = None) -> ParentProgress:
+        task = self.store.get_task(task_id)
+        children = [self.store.get_task(child) for child in task.child_task_ids]
+        completed = sum(child.state == ExecutionState.COMPLETED for child in children)
+        failed = sum(child.state == ExecutionState.FAILED for child in children)
+        cancelled = sum(child.state == ExecutionState.CANCELLED for child in children)
+        active_rows = [child for child in children if child.state not in TERMINAL_STATES]
+        child_by_id = {child.task_id: child for child in children}
+        blocking_dependencies = {
+            child.task_id: [
+                dependency_id
+                for dependency_id in child.dependency_task_ids
+                if dependency_id not in child_by_id
+                or child_by_id[dependency_id].state != ExecutionState.COMPLETED
+            ]
+            for child in children
+        }
+        blocking_dependencies = {
+            child_id: dependencies
+            for child_id, dependencies in blocking_dependencies.items()
+            if dependencies
+        }
+        timed_out = bool(task.deadline_at and (now or self.clock()) >= task.deadline_at)
+        if task.wait_policy == WaitPolicy.FAIL_FAST:
+            satisfied = not failed and not active_rows
+        elif task.wait_policy == WaitPolicy.BEST_EFFORT:
+            satisfied = not active_rows
+        elif task.wait_policy == WaitPolicy.MINIMUM_SUCCESS_COUNT:
+            satisfied = completed >= int(task.minimum_success_count or 1)
+        elif task.wait_policy == WaitPolicy.DEPENDENCY_GRAPH:
+            satisfied = not active_rows and not blocking_dependencies and not failed
+        else:
+            satisfied = bool(children) and completed == len(children)
+        return ParentProgress(
+            task_id=task_id,
+            policy=task.wait_policy,
+            total_children=len(children),
+            completed=completed,
+            failed=failed,
+            cancelled=cancelled,
+            active=len(active_rows),
+            timed_out=timed_out,
+            satisfied=satisfied and not timed_out,
+            blocking_task_ids=[child.task_id for child in active_rows],
+            blocking_dependencies=blocking_dependencies,
+        )
+
+    def reconnect_tree(self) -> int:
+        """Repair missing parent child links without discarding existing records."""
+        repaired = 0
+        for task in self.store.list_tasks():
+            if not task.parent_task_id:
+                continue
+            parent = self.store.get_task_or_none(task.parent_task_id)
+            if parent is None or task.task_id in parent.child_task_ids:
+                continue
+            def link(current: TaskRecord) -> None:
+                current.child_task_ids.append(task.task_id)
+                current.updated_at = self.clock()
+            self.store.update_task(parent.task_id, link)
+            repaired += 1
+        return repaired

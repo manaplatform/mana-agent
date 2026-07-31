@@ -196,6 +196,12 @@ class AutomationDefinition(BaseModel):
     last_run_at: datetime | None = None
     deployment: DeploymentState = Field(default_factory=DeploymentState)
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    side_effect_classification: Literal[
+        "read_only", "idempotent", "deduplicated", "compensatable",
+        "non_idempotent", "unknown",
+    ] = "unknown"
+    idempotency_key: str = ""
+    compensation_strategy: str = ""
     misfire_policy: MisfirePolicy = Field(default_factory=MisfirePolicy)
     permission_references: list[str] = Field(default_factory=list)
     recent_execution: ExecutionSummary | None = None
@@ -245,6 +251,25 @@ class AutomationRun(BaseModel):
     output_summary: str = ""
     error: str = ""
     next_run_at: datetime | None = None
+
+
+def _validate_automation_retry_safety(automation: AutomationDefinition) -> None:
+    if automation.retry_policy.maximum_attempts <= 1:
+        return
+    classification = automation.side_effect_classification
+    if classification in {"non_idempotent", "unknown"}:
+        raise AutomationValidationError(
+            "Automation retries require an explicit retry-safe side-effect classification; "
+            "no retry or fallback action was scheduled."
+        )
+    if classification in {"idempotent", "deduplicated"} and not automation.idempotency_key:
+        raise AutomationValidationError(
+            "Idempotent or deduplicated automation retries require an idempotency key."
+        )
+    if classification == "compensatable" and not automation.compensation_strategy:
+        raise AutomationValidationError(
+            "Compensatable automation retries require a tested compensation strategy."
+        )
 
 
 def now_utc() -> datetime:
@@ -635,6 +660,11 @@ def create_automation(
     retry_policy: RetryPolicy | dict[str, Any] | None = None,
     misfire_policy: MisfirePolicy | dict[str, Any] | None = None,
     idempotency_key: str = "",
+    side_effect_classification: Literal[
+        "read_only", "idempotent", "deduplicated", "compensatable",
+        "non_idempotent", "unknown",
+    ] = "unknown",
+    compensation_strategy: str = "",
     deploy: bool = True,
 ) -> AutomationDefinition:
     trigger_model = trigger if isinstance(trigger, (CronTrigger, IntervalTrigger, OnceTrigger)) else TRIGGER_ADAPTER.validate_python(trigger)
@@ -668,6 +698,9 @@ def create_automation(
             permission_references=list(permission_references or []),
             retry_policy=RetryPolicy.model_validate(retry_policy or {}),
             misfire_policy=MisfirePolicy.model_validate(misfire_policy or {}),
+            side_effect_classification=side_effect_classification,
+            idempotency_key=idempotency_key,
+            compensation_strategy=compensation_strategy,
         )
     except ValidationError as exc:
         message = "; ".join(
@@ -675,6 +708,7 @@ def create_automation(
             for item in exc.errors(include_url=False)
         )
         raise AutomationValidationError(message) from exc
+    _validate_automation_retry_safety(automation)
     if automation.job.type == "teach_flow":
         validate_teach_job(automation.job)
     emit_automation_event(root, "automation.planning", automation, status="running")
@@ -695,6 +729,7 @@ def update_automation(root: Path, automation_id: str, changes: dict[str, Any]) -
     if "trigger" in changes:
         payload["next_run_at"] = calculate_next_run(TRIGGER_ADAPTER.validate_python(changes["trigger"]))
     updated = AutomationDefinition.model_validate(payload)
+    _validate_automation_retry_safety(updated)
     upsert_automation(root, updated)
     updated = reconcile_deployment(root, updated.id)
     emit_automation_event(root, "automation.updated", updated, status="completed")
@@ -1186,6 +1221,7 @@ def _acquire_lease(root: Path, automation: AutomationDefinition, *, force: bool)
             and current.recent_execution.status in {"failed", "blocked"}
             and current.recent_execution.attempt < current.retry_policy.maximum_attempts
         ):
+            _validate_automation_retry_safety(current)
             attempt = current.recent_execution.attempt + 1
         run = AutomationRun(automation_id=automation.id, attempt=attempt)
         payload["leases"][automation.id] = {
@@ -1230,9 +1266,83 @@ def execute_automation(
             output="", error="Missed occurrence exceeded the configured grace period.",
         )
         return {"ok": True, "executed": False, "reason": "misfire_skipped", **completed}
+    from mana_agent.config.settings import Settings
+    from mana_agent.execution_supervisor import (
+        CompletionContract,
+        CompletionContractType,
+        ExecutionState as SupervisorState,
+        ExecutionSupervisor,
+        ExecutionSupervisorConfig,
+        SideEffectClassification,
+    )
+    from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
+
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig.from_settings(Settings()))
+    if not supervisor.config.enabled:
+        raise ExecutionSupervisorError(
+            "execution supervisor is disabled; the automation run was not claimed or executed"
+        )
     run = _acquire_lease(root, automation, force=force)
     if run is None:
         return {"ok": True, "executed": False, "reason": "not_due_or_already_claimed", "automation_id": automation_id}
+
+    try:
+        supervised = supervisor.create_task(
+            task_id=run.id,
+            task_type=f"automation:{automation.job.type}",
+            runtime_provider=automation.target_runtime,
+            workspace_path=root,
+            routing_decision_id=f"automation-definition:{automation.id}",
+            side_effect_classification=SideEffectClassification(automation.side_effect_classification),
+            idempotency_key=automation.idempotency_key,
+            compensation_strategy=automation.compensation_strategy,
+            completion_contract=[CompletionContract(
+                contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                metadata={
+                    "required_keys": ["automation_id", "run_id", "persisted_status"],
+                    "expected_values": {
+                        "automation_id": automation.id,
+                        "run_id": run.id,
+                        "persisted_status": "succeeded",
+                    },
+                },
+            )],
+        )
+        supervisor.queue(supervised.task_id)
+        supervised, supervisor_token = supervisor.acquire_lease(
+            supervised.task_id,
+            owner=f"automation:{os.getpid()}",
+            worker=f"automation:{automation.target_runtime}",
+        )
+        supervisor.start(
+            supervised.task_id,
+            attempt_id=supervised.attempt_id,
+            lease_token=supervisor_token,
+        )
+    except Exception:
+        _release_lease(root, automation_id, run.id)
+        raise
+    heartbeat_stop = threading.Event()
+    heartbeat_errors: list[str] = []
+
+    def renew_supervisor_lease() -> None:
+        while not heartbeat_stop.wait(supervisor.config.heartbeat_seconds):
+            try:
+                supervisor.heartbeat(
+                    supervised.task_id,
+                    attempt_id=supervised.attempt_id,
+                    lease_token=supervisor_token,
+                )
+            except Exception as exc:
+                heartbeat_errors.append(str(exc))
+                heartbeat_stop.set()
+
+    supervisor_heartbeat_thread = threading.Thread(
+        target=renew_supervisor_lease,
+        name=f"mana-automation-heartbeat-{run.id}",
+        daemon=True,
+    )
+    supervisor_heartbeat_thread.start()
     emit_automation_event(root, "automation.run.started", automation, run_id=run.id, status="running")
     status: Literal["succeeded", "failed", "blocked"] = "succeeded"
     output = ""
@@ -1255,6 +1365,53 @@ def execute_automation(
     except Exception:
         _release_lease(root, automation_id, run.id)
         raise
+    finally:
+        heartbeat_stop.set()
+        supervisor_heartbeat_thread.join(
+            timeout=min(5.0, supervisor.config.lease_seconds / 2)
+        )
+    if heartbeat_errors:
+        status = "failed"
+        error = f"Execution supervisor heartbeat failed: {heartbeat_errors[-1]}"
+        completed = _finish_run(root, automation_id, run.id, status=status, output=output, error=error)
+        current = supervisor.store.get_task(supervised.task_id)
+        if current.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+            supervisor.transition(supervised.task_id, SupervisorState.FAILED, reason=error)
+    elif status == "succeeded":
+        try:
+            supervisor.heartbeat(
+                supervised.task_id,
+                attempt_id=supervised.attempt_id,
+                lease_token=supervisor_token,
+            )
+            final_task = supervisor.submit_result(
+                supervised.task_id,
+                attempt_id=supervised.attempt_id,
+                lease_token=supervisor_token,
+                payload={
+                    "automation_id": automation.id,
+                    "run_id": run.id,
+                    "persisted_status": "succeeded",
+                    "result": completed,
+                },
+            )
+        except ExecutionSupervisorError as exc:
+            status = "failed"
+            error = f"Automation completion supervision failed: {exc}"
+            completed = _finish_run(root, automation_id, run.id, status=status, output=output, error=error)
+        else:
+            if final_task.state.value != "completed":
+                status = "failed"
+                error = "Automation result did not satisfy its supervised completion contract."
+                completed = _finish_run(root, automation_id, run.id, status=status, output=output, error=error)
+    else:
+        current = supervisor.store.get_task(supervised.task_id)
+        if current.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+            supervisor.transition(
+                supervised.task_id,
+                SupervisorState.FAILED,
+                reason=error or f"automation ended as {status}",
+            )
     # A completed one-time automation has no further due occurrence. Remove its
     # recurring platform wakeup promptly so it cannot continue polling forever.
     finished_automation = get_automation(root, automation_id)

@@ -806,6 +806,7 @@ class AgentChatGateway:
                     )
         job = self.remote_execution_service.approve_permission(permission_request_id)
         lane_task_id = getattr(self, "_remote_job_lanes", {}).get(job.request.job_id)
+        supervision_error = ""
         if lane_task_id:
             self._lane_coordinator.transition(
                 lane_task_id,
@@ -833,7 +834,7 @@ class AgentChatGateway:
                 if job.state.value == "succeeded"
                 else LaneTaskState.FAILED
             )
-            self._lane_coordinator.finish(
+            finished = self._lane_coordinator.finish(
                 lane_task_id,
                 state=lane_state,
                 verification_state={"remote_job_state": job.state.value},
@@ -841,7 +842,24 @@ class AgentChatGateway:
                 if lane_state is LaneTaskState.COMPLETED
                 else f"remote SSH job ended as {job.state.value}",
             )
+            if (
+                lane_state is LaneTaskState.COMPLETED
+                and finished.state is not LaneTaskState.COMPLETED
+            ):
+                supervision_error = (
+                    finished.error
+                    or "remote result did not satisfy its durable completion contract"
+                )
             self._remote_job_lanes.pop(job.request.job_id, None)
+        if supervision_error:
+            return {
+                "status": "verification_failed",
+                "job_id": job.request.job_id,
+                "message": (
+                    "The remote command returned successfully, but task completion was not "
+                    f"verified: {supervision_error}"
+                ),
+            }
         if job.request.provider == "remote-ssh":
             message = (
                 "Approved remote SSH job completed through direct SSH."
@@ -917,13 +935,19 @@ class AgentChatGateway:
         succeeded = (
             outcome.exit_code == 0 and not outcome.timed_out and not outcome.cancelled
         )
+        supervision_error = ""
         if lane_task_id:
-            self._lane_coordinator.finish(
+            finished = self._lane_coordinator.finish(
                 lane_task_id,
                 state=LaneTaskState.COMPLETED if succeeded else LaneTaskState.FAILED,
                 verification_state={"server_result": serialized},
                 error="" if succeeded else "Approved server action did not complete successfully.",
             )
+            if succeeded and finished.state is not LaneTaskState.COMPLETED:
+                supervision_error = (
+                    finished.error
+                    or "server result did not satisfy its durable completion contract"
+                )
         output = "\n".join(
             value
             for value in (str(outcome.stdout).strip(), str(outcome.stderr).strip())
@@ -934,10 +958,19 @@ class AgentChatGateway:
             if succeeded
             else f"Approved server action exited with code {outcome.exit_code}."
         )
+        if supervision_error:
+            summary = (
+                "The approved server action returned successfully, but task completion was "
+                f"not verified: {supervision_error}"
+            )
         if output:
             summary = f"{summary}\n\nRemote command output:\n{output}"
         return {
-            "status": "succeeded" if succeeded else "failed",
+            "status": (
+                "verification_failed"
+                if supervision_error
+                else "succeeded" if succeeded else "failed"
+            ),
             "approval_request_id": approval_request_id,
             "result": serialized,
             "message": summary,
@@ -2417,7 +2450,7 @@ class AgentChatGateway:
                                 reason="waiting for interactive approval",
                             )
                         else:
-                            self._lane_coordinator.finish(
+                            finished = self._lane_coordinator.finish(
                                 reservation.execution.task_id,
                                 state=(
                                     LaneTaskState.FAILED
@@ -2435,6 +2468,17 @@ class AgentChatGateway:
                                 },
                                 error=str(result.error or ""),
                             )
+                            if (
+                                not result.error
+                                and finished.state is not LaneTaskState.COMPLETED
+                            ):
+                                result.error = "completion_verification_failed"
+                                result.mode = "lane-verification-failed"
+                                result.answer = (
+                                    "The selected workflow returned a result, but durable "
+                                    "completion verification did not pass. "
+                                    f"{finished.error or 'The result remains pending review.'}"
+                                )
                         result.payload.update(
                             {
                                 "lane_id": lane_id.value,
@@ -2780,6 +2824,22 @@ class AgentChatGateway:
             ),
         )
         child_payloads = [asdict(item) for item in results]
+        for child_result in results:
+            supervised_child = (
+                self._lane_coordinator.execution_supervisor.store.get_task_or_none(
+                    child_result.task_id
+                )
+            )
+            if (
+                supervised_child is not None
+                and supervised_child.result_id
+                and supervised_child.parent_task_id == root_task.task_id
+                and supervised_child.state.value == "completed"
+            ):
+                self._lane_coordinator.execution_supervisor.acknowledge_result(
+                    supervised_child.result_id,
+                    parent_task_id=root_task.task_id,
+                )
         statuses = {item.status for item in results}
         changed_files = [path for item in results for path in item.changed_files]
         approvals = [
@@ -2789,11 +2849,13 @@ class AgentChatGateway:
             overall = "cancelled"
         elif statuses <= {"completed", "skipped"}:
             overall = "done"
-            self._lane_coordinator.finish(
+            finished_root = self._lane_coordinator.finish(
                 root_reservation.execution.task_id,
                 changed_files=changed_files,
                 verification_state={"children": child_payloads, "status": overall},
             )
+            if finished_root.state is not LaneTaskState.COMPLETED:
+                overall = "verification_failed"
         elif statuses.intersection({"blocked", "awaiting_approval"}):
             overall = "blocked"
             self._lane_coordinator.mark_blocked(
@@ -3077,11 +3139,15 @@ class AgentChatGateway:
                 error=str(result.error),
             )
         else:
-            status = "completed"
-            self._lane_coordinator.finish(
+            finished = self._lane_coordinator.finish(
                 reservation.execution.task_id,
                 changed_files=result.changed_files,
                 verification_state={"mode": result.mode, "status": "completed"},
+            )
+            status = (
+                "completed"
+                if finished.state == LaneTaskState.COMPLETED
+                else "failed"
             )
         artifacts = [
             str(item.get("path"))

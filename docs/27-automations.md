@@ -10,6 +10,10 @@ route. The public CLI and dashboard only list, inspect, and delete records.
 source (`chat`, `teach`, or `migration`), an explicit IANA timezone, one typed
 trigger, one typed job, retry/misfire policy, permission references, deployment
 state, next/last run timestamps, and a bounded recent execution summary.
+Retry-enabled definitions also require an explicit side-effect classification.
+Idempotent/deduplicated jobs require an idempotency key; compensatable jobs
+require a named compensation strategy; unknown and non-idempotent jobs cannot
+be configured for automatic retries.
 
 Triggers are `cron` for calendar schedules, `interval` for exact elapsed
 seconds from an anchor, or `once` for an absolute instant. Jobs are
@@ -42,6 +46,12 @@ The executor atomically claims a lease, reloads the full record, creates a run,
 reconstructs a fresh headless runtime, executes the typed job, records bounded
 redacted output, advances the next run, emits automation lifecycle events, and
 releases the lease. Duplicate invocations cannot claim the same run.
+
+Each claimed run also creates a task/attempt in the resilient execution
+supervisor, renews its lease, and publishes completion only after the persisted
+automation run satisfies its completion contract. If a process disappears
+after an ambiguous external action, the supervisor leaves the `unknown` task
+for intervention instead of allowing the scheduler retry policy to repeat it.
 
 ## Teach Mode
 

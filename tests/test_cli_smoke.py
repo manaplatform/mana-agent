@@ -208,12 +208,23 @@ def test_root_help_exposes_commands_and_no_legacy_branding() -> None:
 
     assert result.exit_code == 0
     assert "chat" in result.output
+    assert "runs" in result.output
     # ask remains retired; analyze is public again as the repository intelligence command.
     assert "ask" not in result.output
     assert "analyze" in result.output
     assert "mana-agent" in result.output
     assert "mana-analyzer" not in result.output
     assert "analyzor" not in result.output
+
+
+def test_durable_execution_commands_keep_visible_and_compatibility_names() -> None:
+    visible = runner.invoke(app, ["runs", "--help"])
+    compatibility = runner.invoke(app, ["tasks", "--help"])
+
+    assert visible.exit_code == 0
+    assert compatibility.exit_code == 0
+    assert "status" in visible.output
+    assert "recover" in compatibility.output
 
 
 def test_chat_help_works() -> None:

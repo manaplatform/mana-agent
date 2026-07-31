@@ -1,5 +1,37 @@
 # Configuration
 
+## Execution supervisor
+
+The supervisor is enabled by default and stores process-independent state below
+`~/.mana/execution`. The typed settings are:
+
+```toml
+MANA_EXECUTION_SUPERVISOR_ENABLED = true
+MANA_EXECUTION_SUPERVISOR_LEASE_SECONDS = 60
+MANA_EXECUTION_SUPERVISOR_HEARTBEAT_SECONDS = 15
+MANA_EXECUTION_SUPERVISOR_CHECKPOINT_SECONDS = 60
+MANA_EXECUTION_SUPERVISOR_RETRY_BUDGET = 3
+MANA_EXECUTION_SUPERVISOR_MAX_REPLANS = 2
+MANA_EXECUTION_SUPERVISOR_MAX_CHILD_DEPTH = 5
+MANA_EXECUTION_SUPERVISOR_MAX_CHILDREN = 20
+MANA_EXECUTION_SUPERVISOR_MAX_TOTAL_SUBTASKS = 100
+MANA_EXECUTION_SUPERVISOR_MAX_CONCURRENT_CHILDREN = 4
+MANA_EXECUTION_SUPERVISOR_STARTUP_RECOVERY = true
+MANA_EXECUTION_SUPERVISOR_VERIFY_ARTIFACTS = true
+MANA_EXECUTION_SUPERVISOR_ALLOW_UNKNOWN_RETRY = false
+```
+
+Heartbeat duration must be shorter than lease duration. Unknown-side-effect
+retry is false by design; enabling it is an explicit operator risk decision,
+not a routing fallback. Normal Mana precedence still applies: persisted
+`~/.mana/config.toml`, protected secrets where applicable, then safe defaults.
+Repository `.env` files do not override these persisted settings.
+
+Disabling the supervisor is fail-closed: execution entry points refuse to start
+unsupervised work. Disabling artifact verification likewise leaves submitted
+results in `completed_pending_verification`; it never converts verification-off
+into an implicit success path.
+
 ## Context and cost governor
 
 Every gateway session owns one context/cost governor shared by chat, routing,

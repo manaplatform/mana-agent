@@ -582,6 +582,45 @@ class Settings(BaseSettings):
     mana_execution_providers: dict[str, Any] | str = Field(
         default_factory=dict, alias="MANA_EXECUTION_PROVIDERS"
     )
+    mana_execution_supervisor_enabled: bool = Field(
+        default=True, alias="MANA_EXECUTION_SUPERVISOR_ENABLED"
+    )
+    mana_execution_supervisor_lease_seconds: int = Field(
+        default=60, alias="MANA_EXECUTION_SUPERVISOR_LEASE_SECONDS"
+    )
+    mana_execution_supervisor_heartbeat_seconds: int = Field(
+        default=15, alias="MANA_EXECUTION_SUPERVISOR_HEARTBEAT_SECONDS"
+    )
+    mana_execution_supervisor_checkpoint_seconds: int = Field(
+        default=60, alias="MANA_EXECUTION_SUPERVISOR_CHECKPOINT_SECONDS"
+    )
+    mana_execution_supervisor_retry_budget: int = Field(
+        default=3, alias="MANA_EXECUTION_SUPERVISOR_RETRY_BUDGET"
+    )
+    mana_execution_supervisor_max_replans: int = Field(
+        default=2, alias="MANA_EXECUTION_SUPERVISOR_MAX_REPLANS"
+    )
+    mana_execution_supervisor_max_child_depth: int = Field(
+        default=5, alias="MANA_EXECUTION_SUPERVISOR_MAX_CHILD_DEPTH"
+    )
+    mana_execution_supervisor_max_children: int = Field(
+        default=20, alias="MANA_EXECUTION_SUPERVISOR_MAX_CHILDREN"
+    )
+    mana_execution_supervisor_max_total_subtasks: int = Field(
+        default=100, alias="MANA_EXECUTION_SUPERVISOR_MAX_TOTAL_SUBTASKS"
+    )
+    mana_execution_supervisor_max_concurrent_children: int = Field(
+        default=4, alias="MANA_EXECUTION_SUPERVISOR_MAX_CONCURRENT_CHILDREN"
+    )
+    mana_execution_supervisor_startup_recovery: bool = Field(
+        default=True, alias="MANA_EXECUTION_SUPERVISOR_STARTUP_RECOVERY"
+    )
+    mana_execution_supervisor_verify_artifacts: bool = Field(
+        default=True, alias="MANA_EXECUTION_SUPERVISOR_VERIFY_ARTIFACTS"
+    )
+    mana_execution_supervisor_allow_unknown_retry: bool = Field(
+        default=False, alias="MANA_EXECUTION_SUPERVISOR_ALLOW_UNKNOWN_RETRY"
+    )
     # Distributed verification is opt-in and fail-closed when no compatible
     # authenticated worker satisfies the model-produced selection request.
     mana_fleet_enabled: bool = Field(default=False, alias="MANA_FLEET_ENABLED")
