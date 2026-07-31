@@ -19,6 +19,7 @@ class ComputerPermissionChoice:
     decision: PermissionDecision | None
     remote: bool = False
     server: bool = False
+    api: bool = False
 
 
 class ComputerPermissionRequested(Message):
@@ -32,6 +33,7 @@ class ComputerPermissionRequested(Message):
         preview: str,
         remote: bool = False,
         server: bool = False,
+        api: bool = False,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -39,6 +41,7 @@ class ComputerPermissionRequested(Message):
         self.preview = preview
         self.remote = remote
         self.server = server
+        self.api = api
 
 
 class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
@@ -65,6 +68,7 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
         preview: str,
         remote: bool = False,
         server: bool = False,
+        api: bool = False,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -72,12 +76,15 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
         self.preview = preview
         self.remote = remote
         self.server = server
+        self.api = api
 
     def compose(self) -> ComposeResult:
         with Vertical(id="computer-permission-dialog"):
             title = (
                 "Mana-Agent needs server action approval"
                 if self.server
+                else "Mana-Agent needs API request approval"
+                if self.api
                 else "Mana-Agent needs remote SSH permission"
                 if self.remote
                 else "Mana-Agent needs computer permission"
@@ -88,7 +95,7 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
             with Horizontal(classes="computer-permission-actions"):
                 yield Button("Deny", id="permission-deny", variant="error")
                 yield Button("Allow once", id="permission-once", variant="primary")
-                if not self.server:
+                if not self.server and not self.api:
                     yield Button("This session", id="permission-session", variant="success")
                     yield Button("Always", id="permission-always", variant="warning")
 
@@ -106,5 +113,6 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
                     decisions[event.button.id],
                     self.remote,
                     self.server,
+                    self.api,
                 )
             )

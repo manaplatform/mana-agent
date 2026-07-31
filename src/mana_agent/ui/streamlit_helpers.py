@@ -115,6 +115,31 @@ def decide_dashboard_server_approval(
     return command(approval_request_id, session_id=conversation_id)
 
 
+def decide_dashboard_api_approval(
+    conversation_id: str,
+    approval_request_id: str,
+    *,
+    approve: bool,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve one pending API approval on the exact cached dashboard gateway."""
+    resolved = find_mana_root(root)
+    key = (str(resolved.resolve()), str(conversation_id or "dashboard-default"))
+    gateway = _DASHBOARD_GATEWAYS.get(key)
+    if gateway is None:
+        raise LookupError("The dashboard API approval session is no longer active.")
+    command = (
+        gateway.api_approval_command
+        if approve
+        else gateway.deny_api_approval_command
+    )
+    return command(
+        approval_request_id,
+        session_id=conversation_id,
+        client_type="dashboard",
+    )
+
+
 def _close_all_dashboard_chat_sessions() -> None:
     for gateway in list(_DASHBOARD_GATEWAYS.values()):
         if hasattr(gateway, "close_session"):

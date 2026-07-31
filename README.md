@@ -21,6 +21,7 @@ Mana-Agent is a Python CLI and optional dashboard for understanding, operating, 
 - Repository analysis and evidence-backed chat
 - Multi-agent planning, coding, review, and verification
 - Safe Git, document, browser, and computer-control tools
+- Reusable external API integrations with validated requests, approvals, and SSRF protection
 - Adaptive model routing and repository-scoped memory
 - Automations, Teach Mode, Live Canvas, and media generation
 - Gmail, Telegram, ACP, A2A, MCP, SSH, and reverse-worker integrations
@@ -119,7 +120,7 @@ Credentials remain separate from normal settings.
 
 ## Documentation
 
-See the [`docs/`](docs/) directory for installation, architecture, commands, connectors, automation, Teach Mode, media generation, workers, protocols, and development guides.
+See the [`docs/`](docs/) directory for installation, architecture, commands, connectors, [API Manager](docs/api-manager.md), automation, Teach Mode, media generation, workers, protocols, and development guides.
 
 ## Development
 

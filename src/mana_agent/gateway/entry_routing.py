@@ -28,6 +28,7 @@ EntryRouteName = Literal[
     "repository",
     "memory",
     "automation",
+    "api",
     "canvas",
     "remote_execution",
     "server",
@@ -44,7 +45,7 @@ AutomationOperation = Literal[
 
 RequiredSource = Literal[
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "media", "remote_execution", "server", "canvas", "internal_knowledge", "none",
+    "memory", "artifact", "media", "remote_execution", "server", "canvas", "api", "internal_knowledge", "none",
 ]
 
 REQUIRED_SOURCES: set[str] = set(get_args(RequiredSource))
@@ -311,6 +312,10 @@ Route semantics:
   must not execute during automation creation. Return the exact automation_operation. Use create
   for a request to make or schedule an automation and list only when the user actually asks to see
   existing automations; listing is not a prerequisite for creation.
+- api: import authorized external API documentation, inspect or configure saved API integrations,
+  retrieve candidate operations, preview a validated request, or execute a saved operation. Use
+  this dynamic route for arbitrary providers; never expose a raw unrestricted HTTP tool. A
+  documentation URL belongs to api when the requested outcome is a reusable integration.
 - canvas: create, update, inspect, wait on, or close an interactive Live Canvas/A2UI surface.
   Use this route only when the user requests a visual interactive workspace or when current
   conversation context is already operating on a canvas. Canvas tools require the supplied exact
@@ -345,7 +350,7 @@ fallback. Direct URL signals are supplied separately; do not treat them as repos
 
 required_sources is required for every decision and must never be omitted or empty. Use exactly
 ["none"] for conversation and unsupported. Use the route's corresponding source for ordinary
-single-source decisions: coding/repository/automation -> ["repository"], server -> ["server"], gmail -> ["gmail"],
+single-source decisions: coding/repository/automation -> ["repository"], api -> ["api"], server -> ["server"], gmail -> ["gmail"],
 calendar -> ["calendar"], browser -> ["browser"], search -> ["search"], github -> ["github"],
 canvas -> ["canvas"], media -> ["media"],
 and memory -> ["memory"]. capability_error must name the unavailable tool source. Do not use an
@@ -353,7 +358,7 @@ empty array for a request that needs no external information.
 
 Return JSON only:
 {
-  "route": "multi_task|conversation|coding|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|canvas|unsupported|capability_error",
+  "route": "multi_task|conversation|coding|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|api|canvas|unsupported|capability_error",
   "confidence": 0.0,
   "reason": "short routing reason",
   "required_sources": ["browser"],
@@ -449,6 +454,7 @@ class EntryRouter:
                 "repository": [["repository"]],
                 "memory": [["memory"]],
                 "automation": [["repository"]],
+                "api": [["api"]],
                 "canvas": [["canvas"]],
                 "capability_error": "one or more unavailable source identifiers",
             },

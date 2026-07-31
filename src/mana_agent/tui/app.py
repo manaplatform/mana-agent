@@ -247,6 +247,7 @@ class ManaChatApp(App):
             "computer.waiting_permission",
             "remote_execution.waiting_permission",
             "server.waiting_approval",
+            "api.waiting_approval",
         }:
             return
         metadata = activity.get("metadata") or {}
@@ -265,6 +266,7 @@ class ManaChatApp(App):
             preview=str(metadata.get("preview") or activity.get("title") or ""),
             remote=bool(metadata.get("remote_permission")),
             server=bool(metadata.get("server_approval")),
+            api=bool(metadata.get("api_approval")),
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
@@ -277,6 +279,7 @@ class ManaChatApp(App):
                 preview=event.preview,
                 remote=event.remote,
                 server=event.server,
+                api=event.api,
             ),
             self._apply_computer_permission,
         )
@@ -301,6 +304,20 @@ class ManaChatApp(App):
                     self.gateway.server_approval_command
                     if choice.decision is not None
                     else self.gateway.deny_server_approval_command
+                )
+                result = await asyncio.to_thread(
+                    command,
+                    choice.request_id,
+                    session_id=self._gateway_session_id or "",
+                )
+                self.notify(result["message"])
+                self.history.add(AssistantMessageEvent(content=result["message"]))
+                return
+            if choice.api:
+                command = (
+                    self.gateway.api_approval_command
+                    if choice.decision is not None
+                    else self.gateway.deny_api_approval_command
                 )
                 result = await asyncio.to_thread(
                     command,
@@ -337,7 +354,13 @@ class ManaChatApp(App):
                 content=f"Computer action completed after permission approval: {result.message}"
             ))
         except Exception as exc:
-            action_name = "Server approval" if choice.server else "Computer permission"
+            action_name = (
+                "Server approval"
+                if choice.server
+                else "API approval"
+                if choice.api
+                else "Computer permission"
+            )
             self.notify(f"{action_name} action failed: {exc}", severity="error")
 
     def update_status(self, text: str) -> None:

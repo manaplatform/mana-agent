@@ -252,6 +252,24 @@ class Settings(BaseSettings):
         default="", alias="MANA_WORKSPACE_ALLOWED_ROOTS"
     )
     mana_api_token: str = Field(default="", alias="MANA_API_TOKEN")
+    mana_api_manager_allowed_hosts: str = Field(
+        default="", alias="MANA_API_MANAGER_ALLOWED_HOSTS"
+    )
+    mana_api_manager_trusted_internal_hosts: str = Field(
+        default="", alias="MANA_API_MANAGER_TRUSTED_INTERNAL_HOSTS"
+    )
+    mana_api_manager_trusted_internal_networks: str = Field(
+        default="", alias="MANA_API_MANAGER_TRUSTED_INTERNAL_NETWORKS"
+    )
+    mana_api_manager_allow_http: bool = Field(
+        default=False, alias="MANA_API_MANAGER_ALLOW_HTTP"
+    )
+    mana_api_manager_max_redirects: int = Field(
+        default=3, alias="MANA_API_MANAGER_MAX_REDIRECTS"
+    )
+    mana_api_manager_max_response_bytes: int = Field(
+        default=10_485_760, alias="MANA_API_MANAGER_MAX_RESPONSE_BYTES"
+    )
     mana_mcp_server_token: str = Field(default="", alias="MANA_MCP_SERVER_TOKEN")
     mana_worker_gateway_enabled: bool = Field(
         default=False, alias="MANA_WORKER_GATEWAY_ENABLED"

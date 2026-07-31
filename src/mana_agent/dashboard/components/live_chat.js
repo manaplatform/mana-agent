@@ -233,16 +233,16 @@
     const type = eventType(event);
     const metadata = metaOf(event);
     const permissionRequestId = text(metadata.permission_request_id);
-    if ((type === "computer.waiting_permission" || type === "server.waiting_approval") && permissionRequestId) {
+    if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval") && permissionRequestId) {
       state.permissionRequests.set(permissionRequestId, {
         requestId: permissionRequestId,
         scope: text(metadata.permission_scope),
         preview: text(metadata.preview || event.title || eventSummary(event)),
-        kind: type === "server.waiting_approval" ? "server" : "computer",
+        kind: type === "server.waiting_approval" ? "server" : type === "api.waiting_approval" ? "api" : "computer",
         status: "pending",
         decision: "",
       });
-    } else if ((type === "computer.permission_decided" || type === "server.approval_decided") && permissionRequestId) {
+    } else if ((type === "computer.permission_decided" || type === "server.approval_decided" || type === "api.approval_decided") && permissionRequestId) {
       const previous = state.permissionRequests.get(permissionRequestId) || {
         requestId: permissionRequestId,
       };
@@ -404,11 +404,12 @@
           const type = eventType(event);
           const metadata = metaOf(event);
           const permissionRequestId = text(metadata.permission_request_id);
-          if ((type === "computer.waiting_permission" || type === "server.waiting_approval") && permissionRequestId) {
+          if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval") && permissionRequestId) {
             node.className = "activity permission";
             const request = state.permissionRequests.get(permissionRequestId) || {};
             const serverApproval = type === "server.waiting_approval" || request.kind === "server";
-            addText(node, "div", serverApproval ? "Server action approval required" : "Computer permission required");
+            const apiApproval = type === "api.waiting_approval" || request.kind === "api";
+            addText(node, "div", serverApproval ? "Server action approval required" : apiApproval ? "API request approval required" : "Computer permission required");
             addText(node, "div", request.preview || metadata.preview || event.title, "logs");
             addText(node, "div", `Scope: ${request.scope || metadata.permission_scope || ""}`, "meta");
             if (request.status === "decided") {
@@ -417,7 +418,7 @@
             } else {
               const actions = document.createElement("div");
               actions.className = "permission-actions";
-              const choices = serverApproval
+              const choices = serverApproval || apiApproval
                 ? [["Deny", "deny", "deny"], ["Approve once", "approve", ""]]
                 : [
                     ["Deny", "deny", "deny"],
@@ -436,7 +437,7 @@
                   permissionErrors.delete(permissionRequestId);
                   render();
                   try {
-                    const permissionPath = serverApproval ? "server-approvals" : "computer-permissions";
+                    const permissionPath = serverApproval ? "server-approvals" : apiApproval ? "api-approvals" : "computer-permissions";
                     const response = await fetch(
                       `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(permissionRequestId)}`,
                       {

@@ -1,0 +1,616 @@
+"""Safe documentation ingestion and OpenAPI normalization."""
+
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import re
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import urljoin, urlsplit
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+
+from mana_agent.api_manager.errors import (
+    MalformedSpecificationError,
+    UnresolvedSchemaReferenceError,
+    UnsupportedDocumentationError,
+)
+from mana_agent.api_manager.models import (
+    ApiIntegration,
+    ApiOperation,
+    ApiParameter,
+    ApiServer,
+    AuthenticationConfig,
+    AuthenticationType,
+    DocumentationSource,
+    DocumentationSourceType,
+    HttpMethod,
+    OAuthFlow,
+    OperationRiskLevel,
+    ParameterLocation,
+    RequestBody,
+    ResponseDefinition,
+    stable_id,
+)
+
+
+HTTP_METHODS = {"get", "head", "options", "post", "put", "patch", "delete"}
+
+
+class DocumentationFetcher(Protocol):
+    def fetch(self, url: str) -> tuple[bytes, str]: ...
+
+
+class SemanticDefinition(BaseModel):
+    """Model-produced semantic extraction; strict validation prevents invention."""
+
+    model_config = ConfigDict(extra="forbid")
+    servers: list[ApiServer] = Field(min_length=1)
+    operations: list[ApiOperation] = Field(min_length=1)
+    authentication: list[AuthenticationConfig] = Field(default_factory=list)
+    description: str = ""
+
+
+class DocumentationImporter:
+    def __init__(
+        self,
+        *,
+        allowed_file_roots: tuple[Path, ...] = (),
+        fetcher: DocumentationFetcher | None = None,
+    ) -> None:
+        self.allowed_file_roots = tuple(path.expanduser().resolve() for path in allowed_file_roots)
+        self.fetcher = fetcher
+
+    def from_file(
+        self,
+        path: str | Path,
+        *,
+        name: str,
+        source_decision_id: str,
+        semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+    ) -> ApiIntegration:
+        resolved = Path(path).expanduser().resolve()
+        if self.allowed_file_roots and not any(
+            resolved == root or root in resolved.parents for root in self.allowed_file_roots
+        ):
+            raise UnsupportedDocumentationError(
+                "Documentation file is outside the authorized roots.",
+                details={"path": str(resolved)},
+            )
+        if not resolved.is_file():
+            raise UnsupportedDocumentationError("Documentation file was not found.")
+        content = resolved.read_bytes()
+        suffix = resolved.suffix.lower()
+        hint = "json" if suffix == ".json" else "yaml" if suffix in {".yaml", ".yml"} else "text"
+        return self.from_bytes(
+            content,
+            name=name,
+            reference=str(resolved),
+            source_type=DocumentationSourceType.LOCAL_FILE,
+            format_hint=hint,
+            source_decision_id=source_decision_id,
+            semantic_definition=semantic_definition,
+        )
+
+    def from_url(
+        self,
+        url: str,
+        *,
+        name: str,
+        source_decision_id: str,
+        semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+    ) -> ApiIntegration:
+        if self.fetcher is None:
+            raise UnsupportedDocumentationError(
+                "A policy-controlled documentation fetcher is required for URL imports."
+            )
+        content, content_type = self.fetcher.fetch(url)
+        lowered = content_type.lower()
+        hint = (
+            "json"
+            if "json" in lowered
+            else "yaml"
+            if "yaml" in lowered
+            else "html"
+            if "html" in lowered
+            else "text"
+        )
+        return self.from_bytes(
+            content,
+            name=name,
+            reference=url,
+            source_type=DocumentationSourceType.WEBPAGE,
+            format_hint=hint,
+            source_decision_id=source_decision_id,
+            semantic_definition=semantic_definition,
+        )
+
+    def from_text(
+        self,
+        content: str,
+        *,
+        name: str,
+        source_decision_id: str,
+        reference: str = "pasted-text",
+        semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+    ) -> ApiIntegration:
+        return self.from_bytes(
+            content.encode("utf-8"),
+            name=name,
+            reference=reference,
+            source_type=DocumentationSourceType.PASTED,
+            format_hint="text",
+            source_decision_id=source_decision_id,
+            semantic_definition=semantic_definition,
+        )
+
+    def from_bytes(
+        self,
+        content: bytes,
+        *,
+        name: str,
+        reference: str,
+        source_type: DocumentationSourceType,
+        format_hint: str,
+        source_decision_id: str,
+        semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+    ) -> ApiIntegration:
+        if len(content) > 10 * 1024 * 1024:
+            raise UnsupportedDocumentationError("Documentation exceeds the 10 MiB import limit.")
+        digest = hashlib.sha256(content).hexdigest()
+        text = content.decode("utf-8", errors="strict")
+        formal = self._parse_formal(text, format_hint=format_hint)
+        if formal is not None:
+            formal_document, formal_format = formal
+            integration, detected_type = normalize_openapi(
+                formal_document,
+                name=name,
+                reference=reference,
+                source_decision_id=source_decision_id,
+                content_sha256=digest,
+                source_format=formal_format,
+            )
+            source = integration.documentation_sources[0].model_copy(update={"type": detected_type})
+            return integration.model_copy(update={"documentation_sources": (source,)})
+
+        if semantic_definition is None:
+            raise UnsupportedDocumentationError(
+                "Unstructured API documentation requires a validated model semantic extraction. "
+                "No heuristic or fallback extraction was executed."
+            )
+        semantic = SemanticDefinition.model_validate(semantic_definition)
+        _validate_inferred_operations(semantic.operations, reference)
+        normalized_text = _strip_html(text) if format_hint == "html" else text
+        if not normalized_text.strip():
+            raise UnsupportedDocumentationError("Documentation did not contain readable text.")
+        source = DocumentationSource(
+            type=source_type,
+            reference=reference,
+            content_sha256=digest,
+            source_decision_id=source_decision_id,
+        )
+        return ApiIntegration.create(
+            name=name,
+            description=semantic.description,
+            servers=semantic.servers,
+            operations=semantic.operations,
+            authentication=semantic.authentication,
+            documentation_source=source,
+        )
+
+    @staticmethod
+    def _parse_formal(
+        text: str,
+        *,
+        format_hint: str,
+    ) -> tuple[dict[str, Any], str] | None:
+        candidates = [format_hint]
+        if format_hint == "text":
+            candidates.extend(["json", "yaml"])
+        for candidate in candidates:
+            try:
+                value = json.loads(text) if candidate == "json" else yaml.safe_load(text) if candidate == "yaml" else None
+            except (json.JSONDecodeError, yaml.YAMLError):
+                continue
+            if isinstance(value, dict) and ("openapi" in value or "swagger" in value):
+                return value, candidate
+        return None
+
+
+def normalize_openapi(
+    document: dict[str, Any],
+    *,
+    name: str,
+    reference: str,
+    source_decision_id: str,
+    content_sha256: str,
+    source_format: str = "",
+) -> tuple[ApiIntegration, DocumentationSourceType]:
+    openapi_version = str(document.get("openapi") or "")
+    swagger_version = str(document.get("swagger") or "")
+    if openapi_version and not openapi_version.startswith("3."):
+        raise UnsupportedDocumentationError(f"Unsupported OpenAPI version: {openapi_version}")
+    if swagger_version and swagger_version != "2.0":
+        raise UnsupportedDocumentationError(f"Unsupported Swagger version: {swagger_version}")
+    if not openapi_version and not swagger_version:
+        raise MalformedSpecificationError("The document is not OpenAPI or Swagger.")
+    resolver = _LocalReferenceResolver(document)
+    is_swagger = bool(swagger_version)
+    servers = _servers(document, is_swagger=is_swagger, reference=reference)
+    security_schemes = _security_schemes(document, resolver=resolver, is_swagger=is_swagger)
+    default_security = document.get("security")
+    operations: list[ApiOperation] = []
+    paths = document.get("paths")
+    if not isinstance(paths, dict):
+        raise MalformedSpecificationError("Specification paths must be an object.")
+    for raw_path, path_item_value in paths.items():
+        path_item = resolver.resolve_object(path_item_value, context=f"paths.{raw_path}")
+        shared_parameters = path_item.get("parameters") or []
+        for method_name, raw_operation in path_item.items():
+            if method_name.lower() not in HTTP_METHODS:
+                continue
+            method = HttpMethod(method_name.upper())
+            operation = resolver.resolve_object(raw_operation, context=f"{method.value} {raw_path}")
+            all_raw_parameters = [*shared_parameters, *(operation.get("parameters") or [])]
+            op_parameters = _parameters(all_raw_parameters, resolver=resolver)
+            request_body = (
+                _swagger_request_body(all_raw_parameters, resolver=resolver)
+                if is_swagger
+                else _request_body(operation.get("requestBody"), resolver=resolver)
+            )
+            auth, scopes = _operation_auth(
+                operation.get("security", default_security),
+                security_schemes,
+            )
+            operation_id = str(operation.get("operationId") or "").strip() or stable_id(
+                "op", servers[0].url, method.value, str(raw_path)
+            )
+            source_pointer = f"{reference}#/paths/{_pointer_escape(str(raw_path))}/{method_name.lower()}"
+            operations.append(
+                ApiOperation(
+                    operation_id=operation_id,
+                    name=str(operation.get("summary") or operation_id),
+                    description=str(operation.get("description") or ""),
+                    method=method,
+                    path=str(raw_path),
+                    base_url=servers[0].url,
+                    tags=tuple(str(item) for item in operation.get("tags") or ()),
+                    parameters=tuple(op_parameters),
+                    request_body=request_body,
+                    responses=tuple(_responses(operation.get("responses") or {}, resolver=resolver, is_swagger=is_swagger)),
+                    authentication=tuple(auth),
+                    required_scopes=tuple(scopes),
+                    risk_level=_risk_for(method),
+                    source_reference=source_pointer,
+                )
+            )
+    if not operations:
+        raise MalformedSpecificationError("Specification does not define any supported operations.")
+    description = str((document.get("info") or {}).get("description") or "")
+    extension = source_format or ("json" if reference.lower().endswith(".json") else "yaml")
+    source_type = (
+        DocumentationSourceType.SWAGGER_JSON
+        if is_swagger and extension == "json"
+        else DocumentationSourceType.SWAGGER_YAML
+        if is_swagger
+        else DocumentationSourceType.OPENAPI_JSON
+        if extension == "json"
+        else DocumentationSourceType.OPENAPI_YAML
+    )
+    source = DocumentationSource(
+        type=source_type,
+        reference=reference,
+        content_sha256=content_sha256,
+        source_decision_id=source_decision_id,
+    )
+    integration = ApiIntegration.create(
+        name=name,
+        description=description,
+        servers=servers,
+        operations=operations,
+        authentication=list(security_schemes.values()),
+        documentation_source=source,
+    )
+    return integration, source_type
+
+
+class _LocalReferenceResolver:
+    def __init__(self, document: dict[str, Any]) -> None:
+        self.document = document
+
+    def resolve_object(self, value: Any, *, context: str) -> dict[str, Any]:
+        resolved = self.resolve(value, seen=(), context=context)
+        if not isinstance(resolved, dict):
+            raise MalformedSpecificationError(f"{context} must resolve to an object.")
+        return resolved
+
+    def resolve(self, value: Any, *, seen: tuple[str, ...], context: str) -> Any:
+        if isinstance(value, list):
+            return [self.resolve(item, seen=seen, context=context) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if reference:
+            if not isinstance(reference, str) or not reference.startswith("#/"):
+                raise UnresolvedSchemaReferenceError(
+                    "Only local OpenAPI references are allowed.",
+                    details={"reference": reference, "context": context},
+                )
+            if reference in seen:
+                # Keep recursive schemas as local references rather than recursing forever.
+                return {"$ref": reference}
+            target: Any = self.document
+            try:
+                for token in reference[2:].split("/"):
+                    token = token.replace("~1", "/").replace("~0", "~")
+                    target = target[token]
+            except (KeyError, TypeError) as exc:
+                raise UnresolvedSchemaReferenceError(
+                    f"Local schema reference could not be resolved: {reference}",
+                    details={"reference": reference, "context": context},
+                ) from exc
+            merged = dict(self.resolve(target, seen=(*seen, reference), context=context))
+            merged.update({key: item for key, item in value.items() if key != "$ref"})
+            value = merged
+        return {
+            key: self.resolve(item, seen=seen, context=f"{context}.{key}")
+            for key, item in value.items()
+        }
+
+
+def _servers(
+    document: dict[str, Any],
+    *,
+    is_swagger: bool,
+    reference: str,
+) -> list[ApiServer]:
+    if is_swagger:
+        schemes = document.get("schemes") or ["https"]
+        host = str(document.get("host") or "").strip()
+        if not host:
+            raise MalformedSpecificationError("Swagger 2.0 requires a host.")
+        base_path = str(document.get("basePath") or "").rstrip("/")
+        return [ApiServer(url=f"{schemes[0]}://{host}{base_path}")]
+    raw_servers = document.get("servers") or []
+    if not raw_servers:
+        raise MalformedSpecificationError(
+            "OpenAPI specification requires an explicit server; no base URL was inferred."
+        )
+    result: list[ApiServer] = []
+    for raw in raw_servers:
+        if not isinstance(raw, dict) or not raw.get("url"):
+            raise MalformedSpecificationError("OpenAPI server entries require a URL.")
+        variables = {
+            str(key): str((value or {}).get("default") or "")
+            for key, value in (raw.get("variables") or {}).items()
+        }
+        missing_defaults = sorted(key for key, value in variables.items() if not value)
+        if missing_defaults:
+            raise MalformedSpecificationError(
+                "OpenAPI server variables require explicit defaults: "
+                + ", ".join(missing_defaults)
+            )
+        url = str(raw["url"])
+        for key, value in variables.items():
+            url = url.replace("{" + key + "}", value)
+        if not urlsplit(url).scheme:
+            if urlsplit(reference).scheme not in {"http", "https"}:
+                raise MalformedSpecificationError(
+                    "Relative OpenAPI server URLs require an HTTP(S) documentation source."
+                )
+            url = urljoin(reference, url)
+        result.append(ApiServer(url=url, description=str(raw.get("description") or ""), variables=variables))
+    return result
+
+
+def _security_schemes(
+    document: dict[str, Any],
+    *,
+    resolver: _LocalReferenceResolver,
+    is_swagger: bool,
+) -> dict[str, AuthenticationConfig]:
+    raw_schemes = (
+        document.get("securityDefinitions") or {}
+        if is_swagger
+        else (document.get("components") or {}).get("securitySchemes") or {}
+    )
+    schemes: dict[str, AuthenticationConfig] = {}
+    for name, raw_value in raw_schemes.items():
+        raw = resolver.resolve_object(raw_value, context=f"securitySchemes.{name}")
+        kind = str(raw.get("type") or "").lower()
+        location = str(raw.get("in") or "").lower()
+        scheme = str(raw.get("scheme") or "").lower()
+        if kind == "apikey":
+            auth_type = AuthenticationType.API_KEY_QUERY if location == "query" else AuthenticationType.API_KEY_HEADER
+        elif kind == "http" and scheme == "bearer":
+            auth_type = AuthenticationType.BEARER
+        elif kind == "http" and scheme == "basic" or is_swagger and kind == "basic":
+            auth_type = AuthenticationType.BASIC
+        elif kind in {"oauth2", "oauth"}:
+            auth_type = AuthenticationType.OAUTH2
+        else:
+            continue
+        flows: dict[str, OAuthFlow] = {}
+        raw_flows = raw.get("flows") or {}
+        if is_swagger and auth_type is AuthenticationType.OAUTH2:
+            raw_flows = {
+                str(raw.get("flow") or "authorizationCode"): {
+                    "authorizationUrl": raw.get("authorizationUrl"),
+                    "tokenUrl": raw.get("tokenUrl"),
+                    "scopes": raw.get("scopes") or {},
+                }
+            }
+        for flow_name, flow in raw_flows.items():
+            flows[str(flow_name)] = OAuthFlow(
+                authorization_url=str((flow or {}).get("authorizationUrl") or ""),
+                token_url=str((flow or {}).get("tokenUrl") or ""),
+                refresh_url=str((flow or {}).get("refreshUrl") or ""),
+                scopes={str(key): str(value) for key, value in ((flow or {}).get("scopes") or {}).items()},
+            )
+        schemes[str(name)] = AuthenticationConfig(
+            type=auth_type,
+            scheme_name=str(name),
+            parameter_name=str(raw.get("name") or ""),
+            oauth_flows=flows,
+            required=True,
+        )
+    return schemes
+
+
+def _operation_auth(
+    security: Any,
+    schemes: dict[str, AuthenticationConfig],
+) -> tuple[list[AuthenticationConfig], list[str]]:
+    if security == []:
+        return [AuthenticationConfig()], []
+    if not security:
+        return [], []
+    selected: list[AuthenticationConfig] = []
+    scopes: list[str] = []
+    for requirement in security:
+        if not isinstance(requirement, dict):
+            continue
+        for name, required_scopes in requirement.items():
+            if name in schemes:
+                selected.append(schemes[name])
+                scopes.extend(str(scope) for scope in required_scopes or ())
+    return selected, scopes
+
+
+def _parameters(values: Any, *, resolver: _LocalReferenceResolver) -> list[ApiParameter]:
+    result: list[ApiParameter] = []
+    for index, raw_value in enumerate(values or []):
+        raw = resolver.resolve_object(raw_value, context=f"parameters[{index}]")
+        location = str(raw.get("in") or "")
+        if location == "body":
+            continue
+        try:
+            normalized_location = ParameterLocation(location)
+        except ValueError as exc:
+            raise MalformedSpecificationError(f"Unsupported parameter location: {location}") from exc
+        schema = raw.get("schema") or {
+            key: raw[key]
+            for key in ("type", "format", "items", "enum", "default")
+            if key in raw
+        }
+        result.append(
+            ApiParameter(
+                name=str(raw.get("name") or ""),
+                location=normalized_location,
+                required=bool(raw.get("required")),
+                description=str(raw.get("description") or ""),
+                schema=resolver.resolve(schema, seen=(), context=f"parameter.{raw.get('name')}"),
+                style=str(raw.get("style") or ""),
+                explode=raw.get("explode"),
+            )
+        )
+    return result
+
+
+def _swagger_request_body(
+    parameters: list[Any],
+    *,
+    resolver: _LocalReferenceResolver,
+) -> RequestBody | None:
+    body: dict[str, Any] | None = None
+    for index, value in enumerate(parameters):
+        candidate = resolver.resolve_object(value, context=f"parameters[{index}]")
+        if str(candidate.get("in") or "") == "body":
+            body = candidate
+            break
+    if body is None:
+        return None
+    return RequestBody(
+        required=bool(body.get("required")),
+        description=str(body.get("description") or ""),
+        content={
+            "application/json": resolver.resolve(
+                body.get("schema") or {},
+                seen=(),
+                context="body.schema",
+            )
+        },
+    )
+
+
+def _request_body(value: Any, *, resolver: _LocalReferenceResolver) -> RequestBody | None:
+    if value is None:
+        return None
+    raw = resolver.resolve_object(value, context="requestBody")
+    content = {
+        str(media_type): resolver.resolve((definition or {}).get("schema") or {}, seen=(), context=f"requestBody.{media_type}")
+        for media_type, definition in (raw.get("content") or {}).items()
+    }
+    return RequestBody(
+        required=bool(raw.get("required")),
+        description=str(raw.get("description") or ""),
+        content=content,
+    )
+
+
+def _responses(values: Any, *, resolver: _LocalReferenceResolver, is_swagger: bool) -> list[ResponseDefinition]:
+    result: list[ResponseDefinition] = []
+    for status, raw_value in values.items():
+        raw = resolver.resolve_object(raw_value, context=f"responses.{status}")
+        content = raw.get("content") or {}
+        if is_swagger and raw.get("schema"):
+            content = {"application/json": {"schema": raw.get("schema")}}
+        schemas = {
+            str(media_type): resolver.resolve((definition or {}).get("schema") or {}, seen=(), context=f"response.{status}")
+            for media_type, definition in content.items()
+        }
+        result.append(
+            ResponseDefinition(
+                status_code=str(status),
+                description=str(raw.get("description") or ""),
+                content=schemas,
+                headers={
+                    str(key): resolver.resolve(value, seen=(), context=f"response.{status}.headers")
+                    for key, value in (raw.get("headers") or {}).items()
+                },
+            )
+        )
+    return result
+
+
+def _risk_for(method: HttpMethod) -> OperationRiskLevel:
+    if method in {HttpMethod.GET, HttpMethod.HEAD, HttpMethod.OPTIONS}:
+        return OperationRiskLevel.READ_ONLY
+    if method is HttpMethod.POST:
+        return OperationRiskLevel.CREATE
+    if method in {HttpMethod.PUT, HttpMethod.PATCH}:
+        return OperationRiskLevel.UPDATE
+    if method is HttpMethod.DELETE:
+        return OperationRiskLevel.DELETE
+    return OperationRiskLevel.HIGH
+
+
+def _validate_inferred_operations(operations: list[ApiOperation], reference: str) -> None:
+    for operation in operations:
+        if not operation.source_reference:
+            raise MalformedSpecificationError("Every inferred operation requires a source reference.")
+        if reference not in operation.source_reference and not operation.source_reference.startswith("#"):
+            raise MalformedSpecificationError(
+                "Inferred operation source references must cite the imported documentation."
+            )
+        if not operation.inferred_fields:
+            raise MalformedSpecificationError(
+                f"Inferred operation {operation.operation_id!r} must identify inferred fields."
+            )
+        for auth in operation.authentication:
+            if auth.inferred and not auth.unresolved:
+                raise MalformedSpecificationError(
+                    "Inferred authentication must remain unresolved until explicitly configured."
+                )
+
+
+def _strip_html(text: str) -> str:
+    without_scripts = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+    return html.unescape(re.sub(r"(?s)<[^>]+>", " ", without_scripts))
+
+
+def _pointer_escape(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")

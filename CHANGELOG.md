@@ -2,6 +2,22 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-31
+
+- Added the production API Manager for importing OpenAPI 3.x, Swagger 2.0, authorized files/URLs,
+  and validated model-extracted prose documentation; persisting versioned reusable integrations;
+  storing credential references separately from secret values; retrieving model-selection
+  candidates; building and previewing strict requests; and executing through a DNS-pinned,
+  redirect-revalidated, response-bounded HTTP runtime. The new model-driven `api` gateway route,
+  Operations-lane capability, narrow `api_*` tools, shared TUI/dashboard approval flow, redacted
+  execution events, project skill, configuration, security documentation, and mocked coverage do
+  not expose an unrestricted HTTP fallback. Missing or invalid semantic decisions,
+  authentication, parameters, operation choices, permissions, or network-policy checks stop
+  without selecting a default integration, operation, credential, or host.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/test_api_conversations.py tests/test_tui_auto_chat_tool_events.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required: `python -m pytest`.
+
 ## 2026-07-30
 
 - Fixed enrolled-server generic shell actions by publishing the required exact
