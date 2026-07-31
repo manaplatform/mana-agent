@@ -138,6 +138,8 @@ The executor:
 - blocks localhost, loopback, private, link-local, multicast, reserved, metadata-service, and other
   non-global addresses by default
 - resolves and validates every redirect target
+- percent-encodes unescaped spaces in redirect locations while rejecting CR, LF, and other
+  control-byte injection
 - pins the socket connection to the validated DNS result while preserving TLS hostname validation
 - limits redirects and response size
 - bounds connect/read time

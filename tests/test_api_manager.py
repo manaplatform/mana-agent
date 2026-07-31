@@ -20,6 +20,7 @@ from mana_agent.api_manager.errors import (
     ResponseTooLargeError,
     SsrfPolicyViolationError,
     UnsupportedDocumentationError,
+    UpstreamApiError,
 )
 from mana_agent.api_manager.executor import (
     ApiExecutor,
@@ -543,9 +544,11 @@ class _Transport:
     def __init__(self, responses: list[_RawResponse]) -> None:
         self.responses = list(responses)
         self.calls = 0
+        self.urls: list[str] = []
 
     def send(self, *args: Any, **kwargs: Any) -> _RawResponse:
         self.calls += 1
+        self.urls.append(str(args[1]))
         return self.responses.pop(0)
 
 
@@ -648,6 +651,39 @@ def test_timeout_is_structured_and_redirect_target_is_revalidated(
     )
     assert resolved_hosts == ["api.acme.example", "cdn.acme.example"]
     assert result.redirects == ("https://cdn.acme.example/contact",)
+
+
+def test_documentation_redirect_encodes_spaces_and_rejects_control_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    transport = _Transport(
+        [
+            _RawResponse(
+                302,
+                {"location": "/authorize?scope=openid profile email"},
+                b"",
+            ),
+            _RawResponse(200, {"content-type": "text/plain"}, b"API documentation"),
+        ]
+    )
+    executor = ApiExecutor(transport=transport)
+
+    body, content_type = executor.fetch_documentation("https://docs.example.com/api")
+
+    assert body == b"API documentation"
+    assert content_type == "text/plain"
+    assert transport.urls[1] == (
+        "https://docs.example.com/authorize?scope=openid%20profile%20email"
+    )
+
+    rejected = ApiExecutor(
+        transport=_Transport(
+            [_RawResponse(302, {"location": "/authorize\r\nX-Injected: yes"}, b"")]
+        )
+    )
+    with pytest.raises(UpstreamApiError, match="forbidden control characters"):
+        rejected.fetch_documentation("https://docs.example.com/api")
 
 
 def test_rate_limit_response_is_structured(

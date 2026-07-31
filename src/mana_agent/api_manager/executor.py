@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from pydantic import Field
 
@@ -392,7 +392,7 @@ class ApiExecutor:
                 return response
             if redirect_count >= self.network_policy.maximum_redirects:
                 raise UpstreamApiError("The upstream API exceeded the redirect limit.")
-            next_url = urljoin(url, location)
+            next_url = _normalized_redirect_target(url, location)
             # The next target is independently resolved and checked on the next loop.
             redirects.append(
                 redact_mapping(next_url, secret_values=request.secret_values)
@@ -693,3 +693,17 @@ def _origin(url: str) -> tuple[str, str, int]:
         (parsed.hostname or "").lower(),
         parsed.port or (443 if parsed.scheme == "https" else 80),
     )
+
+
+def _normalized_redirect_target(base_url: str, location: str) -> str:
+    """Encode spaces in Location while rejecting header control-byte injection."""
+    if any(
+        character != " "
+        and (ord(character) < 0x20 or ord(character) == 0x7F)
+        for character in location
+    ):
+        raise UpstreamApiError(
+            "The upstream API returned a redirect containing forbidden control characters."
+        )
+    encoded = quote(location, safe="/:?#[]@!$&'()*+,;=%")
+    return urljoin(base_url, encoded)

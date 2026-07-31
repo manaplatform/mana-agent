@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Fixed API documentation redirects whose authorization query contains unescaped spaces by
+  percent-encoding safe redirect text before the next request. Redirect locations containing CR,
+  LF, DEL, or other actual control bytes now stop explicitly; every normalized redirect still
+  passes independent scheme, host, DNS, SSRF, and credential-forwarding checks.
+  - User verification reported before the fix: the IPstack documentation reader stopped on an
+    authorization redirect containing `scope=openid profile email` with `URL can't contain control
+    characters` and no API call was made.
+  - User verification required: `python -m pytest tests/test_api_manager.py::test_documentation_redirect_encodes_spaces_and_rejects_control_bytes tests/test_api_manager.py::test_timeout_is_structured_and_redirect_target_is_revalidated`.
+
 - Fixed compound documentation-and-call workflows so one model-selected API lifecycle can inspect
   an authorized documentation source, save the normalized integration, search its operations, and
   continue to request execution instead of splitting browser inspection from an empty integration
