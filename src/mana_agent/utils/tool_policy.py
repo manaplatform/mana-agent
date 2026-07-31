@@ -74,6 +74,17 @@ REGISTERED_TOOLS: frozenset[str] = frozenset(
         "create_file",
         "delete_file",
         "github_search",
+        "api_workflow_decide",
+        "api_docs_inspect",
+        "api_docs_import",
+        "api_docs_import_semantic",
+        "api_integrations_list",
+        "api_integration_get",
+        "api_integration_update",
+        "api_integration_delete",
+        "api_operations_search",
+        "api_request_preview",
+        "api_request_execute",
     }
 )
 

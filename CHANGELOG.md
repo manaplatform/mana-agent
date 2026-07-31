@@ -2,6 +2,95 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-07-31
+
+- Bumped the package and documented version to `v0.1.4`.
+  - User verification required: inspect package metadata with `python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"`.
+
+## 2026-07-31
+
+- Added the required-schema `api_docs_import_semantic` tool for prose and rendered API
+  documentation, preventing unstructured evidence from being submitted without the model's typed,
+  cited `SemanticDefinition`. The rendered-documentation path may now use bounded click, wait, and
+  scroll actions to reveal an operation's endpoint, parameters, authentication, and responses;
+  typing, form submission, login, authorization/consent, CAPTCHA, and MFA interaction remain
+  prohibited. Successful semantic imports count as explicit integration-import workflow evidence.
+  - User verification reported before the fix: the model inspected IPstack's rendered operation
+    list, called the generic importer with prose but no semantic definition, received
+    `Unstructured API documentation requires a validated model semantic extraction`, and stopped
+    without saving an integration or executing the requested lookup.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
+
+- Added a strict API workflow completion contract through the required first-call
+  `api_workflow_decide` tool. The model now declares every action needed for the requested outcome,
+  and the gateway validates successful documentation inspection, integration import/configuration,
+  operation search, preview, and execution evidence before returning success. Missing execution
+  produces `api_workflow_incomplete`; an exact permission request remains awaiting approval. Tools
+  that execute actions absent from the validated workflow decision are also rejected.
+  - User verification reported before the fix: the operations lane discovered IPstack's
+    `lookupIpAddress` GET operation, recorded no tool evidence or result summary, omitted the API
+    call, and nevertheless transitioned the task from `in_progress` to `done`/`lane.completed`.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/gateway/test_multi_task_orchestration.py`.
+
+- Reclassified API-documentation OAuth/OIDC redirects as the typed
+  `documentation_authorization_required` condition before they exhaust the redirect budget. The
+  API route may now make an explicit model decision to inspect that same documentation URL with the
+  existing read-only rendered-browser tools and import only from returned page evidence. Browser
+  login, CAPTCHA, MFA, access-denial, and other intervention controls still stop safely, and browser
+  tools cannot substitute for API request execution.
+  - User verification reported before the fix: the IPstack documentation URL entered a SwaggerHub
+    OIDC loop and failed as `The upstream API exceeded the redirect limit`, leaving no integration
+    or executed request.
+  - User verification required: `python -m pytest tests/test_api_manager.py::test_documentation_oauth_redirect_requests_rendered_browser_inspection tests/test_api_manager.py::test_documentation_redirect_encodes_spaces_and_rejects_control_bytes tests/gateway/test_api_manager_route.py`.
+
+- Fixed API documentation redirects whose authorization query contains unescaped spaces by
+  percent-encoding safe redirect text before the next request. Redirect locations containing CR,
+  LF, DEL, or other actual control bytes now stop explicitly; every normalized redirect still
+  passes independent scheme, host, DNS, SSRF, and credential-forwarding checks.
+  - User verification reported before the fix: the IPstack documentation reader stopped on an
+    authorization redirect containing `scope=openid profile email` with `URL can't contain control
+    characters` and no API call was made.
+  - User verification required: `python -m pytest tests/test_api_manager.py::test_documentation_redirect_encodes_spaces_and_rejects_control_bytes tests/test_api_manager.py::test_timeout_is_structured_and_redirect_target_is_revalidated`.
+
+- Fixed compound documentation-and-call workflows so one model-selected API lifecycle can inspect
+  an authorized documentation source, save the normalized integration, search its operations, and
+  continue to request execution instead of splitting browser inspection from an empty integration
+  search. Added the narrow `api_docs_inspect` evidence tool, explicit atomic-lifecycle routing and
+  decomposition guidance, and truthful approval propagation to parent tasks. Public requests that
+  require a configured-host-allowlist exception or one-time plain-HTTP exception now produce the
+  existing session-bound TUI/dashboard API approval; approval applies only to the exact stored
+  request and does not persistently weaken network policy or permit cross-host redirects.
+  - User verification reported before the fix: browser documentation inspection and an empty API
+    operation search were both reported as completed even though no integration was saved and no
+    API request was executed.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py tests/gateway/test_multi_task_orchestration.py tests/test_api_conversations.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+
+- Fixed prose API imports so fully documented operations may use an empty `inferred_fields` list,
+  operation citations may name URLs actually present in pasted documentation, and query/header
+  parameters used solely for authentication are normalized out of ordinary request inputs. API
+  routing instructions now preserve the required `env://<name>` or `mana-secret://<id>` credential
+  reference form across retries and prohibit claiming a credential was received or stored without
+  explicit tool confirmation. Bare credential names and plaintext secrets remain rejected.
+  - User verification reported before the fix: an IPstack semantic import retried
+    `env://IPSTACK_TOKEN` as the invalid bare reference `IPSTACK_TOKEN`, producing two strict model
+    validation errors and stopping the session.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
+
+- Added the production API Manager for importing OpenAPI 3.x, Swagger 2.0, authorized files/URLs,
+  and validated model-extracted prose documentation; persisting versioned reusable integrations;
+  storing credential references separately from secret values; retrieving model-selection
+  candidates; building and previewing strict requests; and executing through a DNS-pinned,
+  redirect-revalidated, response-bounded HTTP runtime. The new model-driven `api` gateway route,
+  Operations-lane capability, narrow `api_*` tools, shared TUI/dashboard approval flow, redacted
+  execution events, project skill, configuration, security documentation, and mocked coverage do
+  not expose an unrestricted HTTP fallback. Missing or invalid semantic decisions,
+  authentication, parameters, operation choices, permissions, or network-policy checks stop
+  without selecting a default integration, operation, credential, or host.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/test_api_conversations.py tests/test_tui_auto_chat_tool_events.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required: `python -m pytest`.
+
 ## 2026-07-30
 
 - Fixed enrolled-server generic shell actions by publishing the required exact

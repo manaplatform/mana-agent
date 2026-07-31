@@ -169,6 +169,33 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "Cancel the exact selected media generation when supported.",
         "media",
     ),
+    (
+        "api_workflow_decide",
+        "Record the model-selected API workflow and required completion evidence.",
+        "api",
+    ),
+    (
+        "api_docs_inspect",
+        "Read authorized API documentation as evidence without inferring or executing operations.",
+        "api",
+    ),
+    (
+        "api_docs_import",
+        "Import and validate an authorized OpenAPI or Swagger specification.",
+        "api",
+    ),
+    (
+        "api_docs_import_semantic",
+        "Import unstructured API documentation with a required typed semantic definition.",
+        "api",
+    ),
+    ("api_integrations_list", "List saved external API integrations.", "api"),
+    ("api_integration_get", "Inspect one saved external API integration.", "api"),
+    ("api_integration_update", "Update explicit API integration metadata.", "api"),
+    ("api_integration_delete", "Delete one integration with explicit intent.", "api"),
+    ("api_operations_search", "Retrieve candidate operations from enabled integrations.", "api"),
+    ("api_request_preview", "Build and show a redacted validated API request.", "api"),
+    ("api_request_execute", "Execute a saved operation through the controlled API runtime.", "api"),
     # Documents
     (
         "document_detect",
@@ -243,6 +270,7 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
 CATEGORY_ORDER: tuple[str, ...] = (
     "canvas",
     "server",
+    "api",
     "search",
     "email",
     "computer",
@@ -259,6 +287,7 @@ CATEGORY_ORDER: tuple[str, ...] = (
 
 CATEGORY_LABELS: dict[str, str] = {
     "canvas": "Live Canvas",
+    "api": "External APIs",
     "search": "Search & research",
     "email": "Email",
     "computer": "Computer control",
@@ -297,6 +326,8 @@ def _category_for_name(name: str) -> str:
         return "browser"
     if n.startswith("document_"):
         return "document"
+    if n.startswith("api_"):
+        return "api"
     if n.startswith("canvas_"):
         return "canvas"
     if n.startswith("git_") or n.startswith("git."):

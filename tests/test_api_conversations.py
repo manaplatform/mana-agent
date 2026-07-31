@@ -129,6 +129,56 @@ def test_dashboard_server_approval_endpoint_resumes_cached_exact_action(
     assert calls[0]["approve"] is True
 
 
+def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = str(tmp_path / "repo")
+    created = client.post(
+        "/api/v1/conversations",
+        json={"title": "API approval", "root": root},
+    )
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    calls: list[dict[str, object]] = []
+
+    def decide(conversation_id, approval_request_id, **kwargs):
+        calls.append(
+            {
+                "conversation_id": conversation_id,
+                "approval_request_id": approval_request_id,
+                **kwargs,
+            }
+        )
+        return {
+            "status": "completed",
+            "approval_request_id": approval_request_id,
+            "result": {
+                "result": {
+                    "status_code": 200,
+                    "executed": True,
+                    "upstream_ok": True,
+                }
+            },
+            "message": "Approved API request executed.",
+        }
+
+    monkeypatch.setattr(
+        "mana_agent.ui.streamlit_helpers.decide_dashboard_api_approval",
+        decide,
+    )
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/api-approvals/api_approval_1",
+        json={"decision": "approve", "root": root},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["result"]["result"]["executed"] is True
+    assert calls[0]["conversation_id"] == conversation_id
+    assert calls[0]["approval_request_id"] == "api_approval_1"
+    assert calls[0]["approve"] is True
+
+
 def test_missing_conversation_returns_404(client: TestClient, tmp_path: Path) -> None:
     root = str(tmp_path / "repo")
     response = client.get(

@@ -37,7 +37,7 @@ class _RouteModel:
             "conversation": ["none"], "unsupported": ["none"], "coding": ["repository"],
             "gmail": ["gmail"], "calendar": ["calendar"], "browser": ["browser"],
             "search": ["search"], "github": ["github"], "repository": ["repository"],
-            "memory": ["memory"], "automation": ["repository"],
+            "memory": ["memory"], "automation": ["repository"], "api": ["api"],
             "canvas": ["canvas"],
             "artifact": ["artifact"],
             "capability_error": ["gmail"],
@@ -138,6 +138,7 @@ def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
         ("repository", "repository inspection"),
         ("memory", "memory retrieval"),
         ("automation", "automation"),
+        ("api", "external API manager"),
         ("canvas", "Live Canvas"),
         ("artifact", "artifact operations"),
         ("unsupported", "safe stop"),
@@ -398,6 +399,19 @@ def test_entry_router_validates_canvas_as_an_explicit_model_route() -> None:
     )
     assert decision.route == "canvas"
     assert decision.required_sources == ("canvas",)
+
+
+def test_entry_router_validates_api_as_an_explicit_model_route() -> None:
+    router = EntryRouter(llm=_RouteModel("api"), registry=_registry())
+    decision = router.route(
+        user_prompt="Use the saved CRM API to fetch contact 123.",
+        context=EntryRouteContext(
+            session_id="session", conversation_id="session", turn_id="turn",
+        ),
+    )
+    assert decision.route == "api"
+    assert decision.required_sources == ("api",)
+    assert "never expose a raw unrestricted HTTP tool" in ENTRY_ROUTER_PROMPT
 
 
 def test_entry_router_requires_a_typed_automation_operation() -> None:

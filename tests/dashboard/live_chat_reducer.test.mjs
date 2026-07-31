@@ -149,6 +149,41 @@ test("server approval requests use the shared actionable permission state", () =
   assert.equal(snapshot(state).permissionRequests[0].decision, "approve");
 });
 
+test("API approval requests use the exact mutation approval endpoint state", () => {
+  const state = createState("session-1");
+  reduce(state, {
+    type: "event",
+    event: event(1, "api.waiting_approval", {
+      metadata: {
+        permission_request_id: "api-approval-1",
+        permission_scope: "api.request.execute",
+        preview: "PATCH https://api.example.test/contacts/123",
+        api_approval: true,
+      },
+    }),
+  });
+  assert.deepEqual(snapshot(state).permissionRequests, [{
+    requestId: "api-approval-1",
+    scope: "api.request.execute",
+    preview: "PATCH https://api.example.test/contacts/123",
+    kind: "api",
+    status: "pending",
+    decision: "",
+  }]);
+  reduce(state, {
+    type: "event",
+    event: event(2, "api.approval_decided", {
+      status: "success",
+      metadata: {
+        permission_request_id: "api-approval-1",
+        decision: "approve",
+      },
+    }),
+  });
+  assert.equal(snapshot(state).permissionRequests[0].status, "decided");
+  assert.equal(snapshot(state).permissionRequests[0].decision, "approve");
+});
+
 test("out-of-order terminal events and failed submissions remain visible", () => {
   const state = createState("session-1");
   reduce(state, { type: "event", event: event(5, "tool.finished", { event_id: "tool-a", status: "success", metadata: { tool_call_id: "tool-a", tool_name: "search" } }) });

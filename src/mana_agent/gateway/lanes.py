@@ -150,7 +150,7 @@ class LaneContract:
 
 READ_CAPABILITIES = (
     "repository_read", "shell_read", "web_search", "browser", "git_read",
-    "test_execution", "email", "calendar", "computer",
+    "test_execution", "email", "calendar", "computer", "api",
 )
 WRITE_CAPABILITIES = (
     "repository_write", "shell_write", "git_write", "release", "deployment", "automation",
@@ -209,7 +209,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.RESEARCH, display_name="Research", description="Investigates external and repository information.",
             owns=("web research", "documentation", "dependencies", "external investigation"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("repository_read", "shell_read", "web_search", "browser", "git_read", "email", "calendar"),
+            allowed_tools=("repository_read", "shell_read", "web_search", "browser", "git_read", "email", "calendar", "api"),
             denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
             max_concurrent_jobs=4, max_subagents=4, token_budget=50_000, cost_budget=20.0,
             default_priority=LanePriority.INTERACTIVE, can_create_subagents=True,
@@ -249,7 +249,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.OPERATIONS, display_name="Operations", description="Handles deployment, infrastructure, and monitoring.",
             owns=("deployment", "infrastructure checks", "monitoring"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server"),
+            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server", "api"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
             max_concurrent_jobs=1, max_subagents=0, token_budget=25_000, cost_budget=12.0,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
@@ -314,6 +314,7 @@ ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "calendar": LaneId.RESEARCH,
     "computer": LaneId.OPERATIONS,
     "automation": LaneId.OPERATIONS,
+    "api": LaneId.OPERATIONS,
     "canvas": LaneId.OPERATIONS,
     "remote_execution": LaneId.OPERATIONS,
     "server": LaneId.OPERATIONS,
@@ -369,6 +370,14 @@ for _automation_tool in (
     "automation_disable", "automation_run_now",
 ):
     TOOL_CAPABILITIES[_automation_tool] = frozenset({"automation"})
+
+for _api_tool in (
+    "api_workflow_decide", "api_docs_inspect", "api_docs_import", "api_docs_import_semantic",
+    "api_integrations_list", "api_integration_get",
+    "api_integration_update", "api_integration_delete", "api_operations_search",
+    "api_request_preview", "api_request_execute",
+):
+    TOOL_CAPABILITIES[_api_tool] = frozenset({"api"})
 
 for _canvas_tool in (
     "canvas_create_surface", "canvas_update_components", "canvas_update_data",
