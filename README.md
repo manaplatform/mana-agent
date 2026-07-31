@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.3-purple" />
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.4-purple" />
 </p>
 
 Mana-Agent is a Python CLI and optional dashboard for understanding, operating, and safely changing software repositories.

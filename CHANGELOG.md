@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Bumped the package and documented version to `v0.1.4`.
+  - User verification required: inspect package metadata with `python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"`.
+
+## 2026-07-31
+
 - Added the required-schema `api_docs_import_semantic` tool for prose and rendered API
   documentation, preventing unstructured evidence from being submitted without the model's typed,
   cited `SemanticDefinition`. The rendered-documentation path may now use bounded click, wait, and
