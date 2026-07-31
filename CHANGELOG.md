@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Fixed compound documentation-and-call workflows so one model-selected API lifecycle can inspect
+  an authorized documentation source, save the normalized integration, search its operations, and
+  continue to request execution instead of splitting browser inspection from an empty integration
+  search. Added the narrow `api_docs_inspect` evidence tool, explicit atomic-lifecycle routing and
+  decomposition guidance, and truthful approval propagation to parent tasks. Public requests that
+  require a configured-host-allowlist exception or one-time plain-HTTP exception now produce the
+  existing session-bound TUI/dashboard API approval; approval applies only to the exact stored
+  request and does not persistently weaken network policy or permit cross-host redirects.
+  - User verification reported before the fix: browser documentation inspection and an empty API
+    operation search were both reported as completed even though no integration was saved and no
+    API request was executed.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py tests/gateway/test_multi_task_orchestration.py tests/test_api_conversations.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+
 - Fixed prose API imports so fully documented operations may use an empty `inferred_fields` list,
   operation citations may name URLs actually present in pasted documentation, and query/header
   parameters used solely for authentication are normalized out of ordinary request inputs. API

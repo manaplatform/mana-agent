@@ -106,7 +106,10 @@ constraint. Dependencies must reference local_id values and only express genuine
 independent work independent. Do not combine unrelated operations. Do not invent credentials,
 recipients, URLs, repositories, approvals, destructive actions, or missing values. Each child will
 be independently entry-routed and capability-checked after this decision; do not choose routes or
-tools here. This is decomposition only, never execution or a prose answer.
+tools here. Documentation inspection, integration persistence, and execution against that same API
+form one atomic child rather than independently completable children. A child is complete only when
+its acceptance criteria are met; a prose explanation that an intended action was not executed is a
+blocker, not completion. This is decomposition only, never execution or a prose answer.
 """
 
 

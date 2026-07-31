@@ -21,6 +21,7 @@ The implementation lives in `src/mana_agent/api_manager/`. The gateway registers
 route and only these narrow tools:
 
 ```text
+api_docs_inspect
 api_docs_import
 api_integrations_list
 api_integration_get
@@ -105,6 +106,12 @@ Get contact 123 from Acme CRM.
 Update contact 123’s email to new@example.com.
 ```
 
+For a request that supplies documentation and asks for a call, the API route treats inspection,
+saved integration import, operation selection, and execution as one ordered lifecycle. It first
+searches enabled integrations; when no matching operation exists, `api_docs_inspect` reads the
+authorized source without inference, the model produces a cited semantic definition from that
+evidence, and `api_docs_import` saves it before operation search resumes.
+
 For natural-language calls, the API route retrieves candidates from enabled integrations. A
 structured model decision must select one of those candidates with sufficient confidence.
 Mana-Agent asks only for genuinely missing required values, then validates path/query/header/cookie
@@ -115,6 +122,12 @@ Read-only calls may execute after validation. Create, update, delete, and unknow
 first return a redacted preview and a session-bound approval request. The trusted TUI or dashboard
 can approve that exact request once; the stored method, URL, headers, and body fingerprint must
 still match before execution.
+
+When an otherwise safe public request is outside a configured API host allowlist or requires plain
+HTTP while HTTP is disabled, it also returns the same session-bound approval request. Approval adds
+no durable allowlist entry: it grants only the exact stored request once. Redirects do not inherit
+the exception for a different host, and private/internal targets remain blocked unless separately
+trusted by policy.
 
 ## Security and network policy
 

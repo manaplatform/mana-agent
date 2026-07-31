@@ -46,6 +46,18 @@ class _Import(_Decision):
         return self
 
 
+class _Inspect(_Decision):
+    text: str = Field(default="", max_length=10 * 1024 * 1024)
+    path: str = ""
+    url: str = ""
+
+    @model_validator(mode="after")
+    def exactly_one_source(self) -> "_Inspect":
+        if sum(bool(item) for item in (self.text, self.path, self.url)) != 1:
+            raise ValueError("Select exactly one of text, path, or url.")
+        return self
+
+
 class _List(_Decision):
     include_disabled: bool = True
 
@@ -184,6 +196,20 @@ def build_api_manager_langchain_tools(
 
     return [
         StructuredTool.from_function(
+            name="api_docs_inspect",
+            description=(
+                "Read one authorized API documentation URL, workspace file, or pasted text source "
+                "through the API network/file policy. Returns source evidence only and never infers, "
+                "imports, or executes an operation."
+            ),
+            args_schema=_Inspect,
+            func=lambda source_decision_id, session_id, text="", path="", url="": encode(
+                lambda: manager.inspect_documentation(text=text, path=path, url=url),
+                session_id=session_id,
+                source_decision_id=source_decision_id,
+            ),
+        ),
+        StructuredTool.from_function(
             name="api_docs_import",
             description=(
                 "Import authorized OpenAPI/Swagger documentation deterministically, or validate a "
@@ -268,7 +294,8 @@ def build_api_manager_langchain_tools(
             name="api_request_execute",
             description=(
                 "Execute one validated saved API operation through DNS-pinned SSRF protections. "
-                "Mutations fail closed unless the trusted approval flow supplies an approval reference."
+                "Mutations and network-policy exceptions fail closed unless the trusted approval "
+                "flow supplies an approval reference."
             ),
             args_schema=_Execute,
             func=execute,
@@ -277,6 +304,7 @@ def build_api_manager_langchain_tools(
 
 
 API_MANAGER_TOOL_NAMES = (
+    "api_docs_inspect",
     "api_docs_import",
     "api_integrations_list",
     "api_integration_get",

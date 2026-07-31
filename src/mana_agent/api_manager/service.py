@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from mana_agent.api_manager.discovery import ApiOperationDiscovery, ApiRouteDecision
 from mana_agent.api_manager.documentation import DocumentationImporter, SemanticDefinition
@@ -12,6 +13,7 @@ from mana_agent.api_manager.executor import (
     ApiExecutor,
     NetworkAccessPolicy,
     PendingApiApprovalBroker,
+    validate_network_target,
 )
 from mana_agent.api_manager.registry import ApiIntegrationRegistry
 from mana_agent.api_manager.request_builder import ApiRequestBuilder
@@ -146,6 +148,42 @@ class ApiManagerService:
         )
         return result
 
+    def inspect_documentation(
+        self,
+        *,
+        text: str = "",
+        path: str = "",
+        url: str = "",
+    ) -> dict[str, Any]:
+        """Read one authorized documentation source without inferring API semantics."""
+        if sum(bool(item) for item in (text, path, url)) != 1:
+            raise ValueError("Select exactly one documentation source: text, path, or URL.")
+        reference = "pasted-text"
+        content_type = "text/plain"
+        if path:
+            resolved = Path(path).expanduser().resolve()
+            if (
+                resolved != self.workspace_root
+                and self.workspace_root not in resolved.parents
+            ):
+                raise ValueError("Documentation file is outside the authorized workspace root.")
+            payload = resolved.read_bytes()
+            reference = str(resolved)
+        elif url:
+            payload, content_type = self.executor.fetch_documentation(url)
+            reference = url
+        else:
+            payload = text.encode("utf-8")
+        if len(payload) > 10 * 1024 * 1024:
+            raise ValueError("Documentation exceeds the 10 MiB inspection limit.")
+        return {
+            "reference": reference,
+            "content_type": content_type,
+            "text": payload.decode("utf-8", errors="strict"),
+            "bytes": len(payload),
+            "truncated": False,
+        }
+
     def list_integrations(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
         return [
             {
@@ -251,6 +289,45 @@ class ApiManagerService:
             }
         )
         preview = self.builder.preview(request)
+        parsed = urlsplit(request.url)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        policy = self.executor.network_policy
+        needs_host_approval = bool(
+            policy.allowed_hosts
+            and hostname
+            not in {item.rstrip(".").lower() for item in policy.allowed_hosts}
+        )
+        needs_http_approval = parsed.scheme == "http" and not policy.allow_http
+        if needs_host_approval or needs_http_approval:
+            validation_policy = policy.model_copy(
+                update={
+                    "allowed_hosts": tuple(sorted({*policy.allowed_hosts, hostname})),
+                    "allow_http": bool(policy.allow_http or needs_http_approval),
+                }
+            )
+            validate_network_target(request.url, validation_policy)
+            request = request.model_copy(
+                update={
+                    "approved_network_host": hostname,
+                    "allow_insecure_http_once": needs_http_approval,
+                }
+            )
+            reasons = []
+            if needs_host_approval:
+                reasons.append(f"host {hostname!r} is outside the configured API allowlist")
+            if needs_http_approval:
+                reasons.append("the request uses unencrypted HTTP")
+            preview = preview.model_copy(
+                update={
+                    "approval_required": True,
+                    "expected_side_effects": (
+                        preview.expected_side_effects
+                        + " Network-policy approval is required because "
+                        + " and ".join(reasons)
+                        + ". Approval applies once to this exact request."
+                    ),
+                }
+            )
         publish_api_event(
             "api.request.validation.completed",
             {

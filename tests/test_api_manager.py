@@ -333,6 +333,86 @@ def test_authentication_rejects_bare_credential_reference() -> None:
         )
 
 
+def test_documentation_inspection_returns_complete_authorized_evidence(
+    tmp_path: Path,
+) -> None:
+    service = ApiManagerService(
+        tmp_path,
+        registry=ApiIntegrationRegistry(tmp_path / "integrations"),
+    )
+    evidence = service.inspect_documentation(
+        text="GET /{ip}?access_key=TOKEN returns IP details."
+    )
+
+    assert evidence["reference"] == "pasted-text"
+    assert evidence["truncated"] is False
+    assert evidence["text"].startswith("GET /{ip}")
+
+
+def test_read_only_http_request_requires_exact_ui_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    document = json.loads(json.dumps(OPENAPI))
+    document["servers"] = [{"url": "http://api.acme.example/v1"}]
+    integration = DocumentationImporter().from_text(
+        json.dumps(document),
+        name="HTTP API",
+        source_decision_id="http-import-decision",
+    )
+    registry = ApiIntegrationRegistry(tmp_path / "integrations")
+    registry.save(integration)
+    registry.update(
+        integration.integration_id,
+        {"authentication": (AuthenticationConfig(),)},
+    )
+    broker = PendingApiApprovalBroker()
+    executor = ApiExecutor(
+        network_policy=NetworkAccessPolicy(allow_http=False),
+        approval_broker=broker,
+        transport=_Transport(
+            [_RawResponse(200, {"content-type": "application/json"}, b'{"ok":true}')]
+        ),
+    )
+    service = ApiManagerService(
+        tmp_path,
+        registry=registry,
+        executor=executor,
+    )
+    route = ApiRouteDecision(
+        source_decision_id="http-call-decision",
+        task_intent="retrieve one contact",
+        workflow="request_execution",
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        confidence=0.99,
+        matched_terms=("contact",),
+        reason="The saved read-only operation exactly matches.",
+        safe_to_continue=True,
+    )
+
+    with pytest.raises(PermissionRequiredError) as raised:
+        service.execute_request(
+            routing_decision=route,
+            integration_id=integration.integration_id,
+            operation_id="getContact",
+            path_parameters={"contact_id": "123"},
+            session_id="http-session",
+        )
+
+    details = raised.value.details
+    assert details["preview"]["approval_required"] is True
+    assert "unencrypted HTTP" in details["preview"]["expected_side_effects"]
+    approved = service.decide_approval(
+        details["permission_request_id"],
+        session_id="http-session",
+        approve=True,
+        client_type="tui",
+    )
+    assert approved["executed"] is True
+
+
 def test_local_documentation_import_is_confined_to_authorized_roots(
     tmp_path: Path,
 ) -> None:

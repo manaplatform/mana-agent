@@ -315,7 +315,9 @@ Route semantics:
 - api: import authorized external API documentation, inspect or configure saved API integrations,
   retrieve candidate operations, preview a validated request, or execute a saved operation. Use
   this dynamic route for arbitrary providers; never expose a raw unrestricted HTTP tool. A
-  documentation URL belongs to api when the requested outcome is a reusable integration.
+  documentation URL belongs to api when the requested outcome is a reusable integration. Inspecting
+  documentation, saving the resulting integration, and calling that API are one ordered API
+  lifecycle, not separate browser and API children; select api for the complete request.
 - canvas: create, update, inspect, wait on, or close an interactive Live Canvas/A2UI surface.
   Use this route only when the user requests a visual interactive workspace or when current
   conversation context is already operating on a canvas. Canvas tools require the supplied exact

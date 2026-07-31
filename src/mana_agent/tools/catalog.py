@@ -170,6 +170,11 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "media",
     ),
     (
+        "api_docs_inspect",
+        "Read authorized API documentation as evidence without inferring or executing operations.",
+        "api",
+    ),
+    (
         "api_docs_import",
         "Import and validate authorized API documentation into a reusable integration.",
         "api",

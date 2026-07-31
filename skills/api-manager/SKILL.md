@@ -13,13 +13,15 @@ browser request, shell command, or provider-specific implementation.
 
 1. Distinguish documentation import, integration configuration, operation retrieval, request
    preview, and request execution.
-2. Inspect authorized documentation before creating an integration. Formal OpenAPI or Swagger
-   input is parsed deterministically.
+2. Inspect authorized documentation with `api_docs_inspect` before creating an integration. Formal
+   OpenAPI or Swagger input is parsed deterministically.
 3. For Markdown, webpage prose, or pasted text, produce a strict semantic definition. Cite the
    source for every operation, list only fields that were actually inferred (the list may be empty
    when every field is documented), and leave undocumented required values or authentication
    unresolved.
 4. Prefer enabled saved integrations. Search their operations before selecting one.
+   If the user supplied documentation and no operation exists, inspect, import with `save=true`,
+   search the saved integration, and continue as one ordered workflow.
 5. Select only an operation returned by the operation search. If several remain plausible and the
    difference could change the result or side effects, ask one focused clarification.
 6. Supply every documented required parameter and validate the body. Never guess authentication,
@@ -42,5 +44,7 @@ browser request, shell command, or provider-specific implementation.
 - Stop on blocked hosts, SSRF policy violations, missing credentials, unresolved schemas,
   validation errors, permission requests, timeouts, rate limits, response-size violations, or
   upstream failures.
+- A host-allowlist or plain-HTTP exception must pause for the exact TUI/dashboard API approval. It
+  is single-use and must not silently persist a host or weaken network policy.
 - Save reusable integrations only when the user authorized persistence. Use an ephemeral
   integration for a one-time call.

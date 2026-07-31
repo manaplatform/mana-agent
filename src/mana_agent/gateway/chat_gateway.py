@@ -1118,6 +1118,7 @@ class AgentChatGateway:
                 "Model-driven external API documentation, integration, operation, preview, and execution management.",
                 lambda: self._available(),
                 (
+                    "api_docs_inspect",
                     "api_docs_import",
                     "api_integrations_list",
                     "api_integration_get",
@@ -4302,6 +4303,7 @@ class AgentChatGateway:
                 for name in allowed_tools
                 if name
                 in {
+                    "api_docs_inspect",
                     "api_integrations_list",
                     "api_integration_get",
                     "api_operations_search",
@@ -4312,9 +4314,17 @@ class AgentChatGateway:
             "You are Mana-Agent's dedicated API Manager executor. Use only the supplied api_* "
             "tools. Every call must include the exact "
             f"source_decision_id={source_decision_id!r} and session_id={context.session_id!r}. "
-            "Distinguish documentation import, integration configuration, operation retrieval, "
+            "Distinguish documentation inspection, import, integration configuration, operation "
+            "retrieval, "
             "request preview, and request execution. Prefer enabled saved integrations. For a "
-            "natural-language call against an integration, call api_operations_search first; "
+            "request that supplies API documentation and asks for an API call, treat the work as "
+            "one ordered lifecycle. Search saved integrations first. If no matching operation "
+            "exists, call api_docs_inspect on the authorized source, derive a cited strict semantic "
+            "definition only from its returned evidence, call api_docs_import with save=true, then "
+            "search the newly saved operations and continue to preview and execution. Do not report "
+            "the workflow complete merely because documentation inspection or an empty search "
+            "completed. For a natural-language call against an integration, call "
+            "api_operations_search first; "
             "then construct a strict ApiRouteDecision with the same source_decision_id, task intent, "
             "workflow, selected IDs, confidence, matched terms, missing inputs, risk reason, and "
             "safe_to_continue. Pass it to preview and execution. Select an operation only from "
@@ -4363,8 +4373,9 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": "api"},
             )
+        permission_requests = _api_permission_requests_from_trace(response)
         if callable(self._event_sink):
-            for permission in _api_permission_requests_from_trace(response):
+            for permission in permission_requests:
                 preview = permission.get("preview") or {}
                 try:
                     preview_text = json.dumps(preview, ensure_ascii=False, default=str)
@@ -4381,11 +4392,11 @@ class AgentChatGateway:
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),
             sources=list(getattr(response, "sources", []) or []),
-            mode="route-api",
+            mode="route-api-awaiting-approval" if permission_requests else "route-api",
             decision=decision,
             trace=_serialize_tool_traces(response),
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={"route": "api"},
+            payload={"route": "api", "permission_requests": permission_requests},
         )
 
     def _execute_canvas_route(

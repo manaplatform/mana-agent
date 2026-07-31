@@ -87,10 +87,10 @@ class DenyMutationApprovalBroker:
         preview: RequestPreview,
         approval_reference: str,
     ) -> None:
-        if not request.risk_level.mutating:
+        if not request.risk_level.mutating and not preview.approval_required:
             return
         raise PermissionRequiredError(
-            "The API mutation requires approval through a trusted local client.",
+            "The API request requires approval through a trusted local client.",
             details={
                 "permission_request_id": f"api_approval_{uuid.uuid4().hex}",
                 "permission_scope": "api.request.execute",
@@ -121,13 +121,18 @@ class PendingApiApprovalBroker:
         preview: RequestPreview,
         approval_reference: str,
     ) -> None:
-        if not request.risk_level.mutating:
+        if not request.risk_level.mutating and not preview.approval_required:
             return
         now = datetime.now(timezone.utc)
         with self._lock:
             self._expire(now)
             pending = self._pending.get(approval_reference)
-            if pending and pending.approved and _request_fingerprint(pending.request) == _request_fingerprint(request):
+            if (
+                pending
+                and pending.approved
+                and _request_fingerprint(pending.request)
+                == _request_fingerprint(request)
+            ):
                 self._pending.pop(approval_reference, None)
                 return
             request_id = f"api_approval_{uuid.uuid4().hex}"
@@ -137,7 +142,7 @@ class PendingApiApprovalBroker:
                 expires_at=now + timedelta(seconds=self.ttl_seconds),
             )
         raise PermissionRequiredError(
-            "The API mutation is waiting for a trusted local approval.",
+            "The API request is waiting for a trusted local approval.",
             details={
                 "permission_request_id": request_id,
                 "permission_scope": "api.request.execute",
@@ -252,7 +257,7 @@ class ApiExecutor:
         approval_reference: str = "",
         cancellation: threading.Event | None = None,
     ) -> ApiExecutionResult:
-        if request.risk_level.mutating:
+        if request.risk_level.mutating or preview.approval_required:
             self._emit(
                 "api.approval.required",
                 request,
@@ -353,7 +358,21 @@ class ApiExecutor:
         current_headers = dict(request.headers)
         for redirect_count in range(self.network_policy.maximum_redirects + 1):
             self._check_cancelled(cancellation)
-            resolved = validate_network_target(url, self.network_policy)
+            policy = self.network_policy
+            parsed = urlsplit(url)
+            approved_host = request.approved_network_host.rstrip(".").lower()
+            if approved_host and (parsed.hostname or "").rstrip(".").lower() == approved_host:
+                policy = policy.model_copy(
+                    update={
+                        "allowed_hosts": tuple(
+                            sorted({*policy.allowed_hosts, approved_host})
+                        ),
+                        "allow_http": bool(
+                            policy.allow_http or request.allow_insecure_http_once
+                        ),
+                    }
+                )
+            resolved = validate_network_target(url, policy)
             response = self.transport.send(
                 method,
                 url,

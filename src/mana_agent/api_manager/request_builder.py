@@ -49,6 +49,8 @@ class BuiltApiRequest(StrictModel):
     secret_values: tuple[str, ...] = ()
     session_id: str = ""
     routing_task_intent: str = ""
+    approved_network_host: str = ""
+    allow_insecure_http_once: bool = False
 
 
 class RequestPreview(StrictModel):
