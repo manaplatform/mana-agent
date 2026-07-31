@@ -181,11 +181,18 @@ class DocumentationImporter:
                 "Unstructured API documentation requires a validated model semantic extraction. "
                 "No heuristic or fallback extraction was executed."
             )
-        semantic = SemanticDefinition.model_validate(semantic_definition)
-        _validate_inferred_operations(semantic.operations, reference)
         normalized_text = _strip_html(text) if format_hint == "html" else text
         if not normalized_text.strip():
             raise UnsupportedDocumentationError("Documentation did not contain readable text.")
+        semantic = SemanticDefinition.model_validate(semantic_definition)
+        operations = _normalize_authentication_parameters(
+            semantic.operations,
+            integration_authentication=semantic.authentication,
+        )
+        _validate_inferred_operations(
+            operations,
+            documented_references=_documented_references(reference, normalized_text),
+        )
         source = DocumentationSource(
             type=source_type,
             reference=reference,
@@ -196,7 +203,7 @@ class DocumentationImporter:
             name=name,
             description=semantic.description,
             servers=semantic.servers,
-            operations=semantic.operations,
+            operations=operations,
             authentication=semantic.authentication,
             documentation_source=source,
         )
@@ -588,17 +595,67 @@ def _risk_for(method: HttpMethod) -> OperationRiskLevel:
     return OperationRiskLevel.HIGH
 
 
-def _validate_inferred_operations(operations: list[ApiOperation], reference: str) -> None:
+def _documented_references(reference: str, text: str) -> set[str]:
+    references = {reference}
+    for match in re.finditer(r"https?://[^\s<>\"']+", text):
+        documented_url = match.group(0).rstrip(".,;:!?)]}")
+        if documented_url:
+            references.add(documented_url)
+    return references
+
+
+def _normalize_authentication_parameters(
+    operations: list[ApiOperation],
+    *,
+    integration_authentication: list[AuthenticationConfig],
+) -> list[ApiOperation]:
+    normalized: list[ApiOperation] = []
+    for operation in operations:
+        authentication = [*integration_authentication, *operation.authentication]
+        authentication_parameters: set[tuple[ParameterLocation, str]] = set()
+        for auth in authentication:
+            if auth.type is AuthenticationType.API_KEY_QUERY:
+                authentication_parameters.add((ParameterLocation.QUERY, auth.parameter_name))
+            elif auth.type is AuthenticationType.API_KEY_HEADER:
+                authentication_parameters.add(
+                    (ParameterLocation.HEADER, auth.parameter_name.lower())
+                )
+            elif auth.type is AuthenticationType.CUSTOM_HEADERS:
+                authentication_parameters.update(
+                    (ParameterLocation.HEADER, name.lower()) for name in auth.custom_header_names
+                )
+        parameters = tuple(
+            parameter
+            for parameter in operation.parameters
+            if (
+                parameter.location,
+                parameter.name.lower()
+                if parameter.location is ParameterLocation.HEADER
+                else parameter.name,
+            )
+            not in authentication_parameters
+        )
+        normalized.append(operation.model_copy(update={"parameters": parameters}, deep=True))
+    return normalized
+
+
+def _validate_inferred_operations(
+    operations: list[ApiOperation],
+    *,
+    documented_references: set[str],
+) -> None:
     for operation in operations:
         if not operation.source_reference:
-            raise MalformedSpecificationError("Every inferred operation requires a source reference.")
-        if reference not in operation.source_reference and not operation.source_reference.startswith("#"):
+            raise MalformedSpecificationError(
+                "Every inferred operation requires a source reference."
+            )
+        if not operation.source_reference.startswith("#") and not any(
+            operation.source_reference == reference
+            or operation.source_reference.startswith(f"{reference}#")
+            for reference in documented_references
+        ):
             raise MalformedSpecificationError(
                 "Inferred operation source references must cite the imported documentation."
-            )
-        if not operation.inferred_fields:
-            raise MalformedSpecificationError(
-                f"Inferred operation {operation.operation_id!r} must identify inferred fields."
             )
         for auth in operation.authentication:
             if auth.inferred and not auth.unresolved:

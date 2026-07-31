@@ -48,9 +48,12 @@ security schemes are normalized deterministically. External `$ref` values are re
 servers are accepted only when an HTTP(S) documentation source gives them a safe base.
 
 Unstructured documentation never uses heuristic endpoint extraction. The model must return the
-typed semantic definition, cite every operation, identify inferred fields, and leave undocumented
-required values and authentication unresolved. Documentation content is treated as untrusted data;
-scripts and embedded code are never executed.
+typed semantic definition, cite every operation using the imported source or a URL present in that
+source, identify only fields that were inferred (an empty list is valid for fully documented
+operations), and leave undocumented required values and authentication unresolved. Parameters used
+solely to carry authentication are normalized into authentication metadata instead of being exposed
+as ordinary request inputs. Documentation content is treated as untrusted data; scripts and embedded
+code are never executed.
 
 ## Importing and saving
 
@@ -91,6 +94,9 @@ export ACME_CRM_TOKEN='...'
 Raw API keys, passwords, access/refresh tokens, and client secrets are rejected from normal
 integration records. Resolved values are removed from previews, events, results, and exceptions.
 OAuth browser authorization is represented but is not automatically performed.
+
+Credential references must preserve their URI form on every import or update. `IPSTACK_TOKEN`, for
+example, is rejected; use `env://IPSTACK_TOKEN` and provide the value to the Mana process separately.
 
 ## Calling an operation
 

@@ -259,6 +259,80 @@ def test_unstructured_import_requires_validated_semantic_definition() -> None:
     assert integration.operations[0].unresolved_fields == ("response_schema",)
 
 
+def test_unstructured_import_accepts_documented_fields_and_normalizes_auth_parameter(
+) -> None:
+    source_url = "https://docs.example.com/ip-api/quickstart"
+    semantic_definition = {
+        "servers": [{"url": "https://api.example.com"}],
+        "operations": [
+            {
+                "operation_id": "ip.standard_lookup",
+                "name": "Standard IP Lookup",
+                "method": "GET",
+                "path": "/{ip}",
+                "base_url": "https://api.example.com",
+                "parameters": [
+                    {
+                        "name": "ip",
+                        "location": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                    {
+                        "name": "access_key",
+                        "location": "query",
+                        "required": True,
+                        "schema": {"type": "string", "format": "password"},
+                    },
+                ],
+                "authentication": [
+                    {
+                        "type": "api_key_query",
+                        "scheme_name": "Access key",
+                        "parameter_name": "access_key",
+                        "credential_reference": "env://IP_API_TOKEN",
+                        "required": True,
+                    }
+                ],
+                "risk_level": "read_only",
+                "source_reference": source_url,
+                "inferred_fields": [],
+                "unresolved_fields": [],
+            }
+        ],
+        "authentication": [
+            {
+                "type": "api_key_query",
+                "scheme_name": "Access key",
+                "parameter_name": "access_key",
+                "credential_reference": "env://IP_API_TOKEN",
+                "required": True,
+            }
+        ],
+    }
+
+    integration = DocumentationImporter().from_text(
+        f"Quickstart: {source_url}. GET /{{ip}} uses access_key authentication.",
+        name="IP API",
+        source_decision_id="documented-semantic-decision",
+        semantic_definition=semantic_definition,
+    )
+
+    operation = integration.operations[0]
+    assert operation.inferred_fields == ()
+    assert [parameter.name for parameter in operation.parameters] == ["ip"]
+    assert operation.authentication[0].credential_reference == "env://IP_API_TOKEN"
+
+
+def test_authentication_rejects_bare_credential_reference() -> None:
+    with pytest.raises(ValueError, match="credential_reference must use env://"):
+        AuthenticationConfig(
+            type=AuthenticationType.API_KEY_QUERY,
+            parameter_name="access_key",
+            credential_reference="IP_API_TOKEN",
+        )
+
+
 def test_local_documentation_import_is_confined_to_authorized_roots(
     tmp_path: Path,
 ) -> None:

@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Fixed prose API imports so fully documented operations may use an empty `inferred_fields` list,
+  operation citations may name URLs actually present in pasted documentation, and query/header
+  parameters used solely for authentication are normalized out of ordinary request inputs. API
+  routing instructions now preserve the required `env://<name>` or `mana-secret://<id>` credential
+  reference form across retries and prohibit claiming a credential was received or stored without
+  explicit tool confirmation. Bare credential names and plaintext secrets remain rejected.
+  - User verification reported before the fix: an IPstack semantic import retried
+    `env://IPSTACK_TOKEN` as the invalid bare reference `IPSTACK_TOKEN`, producing two strict model
+    validation errors and stopping the session.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
+
 - Added the production API Manager for importing OpenAPI 3.x, Swagger 2.0, authorized files/URLs,
   and validated model-extracted prose documentation; persisting versioned reusable integrations;
   storing credential references separately from secret values; retrieving model-selection
