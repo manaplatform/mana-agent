@@ -37,7 +37,8 @@ from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.utils.redaction import redact_json_line, redact_secrets
 from mana_agent.utils.tool_results import structured_tool_error_detail
 from mana_agent.utils.tool_policy import expand_tool_aliases
-from mana_agent.config.settings import default_tools_logs_dir
+from mana_agent.config.settings import Settings, default_tools_logs_dir
+from mana_agent.context_cost.governor import ContextCostGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +840,7 @@ def _mutation_failure_error(trace_rows: list[dict[str, Any]]) -> tuple[str, str]
 class WorkerInitPayload(BaseModel):
     api_key: str
     model: str
+    session_id: str
     base_url: str | None = None
     project_root: str
     repo_root: str
@@ -958,6 +960,7 @@ class ToolWorkerClient:
         *,
         api_key: str,
         model: str,
+        session_id: str,
         repo_root: Path,
         project_root: Path,
         base_url: str | None = None,
@@ -973,6 +976,7 @@ class ToolWorkerClient:
         self._init_payload = WorkerInitPayload(
             api_key=api_key,
             model=model,
+            session_id=session_id,
             base_url=resolved_base_url,
             project_root=str(project_root.resolve()),
             repo_root=str(repo_root.resolve()),
@@ -1421,6 +1425,12 @@ def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
         model=getattr(payload, "embed_model", None),
     )
     search_service = SearchService(store=FaissStore(embeddings))
+    governor = ContextCostGovernor(
+        session_id=payload.session_id,
+        repository_id=str(payload.repository_id or ""),
+        workspace_id=str(payload.workspace_id or ""),
+        settings=Settings(),
+    )
     ask_agent = AskAgent(
         api_key=payload.api_key,
         model=payload.model,
@@ -1428,6 +1438,7 @@ def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
         search_service=search_service,
         project_root=Path(payload.project_root),
         coding_memory_service=CodingMemoryService(project_root=Path(payload.project_root)),
+        context_cost_governor=governor,
     )
     tools = [
         build_edit_file_tool(

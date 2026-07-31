@@ -6,6 +6,11 @@ Every gateway session owns one context/cost governor shared by chat, routing,
 the internal coding runtime, tool workers, and Codex. It reuses the existing
 `MANA_ROUTING_*` limits; these settings control allocation and visibility:
 
+`AskAgent` construction requires an explicit `ContextCostGovernor`. Gateway,
+worker, Telegram, and TUI factories must pass the governor with the session
+identity; a missing governor is a construction error and does not select an
+ungoverned fallback path.
+
 ```toml
 MANA_CONTEXT_GOVERNOR_ENABLED = true
 MANA_CONTEXT_GOVERNOR_MODE = "observe" # observe, soft, enforce

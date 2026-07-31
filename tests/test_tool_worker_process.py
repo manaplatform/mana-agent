@@ -152,6 +152,7 @@ def test_tool_worker_client_init_health_shutdown(monkeypatch) -> None:
     client = twp.ToolWorkerClient(
         api_key="x",
         model="fake-model",
+        session_id="test-session",
         repo_root=Path("/tmp"),
         project_root=Path("/tmp"),
     )
@@ -205,6 +206,7 @@ def test_tool_worker_client_restarts_once_on_worker_failure(monkeypatch) -> None
     client = twp.ToolWorkerClient(
         api_key="x",
         model="fake-model",
+        session_id="test-session",
         repo_root=Path("/tmp"),
         project_root=Path("/tmp"),
     )
@@ -268,6 +270,7 @@ def test_tool_worker_client_run_tools_forwards_events(monkeypatch) -> None:
     client = twp.ToolWorkerClient(
         api_key="x",
         model="fake-model",
+        session_id="test-session",
         repo_root=Path("/tmp"),
         project_root=Path("/tmp"),
     )
@@ -324,6 +327,7 @@ def test_tool_worker_client_does_not_retry_non_retriable_run_failed(monkeypatch)
     client = twp.ToolWorkerClient(
         api_key="x",
         model="fake-model",
+        session_id="test-session",
         repo_root=Path("/tmp"),
         project_root=Path("/tmp"),
     )
@@ -768,6 +772,7 @@ def test_run_tool_request_once_enforces_tools_only_policy(monkeypatch) -> None:
     init_payload = twp.WorkerInitPayload(
         api_key="x",
         model="m",
+        session_id="test-session",
         project_root="/tmp",
         repo_root="/tmp",
         tools_only_strict=True,
@@ -788,6 +793,7 @@ def test_run_tool_request_once_respects_tools_only_override(monkeypatch) -> None
     init_payload = twp.WorkerInitPayload(
         api_key="x",
         model="m",
+        session_id="test-session",
         project_root="/tmp",
         repo_root="/tmp",
         tools_only_strict=True,
@@ -855,6 +861,7 @@ def test_run_tools_auto_repairs_invalid_tool_policy_and_retries_once(monkeypatch
     client = twp.ToolWorkerClient(
         api_key="x",
         model="fake-model",
+        session_id="test-session",
         repo_root=Path("/tmp"),
         project_root=Path("/tmp"),
     )
@@ -1042,7 +1049,7 @@ def test_run_tool_request_reports_failed_mutation_when_patch_changes_nothing() -
 
 
 def test_direct_mutation_tool_args_are_validated_before_worker_start(monkeypatch, tmp_path: Path) -> None:
-    client = twp.ToolWorkerClient(api_key="test", model="fake", repo_root=tmp_path, project_root=tmp_path)
+    client = twp.ToolWorkerClient(api_key="test", model="fake", session_id="test-session", repo_root=tmp_path, project_root=tmp_path)
     started = {"value": False}
     monkeypatch.setattr(client, "start", lambda: started.__setitem__("value", True))
 
@@ -1098,6 +1105,7 @@ def test_tool_worker_client_emits_request_events_for_tools_only_violation(
     client = twp.ToolWorkerClient(
         api_key="test",
         model="fake",
+        session_id="test-session",
         repo_root=tmp_path,
         project_root=tmp_path,
     )

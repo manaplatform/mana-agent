@@ -139,6 +139,7 @@ class ChatStack:
     ask_service: Any
     chat_service: ChatService | Any
     memory_service: MemoryService | Any
+    context_cost_governor: ContextCostGovernor
     coding_agent: Any | None = None
     coding_memory_service: Any | None = None
     tool_worker_client: Any | None = None
@@ -158,7 +159,6 @@ class ChatStack:
     execution_manager: ExecutionManager | None = None
     routing_authority: GatewayRoutingAuthority | None = None
     prepared_repository: PreparedRepository | None = None
-    context_cost_governor: ContextCostGovernor | None = None
 
 
 def build_chat_stack(
@@ -283,18 +283,13 @@ def build_chat_stack(
         )
     else:
         build_ask = _resolve_build_ask_service()
-        try:
-            ask_service = build_ask(
-                settings,
-                model_override=cfg.model,
-                project_root=root,
-                routing_authority=routing_authority,
-            )
-        except TypeError:
-            try:
-                ask_service = build_ask(settings, cfg.model, project_root=root)
-            except TypeError:
-                ask_service = build_ask(settings, cfg.model)
+        ask_service = build_ask(
+            settings,
+            model_override=cfg.model,
+            context_cost_governor=context_cost_governor,
+            project_root=root,
+            routing_authority=routing_authority,
+        )
 
         chat_service_cls = _public_symbol("ChatService", ChatService)
         chat_service = chat_service_cls(
@@ -453,6 +448,7 @@ def build_chat_stack(
                 tool_worker_client = tool_worker_client_cls(
                     api_key=inference_connection.api_key,
                     model=effective_tool_worker_model,
+                    session_id=session_id,
                     base_url=effective_base_url,
                     repo_root=coding_repository_root,
                     project_root=coding_working_directory,

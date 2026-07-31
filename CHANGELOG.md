@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Made `ContextCostGovernor` a required `AskAgent` constructor dependency and
+  propagated it through gateway, worker, Telegram, and TUI factories with the
+  active session identity. Removed compatibility calls that retried ask-service
+  construction without the required governor; missing dependencies now stop at
+  construction instead of creating an ungoverned execution path.
+  - User verification reported before the fix: the full suite completed with `69 failed, 1466 passed, 2 skipped`; the failures shared `AttributeError` for a missing `context_cost_governor` on `AskAgent.__new__()` instances or plain-object fakes.
+  - User verification required: `python -m pytest tests/context_cost tests/test_ask_agent.py tests/test_ask_agent_recovery.py tests/test_chat_planning_mode.py tests/test_cli_flow.py tests/test_cli_smoke.py tests/test_llm_logging.py tests/test_tool_worker_process.py tests/test_tui_user_config.py tests/test_workspaces.py`.
+  - User verification required: `python -m pytest`.
+
+## 2026-07-31
+
 - Corrected context-artifact recovery coverage to page through bounded
   `offset`/`limit` reads before asserting that a large compressed tool result
   is exactly recoverable.

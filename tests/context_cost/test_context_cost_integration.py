@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from mana_agent.context_cost import ContextArtifactStore, ContextCostGovernor
 from mana_agent.context_cost.models import GovernorMode
 from mana_agent.model_routing.models import RoutingBudgets
+from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 
 
 def _settings(**overrides):
@@ -29,6 +31,11 @@ def _settings(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_ask_agent_requires_an_explicit_context_cost_governor() -> None:
+    parameter = inspect.signature(AskAgent).parameters["context_cost_governor"]
+    assert parameter.default is inspect.Parameter.empty
 
 
 def test_observe_mode_records_but_does_not_compress_tool_results() -> None:

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from mana_agent.config.settings import Settings
+from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.services.chat_service import ChatService
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -78,7 +79,18 @@ class ManaChatGateway:
         root = Path(context.session.cwd).resolve()
         settings = Settings()
         from mana_agent.commands.cli_internal import build_ask_service
-        ask_service = build_ask_service(settings, None, project_root=root)
+        governor = ContextCostGovernor(
+            session_id=session_id,
+            repository_id=str(context.session.primary_repository_id or ""),
+            workspace_id=str(context.workspace.workspace_id or ""),
+            settings=settings,
+        )
+        ask_service = build_ask_service(
+            settings,
+            None,
+            context_cost_governor=governor,
+            project_root=root,
+        )
         service = ChatService(
             ask_service=ask_service, settings=settings, root_dir=root,
             index_dir=None, agent_tools=True,

@@ -259,6 +259,7 @@ class AskAgent:
         model: str,
         search_service: SearchService,
         project_root: str | Path,
+        context_cost_governor: ContextCostGovernor,
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
         execution_manager: ExecutionManager | None = None,
@@ -275,7 +276,7 @@ class AskAgent:
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
         self.search_config = SearchConfig.from_env()
-        self.context_cost_governor: ContextCostGovernor | None = None
+        self.context_cost_governor = context_cost_governor
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
@@ -287,8 +288,7 @@ class AskAgent:
             return
         governor = self.context_cost_governor
         self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url)
-        if governor is not None:
-            self.llm.context_cost_governor = governor
+        self.llm.context_cost_governor = governor
         self.model = resolved
 
     def _is_blocked_command(self, cmd: str) -> bool:
@@ -1973,12 +1973,11 @@ class AskAgent:
         capability_registry: CapabilityRegistry | None = None
         governor = self.context_cost_governor
         lazy_capabilities = bool(
-            governor is not None
-            and governor.enabled
+            governor.enabled
             and governor.mode is not GovernorMode.OBSERVE
             and getattr(governor.settings, "mana_context_lazy_capabilities", True)
         )
-        if lazy_capabilities and governor is not None:
+        if lazy_capabilities:
             holder: dict[str, CapabilityRegistry] = {}
             core_tools = build_core_tools(lambda: holder["registry"], governor.read_artifact)
             capability_registry = CapabilityRegistry(
@@ -2105,7 +2104,7 @@ class AskAgent:
 
         def append_tool_message(tool_name: str, tool_content: Any, tool_call_id: str, step: int) -> None:
             visible = tool_content
-            if governor is not None and governor.enabled:
+            if governor.enabled:
                 visible = governor.prepare_tool_result(
                     tool_content,
                     tool_name=tool_name,
@@ -2152,7 +2151,7 @@ class AskAgent:
             if capability_registry is not None:
                 capability_registry.unload_idle(
                     step=step_idx,
-                    idle_steps=int(getattr(governor.settings, "mana_context_capability_idle_steps", 3)) if governor is not None else 3,
+                    idle_steps=int(getattr(governor.settings, "mana_context_capability_idle_steps", 3)),
                 )
                 if capability_registry.active.revision != bound_revision:
                     allowed_tools.update(capability_registry.active.loaded)
@@ -2190,13 +2189,13 @@ class AskAgent:
                 else (bound_initial_required if step_idx == 0 and bound_initial_required is not None else bound)
             )
             model_call_id = ""
-            if governor is not None and governor.enabled:
+            if governor.enabled:
                 governor.set_execution_identity(
                     turn_id=str(run_id or flow_id or ""),
                     agent_id="main",
                     step_id=str(step_idx),
                 )
-            if governor is not None and governor.enabled and getattr(self.llm, "context_cost_governor", None) is None:
+            if governor.enabled and getattr(self.llm, "context_cost_governor", None) is None:
                 model_segments = []
                 for index, message in enumerate(messages):
                     kind = "system" if isinstance(message, SystemMessage) else "user" if isinstance(message, HumanMessage) and index == 1 else "tool_result" if isinstance(message, ToolMessage) else "history"
@@ -2221,7 +2220,7 @@ class AskAgent:
                 ai_msg = use_bound.invoke(messages, config=cfg)
             except TypeError:
                 ai_msg = use_bound.invoke(messages)
-            if governor is not None and governor.enabled and model_call_id:
+            if governor.enabled and model_call_id:
                 response_metadata = getattr(ai_msg, "response_metadata", {}) or {}
                 usage = getattr(ai_msg, "usage_metadata", None) or response_metadata.get("token_usage") or response_metadata.get("usage")
                 governor.record_model_call(

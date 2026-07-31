@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 
 
@@ -31,11 +32,19 @@ class _CapturingLogger:
 
 
 def _make_agent(tmp_path: Path) -> AskAgent:
+    governor = ContextCostGovernor(
+        session_id="test-recovery",
+        settings=SimpleNamespace(
+            mana_context_governor_enabled=False,
+            mana_context_cost_log_enabled=False,
+        ),
+    )
     agent = AskAgent(
         api_key="x",
         model="fake-model",
         search_service=SimpleNamespace(),  # type: ignore[arg-type]
         project_root=tmp_path,
+        context_cost_governor=governor,
     )
     return agent
 

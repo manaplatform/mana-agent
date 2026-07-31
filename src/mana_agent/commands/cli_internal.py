@@ -73,6 +73,7 @@ from .worker_cli import worker_app, workers_app
 from .ssh_cli import ssh_app
 from .server_cli import server_app
 from mana_agent.workspaces.paths import repository_analysis_dir, repository_dir, repository_id_for_path
+from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.context_cost.logger import ContextCostLogger
 
 logger = logging.getLogger(__name__)
@@ -1731,6 +1732,7 @@ def build_ask_service(
     settings: Settings,
     model_override: str | None,
     *,
+    context_cost_governor: ContextCostGovernor,
     project_root: Path | None = None,
     routing_authority: Any | None = None,
 ) -> AskService:
@@ -1774,6 +1776,7 @@ def build_ask_service(
         search_service=build_search_service(settings),
         base_url=connection.base_url,
         project_root=root,
+        context_cost_governor=context_cost_governor,
     )
     router_kwargs = {"api_key": connection.api_key, "model": router_model, "base_url": connection.base_url, "provider": connection.provider, "default_headers": connection.headers}
     router_llm = create_chat_model(**router_kwargs)
@@ -1792,14 +1795,17 @@ def _build_ask_service_compat(
     settings: Settings,
     model_override: str | None = None,
     *,
+    context_cost_governor: ContextCostGovernor,
     project_root: Path | None = None,
 ) -> AskService:
     public_cli = sys.modules.get("mana_agent.commands.cli")
     builder = getattr(public_cli, "build_ask_service", build_ask_service) if public_cli is not None else build_ask_service
-    try:
-        return builder(settings, model_override=model_override, project_root=project_root)
-    except TypeError:
-        return builder(settings, model_override=model_override)
+    return builder(
+        settings,
+        model_override=model_override,
+        context_cost_governor=context_cost_governor,
+        project_root=project_root,
+    )
 
 
 # ---------------------------------------------------------------------------

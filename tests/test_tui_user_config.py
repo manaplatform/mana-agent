@@ -114,6 +114,7 @@ def test_tool_worker_connection_settings_ignore_environment(
     worker = ToolWorkerClient(
         api_key=settings.openai_api_key,
         model=settings.openai_tool_worker_model or settings.openai_chat_model,
+        session_id="test-session",
         repo_root=isolated_user_config.parent,
         project_root=isolated_user_config.parent,
     )

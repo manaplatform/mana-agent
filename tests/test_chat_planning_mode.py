@@ -30,7 +30,7 @@ class DummySettings:
 class RecordingAskService:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
-        self.ask_agent = object()
+        self.ask_agent = types.SimpleNamespace()
 
     def ask(self, index_dir: str, question: str, k: int) -> AskResponse:
         _ = index_dir
@@ -97,7 +97,7 @@ def test_chat_planning_mode_asks_questions_and_resets(monkeypatch, tmp_path: Pat
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
         "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None: RecordingAskService(calls),
+        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
     )
     monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
     monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
@@ -150,7 +150,7 @@ def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: 
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
         "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None: RecordingAskService(calls),
+        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
     )
 
     def _fake_llm_question(
@@ -206,7 +206,7 @@ def test_chat_planning_mode_falls_back_to_static_on_llm_question_failure(monkeyp
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
         "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None: RecordingAskService(calls),
+        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
     )
     monkeypatch.setattr(
         "mana_agent.commands.chat_cli._generate_planning_question_llm",
@@ -242,7 +242,7 @@ def test_planning_question_auth_failure_logs_once_and_uses_static_fallback(monke
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
         "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None: RecordingAskService(calls),
+        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
     )
 
     def _raise_auth(**_kwargs):

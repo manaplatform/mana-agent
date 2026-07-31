@@ -46,7 +46,7 @@ def test_chat_startup_with_coding_memory_and_coding_agent_still_works(monkeypatc
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr(
         "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None: _AskServiceWithAgent(),
+        lambda _s, model_override=None, **_kwargs: _AskServiceWithAgent(),
     )
     result = runner.invoke(
         app,
