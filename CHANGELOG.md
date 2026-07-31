@@ -2,6 +2,78 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-01
+
+- Fixed saved API execution when authentication is structurally known but its
+  credential is supplied per request. An explicit `env://` or
+  `mana-secret://` reference now resolves that operation without persisting
+  secret material, and the safe standard `Accept` header no longer fails as an
+  undocumented operation parameter. API workflow guidance now avoids declaring
+  documentation inspection/import when an already-saved integration is being
+  used, so completion evidence matches the model-selected lifecycle.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
+
+- Expanded stopped-task recovery so the strict model decision can select
+  `retry_task` when the request is the same stable work but no valid checkpoint
+  exists. The gateway now reuses the exact durable task identity and creates a
+  new supervised attempt instead of always creating a new task. Live-data work
+  such as price, email, calendar, weather, and remote-state checks still starts
+  fresh, while non-idempotent work, recorded irreversible effects, missing
+  authorization, and invalid decisions stop without fallback execution. The
+  legacy unknown-side-effect retry setting no longer bypasses this required
+  model authorization.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py tests/test_multi_agent_core.py`.
+
+- Tightened API workflow decisions so every declared request execution must
+  also declare operation search and request preview, including read-only calls.
+  Completion now accepts execution evidence only when the tool reports an
+  executed, successful upstream response with an HTTP status, exposes the
+  redacted response evidence to the route result, and instructs the executor to
+  summarize returned status/content instead of claiming present evidence is
+  absent. Undeclared actions and incomplete execution still stop without a
+  fallback workflow.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py`.
+
+- Fixed context-cost governance so `observe` and `soft` modes do not reduce the
+  model router's executable token or cost budgets. Only `enforce` mode now feeds
+  remaining cumulative budgets into candidate validation. This prevents a long
+  tool workflow in observe mode from reducing the next turn's routing budget to
+  zero and incorrectly rejecting every configured model; routing still requires
+  a valid model decision and no fallback model is selected.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_integration.py tests/test_model_routing.py`.
+
+- Added a strict model decision before gateway checkpoint reuse. The decision
+  compares the current request with stopped checkpoint candidates and must
+  explicitly select `resume_checkpoint`, `start_fresh`, or `stop`; checkpoint
+  identity, same-work, freshness, validity, and safety fields are validated
+  before retry. Live-data routes such as current prices or mailbox checks cannot
+  reuse stale checkpoints, invalid decisions stop without fallback, and approved
+  resumes retain supervisor side-effect, checkpoint, retry-budget, and lease
+  validation. Unknown checkpoint recovery requires an exact approved checkpoint
+  with no recorded irreversible side effect; same-task restarts without a
+  checkpoint are governed by the separate repeat-safety authorization described
+  above, while non-idempotent work remains blocked. Approved checkpoint state is
+  redacted and supplied to the executor so pending work continues instead of
+  restarting.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py tests/test_multi_agent_core.py`.
+
+- Prevented process-local task ID counters from overwriting persisted TaskBoard
+  records after an app restart. New root and child tasks now skip every durable
+  identity already loaded by the TaskBoard, so a retried request with no saved
+  checkpoint receives a new identity instead of reaching the execution
+  supervisor with a different immutable contract. Existing same-contract tasks
+  remain eligible for the supervisor's validated checkpoint recovery path.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py::test_taskboard_does_not_overwrite_persisted_task_when_id_counter_restarts tests/execution_supervisor/test_supervisor_core.py::test_duplicate_create_does_not_duplicate_event`.
+
+- Updated durable task retry so `mana-agent tasks retry <task-id>` automatically
+  attaches a task-bound, typed operator `RecoveryDecision`, with an optional
+  retry-budget category and continued support for standalone recovery JSON.
+  Taskboard routing-decision registries now produce an actionable format error
+  instead of raw missing-field validation output, and all retries retain the
+  existing fail-closed side-effect and budget checks.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py`.
+  - User verification required: `mana-agent tasks retry task_20260801_000002`.
+
 ## 2026-07-31
 
 - Added the resilient execution supervisor across gateway lanes, Fleet workers,

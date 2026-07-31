@@ -151,6 +151,25 @@ def test_taskboard_create_update_save_load_and_invalid_transition(tmp_path):
         reloaded.update_status(task.task_id, TaskStatus.DONE)
 
 
+def test_taskboard_does_not_overwrite_persisted_task_when_id_counter_restarts(
+    tmp_path, monkeypatch
+):
+    board = TaskBoard(tmp_path)
+    persisted = board.create_task(title="Persisted", user_request="original request")
+    reloaded = TaskBoard(tmp_path)
+    generated_ids = iter([persisted.task_id, "task_20260801_999999"])
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.taskboard.taskboard.new_task_id",
+        lambda: next(generated_ids),
+    )
+
+    created = reloaded.create_task(title="Retry", user_request="retry request")
+
+    assert created.task_id == "task_20260801_999999"
+    assert reloaded.get_task(persisted.task_id).user_request == "original request"
+    assert reloaded.get_task(created.task_id).user_request == "retry request"
+
+
 def test_duplicate_task_not_created_twice(tmp_path):
     memory = MultiAgentMemoryService(root=tmp_path)
     board = TaskBoard(tmp_path, memory_service=memory)

@@ -294,6 +294,7 @@ class RecoveryDecision(StrictModel):
     selected_worker: str = ""
     selected_model: str = ""
     resume_checkpoint_id: str = ""
+    same_task_retry_authorized: bool = False
     safe_to_continue: bool
 
 

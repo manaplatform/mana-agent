@@ -467,6 +467,8 @@ class ContextCostGovernor:
         return list(reversed(selected))
 
     def remaining_routing_budgets(self, budgets: Any) -> Any:
+        if not self.enabled or self.mode is not GovernorMode.ENFORCE:
+            return budgets
         updates: dict[str, Any] = {}
         if hasattr(budgets, "task_token_limit"):
             current = getattr(budgets, "task_token_limit")

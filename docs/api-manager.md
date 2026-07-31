@@ -43,6 +43,12 @@ which of documentation inspection, integration import/configuration, operation s
 execution are necessary. The gateway records completion only when successful tool evidence exists
 for every declared action. A discovered operation without `api_request_execute` evidence therefore
 returns `api_workflow_incomplete`; an exact pending request remains awaiting TUI/dashboard approval.
+Every workflow that declares request execution must also declare and complete operation search and
+a redacted request preview, including read-only calls. Successful execution evidence requires an
+executed upstream result and HTTP status; undeclared supporting actions still fail closed. Calling
+an already-saved suitable integration does not declare documentation inspection or import merely
+because the integration record contains documentation provenance; those actions are required only
+when the current turn actually inspects and imports or refreshes documentation.
 
 ## Supported documentation
 
@@ -108,6 +114,10 @@ OAuth browser authorization is represented but is not automatically performed.
 
 Credential references must preserve their URI form on every import or update. `IPSTACK_TOKEN`, for
 example, is rejected; use `env://IPSTACK_TOKEN` and provide the value to the Mana process separately.
+When an imported operation fully identifies its authentication scheme but has no saved credential
+binding, preview and execution may supply that explicit reference for the current request. This does
+not persist the reference or relax unresolved authentication whose scheme or parameter shape is
+still unknown.
 
 ## Calling an operation
 
@@ -133,10 +143,12 @@ For natural-language calls, the API route retrieves candidates from enabled inte
 structured model decision must select one of those candidates with sufficient confidence.
 Mana-Agent asks only for genuinely missing required values, then validates path/query/header/cookie
 parameters and the request body. Unknown fields are rejected unless the imported operation
-explicitly permits them. The base URL always comes from the saved operation.
+explicitly permits them. The standard `Accept` transport header is allowed and validated even when
+it is not declared as an OpenAPI operation parameter. The base URL always comes from the saved
+operation.
 
-Read-only calls may execute after validation. Create, update, delete, and unknown/high-risk calls
-first return a redacted preview and a session-bound approval request. The trusted TUI or dashboard
+All calls receive a redacted preview after validation. Create, update, delete, and unknown/high-risk
+calls additionally return a session-bound approval request. The trusted TUI or dashboard
 can approve that exact request once; the stored method, URL, headers, and body fingerprint must
 still match before execution.
 

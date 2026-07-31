@@ -43,6 +43,7 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                                     "task_intent": "retrieve contact 123",
                                     "required_actions": [
                                         "operation_search",
+                                        "request_preview",
                                         "request_execution",
                                     ],
                                     "reason": "The operation must be selected and executed.",
@@ -57,9 +58,14 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                         "output_preview": '{"ok":true,"result":[{"operation_id":"getContact"}]}',
                     },
                     {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+                    },
+                    {
                         "tool_name": "api_request_execute",
                         "status": "ok",
-                        "output_preview": '{"ok":true,"result":{"executed":true}}',
+                        "output_preview": '{"ok":true,"result":{"executed":true,"upstream_ok":true,"status_code":200}}',
                     },
                 ],
             )
@@ -89,6 +95,8 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
     )
     assert result.mode == "route-api"
     assert result.payload["route"] == "api"
+    assert result.payload["workflow_completion"]["execution_evidence"]["status_code"] == 200
+    assert '"status_code": 200' in result.answer
 
 
 def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -> None:
@@ -116,12 +124,26 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
                                 "ok": True,
                                 "result": {
                                     "task_intent": "execute API request",
-                                    "required_actions": ["request_execution"],
+                                    "required_actions": [
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
                                     "reason": "The user requested execution.",
                                     "safe_to_continue": True,
                                 },
                             }
                         ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":[{"operation_id":"getContact"}]}',
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
                     },
                     {
                         "tool_name": "api_request_execute",
@@ -183,6 +205,7 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
                                         "documentation_inspection",
                                         "integration_import",
                                         "operation_search",
+                                        "request_preview",
                                         "request_execution",
                                     ],
                                     "reason": "All stages are required by the user.",
@@ -232,5 +255,6 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
     assert result.error == "api_workflow_incomplete"
     assert result.payload["workflow_completion"]["missing_actions"] == [
         "operation_search",
+        "request_preview",
         "request_execution",
     ]

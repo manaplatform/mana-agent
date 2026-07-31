@@ -59,8 +59,20 @@ def test_soft_mode_compresses_large_result_and_emits_existing_event_envelope(tmp
     assert governor.observability_snapshot()["compression_tokens_saved"] > 0
 
 
-def test_actual_remaining_budget_is_fed_back_to_routing() -> None:
+def test_observe_mode_does_not_reduce_model_routing_budgets() -> None:
     governor = ContextCostGovernor(session_id="s", settings=_settings())
+    governor.ledger.tokens_used = 400
+    governor.ledger.estimated_cost = 0.25
+    configured = RoutingBudgets(task_token_limit=1_000, session_cost_remaining=0.9)
+
+    assert governor.remaining_routing_budgets(configured) == configured
+
+
+def test_enforce_mode_feeds_actual_remaining_budget_back_to_routing() -> None:
+    governor = ContextCostGovernor(
+        session_id="s",
+        settings=_settings(mana_context_governor_mode="enforce"),
+    )
     governor.ledger.tokens_used = 400
     governor.ledger.estimated_cost = 0.25
     remaining = governor.remaining_routing_budgets(

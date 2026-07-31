@@ -56,6 +56,23 @@ verification state. Recovery uses a checkpoint only when a typed
 `RecoveryDecision` explicitly selects `resume_checkpoint` and the checkpoint
 still validates.
 
+When a new gateway request has stopped task candidates, a separate strict model
+decision compares the complete new request with candidate intent and progress.
+It selects `resume_checkpoint`, `retry_task`, `start_fresh`, or `stop` and
+records same-work, freshness, checkpoint-validity, repeat-safety, and
+continuation-safety judgments. `retry_task` reuses the exact durable task ID
+when the work is stable and equivalent but no valid checkpoint exists; the new
+attempt restarts the unfinished request under that existing identity.
+Current or account-backed information such as prices, mailbox state, calendar
+state, news, weather, availability, and remote state must be fetched through a
+fresh execution rather than restored from stale checkpoint evidence. The
+runtime validates the exact selected task or task/checkpoint pair and rejects
+missing, invalid, inconsistent, or unsafe decisions without choosing a fallback
+action.
+An approved resume supplies the executor with redacted completed steps, pending
+steps, resume payload, workspace/Git references, and generated-file state; it
+does not expose stored tool results or treat checkpoint data as instructions.
+
 Child results are atomically written to `results/` before the task advertises
 the result ID. The parent reads unacknowledged escrow entries and durably
 acknowledges consumption. A restart after child completion but before parent
@@ -67,9 +84,13 @@ child.
 Every task records one side-effect classification: `read_only`, `idempotent`,
 `deduplicated`, `compensatable`, `non_idempotent`, or `unknown`. Read-only work
 is safely recoverable. Idempotent/deduplicated retries require a stable
-idempotency key. Compensation must have been selected explicitly. Unknown and
-non-idempotent ambiguous work fails for intervention; the error warns that the
-external action may already have occurred.
+idempotency key. Compensation must have been selected explicitly. Unknown work
+may resume from the exact model-selected checkpoint, or restart under the same
+task ID only when the strict recovery decision explicitly confirms equivalent,
+non-live work whose actions are safe to repeat and no irreversible side effect
+was recorded. Unapproved unknown retries and non-idempotent ambiguous work fail
+for intervention. The error warns when the external action may already have
+occurred.
 
 Infrastructure, model, tool, verification, lease-loss, and replan budgets are
 tracked separately. Backoff is exponential with deterministic jitter and a
@@ -145,9 +166,16 @@ mana-agent tasks status task_123
 Blocked non-idempotent retry:
 
 ```bash
-mana-agent tasks retry task_123 --decision-json recovery.json
+mana-agent tasks retry task_123
 # refuses: action may already have occurred; no retry scheduled
 ```
+
+The retry command automatically creates a typed operator decision bound to the
+task ID and uses the `model` retry budget by default. Use `--category` to select
+a different budget, or `--decision-json` for a standalone advanced recovery
+decision. Do not pass the taskboard's `decisions.json` registry: those entries
+describe routing and do not authorize recovery. Automatic attachment does not
+bypass side-effect, idempotency, checkpoint, or retry-budget validation.
 
 Cancel a parent with children:
 

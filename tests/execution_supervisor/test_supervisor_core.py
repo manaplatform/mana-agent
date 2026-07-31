@@ -8,8 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+from mana_agent.execution_supervisor.cli import _decision, _operator_retry_decision, tasks_app
 from mana_agent.execution_supervisor.errors import (
     BudgetExceededError,
     ConcurrentUpdateError,
@@ -415,6 +417,140 @@ def test_non_idempotent_manual_retry_is_refused(runtime):
     supervisor.transition(task.task_id, ExecutionState.FAILED, reason="ambiguous external failure")
     with pytest.raises(RetrySafetyError, match="may already have produced"):
         supervisor.retry(task.task_id, decision(task.task_id))
+
+
+def test_unknown_task_may_resume_exact_checkpoint_without_irreversible_side_effect(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    attempt_id, token = running(supervisor, task)
+    checkpoint = supervisor.checkpoint(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        resume_payload={"cursor": 2},
+    )
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="worker stopped")
+
+    scheduled = supervisor.retry(
+        task.task_id,
+        decision(
+            task.task_id,
+            action=RecoveryAction.RESUME_CHECKPOINT,
+            resume_checkpoint_id=checkpoint.checkpoint_id,
+        ),
+    )
+
+    assert scheduled.state == ExecutionState.RETRY_SCHEDULED
+    assert scheduled.checkpoint_id == checkpoint.checkpoint_id
+
+
+def test_unknown_task_may_retry_when_model_authorizes_same_stable_work(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    running(supervisor, task)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="worker stopped")
+
+    scheduled = supervisor.retry(
+        task.task_id,
+        decision(
+            task.task_id,
+            same_task_retry_authorized=True,
+        ),
+    )
+
+    assert scheduled.state == ExecutionState.RETRY_SCHEDULED
+
+
+def test_unknown_task_retry_without_model_authorization_still_fails_closed(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    running(supervisor, task)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="worker stopped")
+
+    with pytest.raises(RetrySafetyError, match="no retry was scheduled"):
+        supervisor.retry(task.task_id, decision(task.task_id))
+
+
+def test_legacy_unknown_retry_setting_does_not_bypass_model_authorization(runtime):
+    supervisor, _clock, tmp_path = runtime
+    supervisor.config.allow_unknown_side_effect_retry = True
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    running(supervisor, task)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="worker stopped")
+
+    with pytest.raises(RetrySafetyError, match="no retry was scheduled"):
+        supervisor.retry(task.task_id, decision(task.task_id))
+
+
+def test_operator_retry_decision_is_attached_from_task_id(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    running(supervisor, task)
+    failed = supervisor.transition(task.task_id, ExecutionState.FAILED, reason="model failed")
+
+    selected = _operator_retry_decision(
+        supervisor,
+        task.task_id,
+        category=RetryCategory.MODEL,
+    )
+
+    assert selected.task_id == task.task_id
+    assert selected.decision_id == f"operator-cli:{task.task_id}:{failed.state_version}:retry"
+    assert selected.action == RecoveryAction.RETRY
+    assert selected.retry_category == RetryCategory.MODEL
+    assert selected.safe_to_continue is True
+    assert supervisor.retry(task.task_id, selected).state == ExecutionState.RETRY_SCHEDULED
+
+
+def test_retry_cli_does_not_require_decision_json(runtime, monkeypatch):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    running(supervisor, task)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="model failed")
+    monkeypatch.setattr(
+        "mana_agent.execution_supervisor.cli._supervisor",
+        lambda: supervisor,
+    )
+
+    result = CliRunner().invoke(tasks_app, ["retry", task.task_id])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["state"] == ExecutionState.RETRY_SCHEDULED.value
+
+
+def test_routing_decision_registry_has_actionable_retry_error(tmp_path):
+    registry = tmp_path / "decisions.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "decision_000001": {
+                    "decision_id": "decision_000001",
+                    "task_id": "task_000001",
+                    "selected_route": "simple",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="routing-decision registry"):
+        _decision(str(registry))
 
 
 def test_cancellation_propagates_and_preserves_irreversible_child(runtime):

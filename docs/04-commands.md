@@ -17,17 +17,23 @@ mana-agent tasks tree <task-id>
 mana-agent tasks logs <task-id> [--limit 200]
 mana-agent tasks artefacts <task-id>
 mana-agent tasks cancel <task-id> --reason "operator request" [--attempt-id <attempt-id>]
-mana-agent tasks retry <task-id> --decision-json recovery.json
+mana-agent tasks retry <task-id> [--category model] [--decision-json recovery.json]
 mana-agent tasks resume <task-id> [--decision-json recovery.json]
 mana-agent tasks recover
 ```
 
-Retry and first-time resume require a schema-valid `RecoveryDecision`; the CLI
-does not pick a default worker, model, retry category, or workflow. A scheduled
+Retry automatically attaches an operator-authored, schema-valid
+`RecoveryDecision` to the specified task ID. It uses the `model` retry budget
+unless `--category` explicitly selects another budget. A standalone
+`RecoveryDecision` JSON object or file remains supported for reassignment,
+replanning, or checkpoint selection; a taskboard `decisions.json` registry is
+not a recovery decision and should not be passed. First-time resume still
+requires `--decision-json` unless retry was already scheduled. A scheduled
 retry can be released after its recorded backoff, and a validated replan can be
-released with `resume`, without another decision. Unknown and
-non-idempotent ambiguous actions are refused even when retry is requested. See
-[Resilient Execution](29-resilient-execution.md).
+released with `resume`, without another decision. All generated and supplied
+decisions pass the same safety validation. Unknown and non-idempotent ambiguous
+actions are refused when policy does not explicitly permit them. See [Resilient
+Execution](29-resilient-execution.md).
 
 ## Teach Mode
 

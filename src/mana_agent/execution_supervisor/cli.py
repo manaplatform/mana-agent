@@ -10,7 +10,12 @@ import typer
 from mana_agent.config.settings import Settings
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError, RetrySafetyError
-from mana_agent.execution_supervisor.models import ExecutionState, RecoveryDecision
+from mana_agent.execution_supervisor.models import (
+    ExecutionState,
+    RecoveryAction,
+    RecoveryDecision,
+    RetryCategory,
+)
 from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
 
 
@@ -43,7 +48,32 @@ def _decision(value: str) -> RecoveryDecision:
         )
     path = Path(source).expanduser()
     payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else json.loads(source)
+    if isinstance(payload, dict) and "decision_id" not in payload and any(
+        isinstance(item, dict) and "decision_id" in item for item in payload.values()
+    ):
+        raise ValueError(
+            "the selected file is a taskboard routing-decision registry, not a "
+            "RecoveryDecision; omit --decision-json to create the operator retry "
+            "decision automatically"
+        )
     return RecoveryDecision.model_validate(payload)
+
+
+def _operator_retry_decision(
+    supervisor: ExecutionSupervisor,
+    task_id: str,
+    *,
+    category: RetryCategory,
+) -> RecoveryDecision:
+    task = supervisor.store.get_task(task_id)
+    return RecoveryDecision(
+        decision_id=f"operator-cli:{task.task_id}:{task.state_version}:retry",
+        task_id=task.task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=category,
+        reason="operator requested retry from the task CLI",
+        safe_to_continue=True,
+    )
 
 
 @tasks_app.command("list")
@@ -140,10 +170,25 @@ def cancel(
 @tasks_app.command("retry")
 def retry(
     task_id: str,
-    decision_json: str = typer.Option(..., "--decision-json", help="JSON or a JSON file containing RecoveryDecision."),
+    decision_json: str = typer.Option(
+        "",
+        "--decision-json",
+        help="Optional standalone RecoveryDecision JSON or file.",
+    ),
+    category: RetryCategory = typer.Option(
+        RetryCategory.MODEL,
+        "--category",
+        help="Retry budget category used by the automatic operator decision.",
+    ),
 ) -> None:
     try:
-        task = _supervisor().retry(task_id, _decision(decision_json))
+        supervisor = _supervisor()
+        decision = (
+            _decision(decision_json)
+            if decision_json.strip()
+            else _operator_retry_decision(supervisor, task_id, category=category)
+        )
+        task = supervisor.retry(task_id, decision)
         typer.echo(_render(task))
     except (ExecutionSupervisorError, ValueError, json.JSONDecodeError, OSError) as exc:
         _fail(exc)

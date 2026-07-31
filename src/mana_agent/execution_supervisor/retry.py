@@ -55,11 +55,23 @@ class RetryPolicy:
                 "reassignment requires an explicitly selected agent, worker, or model"
             )
         classification = task.side_effect_classification
-        if classification in {SideEffectClassification.NON_IDEMPOTENT, SideEffectClassification.UNKNOWN}:
-            if not (
+        if classification in {
+            SideEffectClassification.NON_IDEMPOTENT,
+            SideEffectClassification.UNKNOWN,
+        }:
+            exact_checkpoint_resume = (
                 classification == SideEffectClassification.UNKNOWN
-                and self.config.allow_unknown_side_effect_retry
-            ):
+                and decision.action == RecoveryAction.RESUME_CHECKPOINT
+                and bool(decision.resume_checkpoint_id or task.checkpoint_id)
+                and not task.irreversible_side_effect_started
+            )
+            model_authorized_same_task_retry = (
+                classification == SideEffectClassification.UNKNOWN
+                and decision.action == RecoveryAction.RETRY
+                and decision.same_task_retry_authorized
+                and not task.irreversible_side_effect_started
+            )
+            if not exact_checkpoint_resume and not model_authorized_same_task_retry:
                 raise RetrySafetyError(
                     f"{classification.value} task may already have produced an external side effect; "
                     "no retry was scheduled"

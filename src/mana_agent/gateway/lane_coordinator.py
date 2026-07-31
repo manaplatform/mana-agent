@@ -40,8 +40,10 @@ from mana_agent.execution_supervisor import (
     ExecutionSupervisor,
     ExecutionSupervisorConfig,
     SideEffectClassification,
+    RecoveryDecision,
 )
 from mana_agent.execution_supervisor.errors import CompletionVerificationError, ExecutionSupervisorError
+from mana_agent.execution_supervisor.models import RecoveryAction
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
     import msvcrt
@@ -965,6 +967,124 @@ class LaneCoordinator:
             return self._executions[task_id]
         except KeyError as exc:
             raise LaneCoordinatorError(f"Unknown gateway task: {task_id}") from exc
+
+    def resume_checkpoint(
+        self,
+        task_id: str,
+        *,
+        decision: RecoveryDecision,
+        session_id: str,
+    ) -> LaneReservation:
+        """Requeue the exact checkpoint selected by a validated model decision."""
+        execution = self.inspect_task(task_id)
+        durable = self.execution_supervisor.store.get_task(task_id)
+        if not durable.checkpoint_id or durable.checkpoint_id != decision.resume_checkpoint_id:
+            raise LaneCoordinatorError(
+                "model-selected checkpoint does not match the durable task checkpoint"
+            )
+        try:
+            self.execution_supervisor.resume_checkpoint(task_id)
+        except ExecutionSupervisorError as exc:
+            raise LaneCoordinatorError(
+                f"checkpoint recovery validation failed; no retry was executed: {exc}"
+            ) from exc
+        return self._retry_existing_task(
+            execution,
+            decision=decision,
+            session_id=session_id,
+            event_type="lane.checkpoint_resumed",
+            checkpoint_id=decision.resume_checkpoint_id,
+        )
+
+    def retry_task(
+        self,
+        task_id: str,
+        *,
+        decision: RecoveryDecision,
+        session_id: str,
+    ) -> LaneReservation:
+        """Requeue the exact stopped task selected by a validated model decision."""
+        if decision.action is not RecoveryAction.RETRY or not decision.same_task_retry_authorized:
+            raise LaneCoordinatorError(
+                "same-task retry requires an explicit authorized retry decision"
+            )
+        execution = self.inspect_task(task_id)
+        if execution.state not in {
+            LaneTaskState.FAILED,
+            LaneTaskState.INTERRUPTED,
+            LaneTaskState.TIMED_OUT,
+            LaneTaskState.BUDGET_EXHAUSTED,
+            LaneTaskState.REJECTED,
+        }:
+            raise LaneCoordinatorError("model-selected task is not in a retryable stopped state")
+        return self._retry_existing_task(
+            execution,
+            decision=decision,
+            session_id=session_id,
+            event_type="lane.task_retried",
+            checkpoint_id="",
+        )
+
+    def _retry_existing_task(
+        self,
+        execution: LaneExecution,
+        *,
+        decision: RecoveryDecision,
+        session_id: str,
+        event_type: str,
+        checkpoint_id: str,
+    ) -> LaneReservation:
+        task_id = execution.task_id
+        try:
+            scheduled = self.execution_supervisor.retry(task_id, decision)
+        except ExecutionSupervisorError as exc:
+            raise LaneCoordinatorError(
+                f"same-task recovery validation failed; no retry was executed: {exc}"
+            ) from exc
+        retry_at = scheduled.retry_not_before
+        if retry_at is not None:
+            delay = max(0.0, (retry_at - _now()).total_seconds())
+            if delay > self.contracts[execution.owning_lane].timeout_seconds:
+                raise LaneCoordinatorError("checkpoint retry backoff exceeds the lane timeout")
+            if delay:
+                time.sleep(delay)
+        try:
+            self.execution_supervisor.release_retry(task_id)
+        except ExecutionSupervisorError as exc:
+            raise LaneCoordinatorError(
+                f"checkpoint retry could not be released: {exc}"
+            ) from exc
+        with self._condition:
+            execution.state = LaneTaskState.QUEUED
+            execution.session_id = session_id
+            execution.worker_id = ""
+            execution.supervisor_attempt_id = ""
+            execution.supervisor_lease_token = ""
+            execution.error = ""
+            execution.updated_at = _iso()
+            execution.lane_history.append(
+                {
+                    "lane_id": execution.owning_lane.value,
+                    "state": "queued",
+                    "at": execution.updated_at,
+                    "reason": decision.reason,
+                    "checkpoint_id": checkpoint_id,
+                    "recovery_decision_id": decision.decision_id,
+                }
+            )
+            task = self.taskboard.get_task(execution.taskboard_task_id)
+            if task.status is TaskStatus.FAILED:
+                self.taskboard.reopen(task.task_id, reason=decision.reason)
+            self.taskboard.add_decision(task.task_id, decision.decision_id)
+            self._persist_locked()
+        self.emit(
+            event_type,
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+            checkpoint_id=checkpoint_id,
+            recovery_decision_id=decision.decision_id,
+        )
+        return LaneReservation(execution)
 
     def pause(self, task_id: str, *, reason: str = "paused by coordinator") -> LaneExecution:
         return self.transition(task_id, LaneTaskState.PAUSED, reason=reason)

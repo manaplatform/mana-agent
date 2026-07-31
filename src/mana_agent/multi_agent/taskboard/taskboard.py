@@ -36,6 +36,13 @@ class TaskBoard:
         self.tasks: dict[str, TaskBoardItem] = {}
         self.load()
 
+    def _new_task_id(self) -> str:
+        """Allocate an ID that cannot overwrite a durable task after restart."""
+        task_id = new_task_id()
+        while task_id in self.tasks:
+            task_id = new_task_id()
+        return task_id
+
     def create_task(
         self,
         *,
@@ -53,7 +60,7 @@ class TaskBoard:
         repository_ids: list[str] | None = None,
         primary_repository_id: str | None = None,
     ) -> TaskBoardItem:
-        task_id = new_task_id()
+        task_id = self._new_task_id()
         goal = normalized_goal or user_request.strip()
         duplicate_of = None
         memory_bundle_id = None
@@ -140,7 +147,7 @@ class TaskBoard:
         preferred_parallelism: str = "automatic",
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
-        task_id = new_task_id()
+        task_id = self._new_task_id()
         task = TaskBoardItem(
             task_id=task_id,
             parent_task_id=parent_task_id,
@@ -228,6 +235,15 @@ class TaskBoard:
         if status == TaskStatus.BLOCKED and reason:
             self.add_blocker(task_id, reason, save=False)
         self._record("task.updated", {"task_id": task_id, "status": status.value, "reason": reason})
+        self.save()
+
+    def reopen(self, task_id: str, *, reason: str) -> None:
+        task = self.get_task(task_id)
+        if task.status is not TaskStatus.FAILED:
+            raise ValueError(f"task {task_id} is not in a reopenable state")
+        task.status = TaskStatus.QUEUED
+        task.updated_at = utc_now()
+        self._record("task.reopened", {"task_id": task_id, "reason": reason})
         self.save()
 
     def assign(self, task_id: str, agent_id: str) -> None:

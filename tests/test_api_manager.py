@@ -50,6 +50,7 @@ from mana_agent.api_manager.registry import ApiIntegrationRegistry
 from mana_agent.api_manager.request_builder import ApiRequestBuilder
 from mana_agent.api_manager.runtime_tools import (
     API_MANAGER_TOOL_NAMES,
+    _WorkflowDecision,
     build_api_manager_langchain_tools,
 )
 from mana_agent.api_manager.service import ApiManagerService
@@ -488,6 +489,33 @@ def test_request_builder_validates_and_serializes_parameters(
         )
 
 
+def test_explicit_request_credential_resolves_known_unconfigured_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, integration = _registry(tmp_path)
+    monkeypatch.setenv("ACME_TOKEN", "top-secret-token")
+    builder = ApiRequestBuilder(registry)
+
+    with pytest.raises(RequestValidationError, match="Supply an explicit"):
+        builder.build(
+            integration_id=integration.integration_id,
+            operation_id="getContact",
+            path_parameters={"contact_id": "123"},
+        )
+
+    request = builder.build(
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        path_parameters={"contact_id": "123"},
+        headers={"Accept": "application/json"},
+        credential_reference="env://ACME_TOKEN",
+    )
+
+    assert request.headers["Accept"] == "application/json"
+    assert request.headers["Authorization"] == "Bearer top-secret-token"
+
+
 def test_json_body_validation_and_multipart_construction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -899,6 +927,33 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
     assert "operation_id" in properties
     assert "url" not in properties
     assert "base_url" not in properties
+
+
+def test_api_workflow_execution_requires_declared_search_and_preview() -> None:
+    with pytest.raises(ValueError, match="request_execution requires declared actions"):
+        _WorkflowDecision(
+            source_decision_id="decision-api",
+            session_id="session-api",
+            task_intent="execute saved operation",
+            required_actions=("request_execution",),
+            reason="The user requested a live API call.",
+            safe_to_continue=True,
+        )
+
+    decision = _WorkflowDecision(
+        source_decision_id="decision-api",
+        session_id="session-api",
+        task_intent="execute saved operation",
+        required_actions=("operation_search", "request_preview", "request_execution"),
+        reason="Search, preview, and execute the selected operation.",
+        safe_to_continue=True,
+    )
+
+    assert decision.required_actions == (
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    )
 
 
 def test_registry_and_executor_emit_redacted_events(
