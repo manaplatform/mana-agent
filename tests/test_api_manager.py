@@ -886,6 +886,11 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
     )
     tools = build_api_manager_langchain_tools(tmp_path, service=service)
     assert tuple(tool.name for tool in tools) == API_MANAGER_TOOL_NAMES
+    semantic_import_schema = next(
+        tool for tool in tools if tool.name == "api_docs_import_semantic"
+    ).args_schema.model_json_schema()
+    assert "text" in semantic_import_schema["required"]
+    assert "semantic_definition" in semantic_import_schema["required"]
     execute_schema = next(
         tool for tool in tools if tool.name == "api_request_execute"
     ).args_schema.model_json_schema()

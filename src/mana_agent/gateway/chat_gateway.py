@@ -184,6 +184,7 @@ _API_WORKFLOW_EVIDENCE = {
     "api_docs_inspect": "documentation_inspection",
     "browser_inspect": "documentation_inspection",
     "api_docs_import": "integration_import",
+    "api_docs_import_semantic": "integration_import",
     "api_integration_update": "integration_configuration",
     "api_operations_search": "operation_search",
     "api_request_preview": "request_preview",
@@ -1210,6 +1211,7 @@ class AgentChatGateway:
                     "api_workflow_decide",
                     "api_docs_inspect",
                     "api_docs_import",
+                    "api_docs_import_semantic",
                     "api_integrations_list",
                     "api_integration_get",
                     "api_integration_update",
@@ -1219,6 +1221,9 @@ class AgentChatGateway:
                     "api_request_execute",
                     "browser_open",
                     "browser_inspect",
+                    "browser_click",
+                    "browser_wait",
+                    "browser_scroll",
                     "browser_close",
                 ),
             ),
@@ -4390,7 +4395,16 @@ class AgentChatGateway:
 
         source_decision_id = f"{context.turn_id}:api-entry-decision"
         allowed_tools = list(API_MANAGER_TOOL_NAMES)
-        allowed_tools.extend(["browser_open", "browser_inspect", "browser_close"])
+        allowed_tools.extend(
+            [
+                "browser_open",
+                "browser_inspect",
+                "browser_click",
+                "browser_wait",
+                "browser_scroll",
+                "browser_close",
+            ]
+        )
         if read_only:
             allowed_tools = [
                 name
@@ -4405,13 +4419,17 @@ class AgentChatGateway:
                     "api_request_preview",
                     "browser_open",
                     "browser_inspect",
+                    "browser_click",
+                    "browser_wait",
+                    "browser_scroll",
                     "browser_close",
                 }
             ]
         system_prompt = (
             "You are Mana-Agent's dedicated API Manager executor. Use the supplied api_* tools and "
-            "the browser_open, browser_inspect, and browser_close tools only for rendered API "
-            "documentation inspection. Every API tool call must include the exact "
+            "the browser_open, browser_inspect, browser_click, browser_wait, browser_scroll, and "
+            "browser_close tools only for rendered API documentation inspection. Every API tool "
+            "call must include the exact "
             f"source_decision_id={source_decision_id!r} and session_id={context.session_id!r}. "
             "The first tool call must be api_workflow_decide with every action required to satisfy "
             "the user's request. For an inspect-and-call request, required_actions must include "
@@ -4425,13 +4443,19 @@ class AgentChatGateway:
             "request that supplies API documentation and asks for an API call, treat the work as "
             "one ordered lifecycle. Search saved integrations first. If no matching operation "
             "exists, call api_docs_inspect on the authorized source, derive a cited strict semantic "
-            "definition only from its returned evidence, call api_docs_import with save=true, then "
+            "definition only from its returned evidence, call api_docs_import_semantic with "
+            "save=true, then "
             "search the newly saved operations and continue to preview and execution. Do not report "
             "the workflow complete merely because documentation inspection or an empty search "
             "completed. If api_docs_inspect returns documentation_authorization_required, the model "
-            "may explicitly select browser_open and browser_inspect for the same supplied URL, then "
-            "pass the returned rendered documentation text—not the redirecting URL—to "
-            "api_docs_import and derive semantics only from that evidence. Close the browser "
+            "may explicitly select browser_open and browser_inspect for the same supplied URL. It "
+            "may use browser_click, browser_wait, and browser_scroll only to expand or reveal API "
+            "operation documentation referenced by the inspected page, using current inspected "
+            "element references and read-only risk. Re-inspect after each action and collect the "
+            "documented method, path, server, parameters, authentication, and responses. Never "
+            "type, submit forms, sign in, or click login, authorization, consent, CAPTCHA, or MFA "
+            "controls. Pass the returned rendered documentation text—not the redirecting URL—and "
+            "the required strict SemanticDefinition to api_docs_import_semantic. Close the browser "
             "afterward. Never "
             "bypass login, CAPTCHA, MFA, access denial, or other user-intervention controls. Do not "
             "use browser tools as an API-call fallback. After the workflow decision, for a "

@@ -19,12 +19,16 @@ browser request, shell command, or provider-specific implementation.
 2. Inspect authorized documentation with `api_docs_inspect` before creating an integration. Formal
    OpenAPI or Swagger input is parsed deterministically.
    If the tool explicitly returns `documentation_authorization_required`, the model may select the
-   read-only rendered browser tools for that same URL. Import the returned rendered text rather
-   than retrying the redirecting URL. Never bypass login, CAPTCHA, MFA, or access controls.
+   read-only rendered browser tools for that same URL. It may click, wait, or scroll only to expand
+   operation documentation, must re-inspect after every action, and must never type, submit a form,
+   sign in, grant consent, or interact with CAPTCHA or MFA controls. Import the returned rendered
+   text rather than retrying the redirecting URL.
 3. For Markdown, webpage prose, or pasted text, produce a strict semantic definition. Cite the
    source for every operation, list only fields that were actually inferred (the list may be empty
    when every field is documented), and leave undocumented required values or authentication
-   unresolved.
+   unresolved. Submit prose only through `api_docs_import_semantic`, whose schema requires both the
+   inspected text and the typed semantic definition. Use `api_docs_import` for formal OpenAPI or
+   Swagger specifications.
 4. Prefer enabled saved integrations. Search their operations before selecting one.
    If the user supplied documentation and no operation exists, inspect, import with `save=true`,
    search the saved integration, and continue as one ordered workflow.

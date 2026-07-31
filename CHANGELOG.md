@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Added the required-schema `api_docs_import_semantic` tool for prose and rendered API
+  documentation, preventing unstructured evidence from being submitted without the model's typed,
+  cited `SemanticDefinition`. The rendered-documentation path may now use bounded click, wait, and
+  scroll actions to reveal an operation's endpoint, parameters, authentication, and responses;
+  typing, form submission, login, authorization/consent, CAPTCHA, and MFA interaction remain
+  prohibited. Successful semantic imports count as explicit integration-import workflow evidence.
+  - User verification reported before the fix: the model inspected IPstack's rendered operation
+    list, called the generic importer with prose but no semantic definition, received
+    `Unstructured API documentation requires a validated model semantic extraction`, and stopped
+    without saving an integration or executing the requested lookup.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
+
 - Added a strict API workflow completion contract through the required first-call
   `api_workflow_decide` tool. The model now declares every action needed for the requested outcome,
   and the gateway validates successful documentation inspection, integration import/configuration,

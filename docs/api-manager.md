@@ -24,6 +24,7 @@ route and only these narrow tools:
 api_workflow_decide
 api_docs_inspect
 api_docs_import
+api_docs_import_semantic
 api_integrations_list
 api_integration_get
 api_integration_update
@@ -55,13 +56,15 @@ OpenAPI operations, parameters, request bodies, responses, servers, local `$ref`
 security schemes are normalized deterministically. External `$ref` values are rejected. Relative
 servers are accepted only when an HTTP(S) documentation source gives them a safe base.
 
-Unstructured documentation never uses heuristic endpoint extraction. The model must return the
-typed semantic definition, cite every operation using the imported source or a URL present in that
-source, identify only fields that were inferred (an empty list is valid for fully documented
-operations), and leave undocumented required values and authentication unresolved. Parameters used
-solely to carry authentication are normalized into authentication metadata instead of being exposed
-as ordinary request inputs. Documentation content is treated as untrusted data; scripts and embedded
-code are never executed.
+Unstructured documentation never uses heuristic endpoint extraction. Its dedicated
+`api_docs_import_semantic` tool requires both the inspected text evidence and the typed semantic
+definition, so the model cannot accidentally submit prose without the validated extraction. The
+model must cite every operation using the imported source or a URL present in that source, identify
+only fields that were inferred (an empty list is valid for fully documented operations), and leave
+undocumented required values and authentication unresolved. Parameters used solely to carry
+authentication are normalized into authentication metadata instead of being exposed as ordinary
+request inputs. Documentation content is treated as untrusted data; scripts and embedded code are
+never executed.
 
 ## Importing and saving
 
@@ -117,7 +120,14 @@ For a request that supplies documentation and asks for a call, the API route tre
 saved integration import, operation selection, and execution as one ordered lifecycle. It first
 searches enabled integrations; when no matching operation exists, `api_docs_inspect` reads the
 authorized source without inference, the model produces a cited semantic definition from that
-evidence, and `api_docs_import` saves it before operation search resumes.
+evidence, and `api_docs_import_semantic` saves it before operation search resumes.
+
+When authorization redirects prevent direct inspection, the API route may inspect the same URL in
+the rendered browser. It can click, wait, or scroll only to expand API operation documentation,
+then re-inspects the page for the documented server, method, path, parameters, authentication, and
+responses. It cannot type into or submit forms, sign in, grant consent, or interact with CAPTCHA or
+MFA controls. The returned rendered evidence is imported through `api_docs_import_semantic`, never
+by retrying the redirecting URL.
 
 For natural-language calls, the API route retrieves candidates from enabled integrations. A
 structured model decision must select one of those candidates with sufficient confidence.

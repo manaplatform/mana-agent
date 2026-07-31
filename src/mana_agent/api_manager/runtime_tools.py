@@ -63,6 +63,17 @@ class _Import(_Decision):
         return self
 
 
+class _SemanticImport(_Decision):
+    name: str = Field(min_length=1, max_length=160)
+    text: str = Field(min_length=1, max_length=10 * 1024 * 1024)
+    semantic_definition: SemanticDefinition
+    save: bool = True
+    ephemeral: bool = False
+    refresh_integration_id: str = Field(
+        default="", pattern=r"^(|api_[a-f0-9]{24})$"
+    )
+
+
 class _Inspect(_Decision):
     text: str = Field(default="", max_length=10 * 1024 * 1024)
     path: str = ""
@@ -181,6 +192,23 @@ def build_api_manager_langchain_tools(
             source_decision_id=request.source_decision_id,
         )
 
+    def import_semantic_docs(**values: Any) -> str:
+        request = _SemanticImport(**values)
+        return _json(
+            lambda: manager.import_documentation(
+                name=request.name,
+                source_decision_id=request.source_decision_id,
+                text=request.text,
+                semantic_definition=request.semantic_definition,
+                save=request.save,
+                ephemeral=request.ephemeral,
+                refresh_integration_id=request.refresh_integration_id,
+            ),
+            root=resolved_root,
+            session_id=request.session_id,
+            source_decision_id=request.source_decision_id,
+        )
+
     def preview(**values: Any) -> str:
         request = _Request(**values)
         if request.routing_decision.source_decision_id != request.source_decision_id:
@@ -242,12 +270,22 @@ def build_api_manager_langchain_tools(
         StructuredTool.from_function(
             name="api_docs_import",
             description=(
-                "Import authorized OpenAPI/Swagger documentation deterministically, or validate a "
-                "model-produced SemanticDefinition for unstructured documentation. Requires a model "
-                "decision ID and never executes documentation content."
+                "Import authorized OpenAPI/Swagger documentation deterministically. Unstructured "
+                "documentation must use api_docs_import_semantic so its typed semantic definition "
+                "cannot be omitted. Never executes documentation content."
             ),
             args_schema=_Import,
             func=import_docs,
+        ),
+        StructuredTool.from_function(
+            name="api_docs_import_semantic",
+            description=(
+                "Validate and import unstructured documentation using a required, cited, strict "
+                "SemanticDefinition extracted by the model only from the supplied text evidence. "
+                "The semantic_definition argument is mandatory; no heuristic extraction runs."
+            ),
+            args_schema=_SemanticImport,
+            func=import_semantic_docs,
         ),
         StructuredTool.from_function(
             name="api_integrations_list",
@@ -337,6 +375,7 @@ API_MANAGER_TOOL_NAMES = (
     "api_workflow_decide",
     "api_docs_inspect",
     "api_docs_import",
+    "api_docs_import_semantic",
     "api_integrations_list",
     "api_integration_get",
     "api_integration_update",

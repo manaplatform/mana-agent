@@ -17,10 +17,15 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                 *API_MANAGER_TOOL_NAMES,
                 "browser_open",
                 "browser_inspect",
+                "browser_click",
+                "browser_wait",
+                "browser_scroll",
                 "browser_close",
             ]
             assert tool_policy["disable_external_search"] is True
             assert "api_operations_search first" in system_prompt
+            assert "api_docs_import_semantic" in system_prompt
+            assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
             assert kwargs["flow_id"] == "session-api"
             return SimpleNamespace(
@@ -191,6 +196,11 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
                         "status": "ok",
                         "output_preview": '{"ok":true,"text":"GET /{ip}"}',
                     },
+                    {
+                        "tool_name": "api_docs_import_semantic",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"saved":true}}',
+                    },
                 ],
             )
 
@@ -221,7 +231,6 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
     assert result.mode == "route-api-incomplete"
     assert result.error == "api_workflow_incomplete"
     assert result.payload["workflow_completion"]["missing_actions"] == [
-        "integration_import",
         "operation_search",
         "request_execution",
     ]

@@ -181,7 +181,12 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "api_docs_import",
-        "Import and validate authorized API documentation into a reusable integration.",
+        "Import and validate an authorized OpenAPI or Swagger specification.",
+        "api",
+    ),
+    (
+        "api_docs_import_semantic",
+        "Import unstructured API documentation with a required typed semantic definition.",
         "api",
     ),
     ("api_integrations_list", "List saved external API integrations.", "api"),

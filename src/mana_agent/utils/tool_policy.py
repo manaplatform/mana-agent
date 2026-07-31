@@ -77,6 +77,7 @@ REGISTERED_TOOLS: frozenset[str] = frozenset(
         "api_workflow_decide",
         "api_docs_inspect",
         "api_docs_import",
+        "api_docs_import_semantic",
         "api_integrations_list",
         "api_integration_get",
         "api_integration_update",
