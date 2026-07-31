@@ -8,9 +8,13 @@ All notable repository changes should be recorded here.
   credential is supplied per request. An explicit `env://` or
   `mana-secret://` reference now resolves that operation without persisting
   secret material, and the safe standard `Accept` header no longer fails as an
-  undocumented operation parameter. API workflow guidance now avoids declaring
-  documentation inspection/import when an already-saved integration is being
-  used, so completion evidence matches the model-selected lifecycle.
+  undocumented operation parameter. Authenticated operations with neither a
+  saved nor per-request credential reference now return an actionable request
+  validation error before credential resolution. API workflow guidance now
+  avoids declaring documentation inspection/import when an already-saved
+  integration is used, so completion evidence matches the model-selected
+  lifecycle.
+  - User verification reported before the credential-binding guard fix: `1 failed, 29 passed`; the unbound but structurally resolved bearer scheme reached credential resolution with an empty reference.
   - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
 
 - Expanded stopped-task recovery so the strict model decision can select

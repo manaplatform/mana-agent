@@ -322,16 +322,22 @@ class ApiRequestBuilder:
                 f"choice is required ({', '.join(names)}). No authentication fallback was selected."
             )
         authentication = candidates[0]
+        if (
+            authentication.type.value != "none"
+            and not authentication.credential_reference
+            and not credential_reference
+        ):
+            raise RequestValidationError(
+                "Authentication has no credential binding. Supply an explicit "
+                "env:// or mana-secret:// credential reference for this request, or "
+                "configure the saved integration."
+            )
         if authentication.unresolved:
-            if not credential_reference:
-                raise RequestValidationError(
-                    "Authentication requirements remain unresolved. Supply an explicit "
-                    "env:// or mana-secret:// credential reference for this request, or "
-                    "configure the saved integration."
-                )
             authentication = authentication.model_copy(
                 update={
-                    "credential_reference": credential_reference,
+                    "credential_reference": (
+                        credential_reference or authentication.credential_reference
+                    ),
                     "unresolved": False,
                 }
             )
