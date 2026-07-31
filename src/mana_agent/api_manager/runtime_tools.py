@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -25,6 +25,23 @@ class _Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_decision_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
+
+
+class _WorkflowDecision(_Decision):
+    task_intent: str = Field(min_length=1)
+    required_actions: tuple[
+        Literal[
+            "documentation_inspection",
+            "integration_import",
+            "integration_configuration",
+            "operation_search",
+            "request_preview",
+            "request_execution",
+        ],
+        ...,
+    ] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    safe_to_continue: bool
 
 
 class _Import(_Decision):
@@ -196,6 +213,19 @@ def build_api_manager_langchain_tools(
 
     return [
         StructuredTool.from_function(
+            name="api_workflow_decide",
+            description=(
+                "Record the model's strict ordered API workflow decision. This must be the first "
+                "API-route tool call; completion is validated against its required_actions."
+            ),
+            args_schema=_WorkflowDecision,
+            func=lambda **values: encode(
+                lambda: _WorkflowDecision(**values).model_dump(mode="json"),
+                session_id=str(values["session_id"]),
+                source_decision_id=str(values["source_decision_id"]),
+            ),
+        ),
+        StructuredTool.from_function(
             name="api_docs_inspect",
             description=(
                 "Read one authorized API documentation URL, workspace file, or pasted text source "
@@ -304,6 +334,7 @@ def build_api_manager_langchain_tools(
 
 
 API_MANAGER_TOOL_NAMES = (
+    "api_workflow_decide",
     "api_docs_inspect",
     "api_docs_import",
     "api_integrations_list",

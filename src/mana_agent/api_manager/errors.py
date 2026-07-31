@@ -20,6 +20,10 @@ class UnsupportedDocumentationError(ApiManagerError):
     code = "unsupported_documentation"
 
 
+class DocumentationAuthorizationRequiredError(ApiManagerError):
+    code = "documentation_authorization_required"
+
+
 class MalformedSpecificationError(ApiManagerError):
     code = "malformed_specification"
 
@@ -82,4 +86,3 @@ class UpstreamApiError(ApiManagerError):
 
 class ApiCancelledError(ApiManagerError):
     code = "cancelled"
-

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 from pydantic import Field
 
@@ -25,6 +25,7 @@ from mana_agent.api_manager.errors import (
     ApiRateLimitError,
     ApiTimeoutError,
     BlockedHostError,
+    DocumentationAuthorizationRequiredError,
     PermissionRequiredError,
     ResponseTooLargeError,
     SsrfPolicyViolationError,
@@ -333,7 +334,11 @@ class ApiExecutor:
             timeout_seconds=30,
             risk_level=OperationRiskLevel.READ_ONLY,
         )
-        response = self._send_with_redirects(request, cancellation=None)
+        response = self._send_with_redirects(
+            request,
+            cancellation=None,
+            stop_on_authorization_redirect=True,
+        )
         if response.status >= 400:
             raise UpstreamApiError(
                 f"Documentation URL returned HTTP {response.status}.",
@@ -350,6 +355,7 @@ class ApiExecutor:
         request: BuiltApiRequest,
         *,
         cancellation: threading.Event | None,
+        stop_on_authorization_redirect: bool = False,
     ) -> "_RawResponse":
         url = request.url
         redirects: list[str] = []
@@ -390,9 +396,20 @@ class ApiExecutor:
             location = response.headers.get("location")
             if not location:
                 return response
+            next_url = _normalized_redirect_target(url, location)
+            if stop_on_authorization_redirect and _is_oauth_authorization_redirect(
+                next_url
+            ):
+                validate_network_target(next_url, self.network_policy)
+                raise DocumentationAuthorizationRequiredError(
+                    "The documentation source redirected to an OAuth authorization portal.",
+                    details={
+                        "authorization_origin": _origin_text(next_url),
+                        "rendered_browser_inspection_available": True,
+                    },
+                )
             if redirect_count >= self.network_policy.maximum_redirects:
                 raise UpstreamApiError("The upstream API exceeded the redirect limit.")
-            next_url = _normalized_redirect_target(url, location)
             # The next target is independently resolved and checked on the next loop.
             redirects.append(
                 redact_mapping(next_url, secret_values=request.secret_values)
@@ -707,3 +724,16 @@ def _normalized_redirect_target(base_url: str, location: str) -> str:
         )
     encoded = quote(location, safe="/:?#[]@!$&'()*+,;=%")
     return urljoin(base_url, encoded)
+
+
+def _is_oauth_authorization_redirect(url: str) -> bool:
+    query = parse_qs(urlsplit(url).query, keep_blank_values=True)
+    return {"client_id", "redirect_uri"}.issubset(query) and bool(
+        {"response_type", "grant_type", "scope"}.intersection(query)
+    )
+
+
+def _origin_text(url: str) -> str:
+    scheme, host, port = _origin(url)
+    default_port = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + (f":{port}" if port != default_port else "")

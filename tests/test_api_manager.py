@@ -15,6 +15,7 @@ from mana_agent.api_manager.errors import (
     AmbiguousOperationError,
     ApiRateLimitError,
     ApiTimeoutError,
+    DocumentationAuthorizationRequiredError,
     PermissionRequiredError,
     RequestValidationError,
     ResponseTooLargeError,
@@ -684,6 +685,38 @@ def test_documentation_redirect_encodes_spaces_and_rejects_control_bytes(
     )
     with pytest.raises(UpstreamApiError, match="forbidden control characters"):
         rejected.fetch_documentation("https://docs.example.com/api")
+
+
+def test_documentation_oauth_redirect_requests_rendered_browser_inspection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    executor = ApiExecutor(
+        transport=_Transport(
+            [
+                _RawResponse(
+                    302,
+                    {
+                        "location": (
+                            "https://portal.example.com/authorize?response_type=code"
+                            "&scope=openid profile email&client_id=docs-client"
+                            "&redirect_uri=https://portal.example.com/redirect"
+                        )
+                    },
+                    b"",
+                )
+            ]
+        )
+    )
+
+    with pytest.raises(DocumentationAuthorizationRequiredError) as raised:
+        executor.fetch_documentation("https://docs.example.com/api")
+
+    assert raised.value.code == "documentation_authorization_required"
+    assert raised.value.details == {
+        "authorization_origin": "https://portal.example.com",
+        "rendered_browser_inspection_available": True,
+    }
 
 
 def test_rate_limit_response_is_structured(

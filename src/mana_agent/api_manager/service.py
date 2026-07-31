@@ -127,7 +127,6 @@ class ApiManagerService:
                 else self.registry.save(integration)
             )
         result = {
-            "integration": integration.model_dump(mode="json", by_alias=True),
             "saved": bool(save and not ephemeral),
             "operation_count": len(integration.operations),
             "unresolved_fields": sorted(
@@ -137,6 +136,7 @@ class ApiManagerService:
                     for field in operation.unresolved_fields
                 }
             ),
+            "integration": integration.model_dump(mode="json", by_alias=True),
         }
         publish_api_event(
             "api.documentation.import.completed",

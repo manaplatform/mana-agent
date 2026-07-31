@@ -170,6 +170,11 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "media",
     ),
     (
+        "api_workflow_decide",
+        "Record the model-selected API workflow and required completion evidence.",
+        "api",
+    ),
+    (
         "api_docs_inspect",
         "Read authorized API documentation as evidence without inferring or executing operations.",
         "api",

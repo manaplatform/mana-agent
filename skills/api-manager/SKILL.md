@@ -11,10 +11,16 @@ browser request, shell command, or provider-specific implementation.
 
 ## Required workflow
 
-1. Distinguish documentation import, integration configuration, operation retrieval, request
+1. Call `api_workflow_decide` first. Declare every action required by the user's requested outcome.
+   An inspect-and-call request requires documentation inspection, integration import, operation
+   search, and request execution; configuration or preview must also be declared when needed.
+   Distinguish documentation import, integration configuration, operation retrieval, request
    preview, and request execution.
 2. Inspect authorized documentation with `api_docs_inspect` before creating an integration. Formal
    OpenAPI or Swagger input is parsed deterministically.
+   If the tool explicitly returns `documentation_authorization_required`, the model may select the
+   read-only rendered browser tools for that same URL. Import the returned rendered text rather
+   than retrying the redirecting URL. Never bypass login, CAPTCHA, MFA, or access controls.
 3. For Markdown, webpage prose, or pasted text, produce a strict semantic definition. Cite the
    source for every operation, list only fields that were actually inferred (the list may be empty
    when every field is documented), and leave undocumented required values or authentication
@@ -31,6 +37,9 @@ browser request, shell command, or provider-specific implementation.
 8. Execute only through `api_request_execute`. A mutation must pass the real approval flow.
 9. Report the actual status, latency, structured response, and upstream errors. Never claim success
    without an executor result where `ok` and `executed` are true.
+10. Do not treat discovered documentation or a model summary as completion evidence. Every action
+    declared by `api_workflow_decide` must have a corresponding successful tool result; otherwise
+    return `api_workflow_incomplete` or the exact pending approval/credential condition.
 
 ## Security rules
 

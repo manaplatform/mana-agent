@@ -180,6 +180,95 @@ def _api_permission_requests_from_trace(response: Any) -> list[dict[str, Any]]:
     return list(requests.values())
 
 
+_API_WORKFLOW_EVIDENCE = {
+    "api_docs_inspect": "documentation_inspection",
+    "browser_inspect": "documentation_inspection",
+    "api_docs_import": "integration_import",
+    "api_integration_update": "integration_configuration",
+    "api_operations_search": "operation_search",
+    "api_request_preview": "request_preview",
+    "api_request_execute": "request_execution",
+}
+
+
+def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
+    """Validate exact successful tool evidence against the model workflow decision."""
+    traces = _serialize_tool_traces(response)
+    if not traces or traces[0].get("tool_name") != "api_workflow_decide":
+        return {
+            "valid": False,
+            "error_code": "api_workflow_decision_missing",
+            "message": (
+                "Model decision failed: api_workflow. The first API-route tool call was not a "
+                "validated workflow decision. No completion was recorded."
+            ),
+            "required_actions": [],
+            "completed_actions": [],
+            "missing_actions": [],
+        }
+
+    def payload(trace: dict[str, Any]) -> dict[str, Any]:
+        value: Any = trace.get("output_preview") or trace.get("result_summary")
+        if not isinstance(value, str):
+            return value if isinstance(value, dict) else {}
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    decision_payload = payload(traces[0])
+    decision = decision_payload.get("result") if decision_payload.get("ok") is True else None
+    if not isinstance(decision, dict) or not decision.get("safe_to_continue"):
+        return {
+            "valid": False,
+            "error_code": "api_workflow_decision_invalid",
+            "message": (
+                "Model decision failed: api_workflow. The workflow decision was invalid or unsafe. "
+                "No completion was recorded."
+            ),
+            "required_actions": [],
+            "completed_actions": [],
+            "missing_actions": [],
+        }
+    required = [str(item) for item in decision.get("required_actions") or []]
+    completed: set[str] = set()
+    for trace in traces[1:]:
+        action = _API_WORKFLOW_EVIDENCE.get(str(trace.get("tool_name") or ""))
+        result = payload(trace)
+        if action and result.get("ok") is True:
+            completed.add(action)
+    missing = [action for action in required if action not in completed]
+    unexpected = sorted(action for action in completed if action not in required)
+    if unexpected:
+        error_code = "api_workflow_action_not_selected"
+        message = (
+            "API tools executed actions absent from the workflow decision: "
+            + ", ".join(unexpected)
+            + "."
+        )
+    elif missing:
+        error_code = "api_workflow_incomplete"
+        message = (
+            "API workflow is incomplete; missing successful evidence for: "
+            + ", ".join(missing)
+            + "."
+        )
+    else:
+        error_code = ""
+        message = "API workflow completion evidence is valid."
+    return {
+        "valid": not missing and not unexpected,
+        "error_code": error_code,
+        "message": message,
+        "task_intent": str(decision.get("task_intent") or ""),
+        "required_actions": required,
+        "completed_actions": sorted(completed),
+        "missing_actions": missing,
+        "unexpected_actions": unexpected,
+    }
+
+
 class _RoutePreflightComplete(RuntimeError):
     """Internal control flow for a truthful pre-dispatch capability response."""
 
@@ -1118,6 +1207,7 @@ class AgentChatGateway:
                 "Model-driven external API documentation, integration, operation, preview, and execution management.",
                 lambda: self._available(),
                 (
+                    "api_workflow_decide",
                     "api_docs_inspect",
                     "api_docs_import",
                     "api_integrations_list",
@@ -1127,6 +1217,9 @@ class AgentChatGateway:
                     "api_operations_search",
                     "api_request_preview",
                     "api_request_execute",
+                    "browser_open",
+                    "browser_inspect",
+                    "browser_close",
                 ),
             ),
             RouteRegistration(
@@ -4297,23 +4390,35 @@ class AgentChatGateway:
 
         source_decision_id = f"{context.turn_id}:api-entry-decision"
         allowed_tools = list(API_MANAGER_TOOL_NAMES)
+        allowed_tools.extend(["browser_open", "browser_inspect", "browser_close"])
         if read_only:
             allowed_tools = [
                 name
                 for name in allowed_tools
                 if name
                 in {
+                    "api_workflow_decide",
                     "api_docs_inspect",
                     "api_integrations_list",
                     "api_integration_get",
                     "api_operations_search",
                     "api_request_preview",
+                    "browser_open",
+                    "browser_inspect",
+                    "browser_close",
                 }
             ]
         system_prompt = (
-            "You are Mana-Agent's dedicated API Manager executor. Use only the supplied api_* "
-            "tools. Every call must include the exact "
+            "You are Mana-Agent's dedicated API Manager executor. Use the supplied api_* tools and "
+            "the browser_open, browser_inspect, and browser_close tools only for rendered API "
+            "documentation inspection. Every API tool call must include the exact "
             f"source_decision_id={source_decision_id!r} and session_id={context.session_id!r}. "
+            "The first tool call must be api_workflow_decide with every action required to satisfy "
+            "the user's request. For an inspect-and-call request, required_actions must include "
+            "documentation_inspection, integration_import, operation_search, and request_execution; "
+            "include integration_configuration or request_preview when the model determines they are "
+            "also required. Never mark the decision complete in prose: the gateway validates actual "
+            "successful tool evidence for every required action. "
             "Distinguish documentation inspection, import, integration configuration, operation "
             "retrieval, "
             "request preview, and request execution. Prefer enabled saved integrations. For a "
@@ -4323,7 +4428,14 @@ class AgentChatGateway:
             "definition only from its returned evidence, call api_docs_import with save=true, then "
             "search the newly saved operations and continue to preview and execution. Do not report "
             "the workflow complete merely because documentation inspection or an empty search "
-            "completed. For a natural-language call against an integration, call "
+            "completed. If api_docs_inspect returns documentation_authorization_required, the model "
+            "may explicitly select browser_open and browser_inspect for the same supplied URL, then "
+            "pass the returned rendered documentation text—not the redirecting URL—to "
+            "api_docs_import and derive semantics only from that evidence. Close the browser "
+            "afterward. Never "
+            "bypass login, CAPTCHA, MFA, access denial, or other user-intervention controls. Do not "
+            "use browser tools as an API-call fallback. After the workflow decision, for a "
+            "natural-language call against an integration, call "
             "api_operations_search first; "
             "then construct a strict ApiRouteDecision with the same source_decision_id, task intent, "
             "workflow, selected IDs, confidence, matched terms, missing inputs, risk reason, and "
@@ -4374,6 +4486,14 @@ class AgentChatGateway:
                 payload={"route": "api"},
             )
         permission_requests = _api_permission_requests_from_trace(response)
+        workflow_completion = _api_workflow_completion_from_trace(response)
+        required_actions = set(workflow_completion.get("required_actions") or [])
+        missing_actions = set(workflow_completion.get("missing_actions") or [])
+        waiting_for_execution_approval = (
+            bool(permission_requests)
+            and missing_actions.issubset({"request_execution"})
+            and "request_execution" in required_actions
+        )
         if callable(self._event_sink):
             for permission in permission_requests:
                 preview = permission.get("preview") or {}
@@ -4389,14 +4509,36 @@ class AgentChatGateway:
                     )
                 except Exception:
                     logger.debug("API approval status event failed", exc_info=True)
+        model_answer = str(getattr(response, "answer", response) or "").strip()
+        answer = (
+            model_answer
+            if workflow_completion["valid"] or waiting_for_execution_approval
+            else workflow_completion["message"]
+            + (f"\n\nModel summary:\n{model_answer}" if model_answer else "")
+        )
         return ChatTurnResult(
-            answer=str(getattr(response, "answer", response) or "").strip(),
+            answer=answer,
             sources=list(getattr(response, "sources", []) or []),
-            mode="route-api-awaiting-approval" if permission_requests else "route-api",
+            mode=(
+                "route-api-awaiting-approval"
+                if waiting_for_execution_approval
+                else "route-api"
+                if workflow_completion["valid"]
+                else "route-api-incomplete"
+            ),
+            error=(
+                None
+                if workflow_completion["valid"] or waiting_for_execution_approval
+                else str(workflow_completion["error_code"])
+            ),
             decision=decision,
             trace=_serialize_tool_traces(response),
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={"route": "api", "permission_requests": permission_requests},
+            payload={
+                "route": "api",
+                "permission_requests": permission_requests,
+                "workflow_completion": workflow_completion,
+            },
         )
 
     def _execute_canvas_route(

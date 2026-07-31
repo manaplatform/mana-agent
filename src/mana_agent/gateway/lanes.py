@@ -372,7 +372,7 @@ for _automation_tool in (
     TOOL_CAPABILITIES[_automation_tool] = frozenset({"automation"})
 
 for _api_tool in (
-    "api_docs_inspect", "api_docs_import", "api_integrations_list", "api_integration_get",
+    "api_workflow_decide", "api_docs_inspect", "api_docs_import", "api_integrations_list", "api_integration_get",
     "api_integration_update", "api_integration_delete", "api_operations_search",
     "api_request_preview", "api_request_execute",
 ):

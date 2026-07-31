@@ -21,6 +21,7 @@ The implementation lives in `src/mana_agent/api_manager/`. The gateway registers
 route and only these narrow tools:
 
 ```text
+api_workflow_decide
 api_docs_inspect
 api_docs_import
 api_integrations_list
@@ -35,6 +36,12 @@ api_request_execute
 Every tool call requires the exact model decision ID and session ID. Invalid or missing decisions,
 ambiguous operation choices, unresolved authentication, missing required inputs, and failed policy
 checks stop without a fallback tool, host, credential, or operation.
+
+`api_workflow_decide` must be the first API-route tool call. Its typed `required_actions` declare
+which of documentation inspection, integration import/configuration, operation search, preview, and
+execution are necessary. The gateway records completion only when successful tool evidence exists
+for every declared action. A discovered operation without `api_request_execute` evidence therefore
+returns `api_workflow_incomplete`; an exact pending request remains awaiting TUI/dashboard approval.
 
 ## Supported documentation
 
@@ -140,6 +147,9 @@ The executor:
 - resolves and validates every redirect target
 - percent-encodes unescaped spaces in redirect locations while rejecting CR, LF, and other
   control-byte injection
+- stops documentation OAuth redirects as `documentation_authorization_required` before consuming
+  the redirect budget; the API model may explicitly select rendered browser inspection, but cannot
+  bypass login, CAPTCHA, MFA, or access controls
 - pins the socket connection to the validated DNS result while preserving TLS hostname validation
 - limits redirects and response size
 - bounds connect/read time

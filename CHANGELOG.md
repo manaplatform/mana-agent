@@ -4,6 +4,28 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Added a strict API workflow completion contract through the required first-call
+  `api_workflow_decide` tool. The model now declares every action needed for the requested outcome,
+  and the gateway validates successful documentation inspection, integration import/configuration,
+  operation search, preview, and execution evidence before returning success. Missing execution
+  produces `api_workflow_incomplete`; an exact permission request remains awaiting approval. Tools
+  that execute actions absent from the validated workflow decision are also rejected.
+  - User verification reported before the fix: the operations lane discovered IPstack's
+    `lookupIpAddress` GET operation, recorded no tool evidence or result summary, omitted the API
+    call, and nevertheless transitioned the task from `in_progress` to `done`/`lane.completed`.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/gateway/test_multi_task_orchestration.py`.
+
+- Reclassified API-documentation OAuth/OIDC redirects as the typed
+  `documentation_authorization_required` condition before they exhaust the redirect budget. The
+  API route may now make an explicit model decision to inspect that same documentation URL with the
+  existing read-only rendered-browser tools and import only from returned page evidence. Browser
+  login, CAPTCHA, MFA, access-denial, and other intervention controls still stop safely, and browser
+  tools cannot substitute for API request execution.
+  - User verification reported before the fix: the IPstack documentation URL entered a SwaggerHub
+    OIDC loop and failed as `The upstream API exceeded the redirect limit`, leaving no integration
+    or executed request.
+  - User verification required: `python -m pytest tests/test_api_manager.py::test_documentation_oauth_redirect_requests_rendered_browser_inspection tests/test_api_manager.py::test_documentation_redirect_encodes_spaces_and_rejects_control_bytes tests/gateway/test_api_manager_route.py`.
+
 - Fixed API documentation redirects whose authorization query contains unescaped spaces by
   percent-encoding safe redirect text before the next request. Redirect locations containing CR,
   LF, DEL, or other actual control bytes now stop explicitly; every normalized redirect still
