@@ -941,6 +941,7 @@ def chat(
         tool_worker_backend=resolved_tool_exec_backend,
         log_path=chat_log_path,
         session_id=stack.session_id or gateway_session_id,
+        context_cost_governor=stack.context_cost_governor,
     )
     gateway.create_session(frontend="cli", session_id=chat_ui_state.session_id)
     skill_coordinator = ChatSkillCoordinator()

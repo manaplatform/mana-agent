@@ -70,21 +70,35 @@ class GatewayRoutingAuthority:
         self.event_sink = event_sink
         self.decision_path = decision_path or (mana_home() / "routing" / "decisions.jsonl")
         self._write_lock = threading.Lock()
+        self.context_cost_governor: Any | None = None
 
     def route(self, request: RoutingRequest) -> RoutingDecision:
         """Route and persist one model-backed invocation without fallback."""
 
         invocation_id = request.request_id or f"route_req_{uuid.uuid4().hex}"
+        budgets = (
+            self.context_cost_governor.remaining_routing_budgets(request.budgets)
+            if self.context_cost_governor is not None
+            else request.budgets
+        )
         enriched = replace(
             request,
             request_id=invocation_id,
             repository=request.repository if request.repository.fingerprint else self.repository,
+            budgets=budgets,
         )
         self._emit("routing.requested", request_id=invocation_id, task_id=enriched.task_id, role=enriched.role)
         try:
             decision = self.router.route(enriched)
             if not decision.decision_id or decision.request_id != invocation_id:
                 raise GatewayRoutingError("Router returned an invalid decision identity. No model action was executed.")
+            if self.context_cost_governor is not None:
+                try:
+                    self.context_cost_governor.reserve_routing_children(decision)
+                except ValueError as exc:
+                    raise GatewayRoutingError(
+                        f"Routing child budget allocation failed: {exc}. No candidate or subagent was started."
+                    ) from exc
             self._persist(enriched, decision)
         except RoutingFailure as exc:
             self._emit("routing.failed", request_id=invocation_id, task_id=enriched.task_id, error=str(exc))

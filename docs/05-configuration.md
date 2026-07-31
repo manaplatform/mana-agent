@@ -1,5 +1,41 @@
 # Configuration
 
+## Context and cost governor
+
+Every gateway session owns one context/cost governor shared by chat, routing,
+the internal coding runtime, tool workers, and Codex. It reuses the existing
+`MANA_ROUTING_*` limits; these settings control allocation and visibility:
+
+```toml
+MANA_CONTEXT_GOVERNOR_ENABLED = true
+MANA_CONTEXT_GOVERNOR_MODE = "observe" # observe, soft, enforce
+MANA_CONTEXT_WARNING_RATIO = 0.70
+MANA_CONTEXT_COMPACT_RATIO = 0.80
+MANA_CONTEXT_MAX_UTILIZATION = 0.85
+MANA_CONTEXT_HARD_LIMIT_RATIO = 0.95
+MANA_CONTEXT_RESPONSE_RESERVE_RATIO = 0.12
+MANA_CONTEXT_RESPONSE_RESERVE_TOKENS = 0
+MANA_CONTEXT_TOOL_RESULT_MAX_TOKENS = 2000
+MANA_CONTEXT_HISTORY_MAX_TOKENS = 8000
+MANA_CONTEXT_RETRIEVAL_MAX_TOKENS = 12000
+MANA_CONTEXT_LAZY_CAPABILITIES = true
+MANA_CONTEXT_CAPABILITY_IDLE_STEPS = 3
+MANA_CONTEXT_ARTIFACT_RETENTION_DAYS = 30
+MANA_CONTEXT_COST_LOG_ENABLED = true
+MANA_CONTEXT_COST_LOG_RETENTION_DAYS = 30
+```
+
+Ratios must increase strictly from warning through hard limit. Start in
+`observe`, inspect `mana-agent context report --since 7d`, move to `soft` for
+reversible compaction, then use `enforce` for hard rejection. Configured model
+profile prices are exact; fallback prices and missing usage are labeled
+estimated. A `MANA_MODEL_PROFILES` entry whose configuration contains
+`pricing_fallback=true` supplies the fallback input/output rates without
+creating a second task-cost budget. Redacted analytics rotate under
+`~/.mana/logs/context-cost/`, while
+lossless permitted tool results live under
+`~/.mana/context-cache/tool-results/`; both honor `MANA_HOME`.
+
 ## Teach Mode
 
 The optional `[teach]` table controls semantic event sources, user-data storage,

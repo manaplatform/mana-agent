@@ -1,5 +1,20 @@
 # Tool System
 
+## Lazy capabilities and reversible results
+
+In `soft` and `enforce` modes the model starts with `capability_search`,
+`capability_load`, `capability_unload`, and `context_read_artifact`, plus tools
+explicitly required by the validated route/tool policy. Loading validates the
+manifest and existing allow-list; it cannot grant permission or make a mutation
+legal. Binding is rebuilt only when the schema revision changes, and idle
+non-core schemas are unloaded. `observe` retains prior binding behavior.
+
+Oversized permitted results are normalized and redacted, stored in a
+session/repository/workspace-scoped SHA-256 artifact, and replaced with a
+deterministic type-aware envelope. Exact bounded offset, line-range, JSON-path,
+and search reads remain available; arbitrary paths and cross-session reads are
+rejected.
+
 Fleet verification is an orchestration service, not a broad remote-command
 tool. CLI and chat inputs compile into typed selection and verification
 contracts. Provider execution, argv validation, artifact confinement, and

@@ -4,6 +4,34 @@ All notable repository changes should be recorded here.
 
 ## 2026-07-31
 
+- Corrected context-artifact recovery coverage to page through bounded
+  `offset`/`limit` reads before asserting that a large compressed tool result
+  is exactly recoverable.
+  - User verification reported before the fix: the targeted suite completed with `78 passed, 1 failed`; the remaining test attempted to parse only the first 64,000-character artifact page as complete JSON.
+  - User verification required: `python -m pytest tests/context_cost tests/test_llm_compatibility.py tests/test_chat_ui_events_tokens.py tests/test_model_routing.py tests/test_codex_integration.py`.
+
+## 2026-07-31
+
+- Removed the context-cost/CLI initialization cycle by making the ChatUI
+  governor annotation type-only and deferring `ChatEvent` construction imports
+  until an event is emitted.
+  - User verification reported before the fix: `python -m pytest tests/context_cost` and the targeted compatibility suite both stopped during collection with `ImportError: cannot import name 'ContextCostGovernor' from partially initialized module 'mana_agent.context_cost'`.
+  - User verification required: `python -m pytest tests/context_cost tests/test_llm_compatibility.py tests/test_chat_ui_events_tokens.py tests/test_model_routing.py tests/test_codex_integration.py`.
+
+## 2026-07-31
+
+- Added the session-scoped Context and Cost Governor across the gateway, shared
+  model client, AskAgent, routing, history, coding backends, Codex usage path,
+  live UI events, redacted analytics, and read-only `context report`. Soft and
+  enforce modes use validated lazy capabilities and deterministic compression
+  backed by exact scoped artifacts; observe mode records without changing
+  execution. Estimates remain visibly distinct from exact provider usage.
+  - User verification required: `python -m pytest tests/context_cost tests/test_llm_compatibility.py tests/test_chat_ui_events_tokens.py tests/test_model_routing.py tests/test_codex_integration.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required: `python -m pytest`.
+
+## 2026-07-31
+
 - Bumped the package and documented version to `v0.1.4`.
   - User verification required: inspect package metadata with `python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"`.
 

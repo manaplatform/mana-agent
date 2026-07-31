@@ -17,6 +17,9 @@ from mana_agent.config.user_config import get_setting
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 from mana_agent.telemetry.tokens import token_usage_from_provider
+from mana_agent.context_cost import ContextCostGovernor
+from mana_agent.context_cost.estimator import estimate_value_tokens
+from mana_agent.context_cost.models import ContextSegment
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +113,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
     # request-construction guard rather than an inference from provider
     # metadata: the provider has already rejected the previous payload.
     compatibility_force_reasoning_none: bool = False
+    context_cost_governor: ContextCostGovernor | None = None
 
     def _use_responses_api(self, payload: dict) -> bool:
         if self.compatibility_api_mode == "responses":
@@ -176,6 +180,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
     def _generate(self, messages: list[Any], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> Any:
         started = time.perf_counter()
         metadata = self._eval_request_metadata(messages, kwargs)
+        governor_call_id = self._governor_preflight(messages, kwargs, metadata)
         try:
             result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as exc:
@@ -202,6 +207,15 @@ class CompatibleChatOpenAI(ChatOpenAI):
         llm_output = getattr(result, "llm_output", None)
         raw_usage = llm_output.get("token_usage") if isinstance(llm_output, dict) else None
         usage = token_usage_from_provider(raw_usage)
+        if self.context_cost_governor is not None and governor_call_id:
+            self.context_cost_governor.record_model_call(
+                governor_call_id,
+                usage=raw_usage,
+                provider=str(metadata.get("provider") or ""),
+                model=self.model_name,
+                estimated_input=[getattr(message, "content", "") for message in messages],
+                estimated_output=result,
+            )
         record_current(
             "model.call",
             {
@@ -218,6 +232,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
         started = time.perf_counter()
         messages = args[0] if args and isinstance(args[0], list) else kwargs.get("messages", [])
         metadata = self._eval_request_metadata(messages, kwargs)
+        governor_call_id = self._governor_preflight(messages, kwargs, metadata)
         usage: Any = None
         try:
             for chunk in super()._stream(*args, **kwargs):
@@ -246,6 +261,14 @@ class CompatibleChatOpenAI(ChatOpenAI):
             yield from self._retry_without_chat_reasoning()._stream(*args, **kwargs)
             return
         normalized = token_usage_from_provider(usage)
+        if self.context_cost_governor is not None and governor_call_id:
+            self.context_cost_governor.record_model_call(
+                governor_call_id,
+                usage=usage,
+                provider=str(metadata.get("provider") or ""),
+                model=self.model_name,
+                estimated_input=[getattr(message, "content", "") for message in messages],
+            )
         record_current(
             "model.call",
             {
@@ -281,6 +304,50 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 "streaming": bool(kwargs.get("stream")),
             },
         }
+
+    def _governor_preflight(
+        self,
+        messages: list[Any],
+        kwargs: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> str:
+        governor = self.context_cost_governor
+        if governor is None or not governor.enabled:
+            return ""
+        segments: list[ContextSegment] = []
+        human_indexes = [
+            index for index, message in enumerate(messages)
+            if str(getattr(message, "type", "")) in {"human", "user"}
+        ]
+        protected_humans = set(human_indexes[:1] + human_indexes[-1:])
+        for index, message in enumerate(messages):
+            role = str(getattr(message, "type", type(message).__name__)).lower()
+            kind = "system" if role == "system" else "user" if index in protected_humans else "tool_result" if role == "tool" else "history"
+            content = getattr(message, "content", "")
+            protected_tool = role == "tool" and (
+                index >= len(messages) - 3
+                or any(marker in str(content).casefold() for marker in ("error", "approval", "mutation", "changed_files", "verification"))
+            )
+            segments.append(ContextSegment(
+                kind=kind,
+                content=content,
+                token_estimate=estimate_value_tokens(content),
+                protected=kind in {"system", "user"} or protected_tool,
+                source_id=f"message:{index}",
+            ))
+        for index, schema in enumerate(kwargs.get("tools") or []):
+            segments.append(ContextSegment(
+                kind="schema",
+                content=str((schema.get("function") or schema).get("name") if isinstance(schema, dict) else index),
+                token_estimate=estimate_value_tokens(schema),
+                source_id=f"schema:{index}",
+            ))
+        call_id, _decision = governor.before_model_call(
+            segments,
+            model=self.model_name,
+            provider=str(metadata.get("provider") or ""),
+        )
+        return call_id
 
 
 def create_chat_model(*, api_key: str, model: str, base_url: str | None = None, provider: str | None = None, default_headers: dict[str, str] | None = None, **kwargs: Any) -> CompatibleChatOpenAI:

@@ -248,7 +248,24 @@ class ObservabilityStore:
         def percentile(value: float) -> float:
             return durations[min(len(durations) - 1, max(0, int((len(durations) - 1) * value)))] if durations else 0.0
         tokens = sum(int(row["token_usage"].get("total_tokens") or 0) for row in rows)
-        return {"span_count": len(rows), "trace_count": len({row["trace_id"] for row in rows}), "error_count": sum(row["status"] == "failed" for row in rows), "total_tokens": tokens, "p50_latency_ms": round(percentile(.5), 1), "p95_latency_ms": round(percentile(.95), 1), "by_kind": self._group(rows, "kind"), "by_agent": self._group(rows, "agent_id"), "bottlenecks": self.bottlenecks(rows)}
+        governor = self._context_cost_metrics(rows)
+        return {"span_count": len(rows), "trace_count": len({row["trace_id"] for row in rows}), "error_count": sum(row["status"] == "failed" for row in rows), "total_tokens": tokens, "p50_latency_ms": round(percentile(.5), 1), "p95_latency_ms": round(percentile(.95), 1), "by_kind": self._group(rows, "kind"), "by_agent": self._group(rows, "agent_id"), "bottlenecks": self.bottlenecks(rows), **governor}
+
+    @staticmethod
+    def _context_cost_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        context_rows = [row for row in rows if str(row.get("event_type") or "").startswith(("context.", "cost.", "budget."))]
+        attributes = [row.get("attributes") or {} for row in context_rows]
+        estimated_cost = sum(float(item.get("input_cost") or 0) + float(item.get("output_cost") or 0) for item in attributes if item.get("estimated") is True)
+        actual_cost = sum(float(item.get("input_cost") or 0) + float(item.get("output_cost") or 0) for item in attributes if item.get("estimated") is False)
+        return {
+            "schema_tokens_avoided": sum(int(item.get("schema_tokens_avoided") or 0) for item in attributes),
+            "compression_tokens_saved": sum(int(item.get("tokens_saved") or 0) for item in attributes if item.get("action") == "compress_tool_result"),
+            "capability_loads": sum(len(item.get("loaded") or []) for item in attributes if str(item.get("action") or "") == "capabilities_loaded"),
+            "context_compactions": sum(item.get("action") == "compress_tool_result" for item in attributes),
+            "overflow_prevention_count": sum(item.get("outcome") == "blocked" for item in attributes),
+            "calls_blocked_by_budget": sum(item.get("outcome") == "blocked" for item in attributes),
+            "estimated_actual_cost_variance": estimated_cost - actual_cost,
+        }
 
     @staticmethod
     def _group(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:

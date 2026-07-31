@@ -136,7 +136,7 @@ def token_usage_from_provider(usage: Any) -> TokenUsage:
         cached_input_tokens=cached,
         cache_creation_tokens=cache_creation,
         reasoning_tokens=reasoning,
-        estimated=False,
+        estimated=bool(raw.get("estimated", False)),
         provider=str(raw.get("provider") or "") or None,
         model=str(raw.get("model") or "") or None,
         provider_raw_usage=raw,

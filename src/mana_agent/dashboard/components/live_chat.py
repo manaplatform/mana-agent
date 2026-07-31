@@ -18,7 +18,7 @@ def live_chat_html(
     events: list[dict[str, Any]],
     height: int = 680,
 ) -> str:
-    """Build the self-contained same-origin live chat document."""
+    """Build live chat with the shared timeline and context/cost meter."""
     script = Path(__file__).with_name("live_chat.js").read_text(encoding="utf-8")
     config = {
         "mountId": "mana-live-chat",
@@ -30,6 +30,7 @@ def live_chat_html(
         "messages": messages,
         "events": events,
         "height": height,
+        "contextCostMeter": True,
     }
     safe_config = json.dumps(config, ensure_ascii=False).replace("</", "<\\/")
     return (

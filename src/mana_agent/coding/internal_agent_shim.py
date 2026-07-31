@@ -18,7 +18,14 @@ class InternalCodingAgentShim:
         # selected working directory. The native agent's existing contract uses
         # ``repo_root`` and resolves all tools beneath it.
         kwargs.pop("project_root", None)
+        self.context_cost_governor = kwargs.pop("context_cost_governor", None)
         self._agent = NativeCodingAgent(*args, **kwargs)
+        for model_client in (
+            getattr(self._agent, "planner_llm", None),
+            getattr(getattr(self._agent, "ask_agent", None), "llm", None),
+        ):
+            if model_client is not None and hasattr(model_client, "context_cost_governor"):
+                model_client.context_cost_governor = self.context_cost_governor
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._agent, name)

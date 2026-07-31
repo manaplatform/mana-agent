@@ -27,6 +27,7 @@
       submitting: false,
       runStatus: "idle",
       error: "",
+      contextBudget: {},
     };
   }
 
@@ -232,6 +233,9 @@
     }
     const type = eventType(event);
     const metadata = metaOf(event);
+    if (type.startsWith("context.") || type.startsWith("cost.") || type.startsWith("budget.")) {
+      state.contextBudget = { ...state.contextBudget, ...metadata, event_type: type, status: eventStatus(event) };
+    }
     const permissionRequestId = text(metadata.permission_request_id);
     if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval") && permissionRequestId) {
       state.permissionRequests.set(permissionRequestId, {
@@ -318,6 +322,7 @@
       submitting: state.submitting,
       runStatus: state.runStatus,
       error: state.error,
+      contextBudget: { ...state.contextBudget },
     };
   }
 
@@ -350,7 +355,7 @@
         .error{color:#fca5a5}.logs{font-size:12px;color:#aeb4bd;white-space:pre-wrap}
         @media(max-width:520px){.message{max-width:96%}.shell{border-radius:7px}.timeline{padding:8px}}
       </style>
-      <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span></div>
+      <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span><span class="contextMeter"></span></div>
       <div class="timeline"></div><form><textarea aria-label="Chat message" placeholder="Message this conversation"></textarea><button type="submit">Send</button></form></div>`;
     const timeline = mount.querySelector(".timeline");
     const form = mount.querySelector("form");
@@ -358,6 +363,7 @@
     const submitButton = form.querySelector("button");
     const dot = mount.querySelector(".dot");
     const statusText = mount.querySelector(".statusText");
+    const contextMeter = mount.querySelector(".contextMeter");
     const permissionBusy = new Set();
     const permissionErrors = new Map();
 
@@ -503,6 +509,13 @@
       statusText.textContent = state.socketReady
         ? state.submitting || state.runStatus === "running" || state.runStatus === "starting" ? "Agent is working · live" : "Live events connected"
         : "Reconnecting to live events…";
+      const budget = state.contextBudget || {};
+      const breakdown = budget.breakdown || {};
+      const percent = Math.round(Number(budget.utilization_ratio || 0) * 100);
+      const exact = budget.estimated === false ? "exact" : "est";
+      contextMeter.textContent = budget.context_window
+        ? `ctx ${budget.used_tokens || 0}/${budget.context_window} (${percent}%) · schema ${breakdown.schema_tokens || budget.schema_tokens || 0} · ${exact} $${Number(budget.cumulative_cost || 0).toFixed(4)}${budget.remaining_cost == null ? "" : ` · $${Number(budget.remaining_cost).toFixed(4)} left`}`
+        : "";
       if (nearBottom) timeline.scrollTop = timeline.scrollHeight;
     };
 
@@ -523,6 +536,7 @@
       state.submitting = false;
       state.runStatus = "idle";
       state.error = "";
+      state.contextBudget = {};
       reduce(state, { type: "socket", ready: false });
       // Keep the Streamlit shell informed when it later gains a message bridge.
       // The embedded client itself immediately reconnects to the new session.

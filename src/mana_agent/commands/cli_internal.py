@@ -12,7 +12,7 @@ from typing import Any
 import threading
 import traceback
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import typer
 import asyncio
 from asyncio.subprocess import PIPE
@@ -73,6 +73,7 @@ from .worker_cli import worker_app, workers_app
 from .ssh_cli import ssh_app
 from .server_cli import server_app
 from mana_agent.workspaces.paths import repository_analysis_dir, repository_dir, repository_id_for_path
+from mana_agent.context_cost.logger import ContextCostLogger
 
 logger = logging.getLogger(__name__)
 console = get_shared_console()
@@ -82,11 +83,13 @@ skill_app = typer.Typer(help="Review and manage Experience-to-Skill proposals.")
 skill_proposal_app = typer.Typer(help="Review a single skill proposal.")
 automation_app = typer.Typer(help="Inspect and delete chat-authored automations.")
 mcp_app = typer.Typer(help="Connect to or serve Model Context Protocol tools and resources.")
+context_app = typer.Typer(help="Read local context and cost governor analytics.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(skill_app, name="skill")
 skill_app.add_typer(skill_proposal_app, name="proposal")
 app.add_typer(automation_app, name="automation")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(context_app, name="context")
 app.add_typer(acp_app, name="acp")
 app.add_typer(a2a_app, name="a2a")
 app.add_typer(connector_app, name="connector")
@@ -103,6 +106,51 @@ app.add_typer(ssh_app, name="ssh")
 app.add_typer(server_app, name="server")
 app.command("search")(search_command)
 app.command("impact")(impact_command)
+
+
+@context_app.command("report")
+def context_report(
+    session: str = typer.Option("", "--session", help="Filter by session ID."),
+    since: str = typer.Option("", "--since", help="Include records from a duration such as 7d, 24h, or 30m."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Report redacted governor logs without making a model call."""
+    start: datetime | None = None
+    cleaned = str(since or "").strip().lower()
+    if cleaned:
+        match = __import__("re").fullmatch(r"(\d+)([dhm])", cleaned)
+        if match is None:
+            raise typer.BadParameter("--since must use a duration such as 7d, 24h, or 30m")
+        amount = int(match.group(1))
+        delta = {"d": timedelta(days=amount), "h": timedelta(hours=amount), "m": timedelta(minutes=amount)}[match.group(2)]
+        start = datetime.now(timezone.utc) - delta
+    rows = list(ContextCostLogger().read(session_id=session, since=start))
+    totals_by_session: dict[str, dict[str, float]] = {}
+    for row in rows:
+        session_key = str(row.get("session_id") or "")
+        if session_key:
+            totals = totals_by_session.setdefault(session_key, {"tokens": 0.0, "cost": 0.0})
+            totals["tokens"] = max(totals["tokens"], float(row.get("cumulative_tokens") or 0))
+            totals["cost"] = max(totals["cost"], float(row.get("cumulative_cost") or 0))
+    summary = {
+        "records": len(rows),
+        "sessions": len({str(row.get("session_id") or "") for row in rows if row.get("session_id")}),
+        "model_calls": sum(1 for row in rows if row.get("model_call_id") and row.get("action") == "record_usage"),
+        "cumulative_tokens": int(sum(item["tokens"] for item in totals_by_session.values())),
+        "cumulative_cost": sum(item["cost"] for item in totals_by_session.values()),
+        "compression_tokens_saved": sum(int(row.get("tokens_saved") or 0) for row in rows if row.get("action") == "compress_tool_result"),
+        "blocked_calls": sum(1 for row in rows if row.get("outcome") == "blocked"),
+        "estimated_records": sum(1 for row in rows if row.get("estimated") is True),
+    }
+    if json_output:
+        console.print_json(json.dumps({"summary": summary, "records": rows}, ensure_ascii=False))
+        return
+    console.print(
+        f"Context/cost report: {summary['records']} records across {summary['sessions']} sessions\n"
+        f"Model calls: {summary['model_calls']} · Tokens: {summary['cumulative_tokens']} · "
+        f"Cost: ${summary['cumulative_cost']:.6f} · Compression saved: {summary['compression_tokens_saved']} tokens · "
+        f"Blocked: {summary['blocked_calls']} · Estimated records: {summary['estimated_records']}"
+    )
 
 OUTPUT_DIR: Path | None = None
 CLI_VERBOSE_MODE = False

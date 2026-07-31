@@ -23,6 +23,7 @@ Mana-Agent is a Python CLI and optional dashboard for understanding, operating, 
 - Safe Git, document, browser, and computer-control tools
 - Reusable external API integrations with validated requests, approvals, and SSRF protection
 - Adaptive model routing and repository-scoped memory
+- Visible context/cost budgets, lazy tool schemas, and lossless-backed result compression
 - Automations, Teach Mode, Live Canvas, and media generation
 - Gmail, Telegram, ACP, A2A, MCP, SSH, and reverse-worker integrations
 - CLI, dashboard, and reusable analysis artifacts
@@ -67,6 +68,7 @@ mana-agent doctor
 mana-agent chat --root-dir .
 mana-agent dashboard --root-dir .
 mana-agent git -- status
+mana-agent context report --since 7d
 ```
 
 Inside chat:
