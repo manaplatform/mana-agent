@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Updated test doubles and lifecycle fixtures for the strict gateway and supervisor contracts: bound LLM fakes now accept invocation configuration, Gmail follow-ups make an explicit fresh-data checkpoint decision, completed multi-task children carry authoritative supervisor evidence, and the real Mana-home guard checks its blocked write target without observing unrelated concurrent user-state updates.
+  - User verification required: `python -m pytest tests/test_ask_agent.py tests/test_llm_logging.py tests/gateway/test_entry_routing.py tests/gateway/test_multi_task_orchestration.py tests/test_runtime_artifact_isolation.py`.
+
 - Integrated the existing execution supervisor and context-cost governor as the
   authoritative chat execution control layer. Lane completion now projects
   `DONE` only from persisted supervisor verification; TaskBoard duplicate matches

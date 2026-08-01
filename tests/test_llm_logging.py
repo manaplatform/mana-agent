@@ -51,7 +51,10 @@ class _FakeBoundModel:
         self._responses = responses
         self._idx = 0
 
-    def invoke(self, _messages: list[object]) -> _FakeAIMessage:
+    def invoke(
+        self, _messages: list[object], config: object | None = None
+    ) -> _FakeAIMessage:
+        del config
         value = self._responses[self._idx]
         self._idx += 1
         return value

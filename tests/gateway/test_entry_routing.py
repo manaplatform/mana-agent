@@ -22,6 +22,7 @@ from mana_agent.gateway.entry_routing import (
     EntryRoutingOutput,
 )
 from mana_agent.gateway.entry_routing import gmail_route_availability
+from mana_agent.gateway.checkpoint_resume import CHECKPOINT_RESUME_PROMPT
 from mana_agent.workspaces.service import WorkspaceService
 
 
@@ -31,6 +32,23 @@ class _RouteModel:
         self.payloads: list[dict[str, Any]] = []
 
     def invoke(self, messages: list[Any]) -> Any:
+        if messages[0].content == CHECKPOINT_RESUME_PROMPT:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "decision_id": "test-start-fresh",
+                        "action": "start_fresh",
+                        "task_id": "",
+                        "checkpoint_id": "",
+                        "same_work": False,
+                        "fresh_data_required": True,
+                        "checkpoint_still_valid": False,
+                        "side_effects_safe_to_repeat": False,
+                        "safe_to_continue": True,
+                        "reason": "Gmail data must be fetched again.",
+                    }
+                )
+            )
         self.payloads.append(json.loads(messages[-1].content))
         route = self.routes.pop(0) if self.routes else "conversation"
         source_by_route = {
