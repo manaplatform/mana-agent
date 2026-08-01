@@ -32,7 +32,9 @@ browser request, shell command, or provider-specific implementation.
    specifications.
 4. Prefer enabled saved integrations. Search their operations before selecting one.
    If the user supplied documentation and no operation exists, inspect, import with `save=true`,
-   search the saved integration, and continue as one ordered workflow.
+   search the saved integration, and continue as one ordered workflow. If a selected import reports
+   that the integration already exists, retry the same model-selected import with the returned exact
+   integration ID as `refresh_integration_id`; do not continue until the declared import succeeds.
 5. Select only an operation returned by the operation search. If several remain plausible and the
    difference could change the result or side effects, ask one focused clarification.
 6. Supply every documented required parameter and validate the body. Never guess authentication,

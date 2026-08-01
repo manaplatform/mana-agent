@@ -28,9 +28,12 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
             assert tool_policy["disable_external_search"] is True
             assert "api_operations_search first" in system_prompt
             assert "api_docs_import_semantic" in system_prompt
+            assert "retry the same import" in system_prompt
+            assert "refresh_integration_id" in system_prompt
             assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
             assert kwargs["flow_id"] == "session-api"
+            assert kwargs["max_steps"] >= 16
             return SimpleNamespace(
                 answer="Contact 123 was returned by the saved API operation.",
                 sources=[],
@@ -261,6 +264,100 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
         "request_preview",
         "request_execution",
     ]
+
+
+def test_api_route_surfaces_valid_execution_when_import_remains_incomplete(
+    tmp_path: Path,
+) -> None:
+    class ModelToolExecutor:
+        def run(self, **kwargs):
+            return SimpleNamespace(
+                answer="The response body was unavailable.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "task_intent": "inspect, import, and call API",
+                                    "required_actions": [
+                                        "documentation_inspection",
+                                        "integration_import",
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
+                                    "reason": "Every lifecycle action is required.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "browser_inspect",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"text":"GET /{ip}"}',
+                    },
+                    {
+                        "tool_name": "api_docs_import_semantic",
+                        "status": "error",
+                        "output_preview": '{"ok":false,"error_code":"duplicate"}',
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":[{"operation_id":"lookup"}]}',
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+                    },
+                    {
+                        "tool_name": "api_request_execute",
+                        "status": "ok",
+                        "output_preview": (
+                            '{"ok":true,"result":{"executed":true,"upstream_ok":true,'
+                            '"status_code":200,"json_body":{"city":"Shiraz"}}}'
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Use the complete API lifecycle.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            session_id="session-api",
+            conversation_id="session-api",
+            turn_id="turn-api",
+        ),
+        text="Inspect documentation and execute the API request.",
+        ask_service=SimpleNamespace(ask_agent=ModelToolExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api-incomplete"
+    assert result.payload["workflow_completion"]["missing_actions"] == [
+        "integration_import"
+    ]
+    assert "overall workflow remains incomplete" in result.answer
+    assert '"city": "Shiraz"' in result.answer
 
 
 def test_api_workflow_accepts_successful_clipped_non_execution_evidence() -> None:

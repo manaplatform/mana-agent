@@ -9,7 +9,11 @@ All notable repository changes should be recorded here.
   trace now remains valid stage evidence, while request execution still requires its complete typed
   upstream result and HTTP status. Rendered semantic documentation imports now require and preserve
   the exact inspected documentation reference, allowing operation citations to validate against the
-  browser-inspected page instead of the implicit `pasted-text` reference.
+  browser-inspected page instead of the implicit `pasted-text` reference. Duplicate stable
+  integration imports now return an exact refresh instruction, and the API executor has enough
+  bounded steps to perform the explicit model-selected refresh before preview and execution. A
+  validated HTTP response is now surfaced even if another declared lifecycle action remains
+  incomplete, without changing the route's fail-closed incomplete status.
   - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py`.
 
 - Fixed saved API execution when authentication is structurally known but its

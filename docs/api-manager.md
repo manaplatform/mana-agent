@@ -43,6 +43,8 @@ which of documentation inspection, integration import/configuration, operation s
 execution are necessary. The gateway records completion only when successful tool evidence exists
 for every declared action. A discovered operation without `api_request_execute` evidence therefore
 returns `api_workflow_incomplete`; an exact pending request remains awaiting TUI/dashboard approval.
+If execution itself succeeded but another declared lifecycle action remains incomplete, the route
+keeps its incomplete status while still showing the independently validated, redacted HTTP response.
 Every workflow that declares request execution must also declare and complete operation search and
 a redacted request preview, including read-only calls. Successful execution evidence requires an
 executed upstream result and HTTP status; undeclared supporting actions still fail closed. Calling
@@ -86,7 +88,9 @@ Import this pasted API documentation as an ephemeral one-time integration.
 Formal specifications are imported directly. For prose, Mana-Agent first produces and validates a
 semantic definition. Durable records use stable integration and operation identifiers and remain
 available after CLI, gateway, or dashboard restart. Refreshing documentation appends a version
-record; it does not silently replace the integration identity.
+record; it does not silently replace the integration identity. When an imported stable identity
+already exists, the model must explicitly retry the import with that exact identity as
+`refresh_integration_id`; the registry does not silently convert a create into a refresh.
 
 ## Credentials and authentication
 

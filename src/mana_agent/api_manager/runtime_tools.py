@@ -319,7 +319,8 @@ def build_api_manager_langchain_tools(
                 "SemanticDefinition extracted by the model only from the supplied text evidence. "
                 "Pass the exact inspected source reference in documentation_reference and cite "
                 "that reference from every operation. The semantic_definition argument is "
-                "mandatory; no heuristic extraction runs."
+                "mandatory; no heuristic extraction runs. If the integration already exists, "
+                "retry this import with its exact refresh_integration_id."
             ),
             args_schema=_SemanticImport,
             func=import_semantic_docs,

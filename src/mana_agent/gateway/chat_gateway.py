@@ -4691,7 +4691,11 @@ class AgentChatGateway:
             "retrieval, "
             "request preview, and request execution. Prefer enabled saved integrations. For a "
             "request that supplies API documentation and asks for an API call, treat the work as "
-            "one ordered lifecycle. Search saved integrations first. If no matching operation "
+            "one ordered lifecycle. List and search saved integrations before importing. If the "
+            "workflow declares integration_import and the imported integration already exists, "
+            "retry the same import with that exact integration ID as refresh_integration_id; do "
+            "not continue to preview or execution until the declared import succeeds. If no "
+            "matching operation "
             "exists, call api_docs_inspect on the authorized source, derive a cited strict semantic "
             "definition only from its returned evidence, call api_docs_import_semantic with "
             "save=true, then "
@@ -4744,7 +4748,7 @@ class AgentChatGateway:
                 question=text,
                 index_dir=self._index_dir or default_index_dir(self.root),
                 k=self._resolved_k,
-                max_steps=max(12, int(self.config.agent_max_steps or 6)),
+                max_steps=max(16, int(self.config.agent_max_steps or 6)),
                 timeout_seconds=max(30, self._agent_timeout_seconds),
                 callbacks=callbacks,
                 system_prompt=system_prompt,
@@ -4790,7 +4794,7 @@ class AgentChatGateway:
                     logger.debug("API approval status event failed", exc_info=True)
         model_answer = str(getattr(response, "answer", response) or "").strip()
         validated_execution = workflow_completion.get("execution_evidence") or {}
-        if workflow_completion["valid"] and validated_execution:
+        if validated_execution:
             evidence_text = json.dumps(
                 validated_execution,
                 ensure_ascii=False,
@@ -4801,7 +4805,14 @@ class AgentChatGateway:
             model_answer = (
                 model_answer
                 + ("\n\n" if model_answer else "")
-                + "Validated API execution evidence:\n"
+                + (
+                    "Validated API execution evidence:\n"
+                    if workflow_completion["valid"]
+                    else (
+                        "Validated API execution evidence "
+                        "(overall workflow remains incomplete):\n"
+                    )
+                )
                 + evidence_text
             )
         answer = (

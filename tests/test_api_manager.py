@@ -479,6 +479,8 @@ def test_registry_persists_updates_refresh_and_delete(tmp_path: Path) -> None:
     registry, integration = _registry(tmp_path)
     reloaded = ApiIntegrationRegistry(registry.path).get(integration.integration_id)
     assert reloaded.name == "Acme CRM"
+    with pytest.raises(ValueError, match="exact refresh_integration_id"):
+        registry.save(_import())
     assert registry.disable(integration.integration_id).enabled is False
     refreshed = registry.refresh(integration.integration_id, _import())
     assert refreshed.active_version == 2
