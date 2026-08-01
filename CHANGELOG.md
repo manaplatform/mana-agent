@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Clarified the structured gateway follow-up decision contract so
+  `safe_to_continue` authorizes only proceeding to the next independently
+  validated routing boundary, not downstream tools or consequential actions.
+  Independent tasks and conversation-only turns with no applicable durable task
+  are now explicitly requested as safe classifications, while genuine unsafe
+  decisions still stop without fallback and surface the model's concrete reason.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_chat_gateway.py`.
+
 - Updated the gateway follow-up memory test double to declare its capsules-disabled legacy provider contract. The prompt now preserves the legacy label only for that compatibility path; capsule-derived context remains explicitly labeled as untrusted data.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_followup_classifier.py`.
 

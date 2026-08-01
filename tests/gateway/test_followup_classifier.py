@@ -58,3 +58,27 @@ def test_followup_cannot_attach_to_an_unoffered_task() -> None:
             recent_history=[],
             candidates=[{"task_id": "task_1"}],
         )
+
+
+def test_unsafe_classification_reports_the_model_reason() -> None:
+    classifier = FollowupClassifier(
+        _StructuredModel(
+            {
+                "decision_id": "followup_3",
+                "category": "new_task",
+                "related_task_id": "",
+                "safe_to_continue": False,
+                "reason": "the request refers to two conflicting task identities",
+            }
+        )
+    )
+
+    with pytest.raises(
+        FollowupClassificationError,
+        match="two conflicting task identities",
+    ):
+        classifier.decide(
+            message="continue that task",
+            recent_history=[],
+            candidates=[{"task_id": "task_1"}, {"task_id": "task_2"}],
+        )
