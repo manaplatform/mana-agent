@@ -839,6 +839,15 @@ class MainAgent:
             kwargs = {}
             if node.role in {AgentRole.CODING, AgentRole.TOOL, AgentRole.VERIFIER}:
                 kwargs["queue_manager"] = self.queue_manager
+            agent_memory = (
+                self.memory
+                if node.role is AgentRole.MAIN
+                else AgentMemoryBundle(
+                    repo_context=RepoContext(root=str(self.root)),
+                    task_memory=TaskMemory(),
+                    service=None,
+                )
+            )
             agents[node.role] = cls(
                 agent_id=node.agent_id,
                 role=node.role,
@@ -848,7 +857,7 @@ class MainAgent:
                 taskboard=self.taskboard,
                 message_bus=self.message_bus,
                 registry=self.registry,
-                memory=self.memory,
+                memory=agent_memory,
                 **kwargs,
             )
         return agents

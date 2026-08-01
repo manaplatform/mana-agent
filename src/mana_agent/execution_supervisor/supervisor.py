@@ -184,6 +184,7 @@ class ExecutionSupervisor:
         trigger_turn_id: str = "",
         relation_type: str = "independent",
         previous_task_id: str = "",
+        delegated_capsule_revisions: dict[str, int] | None = None,
     ) -> TaskRecord:
         if not self.config.enabled:
             raise ExecutionSupervisorError(
@@ -223,6 +224,7 @@ class ExecutionSupervisor:
                 or existing.trigger_turn_id != trigger_turn_id
                 or existing.relation_type != relation_type
                 or existing.previous_task_id != previous_task_id
+                or existing.delegated_capsule_revisions != dict(delegated_capsule_revisions or {})
             ):
                 raise ConcurrentUpdateError(
                     f"task identity {identifier} already exists with a different immutable contract"
@@ -322,6 +324,7 @@ class ExecutionSupervisor:
             trigger_turn_id=trigger_turn_id,
             relation_type=relation_type,
             previous_task_id=previous_task_id,
+            delegated_capsule_revisions=dict(delegated_capsule_revisions or {}),
         )
         self.store.create_task(task)
         if parent is not None:
@@ -602,6 +605,7 @@ class ExecutionSupervisor:
         idempotency_records: Iterable[str] = (),
         external_action_receipts: Iterable[str] = (),
         resume_cursor: str = "",
+        capsule_revisions: dict[str, int] | None = None,
     ) -> CheckpointRecord:
         original_state = self.store.get_task(task_id).state
         if original_state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
@@ -636,6 +640,11 @@ class ExecutionSupervisor:
                 result_escrow_references=list(result_escrow_references),
                 artifact_references=list(artifact_references),
                 context_manifest_id=context_manifest_id,
+                capsule_revisions=dict(
+                    task.delegated_capsule_revisions
+                    if capsule_revisions is None
+                    else capsule_revisions
+                ),
                 budget_snapshot=dict(budget_snapshot or {}),
                 retry_state=dict(retry_state or {}),
                 idempotency_records=list(idempotency_records),
@@ -665,6 +674,7 @@ class ExecutionSupervisor:
         payload: dict[str, Any],
         token_usage: int = 0,
         actual_cost: float = 0.0,
+        capsule_revisions: dict[str, int] | None = None,
     ) -> TaskRecord:
         current = self.store.get_task(task_id)
         projected_tokens = current.token_usage + max(0, token_usage)
@@ -707,11 +717,13 @@ class ExecutionSupervisor:
                 attempt_generation=task.attempt_generation,
                 lease_token_hash=_token_hash(lease_token),
                 payload=payload,
+                capsule_revisions=dict(capsule_revisions or {}),
                 status=EscrowStatus.PRODUCED,
             )
             task.result_id = result.result_id
             task.token_usage += max(0, token_usage)
             task.actual_cost += max(0.0, actual_cost)
+            task.result_capsule_revisions = dict(capsule_revisions or {})
             task.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
             task.updated_at = self.clock()
             return result

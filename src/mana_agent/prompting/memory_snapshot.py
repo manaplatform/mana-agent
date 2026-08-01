@@ -26,9 +26,12 @@ def _compact_text(text: str, *, max_chars: int) -> str:
 def render_memory_snapshot(*, repo_root: str | Path | None = None, max_chars: int = 1200) -> str:
     root = Path(repo_root or Path.cwd()).expanduser().resolve()
     try:
-        compact = _compact_text(MemoryService(root=root).project_snapshot(max_chars=max_chars), max_chars=max_chars)
+        service = MemoryService(root=root)
+        if service.config.capsules.enabled:
+            return "Project Memory Snapshot\n- scoped capsules require an authenticated task principal"
+        compact = _compact_text(service.project_snapshot(max_chars=max_chars), max_chars=max_chars)
     except MemoryConfigurationError:
-        compact = ""
+        return "Project Memory Snapshot\n- configured memory decision unavailable; no fallback memory was loaded"
     if compact:
         return f"Project Memory Snapshot\n- source: configured memory service\n{compact}"
     for relative in _MEMORY_CANDIDATES:

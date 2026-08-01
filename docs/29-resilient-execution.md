@@ -1,5 +1,7 @@
 # Resilient Execution Supervisor
 
+Scoped memory capsule revision maps are part of durable task, checkpoint, and result-escrow state. Child execution records identify exactly which delegated capsule revisions they received; restart and retry preserve that map instead of rebuilding broad parent history. Result escrow records returned capsule revisions without treating task completion as shared-memory approval. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md#delegation-and-execution-lifecycle).
+
 The execution supervisor is the durable authority for long-running root tasks,
 delegated children, attempts, recovery, and successful completion. It extends
 the existing taskboard and gateway lanes: taskboard IDs remain the public task

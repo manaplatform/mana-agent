@@ -326,12 +326,12 @@ def test_external_runtime_operations_use_mem0_without_local_fallback(
         assigned_agent_id="main",
         repository_ids=["repository-1"],
     )
-    bundle = service.build_bundle(
-        agent_id="main",
-        agent_role="main",
-        task_id="task-1",
-    )
-    assert bundle.repository_ids == ["repository-1"]
+    with pytest.raises(MemoryConfigurationError, match="Broad legacy memory bundles are disabled"):
+        service.build_bundle(
+            agent_id="main",
+            agent_role="main",
+            task_id="task-1",
+        )
     assert {row["metadata"]["mana_kind"] for row in writes} == {
         "repository_fact",
         "agent_decision",

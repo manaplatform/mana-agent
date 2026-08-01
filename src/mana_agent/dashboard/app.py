@@ -31,6 +31,7 @@ from mana_agent.dashboard.views import (
     connectors,
     fleet,
     metrics,
+    memory_capsules,
     observability,
     overview,
     processes,
@@ -99,6 +100,12 @@ pages = {
             url_path="observability",
         ),
         _page(metrics.render, title="Metrics", icon="📊", url_path="metrics"),
+        _page(
+            memory_capsules.render,
+            title="Memory Capsules",
+            icon="🧠",
+            url_path="memory-capsules",
+        ),
         _page(processes.render, title="Processes", icon="⚙️", url_path="processes"),
     ],
     "Operations": [

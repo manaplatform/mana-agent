@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from mana_agent.config.user_config import (
@@ -27,6 +27,80 @@ _EXTERNAL_PROVIDER_SECRET_PREFIX = {
 }
 
 
+def _bool(value: Any, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True, slots=True)
+class CapsuleRetentionConfig:
+    private_days: int = 7
+    parent_child_days: int = 30
+    team_days: int = 90
+    project_days: int = 180
+    organisation_days: int = 365
+
+    def validate(self) -> "CapsuleRetentionConfig":
+        if any(value < 1 for value in (
+            self.private_days,
+            self.parent_child_days,
+            self.team_days,
+            self.project_days,
+            self.organisation_days,
+        )):
+            raise MemoryConfigurationError("Capsule retention periods must be positive days.")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class CapsuleConfig:
+    enabled: bool = True
+    default_max_capsules: int = 12
+    default_max_tokens: int = 4000
+    shared_writes_require_review: bool = True
+    organisation_scope_enabled: bool = False
+    user_scope_enabled: bool = True
+    record_access_events: bool = True
+    quarantine_prompt_injection: bool = True
+    retention: CapsuleRetentionConfig = field(default_factory=CapsuleRetentionConfig)
+
+    def validate(self) -> "CapsuleConfig":
+        if self.default_max_capsules < 1 or self.default_max_capsules > 100:
+            raise MemoryConfigurationError("Capsule retrieval limit must be between 1 and 100.")
+        if self.default_max_tokens < 1:
+            raise MemoryConfigurationError("Capsule retrieval token budget must be positive.")
+        if not self.shared_writes_require_review:
+            raise MemoryConfigurationError("Shared capsule writes without review are not supported.")
+        self.retention.validate()
+        return self
+
+    @classmethod
+    def load(cls, raw: dict[str, Any]) -> "CapsuleConfig":
+        prefix = "MANA_MEMORY_CAPSULES_"
+        value = lambda name, default="": raw.get(prefix + name, os.getenv(prefix + name, default))
+        retention = CapsuleRetentionConfig(
+            private_days=int(value("RETENTION_PRIVATE_DAYS", 7)),
+            parent_child_days=int(value("RETENTION_PARENT_CHILD_DAYS", 30)),
+            team_days=int(value("RETENTION_TEAM_DAYS", 90)),
+            project_days=int(value("RETENTION_PROJECT_DAYS", 180)),
+            organisation_days=int(value("RETENTION_ORGANISATION_DAYS", 365)),
+        )
+        return cls(
+            enabled=_bool(value("ENABLED", True), True),
+            default_max_capsules=int(value("DEFAULT_MAX_CAPSULES", 12)),
+            default_max_tokens=int(value("DEFAULT_MAX_TOKENS", 4000)),
+            shared_writes_require_review=_bool(value("SHARED_WRITES_REQUIRE_REVIEW", True), True),
+            organisation_scope_enabled=_bool(value("ORGANISATION_SCOPE_ENABLED", False), False),
+            user_scope_enabled=_bool(value("USER_SCOPE_ENABLED", True), True),
+            record_access_events=_bool(value("RECORD_ACCESS_EVENTS", True), True),
+            quarantine_prompt_injection=_bool(value("QUARANTINE_PROMPT_INJECTION", True), True),
+            retention=retention,
+        ).validate()
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryConfig:
     mode: str = "internal"
@@ -38,6 +112,7 @@ class MemoryConfig:
     project_id: str = ""
     base_url: str = ""
     timeout_seconds: float = 15.0
+    capsules: CapsuleConfig = field(default_factory=CapsuleConfig)
 
     def validate(self) -> "MemoryConfig":
         allowed = {"internal": {"mana"}, "external": {"mem0", "supermemory"}}
@@ -56,6 +131,7 @@ class MemoryConfig:
             raise MemoryConfigurationError(
                 "External-to-internal fallback is not implemented; no fallback action was executed."
             )
+        self.capsules.validate()
         return self
 
     @classmethod
@@ -93,6 +169,7 @@ class MemoryConfig:
                 or os.getenv("MANA_MEMORY_TIMEOUT_SECONDS", 15)
                 or 15
             ),
+            capsules=CapsuleConfig.load(raw),
         )
         if config.mode == "external" and config.secret_ref and not config.api_key:
             raise MemoryConfigurationError(
