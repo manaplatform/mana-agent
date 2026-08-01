@@ -181,6 +181,9 @@ class ExecutionSupervisor:
         supersedes_execution_id: str = "",
         derived_from_execution_id: str = "",
         previous_execution_id: str = "",
+        trigger_turn_id: str = "",
+        relation_type: str = "independent",
+        previous_task_id: str = "",
     ) -> TaskRecord:
         if not self.config.enabled:
             raise ExecutionSupervisorError(
@@ -217,6 +220,9 @@ class ExecutionSupervisor:
                 or existing.supersedes_execution_id != supersedes_execution_id
                 or existing.derived_from_execution_id != derived_from_execution_id
                 or existing.previous_execution_id != previous_execution_id
+                or existing.trigger_turn_id != trigger_turn_id
+                or existing.relation_type != relation_type
+                or existing.previous_task_id != previous_task_id
             ):
                 raise ConcurrentUpdateError(
                     f"task identity {identifier} already exists with a different immutable contract"
@@ -269,7 +275,11 @@ class ExecutionSupervisor:
         selected_deadline = deadline_at or (
             self.clock() + timedelta(seconds=self.config.default_task_deadline_seconds)
         )
-        if parent is not None and parent.deadline_at is not None:
+        if (
+            parent is not None
+            and parent.state is not ExecutionState.COMPLETED
+            and parent.deadline_at is not None
+        ):
             selected_deadline = min(selected_deadline, parent.deadline_at)
         task = TaskRecord(
             task_id=identifier,
@@ -309,6 +319,9 @@ class ExecutionSupervisor:
             supersedes_execution_id=supersedes_execution_id,
             derived_from_execution_id=derived_from_execution_id,
             previous_execution_id=previous_execution_id,
+            trigger_turn_id=trigger_turn_id,
+            relation_type=relation_type,
+            previous_task_id=previous_task_id,
         )
         self.store.create_task(task)
         if parent is not None:

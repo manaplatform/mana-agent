@@ -199,6 +199,9 @@ class TaskBoardItem:
     risk_level: RiskLevel
     workspace_id: str = ""
     session_id: str = ""
+    trigger_turn_id: str = ""
+    relation_type: str = "independent"
+    previous_task_id: str = ""
     primary_repository_id: str = ""
     repository_ids: list[str] = field(default_factory=list)
     # Managed agent worktree identity (isolated coding checkout).

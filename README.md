@@ -86,6 +86,12 @@ Inside chat:
 
 ## How it works
 
+Each user message is stored as an independent durable chat turn. A completed
+task therefore does not close its conversation: later messages are classified
+as independent work, a linked follow-up, a safe retry/resume, a status request,
+or ordinary conversation. Re-delivery is idempotent only for the same client
+message ID; verified task artifacts remain immutable inputs to follow-up work.
+
 ```text
 Request → Router → Planner → Taskboard → Execution Supervisor → Tools → Verifier → Verified Result
 ```

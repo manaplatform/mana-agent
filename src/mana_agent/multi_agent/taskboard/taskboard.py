@@ -61,6 +61,9 @@ class TaskBoard:
         session_id: str | None = None,
         repository_ids: list[str] | None = None,
         primary_repository_id: str | None = None,
+        trigger_turn_id: str = "",
+        relation_type: str = "independent",
+        previous_task_id: str = "",
     ) -> TaskBoardItem:
         task_id = self._new_task_id()
         goal = normalized_goal or user_request.strip()
@@ -112,6 +115,9 @@ class TaskBoard:
             risk_level=risk_level,
             workspace_id=workspace_id or self.store.workspace_id,
             session_id=session_id or "",
+            trigger_turn_id=trigger_turn_id,
+            relation_type=relation_type,
+            previous_task_id=previous_task_id,
             primary_repository_id=primary_repository_id or self.store.repository_id,
             repository_ids=list(repository_ids or [self.store.repository_id]),
             owner_agent_id=owner_agent_id,
@@ -149,6 +155,9 @@ class TaskBoard:
         depends_on: list[str] | None = None,
         decomposition_local_id: str = "",
         preferred_parallelism: str = "automatic",
+        trigger_turn_id: str = "",
+        relation_type: str = "followup",
+        previous_task_id: str = "",
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
         task_id = self._new_task_id()
@@ -164,6 +173,9 @@ class TaskBoard:
             risk_level=parent.risk_level,
             workspace_id=parent.workspace_id,
             session_id=parent.session_id,
+            trigger_turn_id=trigger_turn_id,
+            relation_type=relation_type,
+            previous_task_id=previous_task_id or parent_task_id,
             primary_repository_id=parent.primary_repository_id,
             repository_ids=list(parent.repository_ids),
             owner_agent_id=owner_agent_id,

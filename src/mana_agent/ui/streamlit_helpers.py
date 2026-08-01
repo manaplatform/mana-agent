@@ -518,6 +518,7 @@ def run_dashboard_chat(
     *,
     conversation_id: str = "",
     execution_id: str = "",
+    user_message_id: str = "",
     event_sink: Any | None = None,
     **_: Any,
 ) -> dict[str, Any]:
@@ -566,6 +567,7 @@ def run_dashboard_chat(
         index_dir=str(idx_dir),
         event_sink=_emit,
         turn_id=execution_id,
+        user_message_id=user_message_id,
     )
     answer = str(getattr(turn, "answer", "") or "").strip()
     if getattr(turn, "error", None):

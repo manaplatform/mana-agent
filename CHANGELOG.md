@@ -2367,3 +2367,8 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Added dual remote execution modes: persistent direct-SSH profiles alongside managed reverse workers, with secure OpenSSH-only execution and explicit route preservation.
   - Verification: focused remote-execution and gateway tests passed (56 tests); Ruff, compilation, CLI help, and `git diff --check` passed.
+
+## 2026-08-01 (multi-turn chat continuation)
+
+- Added durable message-scoped turn state and follow-up classification so verified task completion cannot complete a conversation or cause later work to reuse an unrelated escrowed result.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_chat_turn_store.py tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_chat_gateway.py tests/test_conversation_service.py -q`.

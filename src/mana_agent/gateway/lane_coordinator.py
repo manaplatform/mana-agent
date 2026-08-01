@@ -220,6 +220,10 @@ class LaneExecution:
     supervisor_attempt_id: str = ""
     supervisor_lease_token: str = ""
     checkpoint_id: str = ""
+    trigger_turn_id: str = ""
+    relation_type: str = "independent"
+    previous_task_id: str = ""
+    user_message_id: str = ""
 
 
 @dataclass(slots=True)
@@ -465,6 +469,10 @@ class LaneCoordinator:
         supersedes_execution_id: str = "",
         derived_from_execution_id: str = "",
         previous_execution_id: str = "",
+        trigger_turn_id: str = "",
+        relation_type: str = "independent",
+        previous_task_id: str = "",
+        user_message_id: str = "",
     ) -> LaneReservation:
         if not self.execution_supervisor.config.enabled:
             raise LaneCoordinatorError(
@@ -480,6 +488,8 @@ class LaneCoordinator:
             "intent": " ".join(normalized_intent.lower().split()), "repository_id": repository_id,
             "workspace_id": workspace_id, "session_id": session_id, "target_files": files,
             "lane": lane_id.value, "parent_task_id": parent_task_id,
+            "trigger_turn_id": trigger_turn_id, "relation_type": relation_type,
+            "user_message_id": user_message_id,
         })
         # ``lane_id`` is itself a validated structured routing decision. Older
         # callers did not persist a separate decision ID, so derive a stable
@@ -506,6 +516,9 @@ class LaneCoordinator:
                             "workspace_id": active.workspace_id, "session_id": active.session_id,
                             "target_files": active.target_files, "lane": active.owning_lane.value,
                             "parent_task_id": active.parent_task_id,
+                            "trigger_turn_id": active.trigger_turn_id,
+                            "relation_type": active.relation_type,
+                            "user_message_id": active.user_message_id,
                         })
                         explicit_identity_matches = (
                             not taskboard_task_id
@@ -546,9 +559,10 @@ class LaneCoordinator:
                 parent = self._executions.get(parent_task_id)
                 if parent is None:
                     raise LaneBudgetError("parent task budget is unavailable")
-                remaining = max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens)
-                if budget.reserved_tokens > remaining:
-                    raise LaneBudgetError("child reservation exceeds the parent task's remaining budget")
+                if parent.state not in {LaneTaskState.COMPLETED, LaneTaskState.FAILED, LaneTaskState.CANCELLED}:
+                    remaining = max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens)
+                    if budget.reserved_tokens > remaining:
+                        raise LaneBudgetError("child reservation exceeds the parent task's remaining budget")
             if taskboard_task_id:
                 task = self.taskboard.get_task(taskboard_task_id)
                 expected_parent = self._executions[parent_task_id].taskboard_task_id if parent_task_id else None
@@ -562,6 +576,9 @@ class LaneCoordinator:
                     title=f"{contract.display_name}: {normalized_intent[:100]}",
                     user_request=normalized_intent,
                     owner_agent_id=f"lane:{lane_id.value}",
+                    trigger_turn_id=trigger_turn_id,
+                    relation_type=relation_type,
+                    previous_task_id=previous_task_id or parent_task_id,
                 )
                 self.taskboard.add_files_to_inspect(task.task_id, files)
             else:
@@ -571,6 +588,9 @@ class LaneCoordinator:
                     related_files=files, action_type=f"lane:{lane_id.value}", workspace_id=workspace_id,
                     session_id=session_id, repository_ids=[repository_id] if repository_id else [],
                     primary_repository_id=repository_id,
+                    trigger_turn_id=trigger_turn_id,
+                    relation_type=relation_type,
+                    previous_task_id=previous_task_id,
                 )
             task_id = task.task_id
             side_effect = (
@@ -605,6 +625,10 @@ class LaneCoordinator:
                 supersedes_execution_id=supersedes_execution_id,
                 derived_from_execution_id=derived_from_execution_id,
                 previous_execution_id=previous_execution_id,
+                trigger_turn_id=trigger_turn_id,
+                relation_type=relation_type,
+                previous_task_id=previous_task_id,
+                idempotency_key=(f"{session_id}:{user_message_id}" if user_message_id else ""),
             )
             self.execution_supervisor.queue(task_id)
             execution = LaneExecution(
@@ -616,6 +640,8 @@ class LaneCoordinator:
                 target_files=files, priority=selected_priority, budget=budget,
                 taskboard_task_id=task.task_id, model=model, capabilities=list(capabilities),
                 routing_decision_id=effective_routing_decision_id, provider=provider, task_type=task_type,
+                trigger_turn_id=trigger_turn_id, relation_type=relation_type, previous_task_id=previous_task_id,
+                user_message_id=user_message_id,
                 lane_history=[{"lane_id": lane_id.value, "state": "queued", "at": _iso()}],
             )
             self._executions[task_id] = execution

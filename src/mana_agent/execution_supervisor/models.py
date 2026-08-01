@@ -254,7 +254,7 @@ class ExecutionEvent(StrictModel):
 
 
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=2, ge=1)
+    schema_version: int = Field(default=3, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
@@ -322,6 +322,9 @@ class TaskRecord(StrictModel):
     supersedes_execution_id: str = ""
     derived_from_execution_id: str = ""
     previous_execution_id: str = ""
+    trigger_turn_id: str = ""
+    relation_type: str = "independent"
+    previous_task_id: str = ""
 
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":

@@ -103,7 +103,7 @@ class WorkspaceRecord(BaseModel):
 
 
 class SessionRecord(BaseModel):
-    schema_version: int = 2
+    schema_version: int = 3
     session_id: str = Field(default_factory=lambda: _id("session"))
     workspace_id: str
     primary_repository_id: str

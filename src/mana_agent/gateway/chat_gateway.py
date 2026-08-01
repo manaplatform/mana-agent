@@ -29,6 +29,11 @@ from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
     CheckpointResumeError,
 )
+from mana_agent.gateway.chat_turn_store import ChatTurnRecord, ChatTurnStore
+from mana_agent.gateway.followup_classifier import (
+    FollowupClassificationError,
+    FollowupClassifier,
+)
 from mana_agent.gateway.entry_routing import (
     EntryRouteContext,
     EntryRouteRegistry,
@@ -1659,13 +1664,15 @@ class AgentChatGateway:
         content: str,
         turn_id: str,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+        message_id: str | None = None,
+    ) -> Any:
         message = self._history_store.append(
             session_id,
             role=role,
             content=content,
             turn_id=turn_id,
             metadata=metadata,
+            message_id=message_id,
         )
         if role == "user":
             try:
@@ -1677,6 +1684,7 @@ class AgentChatGateway:
         except FileNotFoundError:
             pass
         self._session(session_id).setdefault("messages", []).append(message.to_dict())
+        return message
 
     def _followup_memory_scope(
         self,
@@ -1742,6 +1750,14 @@ class AgentChatGateway:
                         "mana_kind": "chat_turn",
                         "turn_id": turn_id,
                         "route": str((result.payload or {}).get("entry_route") or ""),
+                        "task_id": str((result.payload or {}).get("execution_id") or ""),
+                        "changed_files": list(result.changed_files),
+                        "completion_summary": str(result.answer)[:2000],
+                        "verified_artifacts": list(
+                            ((result.payload or {}).get("execution_report") or {})
+                            .get("artifacts")
+                            or []
+                        ),
                     },
                 )
             )
@@ -2132,16 +2148,45 @@ class AgentChatGateway:
         self._bind_runtime_session(session_id)
         self._active.add(session_id)
         turn_id = str(options.pop("turn_id", "") or f"turn_{uuid.uuid4().hex[:20]}")
+        user_message_id = str(options.pop("user_message_id", "") or f"msg_{uuid.uuid4().hex[:20]}")
+        state = self._session(session_id)
+        conversation_id = str(state.get("conversation_id") or session_id)
+        turn_store = ChatTurnStore(session_id)
+        turn_record, duplicate_turn = turn_store.create_or_get(
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            turn_id=turn_id,
+            text=text,
+        )
+        if duplicate_turn:
+            if turn_record.response:
+                return ChatTurnResult(
+                    answer=str(turn_record.response.get("answer") or ""),
+                    error=str(turn_record.response.get("error") or ""),
+                    mode="turn-result-reused",
+                    changed_files=list(turn_record.response.get("changed_files") or []),
+                    payload=dict(turn_record.response.get("payload") or {}),
+                )
+            return ChatTurnResult(
+                answer="This message is already being processed.",
+                mode="turn-in-progress",
+                payload={"turn_id": turn_record.turn_id, "user_message_id": user_message_id},
+            )
+        turn_id = turn_record.turn_id
         record_current(
             "gateway.turn.started",
             {"session_id": session_id, "turn_id": turn_id, "original_task": text},
         )
         self._append_session_message(
-            session_id, role="user", content=text, turn_id=turn_id
+            session_id, role="user", content=text, turn_id=turn_id, message_id=user_message_id,
+            metadata={"user_message_id": user_message_id, "turn_state": "received"},
         )
         try:
             state = self._session(session_id)
             conversation_id = str(state.get("conversation_id") or session_id)
+            state["_turn_record"] = turn_record
+            state["_turn_store"] = turn_store
+            state["_user_message_id"] = user_message_id
             has_prior_assistant = any(
                 message.get("role") == "assistant"
                 for message in list(state.get("messages") or [])[:-1]
@@ -2157,6 +2202,17 @@ class AgentChatGateway:
             else:
                 state["followup_memory_context"] = ""
             sink = event_sink or self._event_sink
+            state["_turn_event_sink"] = sink
+            if callable(sink):
+                sink(
+                    "user_turn_received",
+                    "User turn received",
+                    metadata={
+                        "turn_id": turn_id,
+                        "user_message_id": user_message_id,
+                        "conversation_id": conversation_id,
+                    },
+                )
             ask_service = self.get_ask_service()
             route_context = EntryRouteContext(
                 session_id=session_id,
@@ -2256,6 +2312,30 @@ class AgentChatGateway:
                     )
                 if entry_decision.route == "multi_task":
                     result = self._execute_multi_task_route(
+                        decision=entry_decision,
+                        context=route_context,
+                        text=text,
+                        state=state,
+                        ask_service=ask_service,
+                        sink=sink,
+                        options=dict(options),
+                    )
+                    return self._finalize_turn_result(
+                        result=result,
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        text=text,
+                        state=state,
+                        memory_warning=memory_warning,
+                    )
+                # Conversation is a turn-level response, not supervised work.
+                # Keeping it outside lane recovery prevents a completed task in
+                # the same session from being considered for an unrelated
+                # question, while preserving the existing shared-history and
+                # follow-up-memory behavior.
+                if entry_decision.route == "conversation":
+                    result = self._execute_entry_route(
                         decision=entry_decision,
                         context=route_context,
                         text=text,
@@ -2431,12 +2511,98 @@ class AgentChatGateway:
                         "remote_execution": ("remote_ssh_execute",),
                         "server": ("server",),
                     }.get(entry_decision.route, ())
-                    recovery_candidates = self._recovery_candidates(
-                        lane_id=lane_id,
+                    all_recovery_candidates = self._recovery_candidates(
+                        lane_id=None,
                         session_id=session_id,
                         workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                         repository_id=self._lane_coordinator.taskboard.store.repository_id,
                     )
+                    relation_type = "independent"
+                    parent_task_id: str | None = None
+                    previous_task_id = ""
+                    recovery_candidates = [
+                        item for item in all_recovery_candidates
+                        if (
+                            str(item.get("state") or "") != LaneTaskState.COMPLETED.value
+                            and str(item.get("lane") or "") == lane_id.value
+                        )
+                    ]
+                    if all_recovery_candidates:
+                        followup = FollowupClassifier(self._entry_router.llm).decide(
+                            message=text,
+                            recent_history=list(state.get("history") or []),
+                            candidates=all_recovery_candidates,
+                        )
+                        turn_record.normalized_intent = followup.category
+                        turn_record.routing_decision_id = followup.decision_id
+                        turn_record.related_task_ids = (
+                            [followup.related_task_id] if followup.related_task_id else []
+                        )
+                        turn_record.status = "classified"
+                        turn_store.update(turn_record)
+                        if callable(sink):
+                            sink(
+                                "followup_classified",
+                                "Follow-up classified",
+                                metadata={
+                                    "turn_id": turn_id,
+                                    "user_message_id": user_message_id,
+                                    "category": followup.category,
+                                    "related_task_id": followup.related_task_id,
+                                    "decision_id": followup.decision_id,
+                                },
+                            )
+                        if followup.category in {"status_request", "duplicate_message"}:
+                            supervised = self._lane_coordinator.execution_supervisor
+                            verified_task = supervised.store.get_task(followup.related_task_id)
+                            escrow = supervised.store.get_result(verified_task.result_id)
+                            if escrow is None:
+                                raise CheckpointResumeError("Verified execution result escrow is unavailable; no stored status was returned.")
+                            durable_result = dict(escrow.payload.get("chat_result") or {})
+                            result = ChatTurnResult(
+                                answer=str(durable_result.get("answer") or "Verified result is available for the selected task."),
+                                mode="verified-task-status",
+                                changed_files=list(durable_result.get("changed_files") or []),
+                                payload={**dict(durable_result.get("payload") or {}), "lane_task_id": verified_task.task_id, "execution_id": verified_task.task_id, "verified_result_reused": True},
+                            )
+                            return self._finalize_turn_result(result=result, session_id=session_id, conversation_id=conversation_id, turn_id=turn_id, text=text, state=state, memory_warning=memory_warning)
+                        if followup.category in {"conversation_only", "clarification_answer"}:
+                            result = self._execute_entry_route(
+                                decision=entry_decision,
+                                context=route_context,
+                                text=text,
+                                state=state,
+                                ask_service=ask_service,
+                                sink=sink,
+                                options=options,
+                            )
+                            return self._finalize_turn_result(
+                                result=result,
+                                session_id=session_id,
+                                conversation_id=conversation_id,
+                                turn_id=turn_id,
+                                text=text,
+                                state=state,
+                                memory_warning=memory_warning,
+                            )
+                        if followup.category in {"followup_task", "task_expansion", "task_correction"}:
+                            parent_task_id = followup.related_task_id
+                            previous_task_id = parent_task_id
+                            relation_type = {
+                                "followup_task": "followup",
+                                "task_expansion": "expansion",
+                                "task_correction": "correction",
+                            }[followup.category]
+                            recovery_candidates = []
+                        elif followup.category in {"retry_request", "resume_request"}:
+                            recovery_candidates = [
+                                item for item in all_recovery_candidates
+                                if str(item.get("task_id") or "") == followup.related_task_id
+                            ]
+                            relation_type = "retry" if followup.category == "retry_request" else "resume"
+                            previous_task_id = followup.related_task_id
+                        elif followup.category == "new_task":
+                            recovery_candidates = []
                     resume_decision = CheckpointResumeDecider(
                         self._entry_router.llm
                     ).decide(
@@ -2506,38 +2672,9 @@ class AgentChatGateway:
                             session_id=session_id,
                         )
                     elif resume_decision.action in {"return_verified", "reverify"}:
-                        supervised = self._lane_coordinator.execution_supervisor
-                        verified_task = (
-                            supervised.reverify_completed(resume_decision.task_id)
-                            if resume_decision.action == "reverify"
-                            else supervised.store.get_task(resume_decision.task_id)
-                        )
-                        escrow = supervised.store.get_result(verified_task.result_id)
-                        if escrow is None:
-                            raise CheckpointResumeError(
-                                "Verified execution result escrow is unavailable; no stale result was returned."
-                            )
-                        durable_result = dict(escrow.payload.get("chat_result") or {})
-                        result = ChatTurnResult(
-                            answer=str(durable_result.get("answer") or "Verified work is already complete."),
-                            mode="execution-result-reused",
-                            changed_files=list(durable_result.get("changed_files") or []),
-                            payload={
-                                **dict(durable_result.get("payload") or {}),
-                                "lane_task_id": verified_task.task_id,
-                                "execution_id": verified_task.task_id,
-                                "verified_result_reused": True,
-                                "reverified": resume_decision.action == "reverify",
-                            },
-                        )
-                        return self._finalize_turn_result(
-                            result=result,
-                            session_id=session_id,
-                            conversation_id=conversation_id,
-                            turn_id=turn_id,
-                            text=text,
-                            state=state,
-                            memory_warning=memory_warning,
+                        raise CheckpointResumeError(
+                            "Completed-result reuse is only permitted for an explicitly "
+                            "classified duplicate or status request."
                         )
                     else:
                         previous_execution_id = (
@@ -2558,6 +2695,7 @@ class AgentChatGateway:
                             capabilities=route_capabilities,
                             routing_decision_id=execution_decision.decision_id,
                             provider=execution_decision.provider,
+                            parent_task_id=parent_task_id,
                             previous_execution_id=previous_execution_id,
                             derived_from_execution_id=(
                                 previous_execution_id if resume_decision.same_work else ""
@@ -2567,7 +2705,26 @@ class AgentChatGateway:
                                 if previous_execution_id and not resume_decision.same_work
                                 else ""
                             ),
+                            trigger_turn_id=turn_id,
+                            relation_type=relation_type,
+                            previous_task_id=previous_task_id,
+                            user_message_id=user_message_id,
                         )
+                        turn_record.created_task_ids = [reservation.execution.task_id]
+                        turn_record.status = "routed"
+                        turn_store.update(turn_record)
+                        if callable(sink):
+                            sink(
+                                "task_linked" if parent_task_id else "task_created",
+                                "Task linked" if parent_task_id else "Task created",
+                                metadata={
+                                    "turn_id": turn_id,
+                                    "user_message_id": user_message_id,
+                                    "task_id": reservation.execution.task_id,
+                                    "parent_task_id": parent_task_id or "",
+                                    "relation_type": relation_type,
+                                },
+                            )
                         if recovery_candidates:
                             self._lane_coordinator.taskboard.add_decision(
                                 reservation.execution.taskboard_task_id,
@@ -2698,7 +2855,7 @@ class AgentChatGateway:
                                 "routing_decision": execution_decision.concise(),
                             }
                         )
-                except (LaneCoordinatorError, CheckpointResumeError) as exc:
+                except (LaneCoordinatorError, CheckpointResumeError, FollowupClassificationError) as exc:
                     result = ChatTurnResult(
                         answer=f"Gateway lane coordination failed: {exc}. No agent action was executed.",
                         error=getattr(exc, "code", "lane_coordinator_error"),
@@ -2717,6 +2874,8 @@ class AgentChatGateway:
                 memory_warning=memory_warning,
             )
         except BaseException as exc:
+            turn_record.status = "failed"
+            turn_store.update(turn_record)
             record_current(
                 "gateway.turn.failed",
                 {
@@ -2828,7 +2987,7 @@ class AgentChatGateway:
                 },
             )
         if result.answer:
-            self._append_session_message(
+            message = self._append_session_message(
                 session_id,
                 role="assistant",
                 content=result.answer,
@@ -2843,6 +3002,31 @@ class AgentChatGateway:
                 or "Turn interrupted before an assistant response.",
                 turn_id=turn_id,
                 metadata={"state": "failed" if result.error else "interrupted"},
+            )
+            message = None
+        turn_record = state.get("_turn_record")
+        turn_store = state.get("_turn_store")
+        if isinstance(turn_record, ChatTurnRecord) and isinstance(turn_store, ChatTurnStore):
+            turn_record.status = "responded" if result.answer else "failed"
+            turn_record.response_message_id = str(getattr(message, "message_id", "") or "")
+            turn_record.response_execution_id = str(result.payload.get("execution_id") or "")
+            turn_record.response = {
+                "answer": result.answer,
+                "error": result.error,
+                "changed_files": list(result.changed_files),
+                "payload": dict(result.payload),
+            }
+            turn_store.update(turn_record)
+        sink = state.get("_turn_event_sink") or self._event_sink
+        if callable(sink):
+            sink(
+                "conversation_response_created",
+                "Conversation response created",
+                metadata={
+                    "turn_id": turn_id,
+                    "execution_id": result.payload.get("execution_id") or "",
+                    "response_message_id": str(getattr(message, "message_id", "") or ""),
+                },
             )
         write_warning = ""
         if result.payload.get("entry_route") != "computer":
@@ -3478,7 +3662,7 @@ class AgentChatGateway:
     def _recovery_candidates(
         self,
         *,
-        lane_id: Any,
+        lane_id: Any | None,
         session_id: str,
         workspace_id: str,
         repository_id: str,
@@ -3495,7 +3679,7 @@ class AgentChatGateway:
         }
         for execution in reversed(self._lane_coordinator.executions):
             if (
-                execution.owning_lane != lane_id
+                (lane_id is not None and execution.owning_lane != lane_id)
                 or execution.state not in candidate_states
                 or execution.session_id != session_id
                 or execution.workspace_id != workspace_id
