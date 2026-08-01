@@ -24,6 +24,18 @@ WRITE_TOOL_NAMES = {"apply_patch", "write_file", "create_file", "delete_file", "
 VOLATILE_TOOL_ARG_KEYS = {"claimed_by_agent_id", "approved_by_agent_id", "memory_bundle_id"}
 
 
+@dataclass(frozen=True, slots=True)
+class LegacyCapsuleConfig:
+    """Explicit compatibility contract for the pre-capsule memory adapter."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyMemoryConfig:
+    capsules: LegacyCapsuleConfig = field(default_factory=LegacyCapsuleConfig)
+
+
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -420,6 +432,9 @@ class MultiAgentMemoryService:
         session_id: str | None = None,
     ) -> None:
         self.root = Path(root).resolve()
+        # This direct legacy adapter is retained for compatibility callers. It
+        # declares its non-capsule mode instead of relying on a missing field.
+        self.config = LegacyMemoryConfig()
         service = WorkspaceService()
         repo = service.register_repository(self.root)
         workspace = service.workspace_for_repository(repo.repository_id)
