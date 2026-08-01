@@ -18,6 +18,7 @@ from mana_agent.api.routes.repository_analyze import router as repository_analyz
 from mana_agent.api.routes.workspaces import router as workspaces_router
 from mana_agent.api.routes.teach import router as teach_router
 from mana_agent.api.routes.servers import router as servers_router
+from mana_agent.api.routes.tasks import router as tasks_router
 from mana_agent.config.user_config import load_effective_settings, validate_bool
 
 
@@ -50,6 +51,23 @@ def create_app(
             gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
         ),
     ), fleet_registry=fleet_registry)
+    from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+    def supervisor_event(event_type: str, payload: dict[str, Any]) -> None:
+        get_execution_event_hub().publish({
+            "type": event_type,
+            "kind": event_type,
+            "status": "success" if event_type == "task_completed" else "running",
+            "message": event_type.replace("_", " "),
+            "execution_id": payload.get("task_id", ""),
+            "metadata": {"execution_supervisor": True, **payload},
+        }, persist=False)
+
+    execution_supervisor = ExecutionSupervisor(
+        ExecutionSupervisorConfig.from_settings(Settings()),
+        event_sink=supervisor_event,
+    )
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
@@ -61,6 +79,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        if execution_supervisor.config.startup_recovery:
+            execution_supervisor.reconnect_tree()
+            execution_supervisor.recover()
+        application.state.execution_supervisor = execution_supervisor
         if telegram_connector is not None:
             await telegram_connector.initialize()
             assert telegram_connector.task_queue is not None
@@ -102,6 +124,7 @@ def create_app(
     app.include_router(workspaces_router)
     app.include_router(teach_router)
     app.include_router(servers_router)
+    app.include_router(tasks_router)
     app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:
         from mana_agent.github_autopilot.webhook import router as github_autopilot_router
@@ -112,6 +135,7 @@ def create_app(
         app.state.chat_gateway = chat_gateway
     app.state.worker_gateway = worker_gateway
     app.state.fleet_registry = fleet_registry
+    app.state.execution_supervisor = execution_supervisor
     if telegram_connector is not None:
         from fastapi import Response
 

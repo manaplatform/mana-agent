@@ -53,6 +53,21 @@ The production `AgentChatGateway` is the outer resource owner for CLI, TUI, dash
 
 Lane contracts define ownership, handoffs, tool capabilities, model restrictions, per-lane concurrency, subagent limits, token/cost budgets, priority, repository/write requirements, lock policy, timeout, and retry policy. The coordinator also applies global, provider/model, repository-mutation, and per-session limits. Capacity-constrained work remains queued and interactive priority precedes background priority without changing task identity.
 
+Routing budgets are consumption-aware. Before each decision, the gateway feeds
+the shared ledger's remaining task-token and session-cost values into
+`RoutingBudgets`. Subagents, workers, competitions, reviewers, verifiers, and
+retries receive bounded child ledgers; allocations cannot exceed the parent's
+remaining reservation unless the existing routing decision explicitly permits
+a controlled override. The verification reserve remains governed by
+`MANA_ROUTING_VERIFICATION_RESERVE_RATIO`.
+
+Every shared model-client call accounts protected system/safety instructions
+and the current request separately from history, retrieval, schemas, and tool
+results. Degradation removes idle schemas and exact duplicates before
+reversible result compression and old-history eviction. It never slices the
+final prompt. Enforce-mode failures stop before a provider call rather than
+selecting a fallback model or tool.
+
 Active-task fingerprints include normalized intent, repository, workspace, session, target files, lane, and parent relationship. Equivalent active work attaches to the existing task. Review and verification remain distinct lane stages in the same lineage and therefore are not collapsed into their coding stage.
 
 ## Compound request orchestration

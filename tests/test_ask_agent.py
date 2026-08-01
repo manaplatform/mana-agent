@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from langchain_core.tools import StructuredTool
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
+from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.search.config import SearchConfig
@@ -56,7 +58,10 @@ class _FakeBoundModel:
         self._responses = responses
         self._idx = 0
 
-    def invoke(self, _messages: list[object]) -> _FakeAIMessage:
+    def invoke(
+        self, _messages: list[object], config: object | None = None
+    ) -> _FakeAIMessage:
+        del config
         value = self._responses[self._idx]
         self._idx += 1
         return value
@@ -71,9 +76,20 @@ class _FakeLLM:
 
 
 def _build_agent(tmp_path: Path) -> AskAgent:
-    agent = AskAgent.__new__(AskAgent)
-    agent.search_service = _FakeSearchService()
-    agent.project_root = tmp_path.resolve()
+    governor = ContextCostGovernor(
+        session_id="test-ask-agent",
+        settings=SimpleNamespace(
+            mana_context_governor_enabled=False,
+            mana_context_cost_log_enabled=False,
+        ),
+    )
+    agent = AskAgent(
+        api_key="test",
+        model="fake-agent",
+        search_service=_FakeSearchService(),
+        project_root=tmp_path,
+        context_cost_governor=governor,
+    )
     agent._resolved_index = tmp_path / ".mana/index"
     agent.search_config = SearchConfig(enable_ask_agent=False)
     return agent

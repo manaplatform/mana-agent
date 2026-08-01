@@ -199,6 +199,9 @@ class TaskBoardItem:
     risk_level: RiskLevel
     workspace_id: str = ""
     session_id: str = ""
+    trigger_turn_id: str = ""
+    relation_type: str = "independent"
+    previous_task_id: str = ""
     primary_repository_id: str = ""
     repository_ids: list[str] = field(default_factory=list)
     # Managed agent worktree identity (isolated coding checkout).
@@ -229,6 +232,10 @@ class TaskBoardItem:
     routing_evidence: dict[str, Any] = field(default_factory=dict)
     result_summary: str = ""
     verification_status: str = ""
+    supervisor_execution_id: str = ""
+    supervisor_state: str = ""
+    supervisor_state_version: int = 0
+    supervisor_verification_evidence: dict[str, Any] = field(default_factory=dict)
     output_artifacts: list[str] = field(default_factory=list)
     approval_request_ids: list[str] = field(default_factory=list)
     child_task_ids: list[str] = field(default_factory=list)

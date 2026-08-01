@@ -19,6 +19,9 @@ from mana_agent.integrations.codex.prompt_builder import build_codex_prompt
 from mana_agent.integrations.codex.result_parser import parse_codex_result
 from mana_agent.integrations.codex.runtime_config import CodexRuntimeConfigBuilder
 from mana_agent.integrations.codex.runtime_environment import CodexRuntimeContext, CodexRuntimeEnvironment
+from mana_agent.context_cost import ContextCostGovernor
+from mana_agent.context_cost.estimator import estimate_value_tokens
+from mana_agent.context_cost.models import ContextSegment
 
 ClientFactory = Callable[[tuple[str, ...]], AsyncCodexAppServer]
 
@@ -38,10 +41,12 @@ class CodexCodingBackend:
         client_factory: ClientFactory | None = None,
         worker_id: str | None = None,
         resume_thread_id: str = "",
+        context_cost_governor: ContextCostGovernor | None = None,
     ) -> None:
         self.settings = settings
         self.worker_id = worker_id or f"codex-{uuid.uuid4().hex[:8]}"
         self.resume_thread_id = str(resume_thread_id or "").strip()
+        self.context_cost_governor = context_cost_governor
         self._uses_default_client = client_factory is None
         self._client_factory = client_factory or (lambda command: AsyncCodexAppServer(command))
         self._client: AsyncCodexAppServer | None = None
@@ -123,6 +128,9 @@ class CodexCodingBackend:
             sequence = 0
             thread_id = ""
             turn_id = ""
+            governor_call_id = ""
+            last_usage: dict[str, Any] | None = None
+            prompt = build_codex_prompt(task, workspace)
             sequence += 1
             yield AgentEvent(
                 event_type="backend.selected",
@@ -156,11 +164,53 @@ class CodexCodingBackend:
                     thread_id=thread_id,
                     model=self.settings.model or "",
                 )
+                if self.context_cost_governor is not None and self.context_cost_governor.enabled:
+                    governor_call_id, governor_decision = self.context_cost_governor.before_model_call(
+                        (
+                            ContextSegment(
+                                kind="system",
+                                content="Mana-Agent Codex worker safety and output contract",
+                                token_estimate=estimate_value_tokens("Mana-Agent Codex worker safety and output contract"),
+                                protected=True,
+                                source_id="codex:contract",
+                            ),
+                            ContextSegment(
+                                kind="user",
+                                content=task.goal,
+                                token_estimate=estimate_value_tokens(task.goal),
+                                protected=True,
+                                source_id="codex:goal",
+                            ),
+                            ContextSegment(
+                                kind="repository",
+                                content=prompt,
+                                token_estimate=estimate_value_tokens(prompt),
+                                protected=True,
+                                source_id="codex:mana-prompt",
+                            ),
+                        ),
+                        model=self.settings.model or "app-server-default",
+                        provider=self.settings.provider,
+                        turn_id=task.task_id,
+                        task_id=task.task_id,
+                        agent_id=self.worker_id,
+                    )
+                    sequence += 1
+                    yield AgentEvent(
+                        event_type="context.budget",
+                        task_id=task.task_id,
+                        backend="codex",
+                        sequence=sequence,
+                        title="Codex context budget",
+                        summary=f"{governor_decision.snapshot.used_tokens}/{governor_decision.snapshot.budget.context_window} tokens",
+                        model=self.settings.model or "",
+                        payload=governor_decision.snapshot.as_dict(),
+                    )
                 turn_response = await self._client.request(
                     "turn/start",
                     {
                         "threadId": thread_id,
-                        "input": [{"type": "text", "text": build_codex_prompt(task, workspace)}],
+                        "input": [{"type": "text", "text": prompt}],
                         "cwd": str(_execution_directory(workspace)),
                         "approvalPolicy": self.settings.approval_policy,
                         "sandbox": _codex_sandbox(workspace),
@@ -192,6 +242,19 @@ class CodexCodingBackend:
                     seen_event_ids.add(event.event_id)
                     sequence += 1
                     notifications.append(notification)
+                    if event.token_usage:
+                        last_usage = dict(event.token_usage)
+                        hard_reason = self.context_cost_governor.active_hard_limit_reason(
+                            last_usage,
+                            provider=self.settings.provider,
+                            model=self.settings.model or "app-server-default",
+                            context_window=int(last_usage.get("context_window") or 128_000),
+                        ) if self.context_cost_governor is not None else None
+                        if hard_reason:
+                            await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
+                            raise CodexExecutionError(
+                                f"Codex turn interrupted because the enforce-mode {hard_reason} was reached."
+                            )
                     if event.event_type == "warning" and "approval" in str(notification.get("method") or "").lower():
                         await self._client.deny_server_request(notification)
                         raise CodexExecutionError(
@@ -230,6 +293,17 @@ class CodexCodingBackend:
                     turn_id=turn_id,
                 )
             finally:
+                if self.context_cost_governor is not None and governor_call_id:
+                    self.context_cost_governor.record_model_call(
+                        governor_call_id,
+                        usage=last_usage,
+                        provider=self.settings.provider,
+                        model=self.settings.model or "app-server-default",
+                        estimated_input=prompt,
+                        turn_id=task.task_id,
+                        task_id=task.task_id,
+                        agent_id=self.worker_id,
+                    )
                 self._active.pop(task.task_id, None)
                 changed_files = (
                     await asyncio.to_thread(_git_changed_files, workspace.worktree_path)

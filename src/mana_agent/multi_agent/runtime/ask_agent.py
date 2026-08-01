@@ -33,6 +33,9 @@ from mana_agent.search.decision import SearchDecisionEngine
 from mana_agent.search.router import SearchRouter, SearchRouterResult
 from mana_agent.tools import coding_tool_contracts_payload, extract_patch_touched_files
 from mana_agent.utils.tool_policy import resolve_allowed_tools
+from mana_agent.context_cost import CapabilityRegistry, ContextCostGovernor, build_core_tools
+from mana_agent.context_cost.estimator import estimate_tool_schema_tokens, estimate_value_tokens
+from mana_agent.context_cost.models import ContextSegment, GovernorMode
 from mana_agent.tools.repository import (
     apply_patch_batch as repo_apply_patch_batch,
     call_graph as repo_call_graph,
@@ -256,6 +259,7 @@ class AskAgent:
         model: str,
         search_service: SearchService,
         project_root: str | Path,
+        context_cost_governor: ContextCostGovernor,
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
         execution_manager: ExecutionManager | None = None,
@@ -272,6 +276,7 @@ class AskAgent:
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
         self.search_config = SearchConfig.from_env()
+        self.context_cost_governor = context_cost_governor
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
@@ -281,7 +286,9 @@ class AskAgent:
         resolved = str(model_name or "").strip()
         if not resolved or resolved == self.model:
             return
+        governor = self.context_cost_governor
         self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url)
+        self.llm.context_cost_governor = governor
         self.model = resolved
 
     def _is_blocked_command(self, cmd: str) -> bool:
@@ -1963,8 +1970,32 @@ class AskAgent:
         # Unknown names remain excluded and never widen the policy.
         allowed_tools.update(name for name in raw_allowed if name in tool_map)
 
-        bound_tools = [tool for tool in tools if not allowed_tools or tool.name in allowed_tools]
+        capability_registry: CapabilityRegistry | None = None
+        governor = self.context_cost_governor
+        lazy_capabilities = bool(
+            governor.enabled
+            and governor.mode is not GovernorMode.OBSERVE
+            and getattr(governor.settings, "mana_context_lazy_capabilities", True)
+        )
+        if lazy_capabilities:
+            holder: dict[str, CapabilityRegistry] = {}
+            core_tools = build_core_tools(lambda: holder["registry"], governor.read_artifact)
+            capability_registry = CapabilityRegistry(
+                tools,
+                allowed_names=allowed_tools,
+                core_tools=core_tools,
+                event_callback=lambda event_type, payload: governor._record_capability_event(event_type, payload),
+            )
+            holder["registry"] = capability_registry
+            initial_names = set(allowed_tools)
+            bound_tools = capability_registry.initial(initial_names)
+            tool_map.update({tool.name: tool for tool in core_tools})
+            allowed_tools.update(tool.name for tool in core_tools)
+            governor.metrics["schema_tokens_avoided"] = int(governor.metrics["schema_tokens_avoided"]) + capability_registry.avoided_schema_tokens
+        else:
+            bound_tools = [tool for tool in tools if not allowed_tools or tool.name in allowed_tools]
         bound = self.llm.bind_tools(bound_tools)
+        bound_revision = capability_registry.active.revision if capability_registry is not None else 0
         bound_initial_required = (
             self.llm.bind_tools(bound_tools, tool_choice="required")
             if bool(policy.get("require_initial_tool_call"))
@@ -1992,7 +2023,9 @@ class AskAgent:
                 "document_update",
                 "document_delete",
             )
-            if name in tool_map and (not allowed_tools or name in allowed_tools)
+            if name in tool_map
+            and (not allowed_tools or name in allowed_tools)
+            and (capability_registry is None or name in capability_registry.active.loaded)
         ]
         bound_mutation = None
         if mutation_required and mutation_tool_names:
@@ -2069,6 +2102,18 @@ class AskAgent:
 
         final_answer = ""
 
+        def append_tool_message(tool_name: str, tool_content: Any, tool_call_id: str, step: int) -> None:
+            visible = tool_content
+            if governor.enabled:
+                visible = governor.prepare_tool_result(
+                    tool_content,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    turn_id=str(run_id or flow_id or ""),
+                    step_id=str(step),
+                )
+            messages.append(ToolMessage(content=visible, tool_call_id=tool_call_id))
+
         def safe_tool_args(tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
             sanitized = dict(tool_args)
             if tool_name == "browser_type" and "value" in sanitized:
@@ -2103,6 +2148,21 @@ class AskAgent:
                 return
 
         for step_idx in range(max_steps):
+            if capability_registry is not None:
+                capability_registry.unload_idle(
+                    step=step_idx,
+                    idle_steps=int(getattr(governor.settings, "mana_context_capability_idle_steps", 3)),
+                )
+                if capability_registry.active.revision != bound_revision:
+                    allowed_tools.update(capability_registry.active.loaded)
+                    bound_tools = capability_registry.bound_tools()
+                    bound = self.llm.bind_tools(bound_tools)
+                    bound_initial_required = (
+                        self.llm.bind_tools(bound_tools, tool_choice="required")
+                        if bool(policy.get("require_initial_tool_call")) and step_idx == 0
+                        else None
+                    )
+                    bound_revision = capability_registry.active.revision
             need_forced_write = (
                 mutation_required and not mutation_succeeded and bound_mutation is not None
             )
@@ -2128,10 +2188,55 @@ class AskAgent:
                 if (forced_write_done and not mutation_succeeded and bound_mutation is not None)
                 else (bound_initial_required if step_idx == 0 and bound_initial_required is not None else bound)
             )
+            model_call_id = ""
+            if governor.enabled:
+                governor.set_execution_identity(
+                    turn_id=str(run_id or flow_id or ""),
+                    agent_id="main",
+                    step_id=str(step_idx),
+                )
+            if governor.enabled and getattr(self.llm, "context_cost_governor", None) is None:
+                model_segments = []
+                for index, message in enumerate(messages):
+                    kind = "system" if isinstance(message, SystemMessage) else "user" if isinstance(message, HumanMessage) and index == 1 else "tool_result" if isinstance(message, ToolMessage) else "history"
+                    model_segments.append(ContextSegment(
+                        kind=kind,
+                        content=getattr(message, "content", ""),
+                        token_estimate=estimate_value_tokens(getattr(message, "content", "")),
+                        protected=kind in {"system", "user"},
+                        source_id=f"message:{index}",
+                    ))
+                model_segments.extend(
+                    ContextSegment(kind="schema", content=getattr(tool, "name", ""), token_estimate=estimate_tool_schema_tokens(tool), source_id=f"schema:{getattr(tool, 'name', '')}")
+                    for tool in bound_tools
+                )
+                model_call_id, _decision = governor.before_model_call(
+                    model_segments,
+                    model=self.model,
+                    turn_id=str(run_id or flow_id or ""),
+                    step_id=str(step_idx),
+                )
             try:
                 ai_msg = use_bound.invoke(messages, config=cfg)
-            except TypeError:
-                ai_msg = use_bound.invoke(messages)
+            except BaseException as exc:
+                if governor.enabled and model_call_id:
+                    governor.release_reservation(
+                        model_call_id,
+                        reason=f"model call failed before usage accounting: {type(exc).__name__}",
+                    )
+                raise
+            if governor.enabled and model_call_id:
+                response_metadata = getattr(ai_msg, "response_metadata", {}) or {}
+                usage = getattr(ai_msg, "usage_metadata", None) or response_metadata.get("token_usage") or response_metadata.get("usage")
+                governor.record_model_call(
+                    model_call_id,
+                    usage=usage,
+                    model=self.model,
+                    estimated_input=[getattr(message, "content", "") for message in messages],
+                    estimated_output=getattr(ai_msg, "content", ""),
+                    turn_id=str(run_id or flow_id or ""),
+                    step_id=str(step_idx),
+                )
             messages.append(ai_msg)
 
             tool_calls = getattr(ai_msg, "tool_calls", None) or []
@@ -2163,6 +2268,9 @@ class AskAgent:
                 if name not in tool_map:
                     content = json.dumps({"error": f"unknown tool: {name}"})
                     persist_tool_call(name, args if isinstance(args, dict) else {}, content, "error")
+                elif capability_registry is not None and name not in capability_registry.active.loaded:
+                    content = json.dumps({"error": f"capability is not loaded: {name}"})
+                    persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
                 elif allowed_tools and name not in allowed_tools:
                     content = json.dumps({"error": f"tool blocked by policy: {name}"})
                     persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
@@ -2206,13 +2314,13 @@ class AskAgent:
                         if search_budget > 0 and tool_counts["semantic_search"] >= search_budget:
                             content = json.dumps({"error": "semantic_search budget exhausted"})
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                         k_val = int(args.get("k", 0) or 0)
                         if k_val > max_semantic_k:
                             content = json.dumps({"error": f"semantic_search k must be <= {max_semantic_k}"})
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                         normalized = self._normalize_search_key(args)
                         search_seen[normalized] += 1
@@ -2221,7 +2329,7 @@ class AskAgent:
                                 {"error": "duplicate semantic_search intent blocked; move to read_file or edit phase"}
                             )
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     if name == "read_file":
                         read_args = args if isinstance(args, dict) else {}
@@ -2242,7 +2350,7 @@ class AskAgent:
                                 }
                             )
                             persist_tool_call(name, read_args, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                         if (
                             read_budget > 0
@@ -2260,7 +2368,7 @@ class AskAgent:
                         ):
                             content = json.dumps({"error": "read_file budget exhausted"})
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     if name in {"write_file", "create_file"}:
                         document_write_error = self._document_binary_write_error(
@@ -2270,7 +2378,7 @@ class AskAgent:
                         if document_write_error is not None:
                             content = json.dumps(document_write_error)
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     if name in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file", "document_create", "document_update", "document_delete"} and require_read_files > 0:
                         if len(unique_read_files) < require_read_files:
@@ -2282,7 +2390,7 @@ class AskAgent:
                                 }
                             )
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     if name in {"edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "create_file", "write_file", "delete_file", "document_create", "document_update", "document_delete"}:
                         unread_targets = self._mutation_unread_targets(
@@ -2301,15 +2409,21 @@ class AskAgent:
                                 }
                             )
                             persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     try:
                         trace_count_before = len(traces)
                         tool_started = perf_counter()
-                        try:
-                            content = tool_map[name].invoke(args, config=cfg)
-                        except TypeError:
-                            content = tool_map[name].invoke(args)
+                        tool_reservation_id = ""
+                        if governor.enabled:
+                            tool_reservation_id = governor.before_tool_call(
+                                tool_name=name,
+                                tool_call_id=str(call.get("id", "")),
+                                arguments=args,
+                            )
+                        content = tool_map[name].invoke(args, config=cfg)
+                        if governor.enabled and tool_reservation_id:
+                            governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:
                             traces.append(
                                 ToolInvocationTrace(
@@ -2326,6 +2440,11 @@ class AskAgent:
                                 )
                             )
                     except Exception as exc:
+                        if governor.enabled and "tool_reservation_id" in locals() and tool_reservation_id:
+                            governor.release_reservation(
+                                tool_reservation_id,
+                                reason=f"tool failed before usage accounting: {type(exc).__name__}",
+                            )
                         content = json.dumps({"error": str(exc)})
                         traces.append(
                             ToolInvocationTrace(
@@ -2395,7 +2514,9 @@ class AskAgent:
                         if evidence_memory is not None:
                             evidence_memory.invalidate_many(set(changed_paths))
                         mutation_succeeded = True
-                messages.append(ToolMessage(content=content, tool_call_id=str(call.get("id", ""))))
+                if capability_registry is not None:
+                    capability_registry.mark_used(name, step_idx)
+                append_tool_message(name, content, str(call.get("id", "")), step_idx)
 
                 if stagnant_steps >= self.MAX_STAGNANT_STEPS and not force_synthesis_reason:
                     force_synthesis_reason = "no_progress"

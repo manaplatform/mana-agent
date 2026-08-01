@@ -27,6 +27,7 @@ class ExecutionPanel(Vertical):
         self.activity_log: SelectableText | None = None
         self.footer: Static | None = None
         self.details: Collapsible | None = None
+        self.context_meter: dict = {}
 
     def compose(self):
         self.header = Static("◌ coding · queued", classes="execution-header")
@@ -51,6 +52,8 @@ class ExecutionPanel(Vertical):
         self.backend = str(event.get("backend") or self.backend)
         self.model = str(event.get("model") or self.model)
         event_type = str(event.get("event_type") or "activity")
+        if event_type.startswith(("context.", "cost.", "budget.")):
+            self.context_meter.update(event.get("payload") or event.get("metadata") or {})
         self.phase = event_type
         status = str(event.get("status") or "running")
         icon = {"success": "✓", "failed": "✗", "cancelled": "■"}.get(status, "●")
@@ -74,6 +77,14 @@ class ExecutionPanel(Vertical):
             stats.append(f"{tokens} tokens")
         if duration is not None:
             stats.append(f"{duration} ms")
+        if self.context_meter:
+            used = self.context_meter.get("used_tokens", 0)
+            maximum = self.context_meter.get("context_window", 0)
+            ratio = float(self.context_meter.get("utilization_ratio", 0) or 0) * 100
+            schema = (self.context_meter.get("breakdown") or {}).get("schema_tokens", self.context_meter.get("schema_tokens", 0))
+            cost = float(self.context_meter.get("cumulative_cost", 0) or 0)
+            marker = "~" if self.context_meter.get("estimated", True) else ""
+            stats.append(f"ctx {used}/{maximum} ({ratio:.0f}%) · schema {schema} · {marker}${cost:.4f}")
         if self.footer:
             self.footer.update(" · ".join(stats))
         if self.details and event_type in {"turn.completed", "turn.cancelled", "error"}:

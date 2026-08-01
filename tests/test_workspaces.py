@@ -294,6 +294,7 @@ def test_tool_worker_rejects_repository_scope_mismatch(tmp_path: Path, isolated_
     client = ToolWorkerClient(
         api_key="test",
         model="test",
+        session_id="test-session",
         repo_root=tmp_path,
         project_root=tmp_path,
         workspace_id="workspace_one",

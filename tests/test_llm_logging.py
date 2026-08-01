@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from mana_agent.analysis.models import SearchHit
+from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.multi_agent.runtime.qna_chain import QnAChain
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
@@ -49,7 +51,10 @@ class _FakeBoundModel:
         self._responses = responses
         self._idx = 0
 
-    def invoke(self, _messages: list[object]) -> _FakeAIMessage:
+    def invoke(
+        self, _messages: list[object], config: object | None = None
+    ) -> _FakeAIMessage:
+        del config
         value = self._responses[self._idx]
         self._idx += 1
         return value
@@ -83,11 +88,21 @@ def test_qna_chain_logs_each_run(tmp_path: Path) -> None:
 
 def test_ask_agent_logs_each_run(tmp_path: Path) -> None:
     log_file = tmp_path / "llm.jsonl"
-    agent = AskAgent.__new__(AskAgent)
-    agent.search_service = _FakeSearchService()
-    agent.project_root = tmp_path.resolve()
+    governor = ContextCostGovernor(
+        session_id="test-llm-logging",
+        settings=SimpleNamespace(
+            mana_context_governor_enabled=False,
+            mana_context_cost_log_enabled=False,
+        ),
+    )
+    agent = AskAgent(
+        api_key="test",
+        model="fake-agent",
+        search_service=_FakeSearchService(),
+        project_root=tmp_path,
+        context_cost_governor=governor,
+    )
     agent._resolved_index = tmp_path / ".mana/index"
-    agent.model = "fake-agent"
     agent.run_logger = LlmRunLogger(log_file)
     agent.llm = _FakeLLM([_FakeAIMessage("done /tmp/a.py:1-2", tool_calls=[])])
 

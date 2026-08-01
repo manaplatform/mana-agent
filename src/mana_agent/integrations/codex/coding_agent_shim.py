@@ -26,6 +26,7 @@ from mana_agent.workspaces.preparation import validate_prepared_repository
 
 if TYPE_CHECKING:
     from mana_agent.gateway.routing import GatewayRoutingAuthority
+    from mana_agent.context_cost import ContextCostGovernor
 
 BackendFactory = Callable[[], CodexCodingBackend]
 WorkspaceManagerFactory = Callable[[], WorkspaceManager]
@@ -49,6 +50,7 @@ class CodexCodingAgentShim:
         resume_thread_id: str = "",
         routing_authority: "GatewayRoutingAuthority | None" = None,
         workspace_id: str | None = None,
+        context_cost_governor: "ContextCostGovernor | None" = None,
         **_legacy_kwargs: Any,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
@@ -62,13 +64,18 @@ class CodexCodingAgentShim:
         self.workspace_task_id = str(workspace_task_id or "").strip()
         self.resume_thread_id = str(resume_thread_id or "").strip()
         self.workspace_id = str(workspace_id or "").strip()
+        self.context_cost_governor = context_cost_governor
         if routing_authority is None:
             from mana_agent.gateway.routing import GatewayRoutingAuthority
 
             routing_authority = GatewayRoutingAuthority(self.repo_root, event_sink=event_sink)
         self.routing_authority = routing_authority
         self._backend_factory = backend_factory or (
-            lambda: CodexCodingBackend(self.codex_settings, resume_thread_id=self.resume_thread_id)
+            lambda: CodexCodingBackend(
+                self.codex_settings,
+                resume_thread_id=self.resume_thread_id,
+                context_cost_governor=self.context_cost_governor,
+            )
         )
         self._workspace_manager_factory = workspace_manager_factory or (
             lambda: WorkspaceManager(
@@ -169,6 +176,9 @@ class CodexCodingAgentShim:
             raise ValueError("Codex coding request is required")
         validate_prepared_repository(self.repo_root, self.working_directory)
         task_id = f"codex_task_{uuid.uuid4().hex[:16]}"
+        routing_budgets = routing_budgets_from_settings(self.routing_authority.settings)
+        if self.context_cost_governor is not None:
+            routing_budgets = self.context_cost_governor.remaining_routing_budgets(routing_budgets)
         routing_decision = self.routing_authority.route(RoutingRequest(
             role="coding",
             task_description=goal,
@@ -178,7 +188,7 @@ class CodexCodingAgentShim:
             required_capabilities=frozenset({"patch", "tool_calls"} if requires_repository_write else {"structured_output"}),
             required_tools=frozenset({"repository_read", "repository_write", "test_execution"} if requires_repository_write else {"repository_read"}),
             latency_requirement=LatencyClass.STANDARD,
-            budgets=routing_budgets_from_settings(self.routing_authority.settings),
+            budgets=routing_budgets,
             task_id=task_id,
             parent_task_id=self.workspace_task_id or None,
             session_id=self.session_id,

@@ -1375,10 +1375,20 @@ class ManaChatApp(App):
             if not answer:
                 try:
                     from mana_agent.config.settings import Settings
-                    from mana_agent.services.ask_service import _build_ask_service_compat  # type: ignore[attr-defined]
+                    from mana_agent.commands.cli_internal import _build_ask_service_compat
+                    from mana_agent.context_cost.governor import ContextCostGovernor
 
                     settings = Settings()
-                    ask = _build_ask_service_compat(settings, model_override=self.model, project_root=str(self.repo_root))
+                    governor = ContextCostGovernor(
+                        session_id=str(self._gateway_session_id or f"tui-{id(self)}"),
+                        settings=settings,
+                    )
+                    ask = _build_ask_service_compat(
+                        settings,
+                        model_override=self.model,
+                        context_cost_governor=governor,
+                        project_root=self.repo_root,
+                    )
                     if hasattr(ask, "ask_with_tools"):
                         resp = await asyncio.to_thread(
                             ask.ask_with_tools,

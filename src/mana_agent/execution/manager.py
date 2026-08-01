@@ -73,7 +73,14 @@ class ExecutionManager:
         safe = {
             "sandbox_id": handle.sandbox_id if handle else "", "provider": handle.provider if handle else "",
             "state": handle.state.value if handle else "", "task_id": handle.task_id if handle else "",
-            "session_id": handle.session_id if handle else "", **details,
+            "execution_id": handle.execution_id if handle else "",
+            "root_task_id": handle.root_task_id if handle else "",
+            "attempt_id": handle.attempt_id if handle else "",
+            "checkpoint_id": handle.checkpoint_id if handle else "",
+            "session_id": handle.session_id if handle else "",
+            "workspace_id": handle.workspace_id if handle else "",
+            "repository_id": handle.repository_id if handle else "",
+            **details,
         }
         self.event_sink(kind, safe)
 
@@ -91,7 +98,18 @@ class ExecutionManager:
         handle: SandboxHandle | None = None
         async with self._global_limit, self._provider_limits[decision.selected_provider]:
             try:
-                self._emit("sandbox.provisioning.started", provider=decision.selected_provider, task_id=spec.task_id)
+                self._emit(
+                    "sandbox.provisioning.started",
+                    provider=decision.selected_provider,
+                    execution_id=spec.execution_id,
+                    task_id=spec.task_id,
+                    root_task_id=spec.root_task_id,
+                    attempt_id=spec.attempt_id,
+                    checkpoint_id=spec.checkpoint_id,
+                    session_id=spec.session_id,
+                    workspace_id=spec.workspace_id,
+                    repository_id=spec.repository_id,
+                )
                 handle = await provider.provision(spec)
                 if handle.state == SandboxState.REQUESTED:
                     self._transition(handle, SandboxState.PROVISIONING)
@@ -99,6 +117,11 @@ class ExecutionManager:
                     self.store.save(handle)
                 handle.metadata["secrets"] = [item.model_dump(mode="json") for item in spec.secrets]
                 handle.metadata["routing_decision"] = decision.model_dump(mode="json")
+                for field_name in (
+                    "execution_id", "task_id", "root_task_id", "attempt_id",
+                    "checkpoint_id", "session_id", "workspace_id", "repository_id",
+                ):
+                    setattr(handle, field_name, getattr(spec, field_name))
                 handle.lease_expires_at = utc_now() + timedelta(seconds=spec.max_lifetime_seconds)
                 handle = await provider.start(handle)
                 if handle.state != SandboxState.READY:
@@ -124,6 +147,12 @@ class ExecutionManager:
             self._emit("sandbox.command.started", handle, argv0=request.argv[0], timeout_seconds=request.timeout_seconds)
             try:
                 result = await provider.execute(handle, request)
+                for field_name in (
+                    "execution_id", "task_id", "root_task_id", "attempt_id",
+                    "checkpoint_id", "session_id", "workspace_id", "repository_id",
+                ):
+                    request_value = getattr(request, field_name)
+                    setattr(result, field_name, request_value or getattr(handle, field_name))
                 self._transition(handle, SandboxState.READY)
                 self._emit("sandbox.command.completed", handle, exit_status=result.exit_code, duration_seconds=(result.completed_at - result.started_at).total_seconds())
                 return result

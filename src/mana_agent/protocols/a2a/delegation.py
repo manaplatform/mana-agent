@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
 from mana_agent.multi_agent.core.types import HandoffRecord, TaskStatus
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.protocols.common.exceptions import ProtocolPolicyError
+from mana_agent.config.settings import Settings
+from mana_agent.execution_supervisor import (
+    CompletionContract,
+    CompletionContractType,
+    ExecutionState,
+    ExecutionSupervisor,
+    ExecutionSupervisorConfig,
+    SideEffectClassification,
+)
+from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
 
 from .types import DelegationEnvelope, RemoteAgentRecord
 
@@ -47,10 +58,20 @@ class DelegationPolicy:
 class RemoteDelegationService:
     """Track an explicitly authorized remote invocation in the local task board."""
 
-    def __init__(self, *, root: str | Path, client: object, policy: DelegationPolicy) -> None:
+    def __init__(
+        self,
+        *,
+        root: str | Path,
+        client: object,
+        policy: DelegationPolicy,
+        execution_supervisor: ExecutionSupervisor | None = None,
+    ) -> None:
         self.taskboard = TaskBoard(root)
         self.client = client
         self.policy = policy
+        self.execution_supervisor = execution_supervisor or ExecutionSupervisor(
+            ExecutionSupervisorConfig.from_settings(Settings())
+        )
 
     async def delegate(self, remote: RemoteAgentRecord, *, task: str, skill: str, bearer_token: str = "") -> list[object]:
         correlation_id = f"corr_{uuid.uuid4().hex[:20]}"
@@ -70,6 +91,10 @@ class RemoteDelegationService:
             workspace_id=self.taskboard.store.workspace_id,
             authentication_available=bool(bearer_token or not remote.auth_reference),
         )
+        if not self.execution_supervisor.config.enabled:
+            raise ProtocolPolicyError(
+                "execution supervisor is disabled; no remote delegation task was created"
+            )
         local = self.taskboard.create_task(
             title=f"Remote A2A delegation to {remote.name}",
             user_request=task,
@@ -79,6 +104,33 @@ class RemoteDelegationService:
             primary_repository_id=self.taskboard.store.repository_id,
         )
         self.taskboard.update_status(local.task_id, TaskStatus.ROUTED)
+        supervised = self.execution_supervisor.create_task(
+            task_id=local.task_id,
+            task_type="a2a_remote",
+            assigned_agent=remote.agent_id,
+            runtime_provider="a2a",
+            workspace_path=self.taskboard.store.root,
+            routing_decision_id=f"a2a-selection:{remote.agent_id}:{skill}",
+            side_effect_classification=SideEffectClassification.UNKNOWN,
+            completion_contract=[CompletionContract(
+                contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                metadata={
+                    "required_keys": ["remote_terminal", "event_count"],
+                    "expected_values": {"remote_terminal": "completed"},
+                },
+            )],
+        )
+        self.execution_supervisor.queue(supervised.task_id)
+        supervised, lease_token = self.execution_supervisor.acquire_lease(
+            supervised.task_id,
+            owner=f"a2a:{remote.agent_id}",
+            worker=remote.agent_id,
+        )
+        self.execution_supervisor.start(
+            supervised.task_id,
+            attempt_id=supervised.attempt_id,
+            lease_token=lease_token,
+        )
         self.taskboard.add_handoff(
             local.task_id,
             HandoffRecord(
@@ -89,21 +141,106 @@ class RemoteDelegationService:
             ),
         )
         self.taskboard.update_status(local.task_id, TaskStatus.IN_PROGRESS)
+        heartbeat_stop = asyncio.Event()
+        heartbeat_errors: list[str] = []
+
+        async def renew() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        heartbeat_stop.wait(),
+                        timeout=self.execution_supervisor.config.heartbeat_seconds,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        self.execution_supervisor.heartbeat(
+                            supervised.task_id,
+                            attempt_id=supervised.attempt_id,
+                            lease_token=lease_token,
+                        )
+                    except Exception as exc:
+                        heartbeat_errors.append(str(exc))
+                        return
+
+        heartbeat = asyncio.create_task(renew())
         try:
             events = await self.client.delegate(remote.agent_id, task, bearer_token=bearer_token)
-        except Exception:
+        except Exception as exc:
+            heartbeat_stop.set()
+            await heartbeat
             self.taskboard.update_status(local.task_id, TaskStatus.FAILED, reason="Remote A2A invocation failed after acceptance.")
+            self.execution_supervisor.transition(
+                supervised.task_id,
+                ExecutionState.FAILED,
+                reason=f"Remote A2A invocation failed after acceptance: {exc}",
+            )
             raise
+        heartbeat_stop.set()
+        await heartbeat
+        if heartbeat_errors:
+            reason = f"A2A supervisor heartbeat failed: {heartbeat_errors[-1]}"
+            self.taskboard.update_status(local.task_id, TaskStatus.FAILED, reason=reason)
+            current = self.execution_supervisor.store.get_task(supervised.task_id)
+            if current.state not in {ExecutionState.FAILED, ExecutionState.CANCELLED}:
+                self.execution_supervisor.transition(
+                    supervised.task_id, ExecutionState.FAILED, reason=reason
+                )
+            raise ProtocolPolicyError(reason)
         terminal = self._record_events(local.task_id, remote, correlation_id, events)
         if terminal == "completed":
-            self.taskboard.update_status(local.task_id, TaskStatus.DONE)
+            try:
+                result = self.execution_supervisor.submit_result(
+                    supervised.task_id,
+                    attempt_id=supervised.attempt_id,
+                    lease_token=lease_token,
+                    payload={"remote_terminal": terminal, "event_count": len(events)},
+                )
+            except ExecutionSupervisorError as exc:
+                self.taskboard.update_status(
+                    local.task_id,
+                    TaskStatus.NEEDS_REVIEW,
+                    reason=f"Remote result remains unverified: {exc}",
+                )
+            else:
+                if result.state == ExecutionState.COMPLETED:
+                    manifest = self.execution_supervisor.store.artifact_manifest(local.task_id) or {}
+                    self.taskboard.project_supervisor_completion(
+                        local.task_id,
+                        supervisor_task=result,
+                        verification_evidence={
+                            "result_id": result.result_id,
+                            "verification": manifest.get("verification"),
+                            "artefacts": manifest.get("artefacts", []),
+                        },
+                    )
+                else:
+                    self.taskboard.update_status(local.task_id, TaskStatus.NEEDS_REVIEW)
         elif terminal == "cancelled":
+            self.execution_supervisor.cancel(
+                supervised.task_id, reason="remote A2A task cancelled", propagate=False
+            )
             self.taskboard.update_status(local.task_id, TaskStatus.CANCELLED)
         elif terminal == "rejected":
+            self.execution_supervisor.transition(
+                supervised.task_id,
+                ExecutionState.FAILED,
+                reason="remote A2A task was rejected",
+            )
             self.taskboard.update_status(local.task_id, TaskStatus.SKIPPED)
         elif terminal in {"input_required", "auth_required"}:
+            self.execution_supervisor.transition(
+                supervised.task_id,
+                ExecutionState.FAILED,
+                reason=f"remote A2A task requires {terminal.replace('_', ' ')}",
+            )
             self.taskboard.update_status(local.task_id, TaskStatus.BLOCKED, reason=f"Remote task requires {terminal.replace('_', ' ')}.")
         else:
+            self.execution_supervisor.transition(
+                supervised.task_id,
+                ExecutionState.FAILED,
+                reason=f"Remote A2A terminal state: {terminal}",
+            )
             self.taskboard.update_status(local.task_id, TaskStatus.FAILED, reason="Remote A2A task did not reach successful completion.")
         return events
 

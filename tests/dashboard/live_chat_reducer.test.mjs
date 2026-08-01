@@ -80,6 +80,27 @@ test("events apply immediately, duplicates are idempotent, and replay does not d
   assert.equal(snapshot(state).lastSequence, 1);
 });
 
+test("context and cost events update one replay-safe live meter", () => {
+  const state = createState("session-1");
+  reduce(state, { type: "event", event: event(1, "context.budget", {
+    metadata: { used_tokens: 4000, context_window: 10000, utilization_ratio: 0.4, breakdown: { schema_tokens: 600 }, cumulative_cost: 0.02, estimated: true },
+  }) });
+  reduce(state, { type: "event", event: event(2, "cost.updated", {
+    metadata: { cumulative_cost: 0.03, remaining_cost: 0.97, estimated: false },
+  }) });
+  assert.deepEqual(snapshot(state).contextBudget, {
+    used_tokens: 4000,
+    context_window: 10000,
+    utilization_ratio: 0.4,
+    breakdown: { schema_tokens: 600 },
+    cumulative_cost: 0.03,
+    estimated: false,
+    event_type: "cost.updated",
+    status: "running",
+    remaining_cost: 0.97,
+  });
+});
+
 test("computer permission requests remain actionable until a local decision event", () => {
   const state = createState("session-1");
   reduce(state, {

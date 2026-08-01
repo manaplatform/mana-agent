@@ -429,6 +429,7 @@ class ConversationService:
                 root=self.root,
                 conversation_id=conversation_id,
                 execution_id=execution_id,
+                user_message_id=user_message.message_id,
                 event_sink=event_sink,
             )
         except Exception as exc:

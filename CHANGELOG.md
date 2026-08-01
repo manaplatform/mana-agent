@@ -2,6 +2,187 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-01
+
+- Fixed API call workflows with a supplied documentation URL and an already saved matching
+  integration. Gateway guidance now makes the model list saved integrations immediately after its
+  workflow decision, use a matching enabled integration's operation search/preview/execution path,
+  and import or refresh documentation only when the saved integration cannot satisfy the request.
+  This prevents browser documentation recovery from consuming the request lifecycle and leaving
+  required integration-import, operation-search, preview, and execution evidence incomplete.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py`.
+
+- Updated test doubles and lifecycle fixtures for the strict gateway and supervisor contracts: bound LLM fakes now accept invocation configuration, Gmail follow-ups make an explicit fresh-data checkpoint decision, completed multi-task children carry authoritative supervisor evidence, and the real Mana-home guard checks its blocked write target without observing unrelated concurrent user-state updates.
+  - User verification required: `python -m pytest tests/test_ask_agent.py tests/test_llm_logging.py tests/gateway/test_entry_routing.py tests/gateway/test_multi_task_orchestration.py tests/test_runtime_artifact_isolation.py`.
+
+- Integrated the existing execution supervisor and context-cost governor as the
+  authoritative chat execution control layer. Lane completion now projects
+  `DONE` only from persisted supervisor verification; TaskBoard duplicate matches
+  remain resumable advisory records rather than `SKIPPED`; completed matches can
+  return verified escrow or be reverified against stored artifact hashes; gateway
+  work checkpoints after routing and before verification; sandbox operations
+  carry the full execution identity; result/action records use attempt-generation
+  fencing and durable lifecycle/receipt state; concurrent model calls reserve
+  canonical governor budget atomically; and context manifests plus TaskBoard
+  compaction are content-addressed and reversible. TaskBoard writes are now
+  crash-safe and corrupt state fails closed. Supervisor, checkpoint, and
+  TaskBoard schema version 2 fields load older records through typed defaults.
+  Follow-up corrections retry TaskBoard atomic replacement after transient
+  Windows sharing denials, preserve the supervisor-specific error for every
+  unauthorized direct `DONE` transition, and align the concurrency and gateway
+  test doubles with reserved reasoning/safety budget and durable completion or
+  checkpoint-decision contracts.
+  - User verification reported before these follow-up corrections: `10 failed, 153 passed`.
+  - User verification follow-up reported one remaining failure caused by an
+    overly exact persistence write-count assertion; the assertion now verifies
+    recovery for both state files without constraining valid subsequent saves.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_gateway.py tests/test_multi_agent_core.py`.
+  - User verification required: `python -m pytest`.
+
+- Fixed API lifecycle completion when a successful documentation, import, search, or preview tool
+  result exceeds the 4,000-character human-facing trace limit. A clipped successful non-execution
+  trace now remains valid stage evidence, while request execution still requires its complete typed
+  upstream result and HTTP status. Rendered semantic documentation imports now require and preserve
+  the exact inspected documentation reference, allowing operation citations to validate against the
+  browser-inspected page instead of the implicit `pasted-text` reference. Duplicate stable
+  integration imports now return an exact refresh instruction, and the API executor has enough
+  bounded steps to perform the explicit model-selected refresh before preview and execution. A
+  validated HTTP response is now surfaced even if another declared lifecycle action remains
+  incomplete, without changing the route's fail-closed incomplete status.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py`.
+
+- Fixed saved API execution when authentication is structurally known but its
+  credential is supplied per request. An explicit `env://` or
+  `mana-secret://` reference now resolves that operation without persisting
+  secret material, and the safe standard `Accept` header no longer fails as an
+  undocumented operation parameter. Authenticated operations with neither a
+  saved nor per-request credential reference now return an actionable request
+  validation error before credential resolution. API workflow guidance now
+  avoids declaring documentation inspection/import when an already-saved
+  integration is used, so completion evidence matches the model-selected
+  lifecycle.
+  - User verification reported before the credential-binding guard fix: `1 failed, 29 passed`; the unbound but structurally resolved bearer scheme reached credential resolution with an empty reference.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py`.
+
+- Expanded stopped-task recovery so the strict model decision can select
+  `retry_task` when the request is the same stable work but no valid checkpoint
+  exists. The gateway now reuses the exact durable task identity and creates a
+  new supervised attempt instead of always creating a new task. Live-data work
+  such as price, email, calendar, weather, and remote-state checks still starts
+  fresh, while non-idempotent work, recorded irreversible effects, missing
+  authorization, and invalid decisions stop without fallback execution. The
+  legacy unknown-side-effect retry setting no longer bypasses this required
+  model authorization.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py tests/test_multi_agent_core.py`.
+
+- Tightened API workflow decisions so every declared request execution must
+  also declare operation search and request preview, including read-only calls.
+  Completion now accepts execution evidence only when the tool reports an
+  executed, successful upstream response with an HTTP status, exposes the
+  redacted response evidence to the route result, and instructs the executor to
+  summarize returned status/content instead of claiming present evidence is
+  absent. Undeclared actions and incomplete execution still stop without a
+  fallback workflow.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py`.
+
+- Fixed context-cost governance so `observe` and `soft` modes do not reduce the
+  model router's executable token or cost budgets. Only `enforce` mode now feeds
+  remaining cumulative budgets into candidate validation. This prevents a long
+  tool workflow in observe mode from reducing the next turn's routing budget to
+  zero and incorrectly rejecting every configured model; routing still requires
+  a valid model decision and no fallback model is selected.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_integration.py tests/test_model_routing.py`.
+
+- Added a strict model decision before gateway checkpoint reuse. The decision
+  compares the current request with stopped checkpoint candidates and must
+  explicitly select `resume_checkpoint`, `start_fresh`, or `stop`; checkpoint
+  identity, same-work, freshness, validity, and safety fields are validated
+  before retry. Live-data routes such as current prices or mailbox checks cannot
+  reuse stale checkpoints, invalid decisions stop without fallback, and approved
+  resumes retain supervisor side-effect, checkpoint, retry-budget, and lease
+  validation. Unknown checkpoint recovery requires an exact approved checkpoint
+  with no recorded irreversible side effect; same-task restarts without a
+  checkpoint are governed by the separate repeat-safety authorization described
+  above, while non-idempotent work remains blocked. Approved checkpoint state is
+  redacted and supplied to the executor so pending work continues instead of
+  restarting.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py tests/test_multi_agent_core.py`.
+
+- Prevented process-local task ID counters from overwriting persisted TaskBoard
+  records after an app restart. New root and child tasks now skip every durable
+  identity already loaded by the TaskBoard, so a retried request with no saved
+  checkpoint receives a new identity instead of reaching the execution
+  supervisor with a different immutable contract. Existing same-contract tasks
+  remain eligible for the supervisor's validated checkpoint recovery path.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py::test_taskboard_does_not_overwrite_persisted_task_when_id_counter_restarts tests/execution_supervisor/test_supervisor_core.py::test_duplicate_create_does_not_duplicate_event`.
+
+- Updated durable task retry so `mana-agent tasks retry <task-id>` automatically
+  attaches a task-bound, typed operator `RecoveryDecision`, with an optional
+  retry-budget category and continued support for standalone recovery JSON.
+  Taskboard routing-decision registries now produce an actionable format error
+  instead of raw missing-field validation output, and all retries retain the
+  existing fail-closed side-effect and budget checks.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py`.
+  - User verification required: `mana-agent tasks retry task_20260801_000002`.
+
+## 2026-07-31
+
+- Added the resilient execution supervisor across gateway lanes, Fleet workers,
+  A2A delegation, scheduled automations, task attempts, CLI/API management,
+  shared live events, and the dashboard. Supervised tasks
+  now use atomic durable records, validated transitions, leases and bounded
+  heartbeats, schema-versioned checkpoints, child result escrow, explicit
+  side-effect retry safety, cancellation propagation, startup recovery, budget
+  enforcement, and verified completion artifact manifests. Missing/invalid
+  recovery decisions and ambiguous non-idempotent work stop without fallback.
+  Verification-pending lanes retain their durable review state without holding
+  released worker/provider capacity, atomic supervisor writes retry transient
+  Windows replace denials, and the task-management group is visible as `runs`
+  while retaining `tasks` as a hidden compatibility alias.
+  - User verification reported before the follow-up fix: the targeted suite completed with `5 failed, 169 passed`; three failures were released-capacity waits blocked by `verifying`, one was a transient `PermissionError` during atomic replacement, and one was the retired `ask` substring appearing inside `tasks` in root help.
+  - User verification reported after those fixes: the targeted suite completed with `1 failed, 173 passed`; the remaining failure was test instrumentation for the lane store also counting three successful supervisor-store replacements through Python's shared `os` module object. Supervisor atomic replacement is now independently bound and has direct transient-denial coverage.
+  - User verification required: `python -m pytest tests/execution_supervisor tests/gateway/test_lane_coordinator.py tests/gateway/test_multi_task_orchestration.py tests/fleet/test_fleet_core.py tests/test_a2a_protocol.py tests/test_automation_service.py tests/test_api_conversations.py tests/test_chat_websocket.py tests/test_cli_smoke.py tests/test_dashboard_helpers.py`.
+  - User verification required: `python -m pytest`.
+
+## 2026-07-31
+
+- Made `ContextCostGovernor` a required `AskAgent` constructor dependency and
+  propagated it through gateway, worker, Telegram, and TUI factories with the
+  active session identity. Removed compatibility calls that retried ask-service
+  construction without the required governor; missing dependencies now stop at
+  construction instead of creating an ungoverned execution path.
+  - User verification reported before the fix: the full suite completed with `69 failed, 1466 passed, 2 skipped`; the failures shared `AttributeError` for a missing `context_cost_governor` on `AskAgent.__new__()` instances or plain-object fakes.
+  - User verification required: `python -m pytest tests/context_cost tests/test_ask_agent.py tests/test_ask_agent_recovery.py tests/test_chat_planning_mode.py tests/test_cli_flow.py tests/test_cli_smoke.py tests/test_llm_logging.py tests/test_tool_worker_process.py tests/test_tui_user_config.py tests/test_workspaces.py`.
+  - User verification required: `python -m pytest`.
+
+## 2026-07-31
+
+- Corrected context-artifact recovery coverage to page through bounded
+  `offset`/`limit` reads before asserting that a large compressed tool result
+  is exactly recoverable.
+  - User verification reported before the fix: the targeted suite completed with `78 passed, 1 failed`; the remaining test attempted to parse only the first 64,000-character artifact page as complete JSON.
+  - User verification required: `python -m pytest tests/context_cost tests/test_llm_compatibility.py tests/test_chat_ui_events_tokens.py tests/test_model_routing.py tests/test_codex_integration.py`.
+
+## 2026-07-31
+
+- Removed the context-cost/CLI initialization cycle by making the ChatUI
+  governor annotation type-only and deferring `ChatEvent` construction imports
+  until an event is emitted.
+  - User verification reported before the fix: `python -m pytest tests/context_cost` and the targeted compatibility suite both stopped during collection with `ImportError: cannot import name 'ContextCostGovernor' from partially initialized module 'mana_agent.context_cost'`.
+  - User verification required: `python -m pytest tests/context_cost tests/test_llm_compatibility.py tests/test_chat_ui_events_tokens.py tests/test_model_routing.py tests/test_codex_integration.py`.
+
+## 2026-07-31
+
+- Added the session-scoped Context and Cost Governor across the gateway, shared
+  model client, AskAgent, routing, history, coding backends, Codex usage path,
+  live UI events, redacted analytics, and read-only `context report`. Soft and
+  enforce modes use validated lazy capabilities and deterministic compression
+  backed by exact scoped artifacts; observe mode records without changing
+  execution. Estimates remain visibly distinct from exact provider usage.
+  - User verification required: `python -m pytest tests/context_cost tests/test_llm_compatibility.py tests/test_chat_ui_events_tokens.py tests/test_model_routing.py tests/test_codex_integration.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required: `python -m pytest`.
+
 ## 2026-07-31
 
 - Bumped the package and documented version to `v0.1.4`.
@@ -2194,3 +2375,14 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Added dual remote execution modes: persistent direct-SSH profiles alongside managed reverse workers, with secure OpenSSH-only execution and explicit route preservation.
   - Verification: focused remote-execution and gateway tests passed (56 tests); Ruff, compilation, CLI help, and `git diff --check` passed.
+
+## 2026-08-01 (multi-turn chat continuation)
+
+- Added durable message-scoped turn state and follow-up classification so verified task completion cannot complete a conversation or cause later work to reuse an unrelated escrowed result.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_chat_turn_store.py tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_chat_gateway.py tests/test_conversation_service.py -q`.
+
+- Added one bounded model correction for browser decisions missing direct URLs, allowing open-ended discovery requests to return a new model-selected search route instead of failing at entry validation.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_entry_routing.py -q`.
+
+- Preserved informational conversation lane metadata and limited strict follow-up classification to routing models that expose the required structured-output contract; generic recovery still excludes completed tasks.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py -q`.

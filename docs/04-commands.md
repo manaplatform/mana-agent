@@ -1,5 +1,40 @@
 # Commands
 
+## Durable tasks
+
+`mana-agent tasks` reads and controls the durable execution state shared by the
+gateway, TUI, API, and dashboard:
+
+The same command group is shown as `mana-agent runs` in root help. `tasks`
+remains a supported hidden alias so existing operator instructions and scripts
+continue to work without reintroducing the retired `ask` branding substring in
+the root command table.
+
+```bash
+mana-agent tasks list [--incomplete]
+mana-agent tasks status <task-id>
+mana-agent tasks tree <task-id>
+mana-agent tasks logs <task-id> [--limit 200]
+mana-agent tasks artefacts <task-id>
+mana-agent tasks cancel <task-id> --reason "operator request" [--attempt-id <attempt-id>]
+mana-agent tasks retry <task-id> [--category model] [--decision-json recovery.json]
+mana-agent tasks resume <task-id> [--decision-json recovery.json]
+mana-agent tasks recover
+```
+
+Retry automatically attaches an operator-authored, schema-valid
+`RecoveryDecision` to the specified task ID. It uses the `model` retry budget
+unless `--category` explicitly selects another budget. A standalone
+`RecoveryDecision` JSON object or file remains supported for reassignment,
+replanning, or checkpoint selection; a taskboard `decisions.json` registry is
+not a recovery decision and should not be passed. First-time resume still
+requires `--decision-json` unless retry was already scheduled. A scheduled
+retry can be released after its recorded backoff, and a validated replan can be
+released with `resume`, without another decision. All generated and supplied
+decisions pass the same safety validation. Unknown and non-idempotent ambiguous
+actions are refused when policy does not explicitly permit them. See [Resilient
+Execution](29-resilient-execution.md).
+
 ## Teach Mode
 
 `mana-agent teach` provides `start`, `pause`, `resume`, `status`, `explain`,

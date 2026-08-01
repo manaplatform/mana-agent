@@ -199,7 +199,16 @@ def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> N
     board.update_status(mapping["done"], TaskStatus.ROUTED)
     board.update_status(mapping["done"], TaskStatus.IN_PROGRESS)
     board.update_orchestration(mapping["done"], entry_route="repository", result_summary="already done")
-    board.update_status(mapping["done"], TaskStatus.DONE)
+    board.project_supervisor_completion(
+        mapping["done"],
+        supervisor_task=SimpleNamespace(
+            task_id="supervisor-done",
+            state=SimpleNamespace(value="completed"),
+            verification_status=SimpleNamespace(value="passed"),
+            state_version=1,
+        ),
+        verification_evidence={"verification": "passed", "result_id": "result-done"},
+    )
     calls: list[str] = []
 
     def execute(item: MultiTaskItem, task_id: str) -> MultiTaskChildResult:

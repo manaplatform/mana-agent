@@ -43,6 +43,39 @@ class _WorkflowDecision(_Decision):
     reason: str = Field(min_length=1)
     safe_to_continue: bool
 
+    @model_validator(mode="after")
+    def validate_action_dependencies(self) -> "_WorkflowDecision":
+        actions = self.required_actions
+        if len(set(actions)) != len(actions):
+            raise ValueError("required_actions must not contain duplicates")
+        canonical_order = {
+            "documentation_inspection": 0,
+            "integration_import": 1,
+            "integration_configuration": 2,
+            "operation_search": 3,
+            "request_preview": 4,
+            "request_execution": 5,
+        }
+        if list(actions) != sorted(actions, key=canonical_order.__getitem__):
+            raise ValueError("required_actions must follow the declared API lifecycle order")
+        if "request_execution" in actions:
+            missing = [
+                action
+                for action in ("operation_search", "request_preview")
+                if action not in actions
+            ]
+            if missing:
+                raise ValueError(
+                    "request_execution requires declared actions: " + ", ".join(missing)
+                )
+        if "request_preview" in actions and "operation_search" not in actions:
+            raise ValueError("request_preview requires a declared operation_search action")
+        if "integration_import" in actions and "documentation_inspection" not in actions:
+            raise ValueError(
+                "integration_import requires a declared documentation_inspection action"
+            )
+        return self
+
 
 class _Import(_Decision):
     name: str = Field(min_length=1, max_length=160)
@@ -66,6 +99,7 @@ class _Import(_Decision):
 class _SemanticImport(_Decision):
     name: str = Field(min_length=1, max_length=160)
     text: str = Field(min_length=1, max_length=10 * 1024 * 1024)
+    documentation_reference: str = Field(min_length=1, max_length=2048)
     semantic_definition: SemanticDefinition
     save: bool = True
     ephemeral: bool = False
@@ -199,6 +233,7 @@ def build_api_manager_langchain_tools(
                 name=request.name,
                 source_decision_id=request.source_decision_id,
                 text=request.text,
+                text_reference=request.documentation_reference,
                 semantic_definition=request.semantic_definition,
                 save=request.save,
                 ephemeral=request.ephemeral,
@@ -282,7 +317,10 @@ def build_api_manager_langchain_tools(
             description=(
                 "Validate and import unstructured documentation using a required, cited, strict "
                 "SemanticDefinition extracted by the model only from the supplied text evidence. "
-                "The semantic_definition argument is mandatory; no heuristic extraction runs."
+                "Pass the exact inspected source reference in documentation_reference and cite "
+                "that reference from every operation. The semantic_definition argument is "
+                "mandatory; no heuristic extraction runs. If the integration already exists, "
+                "retry this import with its exact refresh_integration_id."
             ),
             args_schema=_SemanticImport,
             func=import_semantic_docs,
@@ -353,7 +391,9 @@ def build_api_manager_langchain_tools(
             name="api_request_preview",
             description=(
                 "Build and validate a saved API operation and return a redacted preview. Use before "
-                "every mutation. Arbitrary base URL overrides are not accepted."
+                "every execution. Supply an explicit env:// or mana-secret:// credential_reference "
+                "when the selected operation identifies its authentication scheme but the saved "
+                "integration has not bound a credential. Arbitrary base URL overrides are not accepted."
             ),
             args_schema=_Request,
             func=preview,
@@ -362,6 +402,8 @@ def build_api_manager_langchain_tools(
             name="api_request_execute",
             description=(
                 "Execute one validated saved API operation through DNS-pinned SSRF protections. "
+                "An explicit credential_reference may resolve a structurally known authentication "
+                "requirement for this request without storing secret material. "
                 "Mutations and network-policy exceptions fail closed unless the trusted approval "
                 "flow supplies an approval reference."
             ),

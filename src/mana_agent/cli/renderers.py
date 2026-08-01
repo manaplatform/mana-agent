@@ -153,6 +153,14 @@ class EventRenderer:
         token_text = self.format_usage(event.token_usage)
         if token_text != "unavailable":
             body.add_row("tokens", token_text)
+        if event.kind == "context":
+            breakdown = event.metadata.get("breakdown") or {}
+            used = int(event.metadata.get("used_tokens") or 0)
+            maximum = int(event.metadata.get("context_window") or 0)
+            ratio = float(event.metadata.get("utilization_ratio") or 0) * 100
+            exact = "estimated" if event.metadata.get("estimated", True) else "exact"
+            body.add_row("context", f"{used}/{maximum} ({ratio:.0f}%) · schema {breakdown.get('schema_tokens', 0)}")
+            body.add_row("cost", f"{exact} ${float(event.metadata.get('cumulative_cost') or 0):.4f}")
         if event.message:
             label = "decision" if event.type == "agent.decision" else "summary"
             body.add_row(label, event.message)
@@ -509,6 +517,12 @@ class InlineChatRenderer:
             return _inline_generic_line(event, noun="plan")
         if kind == "reasoning":
             return _inline_generic_line(event, noun="reasoning")
+        if kind == "context":
+            used = int(event.metadata.get("used_tokens") or 0)
+            maximum = int(event.metadata.get("context_window") or 0)
+            ratio = float(event.metadata.get("utilization_ratio") or 0) * 100
+            marker = "~" if event.metadata.get("estimated", True) else ""
+            return f"{_status_icon(event.status)} context {used}/{maximum} ({ratio:.0f}%) · {marker}${float(event.metadata.get('cumulative_cost') or 0):.4f}"
         if kind == "user_request":
             message = _clip_summary(event.message or "queued", 80)
             return f"{_status_icon(event.status)} request {message}"
@@ -675,6 +689,7 @@ def timeline_event_label(event: ChatEvent) -> str:
         "routing": "Routing",
         "plan_step": "Plan",
         "reasoning": "Reasoning",
+        "context": "Context",
         "tool": "Tool",
         "subagent": "Subagent",
         "response": "Response",

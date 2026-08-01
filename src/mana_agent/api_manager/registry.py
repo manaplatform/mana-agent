@@ -51,7 +51,8 @@ class ApiIntegrationRegistry:
         with self._lock:
             if target.exists() and not replace:
                 raise ValueError(
-                    f"Integration {integration.integration_id!r} already exists; use update or refresh."
+                    f"Integration {integration.integration_id!r} already exists; retry the "
+                    "documentation import with that exact refresh_integration_id."
                 )
             self.path.mkdir(parents=True, exist_ok=True)
             os.chmod(self.path, 0o700)

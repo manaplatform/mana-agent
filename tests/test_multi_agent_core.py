@@ -51,6 +51,7 @@ from mana_agent.multi_agent.routing.agent_decision import AgentDecisionEngine
 from mana_agent.multi_agent.routing.hierarchy import HierarchyPolicy, HierarchyViolation
 from mana_agent.multi_agent.routing.router import Router
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.multi_agent.tools.permissions import assert_shell_allowed
 from mana_agent.services.memory_service import MultiAgentMemoryService
 from mana_agent.workspaces.paths import mana_home
@@ -151,6 +152,54 @@ def test_taskboard_create_update_save_load_and_invalid_transition(tmp_path):
         reloaded.update_status(task.task_id, TaskStatus.DONE)
 
 
+def test_taskboard_does_not_overwrite_persisted_task_when_id_counter_restarts(
+    tmp_path, monkeypatch
+):
+    board = TaskBoard(tmp_path)
+    persisted = board.create_task(title="Persisted", user_request="original request")
+    reloaded = TaskBoard(tmp_path)
+    generated_ids = iter([persisted.task_id, "task_20260801_999999"])
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.taskboard.taskboard.new_task_id",
+        lambda: next(generated_ids),
+    )
+
+    created = reloaded.create_task(title="Retry", user_request="retry request")
+
+    assert created.task_id == "task_20260801_999999"
+    assert reloaded.get_task(persisted.task_id).user_request == "original request"
+    assert reloaded.get_task(created.task_id).user_request == "retry request"
+
+
+def test_taskboard_done_requires_supervisor_projection(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Verified", user_request="produce artifact")
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    with pytest.raises(InvalidTaskTransition, match="supervisor"):
+        board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_taskboard_compaction_is_reversible(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Large", user_request="preserve constraints")
+    task.acceptance_criteria.extend(
+        [f"constraint-{index}-" + "x" * 80 for index in range(50)]
+    )
+    compacted = board.compact_context(task.task_id, token_budget=40)
+    envelope = json.loads(compacted)
+    restored = ContextArtifactStore().read(
+        envelope["artifact_ref"],
+        session_id=task.session_id,
+        repository_id=task.primary_repository_id,
+        workspace_id=task.workspace_id,
+        limit=64_000,
+    )
+    assert "constraint-49" in restored
+    assert envelope["lossless_source_available"] is True
+
+
 def test_duplicate_task_not_created_twice(tmp_path):
     memory = MultiAgentMemoryService(root=tmp_path)
     board = TaskBoard(tmp_path, memory_service=memory)
@@ -160,18 +209,19 @@ def test_duplicate_task_not_created_twice(tmp_path):
 
     assert first.memory_status["duplicate_checked"] is True
     assert second.memory_status["duplicate_of"] == first.task_id
-    assert second.status == TaskStatus.SKIPPED
+    assert second.status == TaskStatus.NEW
     assert memory.task_records[second.task_id].duplicate_of == first.task_id
 
 
-def test_duplicate_task_merged_into_existing_task(tmp_path):
+def test_duplicate_task_remains_advisory_until_supervisor_decision(tmp_path):
     memory = MultiAgentMemoryService(root=tmp_path)
     board = TaskBoard(tmp_path, memory_service=memory)
     first = board.create_task(title="Docs", user_request="Update README.md", related_files=["README.md"])
     duplicate = board.create_task(title="Docs duplicate", user_request="Update README.md", related_files=["README.md"])
 
-    assert duplicate.status == TaskStatus.SKIPPED
-    assert board.get_task(duplicate.task_id).blockers == [f"duplicate_of:{first.task_id}"]
+    assert duplicate.status == TaskStatus.NEW
+    assert duplicate.memory_status["duplicate_of"] == first.task_id
+    assert board.get_task(duplicate.task_id).blockers == []
 
 
 def test_queue_rejects_duplicate_fingerprint(tmp_path):
@@ -953,7 +1003,7 @@ def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
     assert "README" in " ".join(commit_commands[0]) or "readme" in " ".join(commit_commands[0]).lower()
     assert "hardcoded" not in " ".join(commit_commands[0]).lower()
     assert _git(repo, "log", "-1", "--pretty=%s").stdout.strip().lower().startswith("docs: update readme")
-    assert task.status == TaskStatus.DONE
+    assert task.status == TaskStatus.VERIFYING
 
 
 def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
@@ -967,7 +1017,7 @@ def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
     assert ["status", "--short", "--branch"] in commands
     assert ["switch", "-c", "feature/git-workflow"] in commands
     assert _git(repo, "branch", "--show-current").stdout.strip() == "feature/git-workflow"
-    assert task.status == TaskStatus.DONE
+    assert task.status == TaskStatus.VERIFYING
 
 
 @pytest.fixture

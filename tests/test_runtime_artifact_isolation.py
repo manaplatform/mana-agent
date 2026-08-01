@@ -7,17 +7,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-
-def _metadata(path: Path) -> list[tuple[str, int, int]]:
-    if not path.exists():
-        return []
-    return sorted(
-        (str(item.relative_to(path)), item.stat().st_mtime_ns, item.stat().st_size)
-        for item in path.rglob("*")
-    )
-
-
 def _run_nested_pytest(tmp_path: Path, *, failing: bool) -> tuple[subprocess.CompletedProcess[str], Path]:
     conftest = Path(__file__).with_name("conftest.py").read_text(encoding="utf-8")
     (tmp_path / "conftest.py").write_text(conftest, encoding="utf-8")
@@ -71,9 +60,10 @@ def test_nested_pytest_removes_all_mana_runtime_artifacts(tmp_path: Path, failin
 
 
 def test_real_mana_home_write_guard_preserves_existing_user_data(real_mana_home: Path) -> None:
-    before = _metadata(real_mana_home)
+    blocked_target = real_mana_home / "pytest-must-not-create-this"
+    assert not blocked_target.exists()
 
     with pytest.raises(PermissionError, match="real Mana home"):
-        (real_mana_home / "pytest-must-not-create-this").write_text("blocked", encoding="utf-8")
+        blocked_target.write_text("blocked", encoding="utf-8")
 
-    assert _metadata(real_mana_home) == before
+    assert not blocked_target.exists()

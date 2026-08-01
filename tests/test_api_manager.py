@@ -50,6 +50,7 @@ from mana_agent.api_manager.registry import ApiIntegrationRegistry
 from mana_agent.api_manager.request_builder import ApiRequestBuilder
 from mana_agent.api_manager.runtime_tools import (
     API_MANAGER_TOOL_NAMES,
+    _WorkflowDecision,
     build_api_manager_langchain_tools,
 )
 from mana_agent.api_manager.service import ApiManagerService
@@ -326,6 +327,42 @@ def test_unstructured_import_accepts_documented_fields_and_normalizes_auth_param
     assert operation.authentication[0].credential_reference == "env://IP_API_TOKEN"
 
 
+def test_service_preserves_rendered_documentation_reference_for_semantic_import(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://docs.example.com/ip-api/getting-started"
+    service = ApiManagerService(
+        tmp_path,
+        registry=ApiIntegrationRegistry(tmp_path / "integrations"),
+    )
+
+    result = service.import_documentation(
+        name="Rendered IP API",
+        text="GET /{ip_address} returns the documented IP details.",
+        text_reference=source_url,
+        source_decision_id="rendered-documentation-decision",
+        semantic_definition={
+            "servers": [{"url": "https://api.example.com"}],
+            "operations": [
+                {
+                    "operation_id": "lookupIpAddress",
+                    "name": "Standard Lookup",
+                    "method": "GET",
+                    "path": "/{ip_address}",
+                    "base_url": "https://api.example.com",
+                    "risk_level": "read_only",
+                    "source_reference": source_url,
+                    "inferred_fields": [],
+                    "unresolved_fields": [],
+                }
+            ],
+        },
+    )
+
+    assert result["integration"]["documentation_sources"][0]["reference"] == source_url
+    assert result["integration"]["operations"][0]["source_reference"] == source_url
+
+
 def test_authentication_rejects_bare_credential_reference() -> None:
     with pytest.raises(ValueError, match="credential_reference must use env://"):
         AuthenticationConfig(
@@ -442,6 +479,8 @@ def test_registry_persists_updates_refresh_and_delete(tmp_path: Path) -> None:
     registry, integration = _registry(tmp_path)
     reloaded = ApiIntegrationRegistry(registry.path).get(integration.integration_id)
     assert reloaded.name == "Acme CRM"
+    with pytest.raises(ValueError, match="exact refresh_integration_id"):
+        registry.save(_import())
     assert registry.disable(integration.integration_id).enabled is False
     refreshed = registry.refresh(integration.integration_id, _import())
     assert refreshed.active_version == 2
@@ -486,6 +525,33 @@ def test_request_builder_validates_and_serializes_parameters(
             path_parameters={"contact_id": "123"},
             query_parameters={"invented": True},
         )
+
+
+def test_explicit_request_credential_resolves_known_unconfigured_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, integration = _registry(tmp_path)
+    monkeypatch.setenv("ACME_TOKEN", "top-secret-token")
+    builder = ApiRequestBuilder(registry)
+
+    with pytest.raises(RequestValidationError, match="Supply an explicit"):
+        builder.build(
+            integration_id=integration.integration_id,
+            operation_id="getContact",
+            path_parameters={"contact_id": "123"},
+        )
+
+    request = builder.build(
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        path_parameters={"contact_id": "123"},
+        headers={"Accept": "application/json"},
+        credential_reference="env://ACME_TOKEN",
+    )
+
+    assert request.headers["Accept"] == "application/json"
+    assert request.headers["Authorization"] == "Bearer top-secret-token"
 
 
 def test_json_body_validation_and_multipart_construction(
@@ -890,6 +956,7 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
         tool for tool in tools if tool.name == "api_docs_import_semantic"
     ).args_schema.model_json_schema()
     assert "text" in semantic_import_schema["required"]
+    assert "documentation_reference" in semantic_import_schema["required"]
     assert "semantic_definition" in semantic_import_schema["required"]
     execute_schema = next(
         tool for tool in tools if tool.name == "api_request_execute"
@@ -899,6 +966,33 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
     assert "operation_id" in properties
     assert "url" not in properties
     assert "base_url" not in properties
+
+
+def test_api_workflow_execution_requires_declared_search_and_preview() -> None:
+    with pytest.raises(ValueError, match="request_execution requires declared actions"):
+        _WorkflowDecision(
+            source_decision_id="decision-api",
+            session_id="session-api",
+            task_intent="execute saved operation",
+            required_actions=("request_execution",),
+            reason="The user requested a live API call.",
+            safe_to_continue=True,
+        )
+
+    decision = _WorkflowDecision(
+        source_decision_id="decision-api",
+        session_id="session-api",
+        task_intent="execute saved operation",
+        required_actions=("operation_search", "request_preview", "request_execution"),
+        reason="Search, preview, and execute the selected operation.",
+        safe_to_continue=True,
+    )
+
+    assert decision.required_actions == (
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    )
 
 
 def test_registry_and_executor_emit_redacted_events(

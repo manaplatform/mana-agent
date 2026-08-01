@@ -298,6 +298,7 @@ class FleetVerificationPlan(StrictModel):
     timeout_seconds: int = Field(default=1800, ge=1, le=86_400)
     retain_workspaces: bool = False
     mutation_intent: bool = False
+    monetary_budget: float | None = Field(default=None, ge=0)
 
 
 class FleetJob(StrictModel):

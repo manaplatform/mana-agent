@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -120,6 +120,54 @@ class Settings(BaseSettings):
     )
     mana_routing_verification_reserve_ratio: float = Field(
         default=0.15, alias="MANA_ROUTING_VERIFICATION_RESERVE_RATIO"
+    )
+    mana_context_governor_enabled: bool = Field(
+        default=True, alias="MANA_CONTEXT_GOVERNOR_ENABLED"
+    )
+    mana_context_governor_mode: Literal["observe", "soft", "enforce"] = Field(
+        default="observe", alias="MANA_CONTEXT_GOVERNOR_MODE"
+    )
+    mana_context_warning_ratio: float = Field(
+        default=0.70, ge=0.0, le=1.0, alias="MANA_CONTEXT_WARNING_RATIO"
+    )
+    mana_context_compact_ratio: float = Field(
+        default=0.80, ge=0.0, le=1.0, alias="MANA_CONTEXT_COMPACT_RATIO"
+    )
+    mana_context_max_utilization: float = Field(
+        default=0.85, ge=0.0, le=1.0, alias="MANA_CONTEXT_MAX_UTILIZATION"
+    )
+    mana_context_hard_limit_ratio: float = Field(
+        default=0.95, ge=0.0, le=1.0, alias="MANA_CONTEXT_HARD_LIMIT_RATIO"
+    )
+    mana_context_response_reserve_ratio: float = Field(
+        default=0.12, ge=0.0, le=1.0, alias="MANA_CONTEXT_RESPONSE_RESERVE_RATIO"
+    )
+    mana_context_response_reserve_tokens: int = Field(
+        default=0, ge=0, alias="MANA_CONTEXT_RESPONSE_RESERVE_TOKENS"
+    )
+    mana_context_tool_result_max_tokens: int = Field(
+        default=2_000, ge=1, alias="MANA_CONTEXT_TOOL_RESULT_MAX_TOKENS"
+    )
+    mana_context_history_max_tokens: int = Field(
+        default=8_000, ge=1, alias="MANA_CONTEXT_HISTORY_MAX_TOKENS"
+    )
+    mana_context_retrieval_max_tokens: int = Field(
+        default=12_000, ge=1, alias="MANA_CONTEXT_RETRIEVAL_MAX_TOKENS"
+    )
+    mana_context_lazy_capabilities: bool = Field(
+        default=True, alias="MANA_CONTEXT_LAZY_CAPABILITIES"
+    )
+    mana_context_capability_idle_steps: int = Field(
+        default=3, ge=1, alias="MANA_CONTEXT_CAPABILITY_IDLE_STEPS"
+    )
+    mana_context_artifact_retention_days: int = Field(
+        default=30, ge=1, alias="MANA_CONTEXT_ARTIFACT_RETENTION_DAYS"
+    )
+    mana_context_cost_log_enabled: bool = Field(
+        default=True, alias="MANA_CONTEXT_COST_LOG_ENABLED"
+    )
+    mana_context_cost_log_retention_days: int = Field(
+        default=30, ge=1, alias="MANA_CONTEXT_COST_LOG_RETENTION_DAYS"
     )
     mana_routing_benchmark_weights: dict[str, float] | str = Field(
         default_factory=dict, alias="MANA_ROUTING_BENCHMARK_WEIGHTS"
@@ -534,6 +582,45 @@ class Settings(BaseSettings):
     mana_execution_providers: dict[str, Any] | str = Field(
         default_factory=dict, alias="MANA_EXECUTION_PROVIDERS"
     )
+    mana_execution_supervisor_enabled: bool = Field(
+        default=True, alias="MANA_EXECUTION_SUPERVISOR_ENABLED"
+    )
+    mana_execution_supervisor_lease_seconds: int = Field(
+        default=60, alias="MANA_EXECUTION_SUPERVISOR_LEASE_SECONDS"
+    )
+    mana_execution_supervisor_heartbeat_seconds: int = Field(
+        default=15, alias="MANA_EXECUTION_SUPERVISOR_HEARTBEAT_SECONDS"
+    )
+    mana_execution_supervisor_checkpoint_seconds: int = Field(
+        default=60, alias="MANA_EXECUTION_SUPERVISOR_CHECKPOINT_SECONDS"
+    )
+    mana_execution_supervisor_retry_budget: int = Field(
+        default=3, alias="MANA_EXECUTION_SUPERVISOR_RETRY_BUDGET"
+    )
+    mana_execution_supervisor_max_replans: int = Field(
+        default=2, alias="MANA_EXECUTION_SUPERVISOR_MAX_REPLANS"
+    )
+    mana_execution_supervisor_max_child_depth: int = Field(
+        default=5, alias="MANA_EXECUTION_SUPERVISOR_MAX_CHILD_DEPTH"
+    )
+    mana_execution_supervisor_max_children: int = Field(
+        default=20, alias="MANA_EXECUTION_SUPERVISOR_MAX_CHILDREN"
+    )
+    mana_execution_supervisor_max_total_subtasks: int = Field(
+        default=100, alias="MANA_EXECUTION_SUPERVISOR_MAX_TOTAL_SUBTASKS"
+    )
+    mana_execution_supervisor_max_concurrent_children: int = Field(
+        default=4, alias="MANA_EXECUTION_SUPERVISOR_MAX_CONCURRENT_CHILDREN"
+    )
+    mana_execution_supervisor_startup_recovery: bool = Field(
+        default=True, alias="MANA_EXECUTION_SUPERVISOR_STARTUP_RECOVERY"
+    )
+    mana_execution_supervisor_verify_artifacts: bool = Field(
+        default=True, alias="MANA_EXECUTION_SUPERVISOR_VERIFY_ARTIFACTS"
+    )
+    mana_execution_supervisor_allow_unknown_retry: bool = Field(
+        default=False, alias="MANA_EXECUTION_SUPERVISOR_ALLOW_UNKNOWN_RETRY"
+    )
     # Distributed verification is opt-in and fail-closed when no compatible
     # authenticated worker satisfies the model-produced selection request.
     mana_fleet_enabled: bool = Field(default=False, alias="MANA_FLEET_ENABLED")
@@ -599,6 +686,16 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: object) -> None:
         _ = __context
+        ratios = (
+            self.mana_context_warning_ratio,
+            self.mana_context_compact_ratio,
+            self.mana_context_max_utilization,
+            self.mana_context_hard_limit_ratio,
+        )
+        if tuple(sorted(ratios)) != ratios or len(set(ratios)) != len(ratios):
+            raise ValueError(
+                "context ratios must increase in warning, compact, maximum-utilization, hard-limit order"
+            )
         from mana_agent.canvas.config import CanvasConfig
 
         CanvasConfig.from_settings(self)

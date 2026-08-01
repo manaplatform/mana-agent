@@ -40,6 +40,7 @@ from mana_agent.memory import CodingMemoryService, MemoryService
 from mana_agent.execution import ExecutionManager, build_execution_manager
 from mana_agent.workspaces.preparation import PreparedRepository
 from mana_agent.workspaces.service import WorkspaceService
+from mana_agent.context_cost import ContextCostGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class ChatStack:
     ask_service: Any
     chat_service: ChatService | Any
     memory_service: MemoryService | Any
+    context_cost_governor: ContextCostGovernor
     coding_agent: Any | None = None
     coding_memory_service: Any | None = None
     tool_worker_client: Any | None = None
@@ -263,6 +265,15 @@ def build_chat_stack(
         settings=settings,
         event_sink=cfg.event_sink,
     )
+    context_cost_governor = ContextCostGovernor(
+        session_id=session_id,
+        repository_id=str(repository_id or ""),
+        workspace_id=str(workspace_id or ""),
+        settings=settings,
+        event_sink=cfg.event_sink,
+    )
+    context_cost_governor.register_model_profiles(routing_authority.router.profiles)
+    routing_authority.context_cost_governor = context_cost_governor
 
     # --- ask + chat service ---
     if cfg.chat_service is not None:
@@ -272,18 +283,13 @@ def build_chat_stack(
         )
     else:
         build_ask = _resolve_build_ask_service()
-        try:
-            ask_service = build_ask(
-                settings,
-                model_override=cfg.model,
-                project_root=root,
-                routing_authority=routing_authority,
-            )
-        except TypeError:
-            try:
-                ask_service = build_ask(settings, cfg.model, project_root=root)
-            except TypeError:
-                ask_service = build_ask(settings, cfg.model)
+        ask_service = build_ask(
+            settings,
+            model_override=cfg.model,
+            context_cost_governor=context_cost_governor,
+            project_root=root,
+            routing_authority=routing_authority,
+        )
 
         chat_service_cls = _public_symbol("ChatService", ChatService)
         chat_service = chat_service_cls(
@@ -302,6 +308,16 @@ def build_chat_stack(
         )
 
     gateway_ask_agent = getattr(ask_service, "ask_agent", None)
+    if gateway_ask_agent is not None:
+        gateway_ask_agent.context_cost_governor = context_cost_governor
+    for model_owner in (
+        gateway_ask_agent,
+        getattr(ask_service, "qna_chain", None),
+        getattr(ask_service, "entry_router", None),
+    ):
+        model_client = getattr(model_owner, "llm", None)
+        if model_client is not None and hasattr(model_client, "context_cost_governor"):
+            model_client.context_cost_governor = context_cost_governor
     if gateway_ask_agent is not None and hasattr(gateway_ask_agent, "execution_manager"):
         gateway_ask_agent.execution_manager = execution_manager
 
@@ -406,6 +422,7 @@ def build_chat_stack(
                 event_sink=cfg.event_sink,
                 routing_authority=routing_authority,
                 workspace_id=workspace_id,
+                context_cost_governor=context_cost_governor,
             )
         else:
             if not cfg.agent_tools:
@@ -431,6 +448,7 @@ def build_chat_stack(
                 tool_worker_client = tool_worker_client_cls(
                     api_key=inference_connection.api_key,
                     model=effective_tool_worker_model,
+                    session_id=session_id,
                     base_url=effective_base_url,
                     repo_root=coding_repository_root,
                     project_root=coding_working_directory,
@@ -459,6 +477,7 @@ def build_chat_stack(
                 tool_worker_client=tool_worker_client,
                 full_auto_mode=(cfg.execution_profile == "full-auto"),
                 planner_model=planner_model_assignment.resolved_model,
+                context_cost_governor=context_cost_governor,
             )
 
         if (
@@ -486,6 +505,7 @@ def build_chat_stack(
                 coding_agent_instance.set_tools_manager_orchestrator(tools_manager_orchestrator)
             if hasattr(tools_manager_orchestrator, "attach_decision_provider"):
                 tools_manager_orchestrator.attach_decision_provider(coding_agent_instance)
+            tools_manager_orchestrator.context_cost_governor = context_cost_governor
 
     elif coding_agent_instance is not None:
         coding_memory_service = getattr(coding_agent_instance, "coding_memory_service", None)
@@ -531,6 +551,28 @@ def build_chat_stack(
         enable_compatibility=False,
     )
 
+    # Attach the one session governor to model-owning components constructed by
+    # legacy-compatible factories. This is state injection only; routing and
+    # permission decisions remain owned by their existing authorities.
+    for component in (
+        ask_service,
+        gateway_ask_agent,
+        getattr(ask_service, "qna_chain", None),
+        getattr(ask_service, "entry_router", None),
+        coding_agent_instance,
+        getattr(coding_agent_instance, "_agent", None),
+        tool_worker_client,
+        tools_manager_orchestrator,
+    ):
+        if component is None:
+            continue
+        if hasattr(component, "context_cost_governor"):
+            component.context_cost_governor = context_cost_governor
+        for attribute in ("llm", "planner_llm", "model_client"):
+            model_client = getattr(component, attribute, None)
+            if model_client is not None and hasattr(model_client, "context_cost_governor"):
+                model_client.context_cost_governor = context_cost_governor
+
     return ChatStack(
         settings=settings,
         ask_service=ask_service,
@@ -546,6 +588,7 @@ def build_chat_stack(
         execution_manager=execution_manager,
         routing_authority=routing_authority,
         prepared_repository=prepared_repository,
+        context_cost_governor=context_cost_governor,
         coding_agent_is_custom=coding_agent_is_custom,
         effective_model=effective_model,
         chat_agent_max_steps=chat_agent_max_steps,

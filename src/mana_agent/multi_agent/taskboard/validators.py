@@ -9,12 +9,12 @@ _ALLOWED: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
     TaskStatus.DISCUSSING: {TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.ROUTED: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
-    TaskStatus.WAITING_FOR_TOOLS: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.WAITING_FOR_TOOLS: {TaskStatus.IN_PROGRESS, TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.QUEUED: {TaskStatus.IN_PROGRESS, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
-    TaskStatus.IN_PROGRESS: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.IN_PROGRESS: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.NEEDS_REVIEW: {TaskStatus.VERIFYING, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.VERIFYING: {TaskStatus.DONE, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
-    TaskStatus.BLOCKED: {TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.SKIPPED},
+    TaskStatus.BLOCKED: {TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.VERIFYING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.SKIPPED},
 }
 
 
@@ -23,6 +23,20 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
         return
     if task.status in _TERMINAL:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value} without reopen")
+    if next_status == TaskStatus.DONE:
+        evidence = dict(task.supervisor_verification_evidence or {})
+        if not task.supervisor_execution_id:
+            raise InvalidTaskTransition(
+                "done status requires the authoritative supervisor execution identity"
+            )
+        if task.supervisor_state != "completed" or task.verification_status != "passed":
+            raise InvalidTaskTransition(
+                "done status requires supervisor-approved passed verification"
+            )
+        if not evidence.get("verification") or not evidence.get("result_id"):
+            raise InvalidTaskTransition(
+                "done status requires durable supervisor verification evidence"
+            )
     allowed = _ALLOWED.get(task.status, set())
     if next_status not in allowed:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value}")

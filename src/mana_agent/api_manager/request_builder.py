@@ -69,6 +69,8 @@ class RequestPreview(StrictModel):
 
 
 class ApiRequestBuilder:
+    _SAFE_TRANSPORT_HEADERS = frozenset({"accept"})
+
     def __init__(
         self,
         registry: ApiIntegrationRegistry,
@@ -125,7 +127,13 @@ class ApiRequestBuilder:
         }
         self._validate_parameters(path_values, defined[ParameterLocation.PATH], "path", operation)
         self._validate_parameters(query_values, defined[ParameterLocation.QUERY], "query", operation)
-        self._validate_parameters(header_values, defined[ParameterLocation.HEADER], "header", operation)
+        self._validate_parameters(
+            header_values,
+            defined[ParameterLocation.HEADER],
+            "header",
+            operation,
+            allowed_unknown=self._SAFE_TRANSPORT_HEADERS,
+        )
         self._validate_parameters(cookie_values, defined[ParameterLocation.COOKIE], "cookie", operation)
 
         path = operation.path
@@ -164,7 +172,11 @@ class ApiRequestBuilder:
             header_values.setdefault("Content-Type", request_content_type)
         header_values.setdefault("Accept", "application/json, text/plain;q=0.9, */*;q=0.5")
 
-        authentication = self._select_authentication(integration, operation)
+        authentication = self._select_authentication(
+            integration,
+            operation,
+            credential_reference=credential_reference,
+        )
         secret_values: tuple[str, ...] = ()
         if authentication is not None:
             header_values, query_items, secret_values = apply_authentication(
@@ -245,6 +257,7 @@ class ApiRequestBuilder:
         definitions: dict[str, Any],
         location: str,
         operation: ApiOperation,
+        allowed_unknown: frozenset[str] = frozenset(),
     ) -> None:
         missing = sorted(
             name for name, definition in definitions.items() if definition.required and name not in values
@@ -254,7 +267,11 @@ class ApiRequestBuilder:
                 f"Missing required {location} parameters: {', '.join(missing)}.",
                 details={"missing": missing, "location": location},
             )
-        unknown = sorted(set(values).difference(definitions))
+        unknown = sorted(
+            name
+            for name in set(values).difference(definitions)
+            if name.lower() not in allowed_unknown
+        )
         if unknown and not operation.allow_unknown_parameters:
             raise RequestValidationError(
                 f"Unknown {location} parameters: {', '.join(unknown)}.",
@@ -269,6 +286,8 @@ class ApiRequestBuilder:
     def _select_authentication(
         integration: ApiIntegration,
         operation: ApiOperation,
+        *,
+        credential_reference: str = "",
     ) -> AuthenticationConfig | None:
         if (
             len(integration.authentication) == 1
@@ -303,8 +322,25 @@ class ApiRequestBuilder:
                 f"choice is required ({', '.join(names)}). No authentication fallback was selected."
             )
         authentication = candidates[0]
+        if (
+            authentication.type.value != "none"
+            and not authentication.credential_reference
+            and not credential_reference
+        ):
+            raise RequestValidationError(
+                "Authentication has no credential binding. Supply an explicit "
+                "env:// or mana-secret:// credential reference for this request, or "
+                "configure the saved integration."
+            )
         if authentication.unresolved:
-            raise RequestValidationError("Authentication requirements remain unresolved.")
+            authentication = authentication.model_copy(
+                update={
+                    "credential_reference": (
+                        credential_reference or authentication.credential_reference
+                    ),
+                    "unresolved": False,
+                }
+            )
         return authentication
 
     @staticmethod

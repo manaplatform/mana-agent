@@ -5,7 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mana_agent.api_manager.runtime_tools import API_MANAGER_TOOL_NAMES
-from mana_agent.gateway.chat_gateway import AgentChatGateway
+from mana_agent.gateway.chat_gateway import (
+    AgentChatGateway,
+    _api_workflow_completion_from_trace,
+)
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
 
 
@@ -25,9 +28,12 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
             assert tool_policy["disable_external_search"] is True
             assert "api_operations_search first" in system_prompt
             assert "api_docs_import_semantic" in system_prompt
+            assert "retry the same import" in system_prompt
+            assert "refresh_integration_id" in system_prompt
             assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
             assert kwargs["flow_id"] == "session-api"
+            assert kwargs["max_steps"] >= 16
             return SimpleNamespace(
                 answer="Contact 123 was returned by the saved API operation.",
                 sources=[],
@@ -43,6 +49,7 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                                     "task_intent": "retrieve contact 123",
                                     "required_actions": [
                                         "operation_search",
+                                        "request_preview",
                                         "request_execution",
                                     ],
                                     "reason": "The operation must be selected and executed.",
@@ -57,9 +64,14 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                         "output_preview": '{"ok":true,"result":[{"operation_id":"getContact"}]}',
                     },
                     {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+                    },
+                    {
                         "tool_name": "api_request_execute",
                         "status": "ok",
-                        "output_preview": '{"ok":true,"result":{"executed":true}}',
+                        "output_preview": '{"ok":true,"result":{"executed":true,"upstream_ok":true,"status_code":200}}',
                     },
                 ],
             )
@@ -89,6 +101,95 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
     )
     assert result.mode == "route-api"
     assert result.payload["route"] == "api"
+    assert result.payload["workflow_completion"]["execution_evidence"]["status_code"] == 200
+    assert '"status_code": 200' in result.answer
+
+
+def test_api_route_treats_documentation_url_as_optional_when_integration_is_saved(
+    tmp_path: Path,
+) -> None:
+    class ModelToolExecutor:
+        def run(self, *, system_prompt: str, **kwargs):
+            assert (
+                "A supplied documentation URL is not, by itself, evidence that import or refresh "
+                "is required." in system_prompt
+            )
+            assert "Immediately after the workflow decision, list saved integrations." in system_prompt
+            return SimpleNamespace(
+                answer="The saved news integration returned current reporting.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "task_intent": "retrieve current Iran-US news",
+                                    "required_actions": [
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
+                                    "reason": "A suitable saved news integration exists.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":[{"operation_id":"get_news"}]}',
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+                    },
+                    {
+                        "tool_name": "api_request_execute",
+                        "status": "ok",
+                        "output_preview": (
+                            '{"ok":true,"result":{"executed":true,"upstream_ok":true,'
+                            '"status_code":200}}'
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Use the saved Mediastack integration.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            session_id="session-api",
+            conversation_id="session-api",
+            turn_id="turn-api",
+        ),
+        text="Use this documentation URL and call the saved news API.",
+        ask_service=SimpleNamespace(ask_agent=ModelToolExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api"
+    assert result.payload["workflow_completion"]["required_actions"] == [
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    ]
 
 
 def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -> None:
@@ -116,12 +217,26 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
                                 "ok": True,
                                 "result": {
                                     "task_intent": "execute API request",
-                                    "required_actions": ["request_execution"],
+                                    "required_actions": [
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
                                     "reason": "The user requested execution.",
                                     "safe_to_continue": True,
                                 },
                             }
                         ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":[{"operation_id":"getContact"}]}',
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
                     },
                     {
                         "tool_name": "api_request_execute",
@@ -183,6 +298,7 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
                                         "documentation_inspection",
                                         "integration_import",
                                         "operation_search",
+                                        "request_preview",
                                         "request_execution",
                                     ],
                                     "reason": "All stages are required by the user.",
@@ -232,5 +348,194 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
     assert result.error == "api_workflow_incomplete"
     assert result.payload["workflow_completion"]["missing_actions"] == [
         "operation_search",
+        "request_preview",
         "request_execution",
     ]
+
+
+def test_api_route_surfaces_valid_execution_when_import_remains_incomplete(
+    tmp_path: Path,
+) -> None:
+    class ModelToolExecutor:
+        def run(self, **kwargs):
+            return SimpleNamespace(
+                answer="The response body was unavailable.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "task_intent": "inspect, import, and call API",
+                                    "required_actions": [
+                                        "documentation_inspection",
+                                        "integration_import",
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
+                                    "reason": "Every lifecycle action is required.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "browser_inspect",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"text":"GET /{ip}"}',
+                    },
+                    {
+                        "tool_name": "api_docs_import_semantic",
+                        "status": "error",
+                        "output_preview": '{"ok":false,"error_code":"duplicate"}',
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":[{"operation_id":"lookup"}]}',
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+                    },
+                    {
+                        "tool_name": "api_request_execute",
+                        "status": "ok",
+                        "output_preview": (
+                            '{"ok":true,"result":{"executed":true,"upstream_ok":true,'
+                            '"status_code":200,"json_body":{"city":"Shiraz"}}}'
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Use the complete API lifecycle.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            session_id="session-api",
+            conversation_id="session-api",
+            turn_id="turn-api",
+        ),
+        text="Inspect documentation and execute the API request.",
+        ask_service=SimpleNamespace(ask_agent=ModelToolExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api-incomplete"
+    assert result.payload["workflow_completion"]["missing_actions"] == [
+        "integration_import"
+    ]
+    assert "overall workflow remains incomplete" in result.answer
+    assert '"city": "Shiraz"' in result.answer
+
+
+def test_api_workflow_accepts_successful_clipped_non_execution_evidence() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect, import, and call API",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Every selected lifecycle action is required.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "browser_inspect",
+                "status": "ok",
+                "output_preview": '{"ok":true,"text":"' + ("x" * 3981),
+            },
+            {
+                "tool_name": "api_docs_import_semantic",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":{"saved":true}}',
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[{"operation_id":"lookup"}]}',
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": (
+                    '{"ok":true,"result":{"executed":true,"upstream_ok":true,'
+                    '"status_code":200}}'
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["missing_actions"] == []
+    assert "documentation_inspection" in completion["completed_actions"]
+
+
+def test_api_workflow_rejects_unparseable_non_clipped_evidence() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect API documentation",
+                            "required_actions": ["documentation_inspection"],
+                            "reason": "Documentation evidence is required.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "browser_inspect",
+                "status": "ok",
+                "output_preview": "not structured evidence",
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["missing_actions"] == ["documentation_inspection"]

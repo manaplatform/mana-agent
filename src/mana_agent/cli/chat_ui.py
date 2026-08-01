@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.table import Table
@@ -18,6 +18,10 @@ from mana_agent.cli.events import ChatEvent, make_event
 from mana_agent.cli.renderers import EventRenderer
 from mana_agent.telemetry.session_trace import SessionTrace
 from mana_agent.telemetry.tokens import TokenUsageTracker
+from mana_agent.context_cost.estimator import estimate_value_tokens
+
+if TYPE_CHECKING:
+    from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.observability import ObservabilityStore
 from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.tools.catalog import (
@@ -75,6 +79,7 @@ class ChatUIState:
     workspace_id: str = ""
     repository_id: str = ""
     tracker: TokenUsageTracker = field(default_factory=TokenUsageTracker)
+    context_cost_governor: ContextCostGovernor | None = None
     trace: SessionTrace | None = None
     observability: ObservabilityStore | None = None
     events: list[ChatEvent] = field(default_factory=list)
@@ -161,6 +166,12 @@ class ChatUIState:
         self.session_id = context.session.session_id
         self.workspace_id = context.session.workspace_id
         self.repository_id = context.session.primary_repository_id
+        if self.context_cost_governor is not None:
+            self.context_cost_governor.reset_scope(
+                session_id=self.session_id,
+                workspace_id=self.workspace_id,
+                repository_id=self.repository_id,
+            )
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.trace_path = session_dir(self.session_id) / "traces" / f"session_{stamp}.jsonl"
         self.session_path = session_dir(self.session_id) / "events.jsonl"
@@ -184,6 +195,8 @@ class ChatUIState:
 
     def begin_conversation_turn(self, question: str, turn_id: str) -> None:
         """Persist user input before model execution without adding it twice to prompts."""
+        if self.context_cost_governor is not None:
+            self.context_cost_governor.set_execution_identity(turn_id=turn_id, agent_id="main")
         question_text = str(question or "").strip()
         if not question_text:
             return
@@ -204,7 +217,20 @@ class ChatUIState:
             {"role": item.role, "content": item.content}
             for item in durable
             if item.role in {"user", "assistant", "tool"}
-        ][-40:]
+        ]
+        if self.context_cost_governor is not None:
+            prior = self.context_cost_governor.select_history(prior)
+        else:
+            selected: list[dict[str, str]] = []
+            used = 0
+            for item in reversed(prior):
+                tokens = estimate_value_tokens(item)
+                if selected and used + tokens > 8_000:
+                    break
+                if tokens <= 8_000:
+                    selected.append(item)
+                    used += tokens
+            prior = list(reversed(selected))
         if not prior:
             return question_text
         labels = {"user": "User", "assistant": "Assistant", "tool": "Tool result"}
@@ -213,7 +239,7 @@ class ChatUIState:
             role = item.get("role", "user")
             lines.append(f"{labels.get(role, role.title())}: {item.get('content', '')}")
         lines.extend(["", "Current user message:", question_text])
-        return "\n".join(lines)[-40000:]
+        return "\n".join(lines)
 
     @property
     def normalized_events(self) -> list[ChatEvent]:

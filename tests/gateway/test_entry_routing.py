@@ -22,6 +22,7 @@ from mana_agent.gateway.entry_routing import (
     EntryRoutingOutput,
 )
 from mana_agent.gateway.entry_routing import gmail_route_availability
+from mana_agent.gateway.checkpoint_resume import CHECKPOINT_RESUME_PROMPT
 from mana_agent.workspaces.service import WorkspaceService
 
 
@@ -31,6 +32,23 @@ class _RouteModel:
         self.payloads: list[dict[str, Any]] = []
 
     def invoke(self, messages: list[Any]) -> Any:
+        if messages[0].content == CHECKPOINT_RESUME_PROMPT:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "decision_id": "test-start-fresh",
+                        "action": "start_fresh",
+                        "task_id": "",
+                        "checkpoint_id": "",
+                        "same_work": False,
+                        "fresh_data_required": True,
+                        "checkpoint_still_valid": False,
+                        "side_effects_safe_to_repeat": False,
+                        "safe_to_continue": True,
+                        "reason": "Gmail data must be fetched again.",
+                    }
+                )
+            )
         self.payloads.append(json.loads(messages[-1].content))
         route = self.routes.pop(0) if self.routes else "conversation"
         source_by_route = {
@@ -511,6 +529,44 @@ def test_router_rejects_missing_required_sources_instead_of_guessing(tmp_path: P
         assert "required_sources" in str(exc)
     else:
         raise AssertionError("invalid routing output must stop without selecting a source")
+
+
+def test_router_repairs_url_less_browser_discovery_with_a_new_model_decision() -> None:
+    registry = _registry()
+    payloads = iter(
+        [
+            {
+                "route": "browser",
+                "confidence": 0.9,
+                "reason": "research jobs",
+                "required_sources": ["browser"],
+                "target_urls": [],
+                "requires_live_data": True,
+            },
+            {
+                "route": "search",
+                "confidence": 0.95,
+                "reason": "open-ended job discovery needs search",
+                "required_sources": ["search"],
+                "target_urls": [],
+                "requires_live_data": True,
+            },
+        ]
+    )
+    router = EntryRouter(
+        llm=SimpleNamespace(
+            invoke=lambda _messages: SimpleNamespace(content=json.dumps(next(payloads)))
+        ),
+        registry=registry,
+    )
+
+    decision = router.route(
+        user_prompt="Find remote AI agent jobs",
+        context=SimpleNamespace(to_dict=lambda: {"session_id": "s"}),
+    )
+
+    assert decision.route == "search"
+    assert decision.required_sources == ("search",)
 
 
 def test_router_prompt_requires_a_none_source_for_ping() -> None:

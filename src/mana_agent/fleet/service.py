@@ -16,6 +16,16 @@ from mana_agent.execution.models import (
     ArtifactRequest, ExecutionRequest, RoutingRequest, SandboxSpec,
 )
 from mana_agent.utils.redaction import redact_secrets
+from mana_agent.config.settings import Settings
+from mana_agent.execution_supervisor import (
+    CompletionContract,
+    CompletionContractType,
+    ExecutionState as SupervisorState,
+    ExecutionSupervisor,
+    ExecutionSupervisorConfig,
+    SideEffectClassification,
+)
+from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
 
 from .config import FleetConfig
 from .errors import FleetDisabledError, FleetSelectionError, FleetStateError
@@ -37,12 +47,16 @@ class FleetService:
         self, *, config: FleetConfig, registry: FleetRegistry,
         execution_manager: ExecutionManager, store: FleetStore,
         event_sink: EventSink | None = None,
+        execution_supervisor: ExecutionSupervisor | None = None,
     ) -> None:
         self.config = config
         self.registry = registry
         self.execution_manager = execution_manager
         self.store = store
         self.event_sink = event_sink
+        self.execution_supervisor = execution_supervisor or ExecutionSupervisor(
+            ExecutionSupervisorConfig.from_settings(Settings())
+        )
         events = store.events()
         self._sequence = events[-1].sequence if events else 0
         self._cancelled_jobs: set[str] = set()
@@ -134,6 +148,7 @@ class FleetService:
             cells=tuple(cells), timeout_seconds=request.timeout_seconds,
             retain_workspaces=retain_workspaces,
             mutation_intent=request.intent == "mutation",
+            monetary_budget=request.budget,
         )
 
     @staticmethod
@@ -167,6 +182,64 @@ class FleetService:
                 execution_provider=provider_by_worker[worker_id], cell=cell,
             ))
         run = FleetRun(fleet_run_id=plan.fleet_run_id, plan=plan, jobs=tuple(jobs))
+        upstream_task_id = (
+            plan.task_id
+            if plan.task_id
+            and plan.task_id != plan.fleet_run_id
+            and self.execution_supervisor.store.get_task_or_none(plan.task_id) is not None
+            else None
+        )
+        self.execution_supervisor.create_task(
+            task_id=plan.fleet_run_id,
+            parent_task_id=upstream_task_id,
+            task_type="fleet_run",
+            assigned_agent="fleet",
+            runtime_provider="fleet",
+            workspace_path=plan.repository_path,
+            routing_decision_id=plan.decision.decision_id,
+            side_effect_classification=(
+                SideEffectClassification.UNKNOWN
+                if plan.mutation_intent
+                else SideEffectClassification.READ_ONLY
+            ),
+            completion_contract=[CompletionContract(
+                contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                metadata={
+                    "required_keys": ["fleet_run_id", "summary_present"],
+                    "expected_values": {
+                        "fleet_run_id": plan.fleet_run_id,
+                        "summary_present": True,
+                    },
+                },
+            )],
+            estimated_cost=plan.decision.estimated_cost or 0.0,
+            monetary_budget=plan.monetary_budget,
+        )
+        self.execution_supervisor.queue(plan.fleet_run_id)
+        per_job_estimated_cost = (
+            (plan.decision.estimated_cost or 0.0) / max(1, len(jobs))
+        )
+        for job in jobs:
+            self.execution_supervisor.create_task(
+                task_id=job.job_id,
+                parent_task_id=plan.fleet_run_id,
+                task_type="fleet_verification",
+                assigned_agent="fleet",
+                runtime_provider=job.execution_provider,
+                workspace_path=plan.repository_path,
+                routing_decision_id=plan.decision.decision_id,
+                side_effect_classification=(
+                    SideEffectClassification.UNKNOWN
+                    if plan.mutation_intent
+                    else SideEffectClassification.READ_ONLY
+                ),
+                completion_contract=[CompletionContract(
+                    contract_type=CompletionContractType.COMMAND_SUCCEEDED,
+                )],
+                estimated_cost=per_job_estimated_cost,
+                monetary_budget=plan.monetary_budget,
+            )
+            self.execution_supervisor.queue(job.job_id)
         self.store.save_run(run)
         self._emit("fleet.run.created", run=run, job_count=len(jobs))
         for job in jobs:
@@ -175,6 +248,42 @@ class FleetService:
 
     async def execute(self, run: FleetRun) -> FleetRun:
         self._require_enabled()
+        supervised_run = self.execution_supervisor.store.get_task(run.fleet_run_id)
+        if supervised_run.state == SupervisorState.RETRY_SCHEDULED:
+            supervised_run = self.execution_supervisor.release_retry(run.fleet_run_id)
+        supervised_run, run_lease_token = self.execution_supervisor.acquire_lease(
+            run.fleet_run_id,
+            owner="fleet:coordinator",
+            worker="fleet:coordinator",
+        )
+        self.execution_supervisor.start(
+            run.fleet_run_id,
+            attempt_id=supervised_run.attempt_id,
+            lease_token=run_lease_token,
+        )
+        run_heartbeat_stop = asyncio.Event()
+        run_heartbeat_errors: list[str] = []
+
+        async def renew_run_lease() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        run_heartbeat_stop.wait(),
+                        timeout=self.execution_supervisor.config.heartbeat_seconds,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        self.execution_supervisor.heartbeat(
+                            run.fleet_run_id,
+                            attempt_id=supervised_run.attempt_id,
+                            lease_token=run_lease_token,
+                        )
+                    except Exception as exc:
+                        run_heartbeat_errors.append(str(exc))
+                        return
+
+        run_heartbeat = asyncio.create_task(renew_run_lease())
         semaphore = asyncio.Semaphore(self.config.max_concurrent_jobs)
         worker_semaphores = {
             job.worker_id: asyncio.Semaphore(max(
@@ -193,6 +302,13 @@ class FleetService:
             if run.plan.mutation_intent and not job.revalidated:
                 job.state = FleetJobState.REVALIDATION_REQUIRED
                 job.updated_at = utc_now()
+                supervised = self.execution_supervisor.store.get_task_or_none(job.job_id)
+                if supervised is not None and supervised.state == SupervisorState.QUEUED:
+                    self.execution_supervisor.transition(
+                        job.job_id,
+                        SupervisorState.WAITING,
+                        recovery_reason="mutation requires explicit Fleet revalidation",
+                    )
                 self.store.save_run(run.model_copy(update={"jobs": tuple(run.jobs)}))
                 return
             async with semaphore, worker_semaphores[job.worker_id]:
@@ -201,13 +317,87 @@ class FleetService:
                 updated = run.model_copy(update={"results": tuple(results), "updated_at": utc_now()})
                 self.store.save_run(updated)
 
-        await asyncio.gather(*(execute_job(job) for job in run.jobs))
-        summary = summarize_run(run.plan, results, run.jobs)
+        try:
+            await asyncio.gather(*(execute_job(job) for job in run.jobs))
+            for escrow in self.execution_supervisor.store.unacknowledged_results(
+                run.fleet_run_id
+            ):
+                child = self.execution_supervisor.store.get_task(escrow.task_id)
+                if child.state == SupervisorState.COMPLETED:
+                    self.execution_supervisor.acknowledge_result(
+                        escrow.result_id,
+                        parent_task_id=run.fleet_run_id,
+                    )
+            summary = summarize_run(run.plan, results, run.jobs)
+        except BaseException as exc:
+            current = self.execution_supervisor.store.get_task(run.fleet_run_id)
+            if current.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+                self.execution_supervisor.transition(
+                    run.fleet_run_id,
+                    SupervisorState.FAILED,
+                    reason=f"Fleet run coordination failed: {exc}",
+                )
+            raise
+        finally:
+            run_heartbeat_stop.set()
+            await run_heartbeat
+        if run_heartbeat_errors:
+            current = self.execution_supervisor.store.get_task(run.fleet_run_id)
+            if current.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+                self.execution_supervisor.transition(
+                    run.fleet_run_id,
+                    SupervisorState.FAILED,
+                    reason=f"Fleet run heartbeat failed: {run_heartbeat_errors[-1]}",
+                )
+            supervisor_state = SupervisorState.FAILED
+            supervision_error = run_heartbeat_errors[-1]
+        else:
+            supervision_error = ""
+            try:
+                supervised_run = self.execution_supervisor.submit_result(
+                    run.fleet_run_id,
+                    attempt_id=supervised_run.attempt_id,
+                    lease_token=run_lease_token,
+                    payload={
+                        "fleet_run_id": run.fleet_run_id,
+                        "summary_present": True,
+                        "summary": summary.model_dump(mode="json"),
+                    },
+                )
+            except ExecutionSupervisorError as exc:
+                supervision_error = str(exc)
+                supervisor_state = self.execution_supervisor.store.get_task(
+                    run.fleet_run_id
+                ).state
+            else:
+                supervisor_state = supervised_run.state
         completed = run.model_copy(
-            update={"results": tuple(results), "summary": summary, "updated_at": utc_now()}
+            update={
+                "results": tuple(results),
+                "summary": summary,
+                "updated_at": utc_now(),
+                "metadata": {
+                    **run.metadata,
+                    "execution_supervisor_state": supervisor_state.value,
+                    "execution_supervisor_error": supervision_error,
+                },
+            }
         )
         self.store.save_run(completed)
-        self._emit("fleet.comparison.completed", run=completed, outcome=summary.outcome.value)
+        self._emit(
+            "fleet.comparison.completed"
+            if supervisor_state == SupervisorState.COMPLETED
+            else "fleet.comparison.failed",
+            run=completed,
+            outcome=summary.outcome.value,
+            supervisor_state=supervisor_state.value,
+            error=supervision_error,
+        )
+        if supervisor_state != SupervisorState.COMPLETED:
+            raise FleetStateError(
+                "Fleet results were persisted, but durable run completion was not verified: "
+                f"{supervision_error or supervisor_state.value}"
+            )
         return completed
 
     async def _execute_job(self, run: FleetRun, job: FleetJob) -> FleetJobResult:
@@ -226,7 +416,50 @@ class FleetService:
         stderr_parts: list[str] = []
         artifacts: list[ArtifactReference] = []
         final_state = FleetJobState.FAILED
+        supervisor_attempt_id = ""
+        supervisor_token = ""
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task: asyncio.Task[None] | None = None
+        heartbeat_failures: list[str] = []
+
+        async def renew_lease() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        heartbeat_stop.wait(),
+                        timeout=self.execution_supervisor.config.heartbeat_seconds,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        self.execution_supervisor.heartbeat(
+                            job.job_id,
+                            attempt_id=supervisor_attempt_id,
+                            lease_token=supervisor_token,
+                        )
+                    except Exception as exc:
+                        heartbeat_failures.append(str(exc))
+                        return
         try:
+            supervised = self.execution_supervisor.store.get_task(job.job_id)
+            if supervised.state == SupervisorState.RETRY_SCHEDULED:
+                supervised = self.execution_supervisor.release_retry(job.job_id)
+            if supervised.state == SupervisorState.WAITING:
+                supervised = self.execution_supervisor.queue(job.job_id)
+            if supervised.state == SupervisorState.CREATED:
+                supervised = self.execution_supervisor.queue(job.job_id)
+            supervised, supervisor_token = self.execution_supervisor.acquire_lease(
+                job.job_id,
+                owner=f"fleet:{job.worker_id}",
+                worker=job.worker_id,
+            )
+            supervisor_attempt_id = supervised.attempt_id
+            self.execution_supervisor.start(
+                job.job_id,
+                attempt_id=supervisor_attempt_id,
+                lease_token=supervisor_token,
+            )
+            heartbeat_task = asyncio.create_task(renew_lease())
             if self._is_cancelled(job.job_id):
                 raise asyncio.CancelledError
             local_workspace = self._create_isolated_source(run.plan, job)
@@ -242,6 +475,11 @@ class FleetService:
                 cleanup_policy="retain" if run.plan.retain_workspaces else "always",
                 task_id=job.task_id, session_id=job.session_id,
                 workspace_id=job.workspace_id,
+                execution_id=job.job_id,
+                root_task_id=job.fleet_run_id,
+                attempt_id=supervisor_attempt_id,
+                checkpoint_id=supervised.checkpoint_id,
+                repository_id=job.repository_id,
                 labels={"fleet_run_id": job.fleet_run_id, "fleet_job_id": job.job_id, "worker_id": job.worker_id},
             )
             routing = RoutingRequest(
@@ -256,14 +494,26 @@ class FleetService:
             self._emit("fleet.workspace.ready", job=job)
             commit_result = await self.execution_manager.execute(
                 context,
-                ExecutionRequest(argv=["git", "rev-parse", "HEAD"], timeout_seconds=30),
+                ExecutionRequest(
+                    argv=["git", "rev-parse", "HEAD"], timeout_seconds=30,
+                    execution_id=job.job_id, task_id=job.task_id,
+                    root_task_id=job.fleet_run_id, attempt_id=supervisor_attempt_id,
+                    checkpoint_id=supervised.checkpoint_id, session_id=job.session_id,
+                    workspace_id=job.workspace_id, repository_id=job.repository_id,
+                ),
             )
             if commit_result.exit_code != 0 or commit_result.stdout.strip() != run.plan.repository_commit:
                 failure = FailureClassification.REPOSITORY_TRANSFER_FAILURE
                 raise FleetStateError("remote workspace commit identity does not match the verification plan")
             status_result = await self.execution_manager.execute(
                 context,
-                ExecutionRequest(argv=["git", "status", "--porcelain"], timeout_seconds=30),
+                ExecutionRequest(
+                    argv=["git", "status", "--porcelain"], timeout_seconds=30,
+                    execution_id=job.job_id, task_id=job.task_id,
+                    root_task_id=job.fleet_run_id, attempt_id=supervisor_attempt_id,
+                    checkpoint_id=supervised.checkpoint_id, session_id=job.session_id,
+                    workspace_id=job.workspace_id, repository_id=job.repository_id,
+                ),
             )
             if status_result.exit_code != 0 or status_result.stdout.strip():
                 failure = FailureClassification.REPOSITORY_TRANSFER_FAILURE
@@ -280,6 +530,10 @@ class FleetService:
                     ExecutionRequest(
                         argv=list(argv), timeout_seconds=run.plan.timeout_seconds,
                         capture_limit_bytes=self.config.max_log_bytes,
+                        execution_id=job.job_id, task_id=job.task_id,
+                        root_task_id=job.fleet_run_id, attempt_id=supervisor_attempt_id,
+                        checkpoint_id=supervised.checkpoint_id, session_id=job.session_id,
+                        workspace_id=job.workspace_id, repository_id=job.repository_id,
                     ),
                 )
                 stdout_parts.append(result.stdout)
@@ -338,9 +592,16 @@ class FleetService:
                 job.worker_id, success=final_state is FleetJobState.COMPLETED,
                 failure=(stderr_parts[-1] if stderr_parts else ""),
             )
+            heartbeat_stop.set()
+            if heartbeat_task is not None:
+                await heartbeat_task
         if cleanup_failure and failure is None:
             failure = FailureClassification.CLEANUP_FAILURE
             final_state = FleetJobState.FAILED
+        if heartbeat_failures and final_state is not FleetJobState.CANCELLED:
+            failure = FailureClassification.WORKER_DISCONNECT
+            final_state = FleetJobState.FAILED
+            stderr_parts.append(f"execution supervisor heartbeat failed: {heartbeat_failures[-1]}")
         job.state = final_state
         job.workspace_state = (
             WorkspaceState.RETAINED if run.plan.retain_workspaces else
@@ -360,6 +621,44 @@ class FleetService:
             artifacts=tuple(artifacts), failure_classification=failure,
             cleanup_failure=cleanup_failure,
         )
+        supervised = self.execution_supervisor.store.get_task_or_none(job.job_id)
+        if supervised is not None and supervisor_attempt_id:
+            if final_state is FleetJobState.COMPLETED:
+                try:
+                    verified = self.execution_supervisor.submit_result(
+                        job.job_id,
+                        attempt_id=supervisor_attempt_id,
+                        lease_token=supervisor_token,
+                        payload={
+                            "exit_code": exit_code,
+                            "worker_id": job.worker_id,
+                            "artifacts": [item.model_dump(mode="json") for item in artifacts],
+                        },
+                    )
+                except ExecutionSupervisorError as exc:
+                    final_state = FleetJobState.FAILED
+                    job.state = final_state
+                    result = result.model_copy(update={
+                        "state": final_state,
+                        "failure_classification": FailureClassification.ARTIFACT_COLLECTION_FAILURE,
+                        "stderr": f"{result.stderr}\nCompletion supervision failed: {exc}".strip(),
+                    })
+                else:
+                    if verified.state != SupervisorState.COMPLETED:
+                        final_state = FleetJobState.FAILED
+                        job.state = final_state
+                        result = result.model_copy(update={
+                            "state": final_state,
+                            "failure_classification": FailureClassification.ARTIFACT_COLLECTION_FAILURE,
+                        })
+            elif final_state is FleetJobState.CANCELLED:
+                self.execution_supervisor.cancel(job.job_id, reason="fleet job cancelled", propagate=False)
+            elif supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+                self.execution_supervisor.transition(
+                    job.job_id,
+                    SupervisorState.FAILED,
+                    reason=(stderr_parts[-1] if stderr_parts else final_state.value),
+                )
         self._emit(
             "fleet.job.completed" if final_state is FleetJobState.COMPLETED else "fleet.job.failed",
             job=job, failure_classification=failure.value if failure else "",
@@ -405,11 +704,18 @@ class FleetService:
             raise FleetStateError("completed fleet jobs cannot be cancelled or re-executed")
         self._cancelled_jobs.add(job_id)
         self.store.request_cancellation(job_id)
+        supervised = self.execution_supervisor.store.get_task_or_none(job_id)
+        if supervised is not None and supervised.state not in {
+            SupervisorState.COMPLETED, SupervisorState.FAILED, SupervisorState.CANCELLED,
+        }:
+            self.execution_supervisor.cancel(job_id, reason="fleet cancellation requested", propagate=False)
 
     def _is_cancelled(self, job_id: str) -> bool:
         return job_id in self._cancelled_jobs or self.store.cancellation_requested(job_id)
 
     def recover(self) -> list[FleetRun]:
+        self.execution_supervisor.reconnect_tree()
+        self.execution_supervisor.recover()
         recovered: list[FleetRun] = []
         terminal = {
             FleetJobState.COMPLETED, FleetJobState.FAILED, FleetJobState.CANCELLED,
@@ -420,9 +726,14 @@ class FleetService:
             changed = False
             for job in run.jobs:
                 if job.state not in terminal:
+                    supervised = self.execution_supervisor.store.get_task_or_none(job.job_id)
                     job.state = (
-                        FleetJobState.REVALIDATION_REQUIRED
-                        if run.plan.mutation_intent else FleetJobState.FAILED
+                        FleetJobState.QUEUED
+                        if supervised is not None
+                        and supervised.state == SupervisorState.RETRY_SCHEDULED
+                        else FleetJobState.REVALIDATION_REQUIRED
+                        if run.plan.mutation_intent
+                        else FleetJobState.FAILED
                     )
                     job.updated_at = utc_now()
                     changed = True

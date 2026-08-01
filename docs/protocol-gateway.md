@@ -8,6 +8,13 @@ Mana-Agent exposes three distinct protocol roles through one runtime:
 
 ACP and A2A are transport adapters around `AgentChatGateway`. They reuse its workspace/session records, durable history, memory scope, lane coordinator, task board, routing decisions, tool policy, and verification path. They do not call models, coding agents, or tools directly. Asynchronous turns are serialized at the shared gateway boundary because the underlying memory and tool stack is session-bound.
 
+The stack also creates one session-scoped `ContextCostGovernor`. It publishes
+`context.budget`, `context.compacted`, `context.capabilities_loaded`,
+`context.capabilities_unloaded`, `cost.updated`, `budget.warning`, and
+`budget.blocked` through the existing `ChatEvent` and `ExecutionEventHub`
+envelope. WebSocket replay needs no second protocol. Metadata contains counts,
+costs, thresholds, and artifact hashes, never raw prompts or full outputs.
+
 Install protocol support without adding it to core installations:
 
 ```bash

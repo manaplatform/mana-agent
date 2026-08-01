@@ -21,11 +21,23 @@ class CleanupController:
                 continue
             source = handle.workspace_path or "."
             try:
-                spec = SandboxSpec(repository_source=source, task_id=handle.task_id, session_id=handle.session_id, workspace_id=handle.workspace_id)
+                spec = SandboxSpec(
+                    repository_source=source,
+                    execution_id=handle.execution_id, task_id=handle.task_id,
+                    root_task_id=handle.root_task_id, attempt_id=handle.attempt_id,
+                    checkpoint_id=handle.checkpoint_id, session_id=handle.session_id,
+                    workspace_id=handle.workspace_id, repository_id=handle.repository_id,
+                )
             except ValueError:
                 # Remote workspace paths need not exist locally. The provider has
                 # enough persisted handle metadata to clean them.
-                spec = SandboxSpec.model_construct(repository_source=source, task_id=handle.task_id, session_id=handle.session_id, workspace_id=handle.workspace_id)
+                spec = SandboxSpec.model_construct(
+                    repository_source=source,
+                    execution_id=handle.execution_id, task_id=handle.task_id,
+                    root_task_id=handle.root_task_id, attempt_id=handle.attempt_id,
+                    checkpoint_id=handle.checkpoint_id, session_id=handle.session_id,
+                    workspace_id=handle.workspace_id, repository_id=handle.repository_id,
+                )
             context = SandboxExecutionContext(
                 handle=handle, spec=spec,
                 routing=RoutingDecision(decision_id="restart-recovery", selected_provider=handle.provider, requirements_considered=["expired-lease" if expired else "interrupted-lifecycle"], policy_rule="recovery"),

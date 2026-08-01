@@ -1,5 +1,11 @@
 # Mana Fleet
 
+Fleet jobs are also durable execution-supervisor children when their selected
+task already has a supervised parent. Each job holds its own attempt lease and
+heartbeat, verifies a zero exit status before completion, and preserves worker
+loss as retry-scheduled only for read-only plans. Mutation plans remain
+revalidation-required and are never replayed from an ambiguous worker failure.
+
 Mana Fleet is the disabled-by-default orchestration layer for trusted,
 cross-platform repository verification. It does not replace the execution
 fabric, reverse-worker gateway, Eval Lab, taskboard, permission broker, or event

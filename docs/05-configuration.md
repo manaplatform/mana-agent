@@ -1,5 +1,78 @@
 # Configuration
 
+## Execution supervisor
+
+The supervisor is enabled by default and stores process-independent state below
+`~/.mana/execution`. The typed settings are:
+
+```toml
+MANA_EXECUTION_SUPERVISOR_ENABLED = true
+MANA_EXECUTION_SUPERVISOR_LEASE_SECONDS = 60
+MANA_EXECUTION_SUPERVISOR_HEARTBEAT_SECONDS = 15
+MANA_EXECUTION_SUPERVISOR_CHECKPOINT_SECONDS = 60
+MANA_EXECUTION_SUPERVISOR_RETRY_BUDGET = 3
+MANA_EXECUTION_SUPERVISOR_MAX_REPLANS = 2
+MANA_EXECUTION_SUPERVISOR_MAX_CHILD_DEPTH = 5
+MANA_EXECUTION_SUPERVISOR_MAX_CHILDREN = 20
+MANA_EXECUTION_SUPERVISOR_MAX_TOTAL_SUBTASKS = 100
+MANA_EXECUTION_SUPERVISOR_MAX_CONCURRENT_CHILDREN = 4
+MANA_EXECUTION_SUPERVISOR_STARTUP_RECOVERY = true
+MANA_EXECUTION_SUPERVISOR_VERIFY_ARTIFACTS = true
+MANA_EXECUTION_SUPERVISOR_ALLOW_UNKNOWN_RETRY = false
+```
+
+Heartbeat duration must be shorter than lease duration. Unknown-side-effect
+retry is false by design; enabling it is an explicit operator risk decision,
+not a routing fallback. Normal Mana precedence still applies: persisted
+`~/.mana/config.toml`, protected secrets where applicable, then safe defaults.
+Repository `.env` files do not override these persisted settings.
+
+Disabling the supervisor is fail-closed: execution entry points refuse to start
+unsupervised work. Disabling artifact verification likewise leaves submitted
+results in `completed_pending_verification`; it never converts verification-off
+into an implicit success path.
+
+## Context and cost governor
+
+Every gateway session owns one context/cost governor shared by chat, routing,
+the internal coding runtime, tool workers, and Codex. It reuses the existing
+`MANA_ROUTING_*` limits; these settings control allocation and visibility:
+
+`AskAgent` construction requires an explicit `ContextCostGovernor`. Gateway,
+worker, Telegram, and TUI factories must pass the governor with the session
+identity; a missing governor is a construction error and does not select an
+ungoverned fallback path.
+
+```toml
+MANA_CONTEXT_GOVERNOR_ENABLED = true
+MANA_CONTEXT_GOVERNOR_MODE = "observe" # observe, soft, enforce
+MANA_CONTEXT_WARNING_RATIO = 0.70
+MANA_CONTEXT_COMPACT_RATIO = 0.80
+MANA_CONTEXT_MAX_UTILIZATION = 0.85
+MANA_CONTEXT_HARD_LIMIT_RATIO = 0.95
+MANA_CONTEXT_RESPONSE_RESERVE_RATIO = 0.12
+MANA_CONTEXT_RESPONSE_RESERVE_TOKENS = 0
+MANA_CONTEXT_TOOL_RESULT_MAX_TOKENS = 2000
+MANA_CONTEXT_HISTORY_MAX_TOKENS = 8000
+MANA_CONTEXT_RETRIEVAL_MAX_TOKENS = 12000
+MANA_CONTEXT_LAZY_CAPABILITIES = true
+MANA_CONTEXT_CAPABILITY_IDLE_STEPS = 3
+MANA_CONTEXT_ARTIFACT_RETENTION_DAYS = 30
+MANA_CONTEXT_COST_LOG_ENABLED = true
+MANA_CONTEXT_COST_LOG_RETENTION_DAYS = 30
+```
+
+Ratios must increase strictly from warning through hard limit. Start in
+`observe`, inspect `mana-agent context report --since 7d`, move to `soft` for
+reversible compaction, then use `enforce` for hard rejection. Configured model
+profile prices are exact; fallback prices and missing usage are labeled
+estimated. A `MANA_MODEL_PROFILES` entry whose configuration contains
+`pricing_fallback=true` supplies the fallback input/output rates without
+creating a second task-cost budget. Redacted analytics rotate under
+`~/.mana/logs/context-cost/`, while
+lossless permitted tool results live under
+`~/.mana/context-cache/tool-results/`; both honor `MANA_HOME`.
+
 ## Teach Mode
 
 The optional `[teach]` table controls semantic event sources, user-data storage,

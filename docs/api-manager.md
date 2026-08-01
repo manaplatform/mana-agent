@@ -43,6 +43,14 @@ which of documentation inspection, integration import/configuration, operation s
 execution are necessary. The gateway records completion only when successful tool evidence exists
 for every declared action. A discovered operation without `api_request_execute` evidence therefore
 returns `api_workflow_incomplete`; an exact pending request remains awaiting TUI/dashboard approval.
+If execution itself succeeded but another declared lifecycle action remains incomplete, the route
+keeps its incomplete status while still showing the independently validated, redacted HTTP response.
+Every workflow that declares request execution must also declare and complete operation search and
+a redacted request preview, including read-only calls. Successful execution evidence requires an
+executed upstream result and HTTP status; undeclared supporting actions still fail closed. Calling
+an already-saved suitable integration does not declare documentation inspection or import merely
+because the integration record contains documentation provenance; those actions are required only
+when the current turn actually inspects and imports or refreshes documentation.
 
 ## Supported documentation
 
@@ -58,8 +66,9 @@ servers are accepted only when an HTTP(S) documentation source gives them a safe
 
 Unstructured documentation never uses heuristic endpoint extraction. Its dedicated
 `api_docs_import_semantic` tool requires both the inspected text evidence and the typed semantic
-definition, so the model cannot accidentally submit prose without the validated extraction. The
-model must cite every operation using the imported source or a URL present in that source, identify
+definition plus the exact inspected documentation reference, so the model cannot accidentally
+submit prose without the validated extraction or lose rendered-page provenance. The model must cite
+every operation using that reference or a URL present in that source, identify
 only fields that were inferred (an empty list is valid for fully documented operations), and leave
 undocumented required values and authentication unresolved. Parameters used solely to carry
 authentication are normalized into authentication metadata instead of being exposed as ordinary
@@ -79,7 +88,9 @@ Import this pasted API documentation as an ephemeral one-time integration.
 Formal specifications are imported directly. For prose, Mana-Agent first produces and validates a
 semantic definition. Durable records use stable integration and operation identifiers and remain
 available after CLI, gateway, or dashboard restart. Refreshing documentation appends a version
-record; it does not silently replace the integration identity.
+record; it does not silently replace the integration identity. When an imported stable identity
+already exists, the model must explicitly retry the import with that exact identity as
+`refresh_integration_id`; the registry does not silently convert a create into a refresh.
 
 ## Credentials and authentication
 
@@ -108,6 +119,10 @@ OAuth browser authorization is represented but is not automatically performed.
 
 Credential references must preserve their URI form on every import or update. `IPSTACK_TOKEN`, for
 example, is rejected; use `env://IPSTACK_TOKEN` and provide the value to the Mana process separately.
+When an imported operation fully identifies its authentication scheme but has no saved credential
+binding, preview and execution may supply that explicit reference for the current request. This does
+not persist the reference or relax unresolved authentication whose scheme or parameter shape is
+still unknown.
 
 ## Calling an operation
 
@@ -127,16 +142,20 @@ the rendered browser. It can click, wait, or scroll only to expand API operation
 then re-inspects the page for the documented server, method, path, parameters, authentication, and
 responses. It cannot type into or submit forms, sign in, grant consent, or interact with CAPTCHA or
 MFA controls. The returned rendered evidence is imported through `api_docs_import_semantic`, never
-by retrying the redirecting URL.
+by retrying the redirecting URL. Successful rendered inspection remains completion evidence even
+when its human-facing text preview is clipped; request execution still requires the complete typed
+executor result.
 
 For natural-language calls, the API route retrieves candidates from enabled integrations. A
 structured model decision must select one of those candidates with sufficient confidence.
 Mana-Agent asks only for genuinely missing required values, then validates path/query/header/cookie
 parameters and the request body. Unknown fields are rejected unless the imported operation
-explicitly permits them. The base URL always comes from the saved operation.
+explicitly permits them. The standard `Accept` transport header is allowed and validated even when
+it is not declared as an OpenAPI operation parameter. The base URL always comes from the saved
+operation.
 
-Read-only calls may execute after validation. Create, update, delete, and unknown/high-risk calls
-first return a redacted preview and a session-bound approval request. The trusted TUI or dashboard
+All calls receive a redacted preview after validation. Create, update, delete, and unknown/high-risk
+calls additionally return a session-bound approval request. The trusted TUI or dashboard
 can approve that exact request once; the stored method, URL, headers, and body fingerprint must
 still match before execution.
 

@@ -349,6 +349,10 @@ source vocabulary. In particular, command is tool-free and requires exactly ["no
 When no supported available capability can satisfy a required source, return route capability_error
 with that source and an exact error_code. unsupported is a distinct model decision, never a
 fallback. Direct URL signals are supplied separately; do not treat them as repository evidence.
+Open-ended discovery requests (for example, finding remote jobs, companies, products, or current
+opportunities) must select search with required_sources=["search"]. Browser is only for inspecting
+one or more explicit direct URLs supplied by the user or selected in target_urls; never select a
+browser source without at least one target URL.
 
 required_sources is required for every decision and must never be omitted or empty. Use exactly
 ["none"] for conversation and unsupported. Use the route's corresponding source for ordinary
@@ -485,7 +489,49 @@ class EntryRouter:
                         for part in content
                     )
                 decision_payload = _extract_json(str(content))
-            decision = self._validate(decision_payload, context=context)
+            try:
+                decision = self._validate(decision_payload, context=context)
+            except EntryRoutingError as validation_error:
+                # This is a bounded correction request, not a static reroute:
+                # the model must supply a new, fully validated decision.
+                if "browser source requires target_urls" not in str(validation_error):
+                    raise
+                repair_payload = {
+                    **payload,
+                    "previous_invalid_decision": decision_payload,
+                    "validation_error": str(validation_error),
+                    "correction": (
+                        "Return a new complete routing decision. Open-ended discovery must use "
+                        'route="search" and required_sources=["search"]; browser requires target_urls.'
+                    ),
+                }
+                repair_messages = [
+                    SystemMessage(content=ENTRY_ROUTER_PROMPT),
+                    HumanMessage(
+                        content=json.dumps(
+                            repair_payload, ensure_ascii=False, sort_keys=True
+                        )
+                    ),
+                ]
+                if callable(structured_output):
+                    response = structured_output(
+                        EntryRoutingOutput, method="json_schema", strict=True
+                    ).invoke(repair_messages)
+                    decision_payload = EntryRoutingOutput.model_validate(
+                        response
+                    ).model_dump()
+                else:
+                    response = self.llm.invoke(repair_messages)
+                    content = getattr(response, "content", response)
+                    if isinstance(content, list):
+                        content = " ".join(
+                            str(part.get("text", part))
+                            if isinstance(part, dict)
+                            else str(part)
+                            for part in content
+                        )
+                    decision_payload = _extract_json(str(content))
+                decision = self._validate(decision_payload, context=context)
             record_current(
                 "model.decision",
                 {

@@ -402,7 +402,11 @@ class MainAgent:
             done_reason = "Multi-agent hierarchy completed and reviewer approved evidence."
             if managed_workspace is not None:
                 done_reason += " Managed worktree is a merge candidate; explicit merge intent is still required."
-            self.taskboard.update_status(task.task_id, TaskStatus.DONE, reason=done_reason)
+            self.taskboard.update_status(
+                task.task_id,
+                TaskStatus.VERIFYING,
+                reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
+            )
             answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
         else:
             self.taskboard.update_status(task.task_id, TaskStatus.BLOCKED, reason="Reviewer rejected weak or incomplete hierarchy evidence.")
@@ -566,7 +570,11 @@ class MainAgent:
             manager.run_next(worker_agent_id=worker_agent_id)
             completed = manager.get_job(job.job_id)
             if completed.status == QueueJobStatus.DONE:
-                self.taskboard.update_status(child.task_id, TaskStatus.DONE, reason="Repository context run completed.")
+                self.taskboard.update_status(
+                    child.task_id,
+                    TaskStatus.VERIFYING,
+                    reason="Repository context run completed; supervisor verification is required.",
+                )
             else:
                 self.taskboard.update_status(
                     child.task_id,

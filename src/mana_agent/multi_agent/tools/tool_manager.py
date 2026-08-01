@@ -328,8 +328,11 @@ class ToolsManager:
             provider_override=routing.explicit_provider,
             repository_source=cwd,
             task_id=job.task_id,
+            execution_id=job.job_id,
+            root_task_id=str(job.root_task_id or job.task_id),
             session_id=str(getattr(job, "session_id", "") or ""),
             workspace_id=str(getattr(job, "workspace_id", "") or ""),
+            repository_id=str(getattr(job, "primary_repository_id", "") or ""),
             execution_timeout_seconds=int((job.payload or {}).get("timeout_seconds") or 120),
         )
         result = self.execution_manager.execute_once_sync(
@@ -338,6 +341,12 @@ class ToolsManager:
             ExecutionRequest(
                 argv=shell_argv,
                 timeout_seconds=spec.execution_timeout_seconds,
+                execution_id=job.job_id,
+                task_id=job.task_id,
+                root_task_id=str(job.root_task_id or job.task_id),
+                session_id=str(getattr(job, "session_id", "") or ""),
+                workspace_id=str(getattr(job, "workspace_id", "") or ""),
+                repository_id=str(getattr(job, "primary_repository_id", "") or ""),
             ),
         )
         return ToolResult(

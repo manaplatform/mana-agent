@@ -30,6 +30,11 @@ The returned `RoutingDecision` includes request/decision/task identity, selected
 
 The router enforces per-task token/cost limits, remaining session cost, competition cost, verification cost, retry cost, and a verification reserve ratio. Implementation candidates are compared against the spend remaining after the reserve. If none fit, routing stops with the rejected constraints. A controlled override is possible only when the validated task policy explicitly enables it.
 
+The context-cost governor contributes cumulative remaining token and cost limits
+to routing only in `enforce` mode. `observe` records usage without changing
+execution, while `soft` may compact context but does not reject model candidates
+by replacing their configured routing budgets with cumulative remaining values.
+
 ## Candidate competition
 
 Competition is permitted only when the main coordinating model requests it and gateway policy confirms sufficient evidence, at least two compatible models, an independent verifier, isolated execution, no ownership conflict, concurrency, latency, and total candidate-plus-verification budget. Difficulty alone does not enable competition. The evidence score includes demand, initial-model uncertainty, similar failures, historical output variance and competition benefit, candidate diversity, and multiple plausible strategies. `CandidateCompetition` requires distinct isolated worktrees or patch roots and rejects the active checkout, duplicate roots, candidates without a diff and executed checks, and incomplete verifier judgments.
