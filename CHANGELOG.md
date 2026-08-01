@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Fixed API call workflows with a supplied documentation URL and an already saved matching
+  integration. Gateway guidance now makes the model list saved integrations immediately after its
+  workflow decision, use a matching enabled integration's operation search/preview/execution path,
+  and import or refresh documentation only when the saved integration cannot satisfy the request.
+  This prevents browser documentation recovery from consuming the request lifecycle and leaving
+  required integration-import, operation-search, preview, and execution evidence incomplete.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py`.
+
 - Updated test doubles and lifecycle fixtures for the strict gateway and supervisor contracts: bound LLM fakes now accept invocation configuration, Gmail follow-ups make an explicit fresh-data checkpoint decision, completed multi-task children carry authoritative supervisor evidence, and the real Mana-home guard checks its blocked write target without observing unrelated concurrent user-state updates.
   - User verification required: `python -m pytest tests/test_ask_agent.py tests/test_llm_logging.py tests/gateway/test_entry_routing.py tests/gateway/test_multi_task_orchestration.py tests/test_runtime_artifact_isolation.py`.
 

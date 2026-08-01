@@ -105,6 +105,93 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
     assert '"status_code": 200' in result.answer
 
 
+def test_api_route_treats_documentation_url_as_optional_when_integration_is_saved(
+    tmp_path: Path,
+) -> None:
+    class ModelToolExecutor:
+        def run(self, *, system_prompt: str, **kwargs):
+            assert (
+                "A supplied documentation URL is not, by itself, evidence that import or refresh "
+                "is required." in system_prompt
+            )
+            assert "Immediately after the workflow decision, list saved integrations." in system_prompt
+            return SimpleNamespace(
+                answer="The saved news integration returned current reporting.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "task_intent": "retrieve current Iran-US news",
+                                    "required_actions": [
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
+                                    "reason": "A suitable saved news integration exists.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":[{"operation_id":"get_news"}]}',
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+                    },
+                    {
+                        "tool_name": "api_request_execute",
+                        "status": "ok",
+                        "output_preview": (
+                            '{"ok":true,"result":{"executed":true,"upstream_ok":true,'
+                            '"status_code":200}}'
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Use the saved Mediastack integration.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            session_id="session-api",
+            conversation_id="session-api",
+            turn_id="turn-api",
+        ),
+        text="Use this documentation URL and call the saved news API.",
+        ask_service=SimpleNamespace(ask_agent=ModelToolExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api"
+    assert result.payload["workflow_completion"]["required_actions"] == [
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    ]
+
+
 def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -> None:
     permission = {
         "ok": False,
