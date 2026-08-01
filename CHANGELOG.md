@@ -2372,3 +2372,9 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Added durable message-scoped turn state and follow-up classification so verified task completion cannot complete a conversation or cause later work to reuse an unrelated escrowed result.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_chat_turn_store.py tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_chat_gateway.py tests/test_conversation_service.py -q`.
+
+- Added one bounded model correction for browser decisions missing direct URLs, allowing open-ended discovery requests to return a new model-selected search route instead of failing at entry validation.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_entry_routing.py -q`.
+
+- Preserved informational conversation lane metadata and limited strict follow-up classification to routing models that expose the required structured-output contract; generic recovery still excludes completed tasks.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py -q`.

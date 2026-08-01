@@ -2335,6 +2335,10 @@ class AgentChatGateway:
                 # question, while preserving the existing shared-history and
                 # follow-up-memory behavior.
                 if entry_decision.route == "conversation":
+                    conversation_lane = self._lane_coordinator.select_lane(
+                        entry_route=entry_decision.route,
+                        model_lane=options.get("lane_id"),
+                    )
                     result = self._execute_entry_route(
                         decision=entry_decision,
                         context=route_context,
@@ -2344,6 +2348,7 @@ class AgentChatGateway:
                         sink=sink,
                         options=dict(options),
                     )
+                    result.payload["lane_id"] = conversation_lane.value
                     return self._finalize_turn_result(
                         result=result,
                         session_id=session_id,
@@ -2527,8 +2532,11 @@ class AgentChatGateway:
                             and str(item.get("lane") or "") == lane_id.value
                         )
                     ]
-                    if all_recovery_candidates:
-                        followup = FollowupClassifier(self._entry_router.llm).decide(
+                    followup_model = getattr(self._entry_router, "llm", None)
+                    if all_recovery_candidates and callable(
+                        getattr(followup_model, "with_structured_output", None)
+                    ):
+                        followup = FollowupClassifier(followup_model).decide(
                             message=text,
                             recent_history=list(state.get("history") or []),
                             candidates=all_recovery_candidates,

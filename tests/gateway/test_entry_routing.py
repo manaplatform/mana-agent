@@ -531,6 +531,44 @@ def test_router_rejects_missing_required_sources_instead_of_guessing(tmp_path: P
         raise AssertionError("invalid routing output must stop without selecting a source")
 
 
+def test_router_repairs_url_less_browser_discovery_with_a_new_model_decision() -> None:
+    registry = _registry()
+    payloads = iter(
+        [
+            {
+                "route": "browser",
+                "confidence": 0.9,
+                "reason": "research jobs",
+                "required_sources": ["browser"],
+                "target_urls": [],
+                "requires_live_data": True,
+            },
+            {
+                "route": "search",
+                "confidence": 0.95,
+                "reason": "open-ended job discovery needs search",
+                "required_sources": ["search"],
+                "target_urls": [],
+                "requires_live_data": True,
+            },
+        ]
+    )
+    router = EntryRouter(
+        llm=SimpleNamespace(
+            invoke=lambda _messages: SimpleNamespace(content=json.dumps(next(payloads)))
+        ),
+        registry=registry,
+    )
+
+    decision = router.route(
+        user_prompt="Find remote AI agent jobs",
+        context=SimpleNamespace(to_dict=lambda: {"session_id": "s"}),
+    )
+
+    assert decision.route == "search"
+    assert decision.required_sources == ("search",)
+
+
 def test_router_prompt_requires_a_none_source_for_ping() -> None:
     """Tool-free model decisions must still satisfy the explicit source contract."""
     assert 'required_sources is required for every decision and must never be omitted or empty' in ENTRY_ROUTER_PROMPT
