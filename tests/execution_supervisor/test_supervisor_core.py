@@ -19,8 +19,10 @@ from mana_agent.execution_supervisor.errors import (
     LeaseConflictError,
     RetrySafetyError,
     StaleLeaseError,
+    CompletionVerificationError,
 )
 from mana_agent.execution_supervisor.models import (
+    ActionRequestState,
     CheckpointRecord,
     CompletionContract,
     CompletionContractType,
@@ -593,7 +595,7 @@ def test_token_and_cost_budgets_block_result(runtime):
             payload={"ok": True},
             token_usage=2,
         )
-    assert supervisor.store.get_task(task.task_id).state == ExecutionState.FAILED
+    assert supervisor.store.get_task(task.task_id).state == ExecutionState.BUDGET_EXHAUSTED
 
 
 def test_duplicate_create_does_not_duplicate_event(runtime):
@@ -726,3 +728,65 @@ def test_atomic_store_retries_transient_replace_denial(runtime, monkeypatch):
 
     assert supervisor.store.get_task(task.task_id).task_id == task.task_id
     assert replace_calls == 2
+
+
+def test_consequential_action_duplicate_and_stale_generation_are_fenced(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    action = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="email_send",
+        action_fingerprint="recipient:subject:body-hash",
+        classification=SideEffectClassification.NON_IDEMPOTENT,
+    )
+    supervisor.update_action(action.action_id, request_state=ActionRequestState.STARTED)
+    with pytest.raises(RetrySafetyError, match="reconcile"):
+        supervisor.prepare_action(
+            task.task_id,
+            attempt_id=attempt_id,
+            lease_token=token,
+            tool_name="email_send",
+            action_fingerprint="recipient:subject:body-hash",
+            classification=SideEffectClassification.NON_IDEMPOTENT,
+        )
+
+    supervisor.retry(task.task_id, decision(task.task_id))
+    clock.advance(120)
+    supervisor.release_retry(task.task_id)
+    next_attempt, _next_token = running(supervisor, supervisor.store.get_task(task.task_id))
+    assert next_attempt != attempt_id
+    with pytest.raises(StaleLeaseError, match="generation"):
+        supervisor.update_action(
+            action.action_id,
+            request_state=ActionRequestState.SUCCEEDED,
+            external_receipt="provider-receipt",
+        )
+
+
+def test_completed_file_result_is_reverified_against_recorded_hash(runtime):
+    supervisor, _clock, tmp_path = runtime
+    output = tmp_path / "reverify.txt"
+    output.write_text("first", encoding="utf-8")
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    supervisor.set_completion_contract(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        contracts=[CompletionContract(
+            contract_type=CompletionContractType.FILE_EXISTS,
+            path="reverify.txt",
+            minimum_size=1,
+        )],
+    )
+    assert supervisor.submit_result(
+        task.task_id, attempt_id=attempt_id, lease_token=token, payload={}
+    ).state == ExecutionState.COMPLETED
+    output.write_text("changed", encoding="utf-8")
+
+    with pytest.raises(CompletionVerificationError, match="no longer satisfies"):
+        supervisor.reverify_completed(task.task_id)
+    assert supervisor.store.get_task(task.task_id).verification_status == VerificationStatus.FAILED

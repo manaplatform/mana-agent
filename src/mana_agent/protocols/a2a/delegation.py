@@ -203,12 +203,19 @@ class RemoteDelegationService:
                     reason=f"Remote result remains unverified: {exc}",
                 )
             else:
-                self.taskboard.update_status(
-                    local.task_id,
-                    TaskStatus.DONE
-                    if result.state == ExecutionState.COMPLETED
-                    else TaskStatus.NEEDS_REVIEW,
-                )
+                if result.state == ExecutionState.COMPLETED:
+                    manifest = self.execution_supervisor.store.artifact_manifest(local.task_id) or {}
+                    self.taskboard.project_supervisor_completion(
+                        local.task_id,
+                        supervisor_task=result,
+                        verification_evidence={
+                            "result_id": result.result_id,
+                            "verification": manifest.get("verification"),
+                            "artefacts": manifest.get("artefacts", []),
+                        },
+                    )
+                else:
+                    self.taskboard.update_status(local.task_id, TaskStatus.NEEDS_REVIEW)
         elif terminal == "cancelled":
             self.execution_supervisor.cancel(
                 supervised.task_id, reason="remote A2A task cancelled", propagate=False

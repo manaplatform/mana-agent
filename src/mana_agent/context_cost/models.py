@@ -5,12 +5,44 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
+from datetime import datetime, timezone
 
 
 class GovernorMode(str, Enum):
     OBSERVE = "observe"
     SOFT = "soft"
     ENFORCE = "enforce"
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetReservation:
+    reservation_id: str
+    operation_type: str
+    operation_id: str
+    tokens: int
+    cost: float
+    verification: bool = False
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextManifest:
+    manifest_id: str
+    model_call_id: str
+    execution_id: str
+    attempt_id: str
+    included_messages: tuple[str, ...]
+    included_files: tuple[str, ...]
+    included_memories: tuple[str, ...]
+    included_skills: tuple[str, ...]
+    included_tool_schemas: tuple[str, ...]
+    included_artifacts: tuple[str, ...]
+    token_estimate: int
+    reasons: tuple[str, ...]
+    compression_references: tuple[str, ...]
+    artifact_reference: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +273,7 @@ class ContextBudgetExceeded(RuntimeError):
 
 
 __all__ = [
-    "ActiveCapabilitySet", "ArtifactReference", "BudgetSnapshot", "CapabilityManifestEntry",
+    "ActiveCapabilitySet", "ArtifactReference", "BudgetReservation", "BudgetSnapshot", "CapabilityManifestEntry",
     "CompressionEnvelope", "ContextBreakdown", "ContextBudget", "ContextBudgetExceeded",
-    "ContextSegment", "CostLedger", "GovernorDecision", "GovernorMode",
+    "ContextManifest", "ContextSegment", "CostLedger", "GovernorDecision", "GovernorMode",
 ]

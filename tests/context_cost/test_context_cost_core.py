@@ -157,3 +157,29 @@ def test_logger_redacts_and_retention_cleanup_is_best_effort(tmp_path: Path) -> 
     old.write_text("{}\n", encoding="utf-8")
     assert logger.cleanup() == 1
     assert not old.exists()
+
+
+def test_parallel_model_reservations_cannot_spend_the_same_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    governor = ContextCostGovernor(
+        session_id="s",
+        repository_id="r",
+        workspace_id="w",
+        settings=settings(
+            mana_context_governor_mode="enforce",
+            mana_routing_task_token_budget=1_300,
+            mana_context_response_reserve_ratio=0.12,
+        ),
+    )
+    segment = ContextSegment("user", "constraint", 1, protected=True, source_id="user:1")
+    first, _ = governor.before_model_call([segment], model="test", context_window=1_000)
+    second, _ = governor.before_model_call([segment], model="test", context_window=1_000)
+    with pytest.raises(ContextBudgetExceeded):
+        governor.before_model_call([segment], model="test", context_window=1_000)
+    snapshot = governor.observability_snapshot()
+    assert snapshot["budget_reserved"]["tokens"] > 0
+    assert snapshot["context_manifests"] == 3
+    governor.release_reservation(first, reason="provider failed before usage")
+    governor.release_reservation(second, reason="provider failed before usage")

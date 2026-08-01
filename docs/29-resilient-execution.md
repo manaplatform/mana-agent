@@ -10,7 +10,7 @@ identity, while each retry or reassignment receives a new attempt ID.
 Non-terminal states are `created`, `queued`, `leased`, `running`,
 `checkpointing`, `waiting`, `retry_scheduled`, `replanning`, `cancelling`, and
 `completed_pending_verification`. Terminal states are `cancelled`, `failed`,
-and `completed`. Every transition is validated and compare-and-set persisted.
+`budget_exhausted`, and `completed`. Every transition is validated and compare-and-set persisted.
 An invalid transition emits an immutable `invalid_transition` event and raises
 a typed error without executing another action.
 
@@ -33,7 +33,7 @@ JSONL events are stored under:
 
 ```text
 ~/.mana/execution/
-  tasks/ attempts/ checkpoints/ results/ artefacts/ events/ logs/
+  tasks/ attempts/ actions/ checkpoints/ results/ artefacts/ events/ logs/
 ```
 
 Temporary files are flushed and atomically replaced. A cross-process lock
@@ -58,7 +58,8 @@ still validates.
 
 When a new gateway request has stopped task candidates, a separate strict model
 decision compares the complete new request with candidate intent and progress.
-It selects `resume_checkpoint`, `retry_task`, `start_fresh`, or `stop` and
+It selects `resume_checkpoint`, `retry_task`, `return_verified`, `reverify`,
+`start_fresh`, or `stop` and
 records same-work, freshness, checkpoint-validity, repeat-safety, and
 continuation-safety judgments. `retry_task` reuses the exact durable task ID
 when the work is stable and equivalent but no valid checkpoint exists; the new
@@ -79,10 +80,16 @@ acknowledges consumption. A restart after child completion but before parent
 notification therefore re-delivers the same result without re-executing the
 child.
 
+Escrow records persist the `produced → stored → available → delivery_pending →
+delivered → acknowledged/rejected` lifecycle. The attempt generation is stored
+with every result and action. A result or action update from an older generation
+is rejected even if a delayed worker still has its old process-local state.
+
 ## Retry and recovery safety
 
-Every task records one side-effect classification: `read_only`, `idempotent`,
-`deduplicated`, `compensatable`, `non_idempotent`, or `unknown`. Read-only work
+Every task and consequential action records one side-effect classification:
+`read_only`, `idempotent`, `conditionally_idempotent`, `deduplicated`,
+`compensatable`, `non_idempotent`, or `unknown`. Read-only work
 is safely recoverable. Idempotent/deduplicated retries require a stable
 idempotency key. Compensation must have been selected explicitly. Unknown work
 may resume from the exact model-selected checkpoint, or restart under the same
@@ -101,8 +108,39 @@ missing decisions stop without fallback routing.
 
 Startup recovery is idempotent. It reconnects parent-child links, re-verifies
 escrowed results, marks expired attempts lost, schedules only policy-safe work,
-and preserves ambiguous side effects for review. Queue and retry state remain
-visible throughout recovery.
+preserves ambiguous side effects for review, and repairs the LaneCoordinator and
+TaskBoard projections from supervisor state. Queue and retry state remain visible
+throughout recovery.
+
+## Authoritative ownership and projections
+
+- `ExecutionSupervisor` owns logical task/attempt state, retry and resume
+  eligibility, checkpoint validity, escrow acknowledgement, verification, and
+  final completion.
+- `LaneCoordinator` owns lane admission, capacity, queueing, workers, handoffs,
+  file/repository locks, and resource reservations. `finish(COMPLETED)` submits
+  evidence; it does not declare logical success.
+- `TaskBoard` is a compatibility/UI projection. `DONE` is accepted only through
+  a supervisor completion projection containing the durable result ID and passed
+  verification manifest. Duplicate memory matches remain advisory and are never
+  created as `SKIPPED` work.
+- `ExecutionManager` owns provider-neutral sandbox/process lifecycle only. Its
+  spec, handle, request, result, and events carry execution, root task, attempt,
+  checkpoint, session, workspace, and repository identity; sandbox readiness or
+  exit code does not establish task completion.
+- `ContextCostGovernor` is the model/tool-call admission and accounting
+  authority. It atomically reserves estimated concurrent spend, preserves a
+  verification reserve, releases unused reservations, records actual usage once,
+  and persists a content-addressed context manifest for every admitted or blocked
+  model call.
+
+TaskBoard state writes now use file flush, atomic replacement, and directory
+flush. Corrupt state fails closed instead of silently becoming an empty board.
+Schema-version 2 supervisor, checkpoint, and TaskBoard records load older fields
+through defaulted typed models; new records add attempt generations, execution
+scope/linkage, expanded checkpoint references, escrow lifecycle, and action
+receipts. TaskBoard context compaction stores the complete redacted source in the
+existing context artifact store and returns a hash-checked retrieval envelope.
 
 ## Completion contracts
 

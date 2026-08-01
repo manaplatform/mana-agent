@@ -2218,8 +2218,13 @@ class AskAgent:
                 )
             try:
                 ai_msg = use_bound.invoke(messages, config=cfg)
-            except TypeError:
-                ai_msg = use_bound.invoke(messages)
+            except BaseException as exc:
+                if governor.enabled and model_call_id:
+                    governor.release_reservation(
+                        model_call_id,
+                        reason=f"model call failed before usage accounting: {type(exc).__name__}",
+                    )
+                raise
             if governor.enabled and model_call_id:
                 response_metadata = getattr(ai_msg, "response_metadata", {}) or {}
                 usage = getattr(ai_msg, "usage_metadata", None) or response_metadata.get("token_usage") or response_metadata.get("usage")
@@ -2409,10 +2414,16 @@ class AskAgent:
                     try:
                         trace_count_before = len(traces)
                         tool_started = perf_counter()
-                        try:
-                            content = tool_map[name].invoke(args, config=cfg)
-                        except TypeError:
-                            content = tool_map[name].invoke(args)
+                        tool_reservation_id = ""
+                        if governor.enabled:
+                            tool_reservation_id = governor.before_tool_call(
+                                tool_name=name,
+                                tool_call_id=str(call.get("id", "")),
+                                arguments=args,
+                            )
+                        content = tool_map[name].invoke(args, config=cfg)
+                        if governor.enabled and tool_reservation_id:
+                            governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:
                             traces.append(
                                 ToolInvocationTrace(
@@ -2429,6 +2440,11 @@ class AskAgent:
                                 )
                             )
                     except Exception as exc:
+                        if governor.enabled and "tool_reservation_id" in locals() and tool_reservation_id:
+                            governor.release_reservation(
+                                tool_reservation_id,
+                                reason=f"tool failed before usage accounting: {type(exc).__name__}",
+                            )
                         content = json.dumps({"error": str(exc)})
                         traces.append(
                             ToolInvocationTrace(

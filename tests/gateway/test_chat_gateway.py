@@ -41,6 +41,25 @@ class _DummyAskService:
     class _EntryModel:
         def invoke(self, messages):
             payload = json.loads(messages[-1].content)
+            if "recovery_candidates" in payload:
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "decision_id": "test-start-fresh",
+                            "action": "start_fresh",
+                            "task_id": "",
+                            "checkpoint_id": "",
+                            "same_work": False,
+                            "fresh_data_required": bool(
+                                payload.get("entry_route_requires_live_data")
+                            ),
+                            "checkpoint_still_valid": False,
+                            "side_effects_safe_to_repeat": False,
+                            "safe_to_continue": True,
+                            "reason": "the test model selected a fresh execution",
+                        }
+                    )
+                )
             prompt = str(payload.get("user_prompt") or "").lower()
             if "gmail" in prompt:
                 route = "gmail"
@@ -105,6 +124,8 @@ class _DummyCodingAgent:
         }
 
     def generate_auto_execute(self, request, **kwargs):
+        readme = Path(self.kwargs["repo_root"]) / "README.md"
+        readme.write_text("# Updated by the coding-agent test double\n", encoding="utf-8")
         return {
             "answer": f"auto-exec: {request[:40]}",
             "changed_files": ["README.md"],
@@ -204,10 +225,15 @@ def test_missing_worker_at_permission_resume_uses_direct_ssh(monkeypatch) -> Non
     gateway.remote_execution_service = RemoteExecutionService()
     transitions: list[tuple[str, str, str]] = []
     finishes: list[tuple[str, str]] = []
+
+    def finish(task_id, state, **_kwargs):
+        finishes.append((task_id, state.value))
+        return SimpleNamespace(state=state, error="")
+
     gateway._remote_job_lanes = {"job": "lane-task"}
     gateway._lane_coordinator = SimpleNamespace(
         transition=lambda task_id, state, reason: transitions.append((task_id, state.value, reason)),
-        finish=lambda task_id, state, **_kwargs: finishes.append((task_id, state.value)),
+        finish=finish,
     )
     request = RemoteExecutionRequest.model_validate({
         "job_id": "job",
@@ -241,6 +267,10 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
     transitions: list[tuple[str, str, str]] = []
     finishes: list[tuple[str, str]] = []
 
+    def finish(task_id, *, state, **_kwargs):
+        finishes.append((task_id, state.value))
+        return SimpleNamespace(state=state, error="")
+
     async def execute(decision, argv, **kwargs):
         captured.update({"decision": decision, "argv": argv, **kwargs})
         return SimpleNamespace(
@@ -271,9 +301,7 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
         transition=lambda task_id, state, *, reason: transitions.append(
             (task_id, state.value, reason)
         ),
-        finish=lambda task_id, *, state, **_kwargs: finishes.append(
-            (task_id, state.value)
-        ),
+        finish=finish,
     )
     gateway._pending_server_approvals = {
         "server_approval_1": {

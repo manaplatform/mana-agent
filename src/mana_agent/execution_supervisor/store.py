@@ -20,6 +20,7 @@ from typing import Callable, Iterator, Protocol, TypeVar
 from mana_agent.execution_supervisor.errors import ConcurrentUpdateError, TaskNotFoundError
 from mana_agent.execution_supervisor.models import (
     AttemptRecord,
+    ActionRecord,
     CheckpointRecord,
     EscrowResult,
     ExecutionEvent,
@@ -82,6 +83,9 @@ class ExecutionStore(Protocol):
         self, task_id: str, updater: Callable[[TaskRecord], EscrowResult]
     ) -> tuple[TaskRecord, EscrowResult]: ...
     def save_attempt(self, attempt: AttemptRecord) -> None: ...
+    def save_action(self, action: ActionRecord) -> None: ...
+    def get_action(self, action_id: str) -> ActionRecord | None: ...
+    def actions_for_task(self, task_id: str) -> list[ActionRecord]: ...
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None: ...
     def save_checkpoint(self, checkpoint: CheckpointRecord) -> None: ...
     def get_checkpoint(self, checkpoint_id: str) -> CheckpointRecord | None: ...
@@ -119,7 +123,7 @@ def _release_file_lock(handle) -> None:
 class LocalExecutionStore:
     """Cross-process, atomic JSON storage rooted below ``~/.mana/execution``."""
 
-    _DIRECTORIES = ("tasks", "attempts", "checkpoints", "results", "artefacts", "events", "logs")
+    _DIRECTORIES = ("tasks", "attempts", "actions", "checkpoints", "results", "artefacts", "events", "logs")
 
     def __init__(self, root: Path, *, max_log_bytes: int = 10 * 1024 * 1024) -> None:
         self.root = root.expanduser().resolve()
@@ -291,6 +295,33 @@ class LocalExecutionStore:
                 self.root / "attempts" / f"{attempt.attempt_id}.json",
                 attempt.model_dump(mode="json"),
             )
+
+    def save_action(self, action: ActionRecord) -> None:
+        with self.locked():
+            self._atomic_write(
+                self.root / "actions" / f"{action.action_id}.json",
+                action.model_dump(mode="json"),
+            )
+
+    def get_action(self, action_id: str) -> ActionRecord | None:
+        path = self.root / "actions" / f"{action_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            return ActionRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return None
+
+    def actions_for_task(self, task_id: str) -> list[ActionRecord]:
+        rows: list[ActionRecord] = []
+        for path in (self.root / "actions").glob("*.json"):
+            try:
+                item = ActionRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if item.execution_id == task_id:
+                rows.append(item)
+        return sorted(rows, key=lambda item: (item.created_at, item.action_id))
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None:
         path = self.root / "attempts" / f"{attempt_id}.json"

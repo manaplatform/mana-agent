@@ -219,6 +219,7 @@ class LaneExecution:
     final_result: dict[str, Any] = field(default_factory=dict)
     supervisor_attempt_id: str = ""
     supervisor_lease_token: str = ""
+    checkpoint_id: str = ""
 
 
 @dataclass(slots=True)
@@ -461,6 +462,9 @@ class LaneCoordinator:
         provider: str = "",
         task_type: str = "single",
         taskboard_task_id: str | None = None,
+        supersedes_execution_id: str = "",
+        derived_from_execution_id: str = "",
+        previous_execution_id: str = "",
     ) -> LaneReservation:
         if not self.execution_supervisor.config.enabled:
             raise LaneCoordinatorError(
@@ -590,6 +594,17 @@ class LaneCoordinator:
                 token_budget=budget.reserved_tokens or None,
                 estimated_cost=budget.estimated_cost,
                 monetary_budget=contract.cost_budget,
+                execution_fingerprint=fingerprint,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+                normalized_intent=normalized_intent,
+                requested_operation=lane_id.value,
+                target_resources=files,
+                expected_output=task_type,
+                supersedes_execution_id=supersedes_execution_id,
+                derived_from_execution_id=derived_from_execution_id,
+                previous_execution_id=previous_execution_id,
             )
             self.execution_supervisor.queue(task_id)
             execution = LaneExecution(
@@ -710,6 +725,48 @@ class LaneCoordinator:
         if heartbeat_thread is not None and heartbeat_thread is not threading.current_thread():
             heartbeat_thread.join(timeout=min(5.0, self.execution_supervisor.config.lease_seconds / 2))
 
+    def checkpoint(
+        self,
+        task_id: str,
+        *,
+        boundary: str,
+        resume_payload: Mapping[str, Any] | None = None,
+        completed_steps: Sequence[str] = (),
+        pending_steps: Sequence[str] = (),
+    ) -> str:
+        execution = self._executions[task_id]
+        checkpoint = self.execution_supervisor.checkpoint(
+            task_id,
+            attempt_id=execution.supervisor_attempt_id,
+            lease_token=execution.supervisor_lease_token,
+            resume_payload={"boundary": boundary, **dict(resume_payload or {})},
+            completed_steps=completed_steps,
+            pending_steps=pending_steps,
+            child_execution_ids=[
+                item.task_id
+                for item in self._executions.values()
+                if item.parent_task_id == task_id
+            ],
+            result_escrow_references=[
+                item.result_id
+                for item in self.execution_supervisor.store.unacknowledged_results(task_id)
+            ],
+            budget_snapshot=asdict(execution.budget),
+            resume_cursor=boundary,
+        )
+        execution.checkpoint_id = checkpoint.checkpoint_id
+        execution.updated_at = _iso()
+        with self._condition:
+            self._persist_locked()
+        self.emit(
+            "checkpoint.saved",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+            checkpoint_id=checkpoint.checkpoint_id,
+            boundary=boundary,
+        )
+        return checkpoint.checkpoint_id
+
     @contextmanager
     def execution(self, **kwargs: Any) -> Iterator[LaneReservation]:
         reservation = self.reserve(**kwargs)
@@ -807,6 +864,7 @@ class LaneCoordinator:
                             execution.verification_state or execution.evidence
                         ),
                         "verification_state": dict(execution.verification_state),
+                        "chat_result": dict(execution.verification_state.get("chat_result") or {}),
                         "evidence": list(execution.evidence),
                         "token_usage": consumed_input_tokens + consumed_output_tokens,
                         "actual_cost": actual_cost,
@@ -837,6 +895,18 @@ class LaneCoordinator:
                 state = LaneTaskState.COMPLETED if verified else LaneTaskState.VERIFYING
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
+        elif state == LaneTaskState.BUDGET_EXHAUSTED:
+            supervised = self.execution_supervisor.store.get_task(task_id)
+            if supervised.state not in {
+                SupervisorState.BUDGET_EXHAUSTED,
+                SupervisorState.COMPLETED,
+                SupervisorState.CANCELLED,
+            }:
+                self.execution_supervisor.transition(
+                    task_id,
+                    SupervisorState.BUDGET_EXHAUSTED,
+                    reason=error or "canonical execution budget exhausted",
+                )
         else:
             supervised = self.execution_supervisor.store.get_task(task_id)
             if supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
@@ -854,11 +924,24 @@ class LaneCoordinator:
                 LaneTaskState.CANCELLED: TaskStatus.CANCELLED,
             }.get(state, TaskStatus.FAILED)
             reason = error or execution.error or f"lane execution ended as {state.value}"
-            self.taskboard.update_status(
-                execution.taskboard_task_id,
-                mapped_status,
-                reason=reason if mapped_status == TaskStatus.FAILED else None,
-            )
+            if mapped_status == TaskStatus.DONE:
+                supervised = self.execution_supervisor.store.get_task(task_id)
+                manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+                self.taskboard.project_supervisor_completion(
+                    execution.taskboard_task_id,
+                    supervisor_task=supervised,
+                    verification_evidence={
+                        "result_id": supervised.result_id,
+                        "verification": manifest.get("verification"),
+                        "artefacts": manifest.get("artefacts", []),
+                    },
+                )
+            else:
+                self.taskboard.update_status(
+                    execution.taskboard_task_id,
+                    mapped_status,
+                    reason=reason if mapped_status == TaskStatus.FAILED else None,
+                )
             self._persist_locked()
         self.lock_manager.release_task(task_id)
         event = {
@@ -1250,6 +1333,27 @@ class LaneCoordinator:
         if supervise:
             self.execution_supervisor.reconnect_tree()
             self.execution_supervisor.recover()
+        for execution in self._executions.values():
+            supervised = self.execution_supervisor.store.get_task_or_none(execution.task_id)
+            if supervised is None:
+                continue
+            if supervised.state == SupervisorState.COMPLETED:
+                manifest = self.execution_supervisor.store.artifact_manifest(execution.task_id) or {}
+                board_task = self.taskboard.get_task(execution.taskboard_task_id)
+                if board_task.status is not TaskStatus.DONE:
+                    self.taskboard.project_supervisor_completion(
+                        execution.taskboard_task_id,
+                        supervisor_task=supervised,
+                        verification_evidence={
+                            "result_id": supervised.result_id,
+                            "verification": manifest.get("verification"),
+                            "artefacts": manifest.get("artefacts", []),
+                        },
+                    )
+                execution.state = LaneTaskState.COMPLETED
+            elif supervised.state == SupervisorState.BUDGET_EXHAUSTED:
+                execution.state = LaneTaskState.BUDGET_EXHAUSTED
+                execution.error = supervised.failure_reason or "execution budget exhausted"
         self.lock_manager.recover_stale()
         interrupted_task_ids: list[str] = []
         with self._condition:

@@ -98,9 +98,30 @@ class ManaA2AExecutor:
             final_state = TaskState.TASK_STATE_FAILED
             final_text = "Mana-Agent could not complete the task."
         else:
-            self._transition(local_id, TaskStatus.DONE)
-            final_state = TaskState.TASK_STATE_COMPLETED
-            final_text = "Task completed."
+            execution_id = str(result.payload.get("execution_id") or "")
+            supervisor = self.gateway.get_lane_coordinator().execution_supervisor
+            supervised = supervisor.store.get_task_or_none(execution_id)
+            manifest = supervisor.store.artifact_manifest(execution_id) if supervised else None
+            if supervised is None or supervised.state.value != "completed":
+                self._transition(
+                    local_id,
+                    TaskStatus.NEEDS_REVIEW,
+                    reason="Gateway result has no supervisor-approved completion evidence.",
+                )
+                final_state = TaskState.TASK_STATE_FAILED
+                final_text = "Task result is pending durable verification."
+            else:
+                self.taskboard.project_supervisor_completion(
+                    local_id,
+                    supervisor_task=supervised,
+                    verification_evidence={
+                        "result_id": supervised.result_id,
+                        "verification": (manifest or {}).get("verification"),
+                        "artefacts": (manifest or {}).get("artefacts", []),
+                    },
+                )
+                final_state = TaskState.TASK_STATE_COMPLETED
+                final_text = "Task completed."
             await event_queue.enqueue_event(
                 new_text_artifact_update_event(
                     task_id,

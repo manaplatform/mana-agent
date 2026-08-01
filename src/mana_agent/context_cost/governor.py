@@ -14,8 +14,8 @@ from mana_agent.context_cost.estimator import breakdown_for_segments, estimate_t
 from mana_agent.context_cost.events import emit_context_event
 from mana_agent.context_cost.logger import ContextCostLogger
 from mana_agent.context_cost.models import (
-    BudgetSnapshot, ContextBudget, ContextBudgetExceeded, ContextSegment, CostLedger,
-    GovernorDecision, GovernorMode,
+    BudgetReservation, BudgetSnapshot, ContextBudget, ContextBudgetExceeded,
+    ContextManifest, ContextSegment, CostLedger, GovernorDecision, GovernorMode,
 )
 from mana_agent.context_cost.pricing import calculate_cost
 from mana_agent.telemetry.tokens import TokenUsage, TokenUsageTracker, token_usage_from_provider
@@ -66,6 +66,8 @@ class ContextCostGovernor:
         self._lock = threading.RLock()
         self._scope = threading.local()
         self._call_snapshots: dict[str, BudgetSnapshot] = {}
+        self._reservations: dict[str, BudgetReservation] = {}
+        self._context_manifests: dict[str, ContextManifest] = {}
         self._profiles: tuple[Any, ...] = ()
 
     def register_model_profiles(self, profiles: Iterable[Any]) -> None:
@@ -76,18 +78,32 @@ class ContextCostGovernor:
         *,
         turn_id: str = "",
         task_id: str = "",
+        root_task_id: str = "",
+        attempt_id: str = "",
+        checkpoint_id: str = "",
         agent_id: str = "main",
         subagent_id: str | None = None,
         step_id: str = "",
     ) -> None:
-        self._scope.identity = {
+        current = dict(getattr(self._scope, "identity", {}) or {})
+        updates = {
             "turn_id": str(turn_id), "task_id": str(task_id), "agent_id": str(agent_id or "main"),
-            "subagent_id": subagent_id, "step_id": str(step_id),
+            "root_task_id": str(root_task_id), "attempt_id": str(attempt_id),
+            "checkpoint_id": str(checkpoint_id), "subagent_id": subagent_id,
+            "step_id": str(step_id),
+        }
+        self._scope.identity = {
+            key: value if value not in (None, "") else current.get(key, value)
+            for key, value in updates.items()
         }
 
     def _effective_identity(self, **values: Any) -> dict[str, Any]:
         scoped = dict(getattr(self._scope, "identity", {}) or {})
-        result = {key: (value if value not in (None, "") else scoped.get(key, value)) for key, value in values.items()}
+        result = dict(scoped)
+        result.update({
+            key: (value if value not in (None, "") else scoped.get(key, value))
+            for key, value in values.items()
+        })
         if values.get("agent_id") == "main" and scoped.get("agent_id"):
             result["agent_id"] = scoped["agent_id"]
         return result
@@ -124,6 +140,8 @@ class ContextCostGovernor:
             )
             self._reserve_verification_budget()
             self._call_snapshots.clear()
+            self._reservations.clear()
+            self._context_manifests.clear()
             for key in self.metrics:
                 self.metrics[key] = 0.0 if "cost" in key else 0
 
@@ -239,9 +257,32 @@ class ContextCostGovernor:
         used = breakdown.input_tokens + output_reserve + budget.reasoning_reserve_tokens + budget.safety_margin_tokens
         ratio = used / budget.context_window
         estimated_cost = self._cost(breakdown.input_tokens, output_reserve, profile)
-        implementation_remaining = self._implementation_tokens_remaining()
+        verification_call = "verifier" in str(agent_id).casefold()
+        with self._lock:
+            reserved_tokens = sum(
+                item.tokens for item in self._reservations.values()
+                if item.verification == verification_call
+            )
+            reserved_cost = sum(
+                item.cost for item in self._reservations.values()
+                if item.verification == verification_call
+            )
+        verification_ledger = self.ledger.children.get("verification:reserved")
+        implementation_remaining = (
+            verification_ledger.remaining_tokens
+            if verification_call and verification_ledger is not None
+            else self._implementation_tokens_remaining()
+        )
+        if implementation_remaining is not None:
+            implementation_remaining = max(0, implementation_remaining - reserved_tokens)
         remaining_task = None if implementation_remaining is None else max(0, implementation_remaining - used)
-        implementation_cost_remaining = self._implementation_cost_remaining()
+        implementation_cost_remaining = (
+            verification_ledger.remaining_cost
+            if verification_call and verification_ledger is not None
+            else self._implementation_cost_remaining()
+        )
+        if implementation_cost_remaining is not None:
+            implementation_cost_remaining = max(0.0, implementation_cost_remaining - reserved_cost)
         remaining_cost = None if implementation_cost_remaining is None else max(0.0, implementation_cost_remaining - estimated_cost.total_cost)
         status = "blocked" if ratio >= budget.hard_limit_ratio else "warning" if ratio >= budget.warning_ratio else "ok"
         cost_blocked = implementation_cost_remaining is not None and estimated_cost.total_cost > implementation_cost_remaining
@@ -274,6 +315,16 @@ class ContextCostGovernor:
         )
         with self._lock:
             self._call_snapshots[call_id] = snapshot
+            if not blocked:
+                self._reservations[call_id] = BudgetReservation(
+                    reservation_id=call_id,
+                    operation_type="model_call",
+                    operation_id=call_id,
+                    tokens=used,
+                    cost=estimated_cost.total_cost,
+                    verification=verification_call,
+                )
+        self._persist_context_manifest(call_id, compacted, identity=identity)
         self._record_decision(call_id, decision, provider=provider, model=model, turn_id=turn_id, task_id=task_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         if blocked:
             metric = "calls_blocked_cost" if cost_blocked else "calls_blocked_token"
@@ -318,6 +369,7 @@ class ContextCostGovernor:
         )
         cost = self._cost(normalized.input_tokens, normalized.output_tokens, profile)
         with self._lock:
+            self._reservations.pop(call_id, None)
             ledger = self.ledger
             owner_id = str(subagent_id or (agent_id if agent_id and agent_id != "main" else ""))
             if owner_id:
@@ -349,6 +401,135 @@ class ContextCostGovernor:
         self.logger.write(metadata)
         emit_context_event(self.event_sink, "cost.updated", title="Context and cost usage updated", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         return normalized
+
+    def release_reservation(self, reservation_id: str, *, reason: str) -> None:
+        """Release a failed or cancelled admission without recording usage."""
+        with self._lock:
+            reservation = self._reservations.pop(reservation_id, None)
+        if reservation is None:
+            return
+        metadata = self._base_metadata()
+        metadata.update({
+            "reservation_id": reservation_id,
+            "reserved_tokens": reservation.tokens,
+            "reserved_cost": reservation.cost,
+            "action": "release_reservation",
+            "reason": reason,
+        })
+        self.logger.write(metadata)
+
+    def before_tool_call(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: Any,
+        expected_result_tokens: int | None = None,
+    ) -> str:
+        reservation_id = tool_call_id or f"tool-{uuid.uuid4().hex}"
+        scoped_identity = dict(getattr(self._scope, "identity", {}) or {})
+        verification_call = "verifier" in str(scoped_identity.get("agent_id") or "").casefold()
+        tokens = estimate_value_tokens(arguments) + max(
+            1,
+            int(expected_result_tokens or getattr(self.settings, "mana_context_tool_result_max_tokens", 2_000)),
+        )
+        with self._lock:
+            already_reserved = sum(
+                item.tokens for item in self._reservations.values()
+                if item.verification == verification_call
+            )
+            verification_ledger = self.ledger.children.get("verification:reserved")
+            remaining = (
+                verification_ledger.remaining_tokens
+                if verification_call and verification_ledger is not None
+                else self._implementation_tokens_remaining()
+            )
+            blocked = (
+                self.mode is GovernorMode.ENFORCE
+                and remaining is not None
+                and tokens > max(0, remaining - already_reserved)
+            )
+            if not blocked:
+                self._reservations[reservation_id] = BudgetReservation(
+                    reservation_id=reservation_id,
+                    operation_type="tool_call",
+                    operation_id=reservation_id,
+                    tokens=tokens,
+                    cost=0.0,
+                    verification=verification_call,
+                )
+        if blocked:
+            raise RuntimeError(
+                f"Tool budget blocked before {tool_name}; no tool call was executed."
+            )
+        return reservation_id
+
+    def record_tool_call(self, reservation_id: str, *, result: Any) -> None:
+        with self._lock:
+            reservation = self._reservations.pop(reservation_id, None)
+            if reservation is None:
+                return
+            ledger = (
+                self.ledger.children["verification:reserved"]
+                if reservation.verification and "verification:reserved" in self.ledger.children
+                else self.ledger
+            )
+            ledger.record(
+                tokens=estimate_value_tokens(result),
+                input_cost=0.0,
+                output_cost=0.0,
+                estimated=False,
+            )
+
+    def _persist_context_manifest(
+        self,
+        call_id: str,
+        segments: Sequence[ContextSegment],
+        *,
+        identity: dict[str, Any],
+    ) -> ContextManifest:
+        def sources(kind: str) -> tuple[str, ...]:
+            return tuple(
+                segment.source_id
+                for segment in segments
+                if segment.kind == kind and segment.source_id
+            )
+
+        compression_refs = tuple(
+            str(segment.metadata.get("artifact_ref"))
+            for segment in segments
+            if segment.metadata.get("artifact_ref")
+        )
+        manifest_id = f"manifest-{uuid.uuid4().hex}"
+        manifest = ContextManifest(
+            manifest_id=manifest_id,
+            model_call_id=call_id,
+            execution_id=str(identity.get("task_id") or ""),
+            attempt_id=str(identity.get("attempt_id") or ""),
+            included_messages=sources("message") + sources("history") + sources("user") + sources("system"),
+            included_files=sources("file") + sources("evidence"),
+            included_memories=sources("memory"),
+            included_skills=sources("skill"),
+            included_tool_schemas=sources("schema"),
+            included_artifacts=sources("artifact") + compression_refs,
+            token_estimate=breakdown_for_segments(segments).input_tokens,
+            reasons=tuple(
+                str(segment.metadata.get("reason") or segment.kind)
+                for segment in segments
+            ),
+            compression_references=compression_refs,
+        )
+        reference = self.artifacts.put(
+            __import__("dataclasses").asdict(manifest),
+            session_id=self.session_id,
+            repository_id=self.repository_id,
+            workspace_id=self.workspace_id,
+            content_type="json",
+        )
+        manifest = replace(manifest, artifact_reference=reference.artifact_id)
+        with self._lock:
+            self._context_manifests[manifest_id] = manifest
+        return manifest
 
     def prepare_tool_result(
         self,
@@ -483,7 +664,10 @@ class ContextCostGovernor:
     def observability_snapshot(self) -> dict[str, Any]:
         estimated = float(self.metrics["estimated_cost"])
         actual = float(self.metrics["actual_cost"])
-        return {**self.metrics, "estimated_actual_cost_variance": estimated - actual, "cumulative_tokens": self.ledger.tokens_used, "cumulative_cost": self.ledger.total_cost, "remaining_tokens": self._implementation_tokens_remaining(), "remaining_cost": self._implementation_cost_remaining()}
+        with self._lock:
+            reserved_tokens = sum(item.tokens for item in self._reservations.values())
+            reserved_cost = sum(item.cost for item in self._reservations.values())
+        return {**self.metrics, "estimated_actual_cost_variance": estimated - actual, "cumulative_tokens": self.ledger.tokens_used, "cumulative_cost": self.ledger.total_cost, "budget_reserved": {"tokens": reserved_tokens, "cost": reserved_cost}, "remaining_tokens": self._implementation_tokens_remaining(), "remaining_cost": self._implementation_cost_remaining(), "context_manifests": len(self._context_manifests)}
 
     def _record_capability_event(self, event_type: str, payload: dict[str, Any]) -> None:
         if event_type == "context.capabilities_loaded":
@@ -529,6 +713,9 @@ class ContextCostGovernor:
             "session_id": self.session_id, "workspace_id": self.workspace_id,
             "repository_id": self.repository_id, "turn_id": identity.get("turn_id", ""),
             "task_id": identity.get("task_id", ""), "agent_id": identity.get("agent_id", "main"),
+            "root_task_id": identity.get("root_task_id", ""),
+            "attempt_id": identity.get("attempt_id", ""),
+            "checkpoint_id": identity.get("checkpoint_id", ""),
             "subagent_id": identity.get("subagent_id"), "step_id": identity.get("step_id", ""),
             "provider": identity.get("provider", ""), "model": identity.get("model", ""),
             "governor_mode": self.mode.value,

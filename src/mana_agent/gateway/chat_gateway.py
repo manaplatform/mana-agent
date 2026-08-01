@@ -2431,7 +2431,12 @@ class AgentChatGateway:
                         "remote_execution": ("remote_ssh_execute",),
                         "server": ("server",),
                     }.get(entry_decision.route, ())
-                    recovery_candidates = self._recovery_candidates(lane_id=lane_id)
+                    recovery_candidates = self._recovery_candidates(
+                        lane_id=lane_id,
+                        session_id=session_id,
+                        workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                        repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                    )
                     resume_decision = CheckpointResumeDecider(
                         self._entry_router.llm
                     ).decide(
@@ -2500,7 +2505,46 @@ class AgentChatGateway:
                             decision=recovery_decision,
                             session_id=session_id,
                         )
+                    elif resume_decision.action in {"return_verified", "reverify"}:
+                        supervised = self._lane_coordinator.execution_supervisor
+                        verified_task = (
+                            supervised.reverify_completed(resume_decision.task_id)
+                            if resume_decision.action == "reverify"
+                            else supervised.store.get_task(resume_decision.task_id)
+                        )
+                        escrow = supervised.store.get_result(verified_task.result_id)
+                        if escrow is None:
+                            raise CheckpointResumeError(
+                                "Verified execution result escrow is unavailable; no stale result was returned."
+                            )
+                        durable_result = dict(escrow.payload.get("chat_result") or {})
+                        result = ChatTurnResult(
+                            answer=str(durable_result.get("answer") or "Verified work is already complete."),
+                            mode="execution-result-reused",
+                            changed_files=list(durable_result.get("changed_files") or []),
+                            payload={
+                                **dict(durable_result.get("payload") or {}),
+                                "lane_task_id": verified_task.task_id,
+                                "execution_id": verified_task.task_id,
+                                "verified_result_reused": True,
+                                "reverified": resume_decision.action == "reverify",
+                            },
+                        )
+                        return self._finalize_turn_result(
+                            result=result,
+                            session_id=session_id,
+                            conversation_id=conversation_id,
+                            turn_id=turn_id,
+                            text=text,
+                            state=state,
+                            memory_warning=memory_warning,
+                        )
                     else:
+                        previous_execution_id = (
+                            str(recovery_candidates[0]["task_id"])
+                            if recovery_candidates
+                            else ""
+                        )
                         reservation = self._lane_coordinator.reserve(
                             normalized_intent=text,
                             lane_id=lane_id,
@@ -2514,6 +2558,15 @@ class AgentChatGateway:
                             capabilities=route_capabilities,
                             routing_decision_id=execution_decision.decision_id,
                             provider=execution_decision.provider,
+                            previous_execution_id=previous_execution_id,
+                            derived_from_execution_id=(
+                                previous_execution_id if resume_decision.same_work else ""
+                            ),
+                            supersedes_execution_id=(
+                                previous_execution_id
+                                if previous_execution_id and not resume_decision.same_work
+                                else ""
+                            ),
                         )
                         if recovery_candidates:
                             self._lane_coordinator.taskboard.add_decision(
@@ -2533,6 +2586,27 @@ class AgentChatGateway:
                     else:
                         self._lane_coordinator.start(reservation)
                         options["_lane_task_id"] = reservation.execution.task_id
+                        self._stack.context_cost_governor.set_execution_identity(
+                            turn_id=turn_id,
+                            task_id=reservation.execution.task_id,
+                            root_task_id=reservation.execution.root_task_id,
+                            attempt_id=reservation.execution.supervisor_attempt_id,
+                            checkpoint_id=reservation.execution.checkpoint_id,
+                            agent_id="main",
+                            step_id="after_routing",
+                        )
+                        routed_checkpoint_id = self._lane_coordinator.checkpoint(
+                            reservation.execution.task_id,
+                            boundary="after_routing",
+                            resume_payload={
+                                "route": entry_decision.route,
+                                "routing_decision_id": execution_decision.decision_id,
+                            },
+                            pending_steps=("execute_route", "verify", "final_response"),
+                        )
+                        self._stack.context_cost_governor.set_execution_identity(
+                            checkpoint_id=routed_checkpoint_id,
+                        )
                         try:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
@@ -2572,6 +2646,16 @@ class AgentChatGateway:
                                 reason="waiting for interactive approval",
                             )
                         else:
+                            self._lane_coordinator.checkpoint(
+                                reservation.execution.task_id,
+                                boundary="before_verification",
+                                resume_payload={
+                                    "mode": result.mode,
+                                    "changed_files": list(result.changed_files),
+                                },
+                                completed_steps=("routing", "execute_route"),
+                                pending_steps=("verify", "final_response"),
+                            )
                             finished = self._lane_coordinator.finish(
                                 reservation.execution.task_id,
                                 state=(
@@ -2587,6 +2671,11 @@ class AgentChatGateway:
                                 verification_state={
                                     "mode": result.mode,
                                     "error": result.error,
+                                    "chat_result": {
+                                        "answer": result.answer,
+                                        "changed_files": list(result.changed_files),
+                                        "payload": dict(result.payload),
+                                    },
                                 },
                                 error=str(result.error or ""),
                             )
@@ -2663,6 +2752,11 @@ class AgentChatGateway:
                 "session_id": session_id,
                 "conversation_id": conversation_id,
                 "turn_id": turn_id,
+                "execution_id": str(
+                    result.payload.get("execution_id")
+                    or result.payload.get("lane_task_id")
+                    or ""
+                ),
                 "entry_route": str(
                     (result.payload or {}).get("route")
                     or state.get("active_route")
@@ -2670,6 +2764,45 @@ class AgentChatGateway:
                 ),
             }
         )
+        execution_id = str(result.payload.get("execution_id") or "")
+        if execution_id:
+            supervisor = self._lane_coordinator.execution_supervisor
+            supervised = supervisor.store.get_task_or_none(execution_id)
+            if supervised is not None:
+                manifest = supervisor.store.artifact_manifest(execution_id) or {}
+                attempt = (
+                    supervisor.store.get_attempt(supervised.attempt_id)
+                    if supervised.attempt_id
+                    else None
+                )
+                result.payload["execution_report"] = {
+                    "execution_id": supervised.task_id,
+                    "root_task_id": supervised.root_task_id,
+                    "attempt_id": supervised.attempt_id,
+                    "attempt_generation": supervised.attempt_generation,
+                    "state": supervised.state.value,
+                    "checkpoint_id": supervised.checkpoint_id,
+                    "retry_count": supervised.retry_count,
+                    "worker": supervised.assigned_worker,
+                    "model": supervised.assigned_model,
+                    "last_heartbeat": (
+                        supervised.heartbeat_at.isoformat()
+                        if supervised.heartbeat_at
+                        else ""
+                    ),
+                    "budget": {
+                        "reserved_tokens": supervised.token_budget,
+                        "consumed_tokens": supervised.token_usage,
+                        "monetary_limit": supervised.monetary_budget,
+                        "consumed_cost": supervised.actual_cost,
+                        "governor": self._stack.context_cost_governor.observability_snapshot(),
+                    },
+                    "artifacts": manifest.get("artefacts", []),
+                    "verification": manifest.get("verification", {}),
+                    "failure_reason": supervised.failure_reason,
+                    "recovery_reason": supervised.recovery_reason,
+                    "attempt_state": attempt.state if attempt else "",
+                }
         if memory_warning:
             result.warnings.append(memory_warning)
         # Sync flow id back if coding agent advanced it
@@ -3342,18 +3475,32 @@ class AgentChatGateway:
                     pass
                 return
 
-    def _recovery_candidates(self, *, lane_id: Any) -> list[dict[str, Any]]:
+    def _recovery_candidates(
+        self,
+        *,
+        lane_id: Any,
+        session_id: str,
+        workspace_id: str,
+        repository_id: str,
+    ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         supervisor = self._lane_coordinator.execution_supervisor
-        stopped_states = {
+        candidate_states = {
             LaneTaskState.FAILED,
             LaneTaskState.INTERRUPTED,
             LaneTaskState.TIMED_OUT,
             LaneTaskState.BUDGET_EXHAUSTED,
             LaneTaskState.REJECTED,
+            LaneTaskState.COMPLETED,
         }
         for execution in reversed(self._lane_coordinator.executions):
-            if execution.owning_lane != lane_id or execution.state not in stopped_states:
+            if (
+                execution.owning_lane != lane_id
+                or execution.state not in candidate_states
+                or execution.session_id != session_id
+                or execution.workspace_id != workspace_id
+                or execution.repository_id != repository_id
+            ):
                 continue
             task = supervisor.store.get_task_or_none(execution.task_id)
             if task is None:
@@ -3372,6 +3519,9 @@ class AgentChatGateway:
                 "checkpoint_error": checkpoint_error,
                 "normalized_intent": redact_text(execution.normalized_intent),
                 "lane": execution.owning_lane.value,
+                "session_id": execution.session_id,
+                "workspace_id": execution.workspace_id,
+                "repository_id": execution.repository_id,
                 "state": execution.state.value,
                 "updated_at": execution.updated_at,
                 "failure_reason": redact_text(task.failure_reason),
@@ -3381,9 +3531,7 @@ class AgentChatGateway:
                 "pending_steps": list(checkpoint.pending_steps) if checkpoint else [],
                 "resume_payload_fields": sorted(checkpoint.resume_payload) if checkpoint else [],
                 "generated_files": list(checkpoint.generated_files) if checkpoint else [],
-                "verification_status": (
-                    checkpoint.verification_status.value if checkpoint else "unavailable"
-                ),
+                "verification_status": task.verification_status.value,
             }
             candidates.append(candidate)
             if len(candidates) >= 20:

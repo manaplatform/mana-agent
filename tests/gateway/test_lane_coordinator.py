@@ -486,12 +486,17 @@ def test_state_persistence_retries_transient_windows_replace_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_replace = os.replace
-    replace_calls = 0
+    taskboard_state_path = coordinator.taskboard.store.state_path
+    tracked_paths = {taskboard_state_path, coordinator.state_path}
+    replace_calls = {path: 0 for path in tracked_paths}
+    denied_paths: set[Path] = set()
 
     def transiently_denied(source: str | Path, destination: str | Path) -> None:
-        nonlocal replace_calls
-        replace_calls += 1
-        if replace_calls == 1:
+        destination_path = Path(destination)
+        if destination_path in replace_calls:
+            replace_calls[destination_path] += 1
+        if destination_path in replace_calls and replace_calls[destination_path] == 1:
+            denied_paths.add(destination_path)
             raise PermissionError(13, "Access is denied")
         real_replace(source, destination)
 
@@ -499,7 +504,9 @@ def test_state_persistence_retries_transient_windows_replace_denial(
 
     reservation = _reserve(coordinator, LaneId.RESEARCH, intent="retry persistence")
 
-    assert replace_calls == 2
+    assert denied_paths == tracked_paths
+    assert all(replace_calls[path] >= 2 for path in tracked_paths)
+    assert taskboard_state_path.is_file()
     assert coordinator.state_path.is_file()
     assert not list(coordinator.state_path.parent.glob(f".{coordinator.state_path.name}.*.tmp"))
     coordinator.start(reservation)

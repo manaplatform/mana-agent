@@ -15,6 +15,8 @@ from mana_agent.multi_agent.core.types import (
     utc_now,
 )
 from mana_agent.memory import MultiAgentMemoryService, task_fingerprint
+from mana_agent.context_cost.artifact_store import ContextArtifactStore
+from mana_agent.context_cost.compression import compress_tool_result, render_envelope
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
 from mana_agent.multi_agent.taskboard.validators import validate_transition
 
@@ -103,7 +105,9 @@ class TaskBoard:
             title=title,
             user_request=user_request,
             normalized_goal=goal,
-            status=TaskStatus.SKIPPED if duplicate_of else TaskStatus.NEW,
+            # Duplicate detection is advisory. The execution supervisor decides
+            # whether the durable work is resumed, reverified, reused, or superseded.
+            status=TaskStatus.NEW,
             priority=priority,
             risk_level=risk_level,
             workspace_id=workspace_id or self.store.workspace_id,
@@ -117,7 +121,7 @@ class TaskBoard:
             budget_reserved_tokens=20_000,
             budget_remaining_tokens=20_000,
             budget_reserved_ms=120_000,
-            blockers=[f"duplicate_of:{duplicate_of}"] if duplicate_of else [],
+            blockers=[],
             memory_status={
                 "duplicate_checked": True,
                 "duplicate_of": duplicate_of,
@@ -235,6 +239,40 @@ class TaskBoard:
         if status == TaskStatus.BLOCKED and reason:
             self.add_blocker(task_id, reason, save=False)
         self._record("task.updated", {"task_id": task_id, "status": status.value, "reason": reason})
+        self.save()
+
+    def project_supervisor_completion(
+        self,
+        task_id: str,
+        *,
+        supervisor_task: Any,
+        verification_evidence: dict[str, Any],
+    ) -> None:
+        """Project one already-persisted supervisor completion into TaskBoard."""
+        task = self.get_task(task_id)
+        state = str(getattr(getattr(supervisor_task, "state", ""), "value", ""))
+        verification = str(
+            getattr(getattr(supervisor_task, "verification_status", ""), "value", "")
+        )
+        if state != "completed" or verification != "passed":
+            raise ValueError("supervisor projection cannot advertise an unverified completion")
+        task.supervisor_execution_id = str(getattr(supervisor_task, "task_id", ""))
+        task.supervisor_state = state
+        task.supervisor_state_version = int(getattr(supervisor_task, "state_version", 0))
+        task.supervisor_verification_evidence = dict(verification_evidence)
+        task.verification_status = verification
+        # Projection repair may replace a stale terminal TaskBoard status after
+        # a crash. This is not an independent task transition: the durable
+        # supervisor record supplied above is authoritative.
+        if task.status is not TaskStatus.VERIFYING:
+            task.status = TaskStatus.VERIFYING
+        validate_transition(task, TaskStatus.DONE, reason="supervisor completion projected")
+        task.status = TaskStatus.DONE
+        task.updated_at = utc_now()
+        self._record(
+            "task.supervisor_completion_projected",
+            {"task_id": task_id, "supervisor_state_version": task.supervisor_state_version},
+        )
         self.save()
 
     def reopen(self, task_id: str, *, reason: str) -> None:
@@ -370,11 +408,32 @@ class TaskBoard:
                 lines.append(f"{label}:")
                 lines.extend(f"- {item}" for item in values)
         text = "\n".join(lines)
-        return text[: max(200, int(token_budget) * 4)]
+        if len(text) <= max(200, int(token_budget) * 4):
+            return text
+        store = ContextArtifactStore()
+        envelope = compress_tool_result(
+            text,
+            tool_name="taskboard_context",
+            store=store,
+            session_id=task.session_id,
+            repository_id=task.primary_repository_id,
+            workspace_id=task.workspace_id,
+        )
+        task.memory_status["context_compaction"] = {
+            "artifact_ref": envelope.artifact_ref.artifact_id,
+            "artifact_hash": envelope.content_hash,
+            "lossless_source_available": True,
+        }
+        task.updated_at = utc_now()
+        self.save()
+        return render_envelope(envelope)
 
     def save(self) -> None:
         with self._save_lock:
-            self.store.save_state({"tasks": {key: serialize(value) for key, value in self.tasks.items()}})
+            self.store.save_state({
+                "schema_version": 2,
+                "tasks": {key: serialize(value) for key, value in self.tasks.items()},
+            })
 
     def load(self) -> None:
         payload = self.store.load_state()

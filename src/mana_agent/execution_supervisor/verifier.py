@@ -67,8 +67,19 @@ class ArtifactVerifier:
             )
             checks.append(
                 {
+                    "verifier_type": contract.contract_type.value,
                     "contract_type": contract.contract_type.value,
                     "passed": passed,
+                    "expected_condition": contract.model_dump(mode="json"),
+                    "observed_condition": detail,
+                    "status": "passed" if passed else "failed",
+                    "artifact_reference": artifact.path if artifact is not None else "",
+                    "artifact_hash": artifact.sha256 if artifact is not None else "",
+                    "external_receipt": str(detail.get("external_receipt") or ""),
+                    "command": detail.get("command", []),
+                    "exit_code": detail.get("exit_code", detail.get("git_returncode")),
+                    "timestamp": utc_now().isoformat(),
+                    "failure_reason": "" if passed else str(detail.get("reason") or "condition not satisfied"),
                     **detail,
                 }
             )
@@ -136,10 +147,18 @@ class ArtifactVerifier:
             }, None
         if kind == CompletionContractType.COMMAND_SUCCEEDED:
             exit_code = result_payload.get("exit_code")
-            return exit_code == 0, {"exit_code": exit_code}, None
+            return exit_code == 0, {
+                "command": result_payload.get("command", []),
+                "exit_code": exit_code,
+                "reason": "" if exit_code == 0 else "command did not exit successfully",
+            }, None
         if kind == CompletionContractType.REMOTE_RESOURCE_CONFIRMED:
             confirmation = result_payload.get("remote_confirmation")
-            return bool(confirmation), {"confirmed": bool(confirmation)}, None
+            return bool(confirmation), {
+                "confirmed": bool(confirmation),
+                "external_receipt": str(result_payload.get("external_receipt") or confirmation or ""),
+                "reason": "" if confirmation else "remote resource was not confirmed",
+            }, None
         if kind == CompletionContractType.GIT_DIFF_PRESENT:
             argv = ["git", "diff", "--name-only", "HEAD"]
             if contract.path:

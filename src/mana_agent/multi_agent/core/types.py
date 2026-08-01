@@ -229,6 +229,10 @@ class TaskBoardItem:
     routing_evidence: dict[str, Any] = field(default_factory=dict)
     result_summary: str = ""
     verification_status: str = ""
+    supervisor_execution_id: str = ""
+    supervisor_state: str = ""
+    supervisor_state_version: int = 0
+    supervisor_verification_evidence: dict[str, Any] = field(default_factory=dict)
     output_artifacts: list[str] = field(default_factory=list)
     approval_request_ids: list[str] = field(default_factory=list)
     child_task_ids: list[str] = field(default_factory=list)

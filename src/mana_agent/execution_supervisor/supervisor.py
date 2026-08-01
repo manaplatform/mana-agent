@@ -22,10 +22,13 @@ from mana_agent.execution_supervisor.errors import (
 )
 from mana_agent.execution_supervisor.models import (
     AttemptRecord,
+    ActionRecord,
+    ActionRequestState,
     CancellationStatus,
     CheckpointRecord,
     CompletionContract,
     EscrowResult,
+    EscrowStatus,
     ExecutionEvent,
     ExecutionState,
     ParentProgress,
@@ -38,6 +41,7 @@ from mana_agent.execution_supervisor.models import (
     TaskRecord,
     TERMINAL_STATES,
     VerificationStatus,
+    VerificationReport,
     WaitPolicy,
     utc_now,
 )
@@ -91,6 +95,10 @@ class ExecutionSupervisor:
             "runtime_provider": task.runtime_provider,
             "lease_owner": task.lease_owner,
             "checkpoint_id": task.checkpoint_id,
+            "attempt_generation": task.attempt_generation,
+            "session_id": task.session_id,
+            "workspace_id": task.workspace_id,
+            "repository_id": task.repository_id,
             "retry_count": task.retry_count,
             "side_effect_classification": task.side_effect_classification.value,
             "verification_status": task.verification_status.value,
@@ -161,6 +169,18 @@ class ExecutionSupervisor:
         deadline_at: datetime | None = None,
         wait_policy: WaitPolicy = WaitPolicy.WAIT_ALL,
         minimum_success_count: int | None = None,
+        execution_fingerprint: str = "",
+        session_id: str = "",
+        workspace_id: str = "",
+        repository_id: str = "",
+        normalized_intent: str = "",
+        requested_operation: str = "",
+        target_resources: Iterable[str] = (),
+        expected_output: str = "",
+        important_constraints: Iterable[str] = (),
+        supersedes_execution_id: str = "",
+        derived_from_execution_id: str = "",
+        previous_execution_id: str = "",
     ) -> TaskRecord:
         if not self.config.enabled:
             raise ExecutionSupervisorError(
@@ -169,6 +189,8 @@ class ExecutionSupervisor:
         identifier = task_id or f"task_{uuid4()}"
         contracts = list(completion_contract)
         dependencies = list(dependency_task_ids)
+        targets = list(target_resources)
+        constraints = list(important_constraints)
         idempotency_hash = (
             _token_hash(f"idempotency:{idempotency_key}") if idempotency_key else ""
         )
@@ -183,6 +205,18 @@ class ExecutionSupervisor:
                 or existing.compensation_strategy != compensation_strategy
                 or existing.completion_contract != contracts
                 or existing.dependency_task_ids != dependencies
+                or existing.execution_fingerprint != execution_fingerprint
+                or existing.session_id != session_id
+                or existing.workspace_id != workspace_id
+                or existing.repository_id != repository_id
+                or existing.normalized_intent != normalized_intent
+                or existing.requested_operation != requested_operation
+                or existing.target_resources != targets
+                or existing.expected_output != expected_output
+                or existing.important_constraints != constraints
+                or existing.supersedes_execution_id != supersedes_execution_id
+                or existing.derived_from_execution_id != derived_from_execution_id
+                or existing.previous_execution_id != previous_execution_id
             ):
                 raise ConcurrentUpdateError(
                     f"task identity {identifier} already exists with a different immutable contract"
@@ -263,6 +297,18 @@ class ExecutionSupervisor:
             max_concurrent_children=self.config.max_concurrent_children,
             routing_decision_id=routing_decision_id,
             workspace_path=str(Path(workspace_path).expanduser().resolve()) if workspace_path else "",
+            execution_fingerprint=execution_fingerprint,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            repository_id=repository_id,
+            normalized_intent=normalized_intent,
+            requested_operation=requested_operation,
+            target_resources=targets,
+            expected_output=expected_output,
+            important_constraints=constraints,
+            supersedes_execution_id=supersedes_execution_id,
+            derived_from_execution_id=derived_from_execution_id,
+            previous_execution_id=previous_execution_id,
         )
         self.store.create_task(task)
         if parent is not None:
@@ -307,8 +353,8 @@ class ExecutionSupervisor:
                 task.lease_token = ""
                 task.lease_expires_at = None
                 task.retry_not_before = None
-            if reason:
-                task.failure_reason = reason if target == ExecutionState.FAILED else task.failure_reason
+            if reason and target in {ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}:
+                task.failure_reason = reason
             if recovery_reason:
                 task.recovery_reason = recovery_reason
 
@@ -333,6 +379,7 @@ class ExecutionSupervisor:
             ExecutionState.CANCELLING: "cancellation_requested",
             ExecutionState.CANCELLED: "task_cancelled",
             ExecutionState.FAILED: "task_failed",
+            ExecutionState.BUDGET_EXHAUSTED: "task_budget_exhausted",
             ExecutionState.COMPLETED: "task_completed",
         }.get(target, f"task_{target.value}")
         if target in TERMINAL_STATES and task.attempt_id:
@@ -391,6 +438,7 @@ class ExecutionSupervisor:
             attempt = AttemptRecord(
                 task_id=task.task_id,
                 number=len(task.attempt_ids) + 1,
+                generation=task.attempt_generation + 1,
                 state="leased",
                 lease_owner=owner,
                 lease_token=_token_hash(lease_token),
@@ -399,6 +447,7 @@ class ExecutionSupervisor:
             )
             task.state = ExecutionState.LEASED
             task.attempt_id = attempt.attempt_id
+            task.attempt_generation = attempt.generation
             task.attempt_ids.append(attempt.attempt_id)
             task.assigned_worker = worker
             task.lease_owner = owner
@@ -530,6 +579,16 @@ class ExecutionSupervisor:
         workspace_reference: str = "",
         git_reference: str = "",
         generated_files: Iterable[str] = (),
+        plan_version: int = 0,
+        child_execution_ids: Iterable[str] = (),
+        result_escrow_references: Iterable[str] = (),
+        artifact_references: Iterable[str] = (),
+        context_manifest_id: str = "",
+        budget_snapshot: dict[str, Any] | None = None,
+        retry_state: dict[str, Any] | None = None,
+        idempotency_records: Iterable[str] = (),
+        external_action_receipts: Iterable[str] = (),
+        resume_cursor: str = "",
     ) -> CheckpointRecord:
         original_state = self.store.get_task(task_id).state
         if original_state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
@@ -559,6 +618,16 @@ class ExecutionSupervisor:
                 workspace_reference=workspace_reference,
                 git_reference=git_reference,
                 generated_files=list(generated_files),
+                plan_version=max(0, int(plan_version)),
+                child_execution_ids=list(child_execution_ids),
+                result_escrow_references=list(result_escrow_references),
+                artifact_references=list(artifact_references),
+                context_manifest_id=context_manifest_id,
+                budget_snapshot=dict(budget_snapshot or {}),
+                retry_state=dict(retry_state or {}),
+                idempotency_records=list(idempotency_records),
+                external_action_receipts=list(external_action_receipts),
+                resume_cursor=resume_cursor,
             )
             task.checkpoint_id = checkpoint.checkpoint_id
             task.checkpoint_count += 1
@@ -591,7 +660,7 @@ class ExecutionSupervisor:
         over_cost = current.monetary_budget is not None and projected_cost > current.monetary_budget
         if over_tokens or over_cost:
             reason = "execution budget exceeded before result acceptance"
-            self.transition(task_id, ExecutionState.FAILED, reason=reason)
+            self.transition(task_id, ExecutionState.BUDGET_EXHAUSTED, reason=reason)
             raise BudgetExceededError(reason)
         ancestors: list[TaskRecord] = []
         parent_id = current.parent_task_id
@@ -610,7 +679,7 @@ class ExecutionSupervisor:
                 and ancestor_cost > ancestor.monetary_budget
             ):
                 reason = f"ancestor task budget exceeded: {ancestor.task_id}"
-                self.transition(task_id, ExecutionState.FAILED, reason=reason)
+                self.transition(task_id, ExecutionState.BUDGET_EXHAUSTED, reason=reason)
                 raise BudgetExceededError(reason)
 
         def escrow(task: TaskRecord) -> EscrowResult:
@@ -622,8 +691,10 @@ class ExecutionSupervisor:
                 task_id=task.task_id,
                 parent_task_id=task.parent_task_id,
                 attempt_id=attempt_id,
+                attempt_generation=task.attempt_generation,
                 lease_token_hash=_token_hash(lease_token),
                 payload=payload,
+                status=EscrowStatus.PRODUCED,
             )
             task.result_id = result.result_id
             task.token_usage += max(0, token_usage)
@@ -631,7 +702,25 @@ class ExecutionSupervisor:
             task.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
             task.updated_at = self.clock()
             return result
-        task, result = self.store.update_task_and_result(task_id, escrow)
+        try:
+            task, result = self.store.update_task_and_result(task_id, escrow)
+        except StaleLeaseError as exc:
+            rejected = self.store.get_task(task_id)
+            self._emit(
+                "result_rejected",
+                rejected,
+                rejected_attempt_id=attempt_id,
+                active_attempt_id=rejected.attempt_id,
+                active_generation=rejected.attempt_generation,
+                reason=str(exc),
+            )
+            raise
+        self._emit("result_produced", task, result_id=result.result_id)
+        result.status = EscrowStatus.STORED
+        self.store.save_result(result)
+        self._emit("result_stored", task, result_id=result.result_id)
+        result.status = EscrowStatus.AVAILABLE
+        self.store.save_result(result)
         attempt = self.store.get_attempt(attempt_id)
         if attempt is not None:
             attempt.token_usage += max(0, token_usage)
@@ -688,23 +777,63 @@ class ExecutionSupervisor:
             )
         attempt = self.store.get_attempt(result.attempt_id)
         workspace = Path(task.workspace_path) if task.workspace_path else Path.cwd()
-        try:
-            report = self.verifier.verify(
-                task.completion_contract,
-                workspace=workspace,
-                result_payload=result.payload,
-                attempt_started_at=attempt.started_at if attempt else None,
+        blocking_children = []
+        for child_id in task.child_task_ids:
+            child = self.store.get_task(child_id)
+            child_result = self.store.get_result(child.result_id) if child.result_id else None
+            if (
+                child.state != ExecutionState.COMPLETED
+                or child_result is None
+                or child_result.acknowledged_at is None
+                or child_result.acknowledged_by != task.task_id
+            ):
+                blocking_children.append(child_id)
+        unresolved_actions = [
+            action.action_id
+            for action in self.store.actions_for_task(task_id)
+            if action.request_state not in {
+                ActionRequestState.SUCCEEDED,
+                ActionRequestState.RECONCILED,
+            }
+        ]
+        if blocking_children or unresolved_actions:
+            report = VerificationReport(
+                status=VerificationStatus.FAILED,
+                checks=[{
+                    "verifier_type": "supervisor_completion_gate",
+                    "expected_condition": {
+                        "children": "completed_and_acknowledged",
+                        "actions": "succeeded_or_reconciled",
+                    },
+                    "observed_condition": {
+                        "blocking_child_execution_ids": blocking_children,
+                        "unresolved_action_ids": unresolved_actions,
+                    },
+                    "status": "failed",
+                    "passed": False,
+                    "failure_reason": "child results or consequential actions remain unresolved",
+                    "timestamp": self.clock().isoformat(),
+                }],
             )
-        except Exception as exc:
-            self._emit(
-                "verification_failed",
-                task,
-                reason=f"completion verifier failed safely: {type(exc).__name__}: {exc}",
-            )
-            raise CompletionVerificationError(
-                "completion verifier failed; claimed result remains in escrow"
-            ) from exc
+        else:
+            try:
+                report = self.verifier.verify(
+                    task.completion_contract,
+                    workspace=workspace,
+                    result_payload=result.payload,
+                    attempt_started_at=attempt.started_at if attempt else None,
+                )
+            except Exception as exc:
+                self._emit(
+                    "verification_failed",
+                    task,
+                    reason=f"completion verifier failed safely: {type(exc).__name__}: {exc}",
+                )
+                raise CompletionVerificationError(
+                    "completion verifier failed; claimed result remains in escrow"
+                ) from exc
         result.artifacts = list(report.artifacts)
+        result.status = EscrowStatus.AVAILABLE
         self.store.save_result(result)
         def apply_report(current: TaskRecord) -> None:
             if current.result_id != result.result_id:
@@ -749,12 +878,57 @@ class ExecutionSupervisor:
         if result.parent_task_id != parent_task_id:
             raise CompletionVerificationError("result does not belong to the acknowledging parent")
         if result.acknowledged_at is None:
+            result.status = EscrowStatus.DELIVERY_PENDING
+            self.store.save_result(result)
+            self._emit("result_delivery_pending", self.store.get_task(result.task_id), result_id=result_id)
+            result.status = EscrowStatus.DELIVERED
+            result.delivery_count += 1
+            result.delivered_at = self.clock()
+            self.store.save_result(result)
             result.acknowledged_at = self.clock()
             result.acknowledged_by = parent_task_id
+            result.status = EscrowStatus.ACKNOWLEDGED
             self.store.save_result(result)
         task = self.store.get_task(result.task_id)
         self._emit("result_acknowledged", task, result_id=result_id, parent_task_id=parent_task_id)
         return result
+
+    def reverify_completed(self, task_id: str) -> TaskRecord:
+        """Invalidate the completion projection until durable evidence passes again."""
+        current = self.store.get_task(task_id)
+        if current.state != ExecutionState.COMPLETED:
+            raise CompletionVerificationError("only a completed task can be reverified")
+        if current.verification_status != VerificationStatus.PASSED or not current.result_id:
+            raise CompletionVerificationError("completed task has no reusable verified result")
+        recorded_hashes = {
+            artifact.path: artifact.sha256
+            for artifact in current.completion_artefacts
+            if artifact.path and artifact.sha256
+        }
+
+        def reopen(task: TaskRecord) -> None:
+            validate_transition(task.state, ExecutionState.COMPLETED_PENDING_VERIFICATION)
+            task.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
+            task.verification_status = VerificationStatus.PENDING
+            task.finished_at = None
+            task.completion_contract = [
+                contract.model_copy(
+                    update={"expected_sha256": recorded_hashes[contract.path]}
+                )
+                if contract.path in recorded_hashes
+                else contract
+                for contract in task.completion_contract
+            ]
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, reopen)
+        self._emit("reverification_started", task, result_id=task.result_id)
+        verified = self.verify_completion(task_id)
+        if verified.state != ExecutionState.COMPLETED:
+            raise CompletionVerificationError(
+                "stored completion evidence no longer satisfies the contract"
+            )
+        return verified
 
     def mark_irreversible_side_effect(
         self, task_id: str, *, attempt_id: str, lease_token: str
@@ -766,6 +940,76 @@ class ExecutionSupervisor:
         task, _ = self.store.update_task(task_id, update)
         self._emit("side_effect_phase_started", task, irreversible=True)
         return task
+
+    def prepare_action(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        tool_name: str,
+        action_fingerprint: str,
+        classification: SideEffectClassification,
+        idempotency_key: str = "",
+    ) -> ActionRecord:
+        task = self.store.get_task(task_id)
+        self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+        for existing in self.store.actions_for_task(task_id):
+            if existing.action_fingerprint != action_fingerprint:
+                continue
+            if existing.request_state in {
+                ActionRequestState.STARTED,
+                ActionRequestState.SUCCEEDED,
+                ActionRequestState.OUTCOME_UNKNOWN,
+            }:
+                raise RetrySafetyError(
+                    "matching consequential action already exists; reconcile its durable receipt before retry"
+                )
+        if classification in {
+            SideEffectClassification.IDEMPOTENT,
+            SideEffectClassification.CONDITIONALLY_IDEMPOTENT,
+            SideEffectClassification.DEDUPLICATED,
+        } and not idempotency_key:
+            raise RetrySafetyError(
+                f"{classification.value} action requires a durable idempotency key"
+            )
+        action = ActionRecord(
+            execution_id=task_id,
+            attempt_id=attempt_id,
+            attempt_generation=task.attempt_generation,
+            tool_name=tool_name,
+            action_fingerprint=action_fingerprint,
+            idempotency_key=_token_hash(f"action:{idempotency_key}") if idempotency_key else "",
+            classification=classification,
+            request_state=ActionRequestState.PREPARED,
+        )
+        self.store.save_action(action)
+        self._emit("action_prepared", task, action_id=action.action_id, tool_name=tool_name)
+        return action
+
+    def update_action(
+        self,
+        action_id: str,
+        *,
+        request_state: ActionRequestState,
+        external_receipt: str = "",
+        result_reference: str = "",
+        verification_state: dict[str, Any] | None = None,
+    ) -> ActionRecord:
+        action = self.store.get_action(action_id)
+        if action is None:
+            raise RetrySafetyError(f"unknown durable action: {action_id}")
+        task = self.store.get_task(action.execution_id)
+        if action.attempt_generation != task.attempt_generation:
+            raise StaleLeaseError("stale attempt generation cannot update an action record")
+        action.request_state = request_state
+        action.external_receipt = external_receipt or action.external_receipt
+        action.result_reference = result_reference or action.result_reference
+        action.verification_state.update(dict(verification_state or {}))
+        action.updated_at = self.clock()
+        self.store.save_action(action)
+        self._emit("action_updated", task, action_id=action_id, request_state=request_state.value)
+        return action
 
     def cancellation_requested(self, task_id: str) -> bool:
         return self.store.get_task(task_id).state in {ExecutionState.CANCELLING, ExecutionState.CANCELLED}

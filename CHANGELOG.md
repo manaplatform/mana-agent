@@ -4,6 +4,30 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Integrated the existing execution supervisor and context-cost governor as the
+  authoritative chat execution control layer. Lane completion now projects
+  `DONE` only from persisted supervisor verification; TaskBoard duplicate matches
+  remain resumable advisory records rather than `SKIPPED`; completed matches can
+  return verified escrow or be reverified against stored artifact hashes; gateway
+  work checkpoints after routing and before verification; sandbox operations
+  carry the full execution identity; result/action records use attempt-generation
+  fencing and durable lifecycle/receipt state; concurrent model calls reserve
+  canonical governor budget atomically; and context manifests plus TaskBoard
+  compaction are content-addressed and reversible. TaskBoard writes are now
+  crash-safe and corrupt state fails closed. Supervisor, checkpoint, and
+  TaskBoard schema version 2 fields load older records through typed defaults.
+  Follow-up corrections retry TaskBoard atomic replacement after transient
+  Windows sharing denials, preserve the supervisor-specific error for every
+  unauthorized direct `DONE` transition, and align the concurrency and gateway
+  test doubles with reserved reasoning/safety budget and durable completion or
+  checkpoint-decision contracts.
+  - User verification reported before these follow-up corrections: `10 failed, 153 passed`.
+  - User verification follow-up reported one remaining failure caused by an
+    overly exact persistence write-count assertion; the assertion now verifies
+    recovery for both state files without constraining valid subsequent saves.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_gateway.py tests/test_multi_agent_core.py`.
+  - User verification required: `python -m pytest`.
+
 - Fixed API lifecycle completion when a successful documentation, import, search, or preview tool
   result exceeds the 4,000-character human-facing trace limit. A clipped successful non-execution
   trace now remains valid stage evidence, while request execution still requires its complete typed

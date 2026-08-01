@@ -2,6 +2,8 @@
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.models import (
+    ActionRecord,
+    ActionRequestState,
     CompletionContract,
     CompletionContractType,
     ExecutionState,
@@ -22,4 +24,6 @@ __all__ = [
     "RecoveryDecision",
     "SideEffectClassification",
     "TaskRecord",
+    "ActionRecord",
+    "ActionRequestState",
 ]

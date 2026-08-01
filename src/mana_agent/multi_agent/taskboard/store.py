@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import time
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar
@@ -121,15 +124,39 @@ class JsonStateStore:
             return {}
         try:
             return json.loads(self.state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"TaskBoard state is corrupt; no empty fallback state was loaded: {self.state_path}"
+            ) from exc
 
     def save_state(self, payload: dict[str, Any]) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(
-            json.dumps(to_jsonable(payload), indent=2, sort_keys=True, ensure_ascii=False),
-            encoding="utf-8",
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.state_path.name}.", suffix=".tmp", dir=self.base_dir
         )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(to_jsonable(payload), handle, indent=2, sort_keys=True, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            for attempt in range(6):
+                try:
+                    os.replace(temporary, self.state_path)
+                    break
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.01 * (2**attempt))
+            if os.name != "nt":
+                directory_descriptor = os.open(self.base_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def append_history(self, event: dict[str, Any]) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)

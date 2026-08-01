@@ -146,8 +146,13 @@ class SandboxSpec(StrictModel):
     snapshot_source: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
     task_id: str = ""
+    execution_id: str = ""
+    root_task_id: str = ""
+    attempt_id: str = ""
+    checkpoint_id: str = ""
     session_id: str = ""
     workspace_id: str = ""
+    repository_id: str = ""
     cleanup_policy: Literal["always", "on-success", "retain"] = "always"
     read_only_root: bool = False
     provider_options: ProviderSandboxOptions | None = Field(default=None, discriminator="kind")
@@ -167,8 +172,13 @@ class SandboxHandle(StrictModel):
     external_id: str = ""
     state: SandboxState = SandboxState.REQUESTED
     task_id: str = ""
+    execution_id: str = ""
+    root_task_id: str = ""
+    attempt_id: str = ""
+    checkpoint_id: str = ""
     session_id: str = ""
     workspace_id: str = ""
+    repository_id: str = ""
     workspace_path: str = ""
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -188,6 +198,14 @@ class ExecutionRequest(StrictModel):
     timeout_seconds: int = Field(default=120, gt=0)
     stdin: str | None = None
     capture_limit_bytes: int = Field(default=10_485_760, gt=0)
+    execution_id: str = ""
+    task_id: str = ""
+    root_task_id: str = ""
+    attempt_id: str = ""
+    checkpoint_id: str = ""
+    session_id: str = ""
+    workspace_id: str = ""
+    repository_id: str = ""
 
 
 class ExecutionResult(StrictModel):
@@ -200,6 +218,14 @@ class ExecutionResult(StrictModel):
     cancelled: bool = False
     provider: str
     sandbox_id: str
+    execution_id: str = ""
+    task_id: str = ""
+    root_task_id: str = ""
+    attempt_id: str = ""
+    checkpoint_id: str = ""
+    session_id: str = ""
+    workspace_id: str = ""
+    repository_id: str = ""
     resource_usage: dict[str, float] = Field(default_factory=dict)
 
 

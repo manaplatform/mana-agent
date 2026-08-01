@@ -475,6 +475,11 @@ class FleetService:
                 cleanup_policy="retain" if run.plan.retain_workspaces else "always",
                 task_id=job.task_id, session_id=job.session_id,
                 workspace_id=job.workspace_id,
+                execution_id=job.job_id,
+                root_task_id=job.fleet_run_id,
+                attempt_id=supervisor_attempt_id,
+                checkpoint_id=supervised.checkpoint_id,
+                repository_id=job.repository_id,
                 labels={"fleet_run_id": job.fleet_run_id, "fleet_job_id": job.job_id, "worker_id": job.worker_id},
             )
             routing = RoutingRequest(
@@ -489,14 +494,26 @@ class FleetService:
             self._emit("fleet.workspace.ready", job=job)
             commit_result = await self.execution_manager.execute(
                 context,
-                ExecutionRequest(argv=["git", "rev-parse", "HEAD"], timeout_seconds=30),
+                ExecutionRequest(
+                    argv=["git", "rev-parse", "HEAD"], timeout_seconds=30,
+                    execution_id=job.job_id, task_id=job.task_id,
+                    root_task_id=job.fleet_run_id, attempt_id=supervisor_attempt_id,
+                    checkpoint_id=supervised.checkpoint_id, session_id=job.session_id,
+                    workspace_id=job.workspace_id, repository_id=job.repository_id,
+                ),
             )
             if commit_result.exit_code != 0 or commit_result.stdout.strip() != run.plan.repository_commit:
                 failure = FailureClassification.REPOSITORY_TRANSFER_FAILURE
                 raise FleetStateError("remote workspace commit identity does not match the verification plan")
             status_result = await self.execution_manager.execute(
                 context,
-                ExecutionRequest(argv=["git", "status", "--porcelain"], timeout_seconds=30),
+                ExecutionRequest(
+                    argv=["git", "status", "--porcelain"], timeout_seconds=30,
+                    execution_id=job.job_id, task_id=job.task_id,
+                    root_task_id=job.fleet_run_id, attempt_id=supervisor_attempt_id,
+                    checkpoint_id=supervised.checkpoint_id, session_id=job.session_id,
+                    workspace_id=job.workspace_id, repository_id=job.repository_id,
+                ),
             )
             if status_result.exit_code != 0 or status_result.stdout.strip():
                 failure = FailureClassification.REPOSITORY_TRANSFER_FAILURE
@@ -513,6 +530,10 @@ class FleetService:
                     ExecutionRequest(
                         argv=list(argv), timeout_seconds=run.plan.timeout_seconds,
                         capture_limit_bytes=self.config.max_log_bytes,
+                        execution_id=job.job_id, task_id=job.task_id,
+                        root_task_id=job.fleet_run_id, attempt_id=supervisor_attempt_id,
+                        checkpoint_id=supervised.checkpoint_id, session_id=job.session_id,
+                        workspace_id=job.workspace_id, repository_id=job.repository_id,
                     ),
                 )
                 stdout_parts.append(result.stdout)

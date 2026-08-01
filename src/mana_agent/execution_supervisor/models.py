@@ -34,22 +34,50 @@ class ExecutionState(str, Enum):
     CANCELLING = "cancelling"
     CANCELLED = "cancelled"
     FAILED = "failed"
+    BUDGET_EXHAUSTED = "budget_exhausted"
     COMPLETED_PENDING_VERIFICATION = "completed_pending_verification"
     COMPLETED = "completed"
 
 
 TERMINAL_STATES = frozenset(
-    {ExecutionState.CANCELLED, ExecutionState.FAILED, ExecutionState.COMPLETED}
+    {ExecutionState.CANCELLED, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED, ExecutionState.COMPLETED}
 )
 
 
 class SideEffectClassification(str, Enum):
     READ_ONLY = "read_only"
     IDEMPOTENT = "idempotent"
+    CONDITIONALLY_IDEMPOTENT = "conditionally_idempotent"
     DEDUPLICATED = "deduplicated"
     COMPENSATABLE = "compensatable"
     NON_IDEMPOTENT = "non_idempotent"
     UNKNOWN = "unknown"
+
+
+class ActionRequestState(str, Enum):
+    PREPARED = "prepared"
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    RECONCILED = "reconciled"
+
+
+class ActionRecord(StrictModel):
+    action_id: str = Field(default_factory=lambda: stable_id("action"))
+    execution_id: str
+    attempt_id: str
+    attempt_generation: int = Field(ge=1)
+    tool_name: str = Field(min_length=1)
+    action_fingerprint: str = Field(min_length=1)
+    idempotency_key: str = ""
+    classification: SideEffectClassification
+    request_state: ActionRequestState = ActionRequestState.PREPARED
+    external_receipt: str = ""
+    result_reference: str = ""
+    verification_state: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class RetryCategory(str, Enum):
@@ -77,6 +105,16 @@ class VerificationStatus(str, Enum):
     PASSED = "passed"
     FAILED = "failed"
     NOT_SUPPORTED = "not_supported"
+
+
+class EscrowStatus(str, Enum):
+    PRODUCED = "produced"
+    STORED = "stored"
+    AVAILABLE = "available"
+    DELIVERY_PENDING = "delivery_pending"
+    DELIVERED = "delivered"
+    ACKNOWLEDGED = "acknowledged"
+    REJECTED = "rejected"
 
 
 class CancellationStatus(str, Enum):
@@ -142,6 +180,7 @@ class AttemptRecord(StrictModel):
     attempt_id: str = Field(default_factory=lambda: stable_id("attempt"))
     task_id: str
     number: int = Field(ge=1)
+    generation: int = Field(default=1, ge=1)
     state: str = "created"
     created_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None
@@ -158,7 +197,7 @@ class AttemptRecord(StrictModel):
 
 
 class CheckpointRecord(StrictModel):
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=2, ge=1)
     checkpoint_id: str = Field(default_factory=lambda: stable_id("checkpoint"))
     task_id: str
     attempt_id: str
@@ -172,6 +211,16 @@ class CheckpointRecord(StrictModel):
     git_reference: str = ""
     generated_files: list[str] = Field(default_factory=list)
     verification_status: VerificationStatus = VerificationStatus.PENDING
+    plan_version: int = Field(default=0, ge=0)
+    child_execution_ids: list[str] = Field(default_factory=list)
+    result_escrow_references: list[str] = Field(default_factory=list)
+    artifact_references: list[str] = Field(default_factory=list)
+    context_manifest_id: str = ""
+    budget_snapshot: dict[str, Any] = Field(default_factory=dict)
+    retry_state: dict[str, Any] = Field(default_factory=dict)
+    idempotency_records: list[str] = Field(default_factory=list)
+    external_action_receipts: list[str] = Field(default_factory=list)
+    resume_cursor: str = ""
 
 
 class EscrowResult(StrictModel):
@@ -179,10 +228,15 @@ class EscrowResult(StrictModel):
     task_id: str
     parent_task_id: str | None = None
     attempt_id: str
+    attempt_generation: int = Field(default=1, ge=1)
     lease_token_hash: str
     created_at: datetime = Field(default_factory=utc_now)
     payload: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[CompletionArtifact] = Field(default_factory=list)
+    status: EscrowStatus = EscrowStatus.PRODUCED
+    delivery_count: int = Field(default=0, ge=0)
+    delivered_at: datetime | None = None
+    rejected_reason: str = ""
     acknowledged_at: datetime | None = None
     acknowledged_by: str = ""
 
@@ -200,13 +254,14 @@ class ExecutionEvent(StrictModel):
 
 
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=2, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
     root_task_id: str = ""
     attempt_id: str = ""
     attempt_ids: list[str] = Field(default_factory=list)
+    attempt_generation: int = Field(default=0, ge=0)
     child_task_ids: list[str] = Field(default_factory=list)
     dependency_task_ids: list[str] = Field(default_factory=list)
     task_type: str = "task"
@@ -255,6 +310,18 @@ class TaskRecord(StrictModel):
     routing_decision_id: str = ""
     workspace_path: str = ""
     result_id: str = ""
+    execution_fingerprint: str = ""
+    session_id: str = ""
+    workspace_id: str = ""
+    repository_id: str = ""
+    normalized_intent: str = ""
+    requested_operation: str = ""
+    target_resources: list[str] = Field(default_factory=list)
+    expected_output: str = ""
+    important_constraints: list[str] = Field(default_factory=list)
+    supersedes_execution_id: str = ""
+    derived_from_execution_id: str = ""
+    previous_execution_id: str = ""
 
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":
@@ -276,10 +343,15 @@ class TaskRecord(StrictModel):
 
 
 class RecoveryAction(str, Enum):
+    CONTINUE = "continue"
     RETRY = "retry"
     RESUME_CHECKPOINT = "resume_checkpoint"
     REASSIGN = "reassign"
     REPLAN = "replan"
+    WAIT_FOR_DEPENDENCY = "wait_for_dependency"
+    REQUIRE_REVERIFICATION = "require_reverification"
+    PAUSE_FOR_USER = "pause_for_user"
+    MARK_BUDGET_EXHAUSTED = "mark_budget_exhausted"
     FAIL = "fail"
     REQUIRE_INTERVENTION = "require_intervention"
 
