@@ -63,6 +63,8 @@ Trusted capsule state is stored atomically under the repository's existing Mana 
 
 Legacy records do not become shared capsules. Controlled migration creates quarantined, unscoped placeholders containing only the legacy record ID and a mapping-required marker. Ownership is never inferred from conversation text. Disabling capsules preserves capsule data and restores the supported legacy provider path, including external provider selection, without copying records between providers.
 
+The direct multi-agent compatibility adapter is capsule-enabled by default and delegates authorized reads to a `CapsuleService`. When it is created by the canonical `MemoryService`, both objects share the same capsule lifecycle service and repository. Broad `ScopedMemoryBundle` construction is available only when a compatibility caller explicitly passes `capsules_enabled=False`; capsule-enabled callers must provide a validated `CapsuleReadRequest`.
+
 Default retention is seven days for private capsules, 30 for parent-child, 90 for team, 180 for project/user, and 365 for the disabled organisation scope. Expired, soft-deleted, rejected, and quarantined capsules are excluded. Redaction replaces content while preserving hash/revision history and lineage; permanent deletion requires explicit authorized intent.
 
 ## API and dashboard

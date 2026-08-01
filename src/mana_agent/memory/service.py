@@ -80,6 +80,8 @@ class MemoryService:
                 workspace_id=workspace_id,
                 session_id=session_id,
                 repository_id=repository_id or (repository_ids or [None])[0],
+                capsule_service=self.capsules,
+                capsules_enabled=self.config.capsules.enabled,
             )
         elif self.config.mode == "external" and enable_compatibility:
             from mana_agent.memory.compatibility import ExternalRuntimeMemory

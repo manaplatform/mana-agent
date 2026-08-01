@@ -274,5 +274,13 @@ def test_canonical_memory_facade_disables_broad_bundle_when_capsules_enabled(
 ) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     memory = MemoryService(tmp_path, config=MemoryConfig())
+    assert memory.multi_agent.capsules is memory.capsules
+    actor = principal(capabilities=("memory.capsule.read.private",))
+    request = CapsuleReadRequest(
+        actor,
+        context(actor),
+        allowed_scopes=frozenset({CapsuleScope.PRIVATE}),
+    )
+    assert memory.multi_agent.build_capsule_bundle(request) == []
     with pytest.raises(MemoryConfigurationError, match="Broad legacy memory bundles are disabled"):
         memory.build_bundle(agent_id="main", agent_role="main", task_id="task-a")

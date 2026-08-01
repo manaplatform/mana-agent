@@ -26,9 +26,9 @@ VOLATILE_TOOL_ARG_KEYS = {"claimed_by_agent_id", "approved_by_agent_id", "memory
 
 @dataclass(frozen=True, slots=True)
 class LegacyCapsuleConfig:
-    """Explicit compatibility contract for the pre-capsule memory adapter."""
+    """Capsule mode exposed by the multi-agent compatibility adapter."""
 
-    enabled: bool = False
+    enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,11 +430,20 @@ class MultiAgentMemoryService:
         workspace_id: str | None = None,
         repository_id: str | None = None,
         session_id: str | None = None,
+        capsule_service: Any | None = None,
+        capsules_enabled: bool = True,
     ) -> None:
         self.root = Path(root).resolve()
-        # This direct legacy adapter is retained for compatibility callers. It
-        # declares its non-capsule mode instead of relying on a missing field.
-        self.config = LegacyMemoryConfig()
+        self.config = LegacyMemoryConfig(
+            capsules=LegacyCapsuleConfig(enabled=bool(capsules_enabled))
+        )
+        self.capsules = capsule_service
+        if self.config.capsules.enabled and self.capsules is None:
+            # Import lazily because the provider-neutral memory package also
+            # exports these legacy record types during the migration window.
+            from mana_agent.memory.capsules.service import CapsuleService
+
+            self.capsules = CapsuleService(self.root)
         service = WorkspaceService()
         repo = service.register_repository(self.root)
         workspace = service.workspace_for_repository(repo.repository_id)
@@ -758,6 +767,13 @@ class MultiAgentMemoryService:
         parent_task_id: str | None = None,
         target_files: list[str] | None = None,
     ) -> ScopedMemoryBundle:
+        if self.config.capsules.enabled:
+            from mana_agent.memory.errors import MemoryConfigurationError
+
+            raise MemoryConfigurationError(
+                "Broad legacy memory bundles are disabled while scoped capsules are enabled; "
+                "use build_capsule_bundle with a validated CapsuleReadRequest."
+            )
         role = agent_role.value if isinstance(agent_role, AgentRole) else str(agent_role)
         privilege = self.privilege_for_role(role)
         current = self.task_records.get(task_id)
@@ -806,6 +822,21 @@ class MultiAgentMemoryService:
         )
         logger.debug("[memory] scoped_bundle_created bundle_id=%s agent_id=%s role=%s", bundle.bundle_id, agent_id, role)
         return bundle
+
+    def build_capsule_bundle(self, request: Any) -> list[Any]:
+        """Delegate compact retrieval to the shared capsule lifecycle service."""
+        from mana_agent.memory.capsules.models import CapsuleReadRequest
+        from mana_agent.memory.errors import MemoryConfigurationError
+
+        if not self.config.capsules.enabled or self.capsules is None:
+            raise MemoryConfigurationError(
+                "Scoped memory capsules are disabled for this compatibility adapter."
+            )
+        if not isinstance(request, CapsuleReadRequest):
+            raise MemoryConfigurationError(
+                "A validated CapsuleReadRequest is required; no legacy memory bundle was built."
+            )
+        return self.capsules.query_capsules(request)
 
     @staticmethod
     def privilege_for_role(role: str) -> str:

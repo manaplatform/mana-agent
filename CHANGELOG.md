@@ -4,8 +4,8 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
-- Declared the capsules-disabled compatibility contract on the direct legacy multi-agent memory adapter, allowing existing TaskBoard and QueueManager compatibility flows to remain explicit. The stable prompt test now explicitly selects legacy snapshot mode instead of relying on ambient memory in capsule-enabled operation.
-  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/test_prompting_builder.py`.
+- Converted the direct legacy multi-agent memory adapter to capsule-enabled operation by default and connected the canonical memory facade's existing `CapsuleService` to it. Authorized capsule reads now use the shared lifecycle service, while broad legacy bundles require an explicit `capsules_enabled=False` compatibility setting; the stable prompt test uses that explicit legacy snapshot mode.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/test_prompting_builder.py tests/memory/test_scoped_capsules.py tests/test_memory_architecture.py`.
 
 - Clarified the structured gateway follow-up decision contract so
   `safe_to_continue` authorizes only proceeding to the next independently
