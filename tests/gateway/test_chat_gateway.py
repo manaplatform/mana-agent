@@ -901,6 +901,12 @@ def test_gateway_followup_uses_stack_owned_shared_memory(tmp_path: Path, monkeyp
         def __init__(self) -> None:
             self.searches: list[Any] = []
             self.writes: list[Any] = []
+            # This fake intentionally models the supported legacy provider
+            # path. Production services expose this feature flag explicitly;
+            # enabled capsules must not fall back to conversation-wide recall.
+            self.config = SimpleNamespace(
+                capsules=SimpleNamespace(enabled=False),
+            )
 
         def search_blocking(self, request):
             self.searches.append(request)

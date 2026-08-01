@@ -2300,8 +2300,10 @@ class AgentChatGateway:
                     query=text,
                 )
                 state["followup_memory_context"] = memory_context
+                state["followup_memory_kind"] = "legacy" if memory_context else ""
             else:
                 state["followup_memory_context"] = ""
+                state["followup_memory_kind"] = ""
             sink = event_sink or self._event_sink
             state["_turn_event_sink"] = sink
             if callable(sink):
@@ -2655,6 +2657,7 @@ class AgentChatGateway:
                                 session_id=session_id,
                                 query=text,
                             )
+                            state["followup_memory_kind"] = "capsule"
                         if callable(sink):
                             sink(
                                 "followup_classified",

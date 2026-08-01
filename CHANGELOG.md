@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Updated the gateway follow-up memory test double to declare its capsules-disabled legacy provider contract. The prompt now preserves the legacy label only for that compatibility path; capsule-derived context remains explicitly labeled as untrusted data.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_followup_classifier.py`.
+
 - Added ACL-enforced scoped shared-memory capsules with typed principals, trusted namespaces, compact retrieval budgets, post-provider reauthorization, parent-child delegation/return records, staged team/project review, optimistic versioned merges, conflicts and idempotent retries, lineage, retention/expiry, prompt-injection quarantine, redacted audit events, resilient-execution revision references, authorization-preserving API/dashboard visibility, and quarantined legacy migration. Organisation scope remains disabled and later federation/governance work is documented as a rollout limitation.
   - Intentional breaking change: broad `build_bundle` and ambient project-memory prompt snapshots fail closed while capsules are enabled; callers must supply a validated `CapsuleReadRequest`. Disabling capsules retains the legacy provider path.
   - User verification required: `python -m pytest tests/memory/test_scoped_capsules.py tests/test_memory_architecture.py`.
