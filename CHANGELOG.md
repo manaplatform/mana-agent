@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Fixed API lifecycle completion when a successful documentation, import, search, or preview tool
+  result exceeds the 4,000-character human-facing trace limit. A clipped successful non-execution
+  trace now remains valid stage evidence, while request execution still requires its complete typed
+  upstream result and HTTP status. Rendered semantic documentation imports now require and preserve
+  the exact inspected documentation reference, allowing operation citations to validate against the
+  browser-inspected page instead of the implicit `pasted-text` reference.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py`.
+
 - Fixed saved API execution when authentication is structurally known but its
   credential is supplied per request. An explicit `env://` or
   `mana-secret://` reference now resolves that operation without persisting

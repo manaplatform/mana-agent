@@ -327,6 +327,42 @@ def test_unstructured_import_accepts_documented_fields_and_normalizes_auth_param
     assert operation.authentication[0].credential_reference == "env://IP_API_TOKEN"
 
 
+def test_service_preserves_rendered_documentation_reference_for_semantic_import(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://docs.example.com/ip-api/getting-started"
+    service = ApiManagerService(
+        tmp_path,
+        registry=ApiIntegrationRegistry(tmp_path / "integrations"),
+    )
+
+    result = service.import_documentation(
+        name="Rendered IP API",
+        text="GET /{ip_address} returns the documented IP details.",
+        text_reference=source_url,
+        source_decision_id="rendered-documentation-decision",
+        semantic_definition={
+            "servers": [{"url": "https://api.example.com"}],
+            "operations": [
+                {
+                    "operation_id": "lookupIpAddress",
+                    "name": "Standard Lookup",
+                    "method": "GET",
+                    "path": "/{ip_address}",
+                    "base_url": "https://api.example.com",
+                    "risk_level": "read_only",
+                    "source_reference": source_url,
+                    "inferred_fields": [],
+                    "unresolved_fields": [],
+                }
+            ],
+        },
+    )
+
+    assert result["integration"]["documentation_sources"][0]["reference"] == source_url
+    assert result["integration"]["operations"][0]["source_reference"] == source_url
+
+
 def test_authentication_rejects_bare_credential_reference() -> None:
     with pytest.raises(ValueError, match="credential_reference must use env://"):
         AuthenticationConfig(
@@ -918,6 +954,7 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
         tool for tool in tools if tool.name == "api_docs_import_semantic"
     ).args_schema.model_json_schema()
     assert "text" in semantic_import_schema["required"]
+    assert "documentation_reference" in semantic_import_schema["required"]
     assert "semantic_definition" in semantic_import_schema["required"]
     execute_schema = next(
         tool for tool in tools if tool.name == "api_request_execute"

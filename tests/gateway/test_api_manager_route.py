@@ -5,7 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mana_agent.api_manager.runtime_tools import API_MANAGER_TOOL_NAMES
-from mana_agent.gateway.chat_gateway import AgentChatGateway
+from mana_agent.gateway.chat_gateway import (
+    AgentChatGateway,
+    _api_workflow_completion_from_trace,
+)
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
 
 
@@ -258,3 +261,97 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
         "request_preview",
         "request_execution",
     ]
+
+
+def test_api_workflow_accepts_successful_clipped_non_execution_evidence() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect, import, and call API",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Every selected lifecycle action is required.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "browser_inspect",
+                "status": "ok",
+                "output_preview": '{"ok":true,"text":"' + ("x" * 3981),
+            },
+            {
+                "tool_name": "api_docs_import_semantic",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":{"saved":true}}',
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[{"operation_id":"lookup"}]}',
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": (
+                    '{"ok":true,"result":{"executed":true,"upstream_ok":true,'
+                    '"status_code":200}}'
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["missing_actions"] == []
+    assert "documentation_inspection" in completion["completed_actions"]
+
+
+def test_api_workflow_rejects_unparseable_non_clipped_evidence() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect API documentation",
+                            "required_actions": ["documentation_inspection"],
+                            "reason": "Documentation evidence is required.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "browser_inspect",
+                "status": "ok",
+                "output_preview": "not structured evidence",
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["missing_actions"] == ["documentation_inspection"]

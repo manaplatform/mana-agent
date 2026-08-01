@@ -250,6 +250,15 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     for trace in traces[1:]:
         action = _API_WORKFLOW_EVIDENCE.get(str(trace.get("tool_name") or ""))
         result = payload(trace)
+        trace_succeeded = str(trace.get("status") or "").lower() == "ok"
+        result_succeeded = result.get("ok") is True
+        raw_result = trace.get("output_preview") or trace.get("result_summary")
+        clipped_success_evidence = (
+            trace_succeeded
+            and isinstance(raw_result, str)
+            and len(raw_result) >= 4000
+            and not result
+        )
         if action == "request_execution" and result.get("ok") is True:
             executed = result.get("result")
             if (
@@ -274,7 +283,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                     )
                     if executed.get(key) not in (None, "")
                 }
-        elif action and result.get("ok") is True:
+        elif action and (result_succeeded or clipped_success_evidence):
             completed.add(action)
     missing = [action for action in required if action not in completed]
     unexpected = sorted(action for action in completed if action not in required)
@@ -4686,7 +4695,10 @@ class AgentChatGateway:
             "exists, call api_docs_inspect on the authorized source, derive a cited strict semantic "
             "definition only from its returned evidence, call api_docs_import_semantic with "
             "save=true, then "
-            "search the newly saved operations and continue to preview and execution. Do not report "
+            "search the newly saved operations and continue to preview and execution. Pass the "
+            "exact reference returned by documentation inspection, or the current inspected page "
+            "URL for rendered browser evidence, as documentation_reference and cite that same "
+            "reference from every semantic operation. Do not report "
             "the workflow complete merely because documentation inspection or an empty search "
             "completed. If api_docs_inspect returns documentation_authorization_required, the model "
             "may explicitly select browser_open and browser_inspect for the same supplied URL. It "

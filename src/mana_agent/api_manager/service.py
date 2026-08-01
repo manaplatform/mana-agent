@@ -75,6 +75,7 @@ class ApiManagerService:
         name: str,
         source_decision_id: str,
         text: str = "",
+        text_reference: str = "pasted-text",
         path: str = "",
         url: str = "",
         semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
@@ -109,6 +110,7 @@ class ApiManagerService:
                     text,
                     name=name,
                     source_decision_id=source_decision_id,
+                    reference=text_reference,
                     semantic_definition=semantic_definition,
                 )
         except (ApiManagerError, ValueError, OSError, UnicodeError) as exc:

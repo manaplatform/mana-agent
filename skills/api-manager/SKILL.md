@@ -26,9 +26,10 @@ browser request, shell command, or provider-specific implementation.
 3. For Markdown, webpage prose, or pasted text, produce a strict semantic definition. Cite the
    source for every operation, list only fields that were actually inferred (the list may be empty
    when every field is documented), and leave undocumented required values or authentication
-   unresolved. Submit prose only through `api_docs_import_semantic`, whose schema requires both the
-   inspected text and the typed semantic definition. Use `api_docs_import` for formal OpenAPI or
-   Swagger specifications.
+   unresolved. Submit prose only through `api_docs_import_semantic`, whose schema requires the
+   inspected text, its exact inspected documentation reference, and the typed semantic definition.
+   Every operation must cite that reference. Use `api_docs_import` for formal OpenAPI or Swagger
+   specifications.
 4. Prefer enabled saved integrations. Search their operations before selecting one.
    If the user supplied documentation and no operation exists, inspect, import with `save=true`,
    search the saved integration, and continue as one ordered workflow.

@@ -99,6 +99,7 @@ class _Import(_Decision):
 class _SemanticImport(_Decision):
     name: str = Field(min_length=1, max_length=160)
     text: str = Field(min_length=1, max_length=10 * 1024 * 1024)
+    documentation_reference: str = Field(min_length=1, max_length=2048)
     semantic_definition: SemanticDefinition
     save: bool = True
     ephemeral: bool = False
@@ -232,6 +233,7 @@ def build_api_manager_langchain_tools(
                 name=request.name,
                 source_decision_id=request.source_decision_id,
                 text=request.text,
+                text_reference=request.documentation_reference,
                 semantic_definition=request.semantic_definition,
                 save=request.save,
                 ephemeral=request.ephemeral,
@@ -315,7 +317,9 @@ def build_api_manager_langchain_tools(
             description=(
                 "Validate and import unstructured documentation using a required, cited, strict "
                 "SemanticDefinition extracted by the model only from the supplied text evidence. "
-                "The semantic_definition argument is mandatory; no heuristic extraction runs."
+                "Pass the exact inspected source reference in documentation_reference and cite "
+                "that reference from every operation. The semantic_definition argument is "
+                "mandatory; no heuristic extraction runs."
             ),
             args_schema=_SemanticImport,
             func=import_semantic_docs,

@@ -64,8 +64,9 @@ servers are accepted only when an HTTP(S) documentation source gives them a safe
 
 Unstructured documentation never uses heuristic endpoint extraction. Its dedicated
 `api_docs_import_semantic` tool requires both the inspected text evidence and the typed semantic
-definition, so the model cannot accidentally submit prose without the validated extraction. The
-model must cite every operation using the imported source or a URL present in that source, identify
+definition plus the exact inspected documentation reference, so the model cannot accidentally
+submit prose without the validated extraction or lose rendered-page provenance. The model must cite
+every operation using that reference or a URL present in that source, identify
 only fields that were inferred (an empty list is valid for fully documented operations), and leave
 undocumented required values and authentication unresolved. Parameters used solely to carry
 authentication are normalized into authentication metadata instead of being exposed as ordinary
@@ -137,7 +138,9 @@ the rendered browser. It can click, wait, or scroll only to expand API operation
 then re-inspects the page for the documented server, method, path, parameters, authentication, and
 responses. It cannot type into or submit forms, sign in, grant consent, or interact with CAPTCHA or
 MFA controls. The returned rendered evidence is imported through `api_docs_import_semantic`, never
-by retrying the redirecting URL.
+by retrying the redirecting URL. Successful rendered inspection remains completion evidence even
+when its human-facing text preview is clipped; request execution still requires the complete typed
+executor result.
 
 For natural-language calls, the API route retrieves candidates from enabled integrations. A
 structured model decision must select one of those candidates with sufficient confidence.
