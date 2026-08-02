@@ -1158,7 +1158,7 @@ def _safe_apply_patch_direct(
         target = (repo_root / Path(item.path)).resolve()
         exists = target.exists()
         # Always re-read from disk for each file (fresh content for recovery).
-        before = target.read_text(encoding="utf-8") if exists else ""
+        before = target.read_bytes().decode("utf-8") if exists else ""
         before_by_path.setdefault(item.path, before)
         if item.op == "add":
             if exists:
@@ -1342,7 +1342,7 @@ def _safe_apply_patch_direct(
                             if after_ft.had_final_newline or normalized.endswith("\n"):
                                 body += before_ft.newline
                             after = body
-                target.write_text(after, encoding="utf-8")
+                target.write_text(after, encoding="utf-8", newline="")
     _write_patch_history(repo_root=repo_root, patch=patch_text, result=result, touched_files=touched_files, check_only=check_only)
     return result
 
@@ -1411,7 +1411,7 @@ def safe_apply_patch(
         else:
             current = expected_content.get(item.path)
             if current is None:
-                current = (root / item.path).read_text(encoding="utf-8")
+                current = (root / item.path).read_bytes().decode("utf-8")
             if enable_recovery:
                 applied, after, _error, _metadata = _apply_codex_update_with_recovery(current, item.lines, item.path)
             else:

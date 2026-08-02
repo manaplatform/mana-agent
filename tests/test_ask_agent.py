@@ -508,10 +508,10 @@ def test_ask_agent_run_command_rewrites_python_to_local_venv_python3(tmp_path: P
     tools, _traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1)
     run_command = [item for item in tools if item.name == "run_command"][0]
 
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     def _fake_run(cmd, **kwargs):  # noqa: ANN001
-        captured["cmd"] = str(cmd)
+        captured["cmd"] = cmd
         _ = kwargs
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -523,7 +523,9 @@ def test_ask_agent_run_command_rewrites_python_to_local_venv_python3(tmp_path: P
     assert payload["interpreter_rewritten"] is True
     assert payload["original_cmd"] == "python -V"
     assert payload["executed_cmd"].startswith(str(venv_python))
-    assert str(venv_python) in captured["cmd"]
+    executed_argv = captured["cmd"]
+    assert isinstance(executed_argv, list)
+    assert str(venv_python) in str(executed_argv[-1])
 
 
 def test_ask_agent_run_command_rewrites_python_to_python3_without_local_venv(tmp_path: Path, monkeypatch) -> None:
