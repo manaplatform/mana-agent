@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from textual.binding import Binding
+from textual.geometry import Size
 from textual.widgets import TextArea
 
 
@@ -62,6 +63,26 @@ class SelectableText(TextArea):
         if not self.soft_wrap:
             return 0
         return self.scrollable_content_region.width - self.gutter_width
+
+    def get_content_height(
+        self, container: Size, viewport: Size, width: int
+    ) -> int:
+        """Return an auto-height using the width being measured right now.
+
+        A dynamically mounted card can receive its first auto-height query
+        before its later resize event.  On Windows that leaves the widget at
+        the old one-line height even though the deferred rewrap has updated
+        its document.  Rewrapping with the measurement width makes the
+        document and the calculated height part of the same layout pass.
+        """
+        if not self.soft_wrap or width <= 0:
+            return super().get_content_height(container, viewport, width)
+
+        wrap_width = max(0, width - self.gutter_width)
+        self.wrapped_document.wrap(wrap_width, tab_width=self.indent_width)
+        self.virtual_size = Size(0, self.wrapped_document.height)
+        return self.wrapped_document.height
+
     def on_mount(self) -> None:
         """Rewrap dynamically mounted cards after their parent has laid out.
 
