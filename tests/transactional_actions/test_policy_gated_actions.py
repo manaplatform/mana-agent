@@ -298,6 +298,7 @@ def test_pending_action_and_idempotency_survive_store_restart(tmp_path: Path) ->
 
 
 def test_unclassified_provider_tool_is_blocked_without_invocation() -> None:
+    assert_model_tool_routed("media_play")
     with pytest.raises(TransactionalGatewayRequired, match="default-deny"):
         assert_model_tool_routed("third_party_mutation")
     with pytest.raises(TransactionalGatewayRequired, match="no registered transactional"):

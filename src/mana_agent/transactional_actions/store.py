@@ -23,6 +23,7 @@ class ActionStore:
         self.root = root.expanduser().resolve()
         for child in ("actions", "transactions", "idempotency", "audit"):
             (self.root / child).mkdir(parents=True, exist_ok=True)
+        (self.root / "audit" / "actions.jsonl").touch(exist_ok=True)
         self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".lock"
         self._lock_path.touch(exist_ok=True)

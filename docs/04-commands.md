@@ -12,7 +12,7 @@ mana-agent memory capsules staged
 mana-agent memory capsules review <staged-id> --strategy append --reason "Evidence reviewed"
 ```
 
-Set `MANA_API_BASE` (or pass `--api-base`) and the existing `MANA_API_TOKEN`. The API host must install its authenticated capsule identity resolver. Principal, project, team, and namespace overrides are intentionally unavailable. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
+Set `MANA_API_BASE` (or pass `--api-base`) and the existing `MANA_API_TOKEN`. `mana-agent api` and the local dashboard install a fixed local process identity for the current OS user and repository, which permits authorized project and user capsule reads. Dashboard chat passes that same identity to its gateway, so successful task results are persisted as task-private capsules for model-selected follow-ups; the dashboard does not expose those task-private records broadly. A deployed host should install its own authenticated capsule identity resolver for broader, task-aware access. Principal, project, team, and namespace overrides are intentionally unavailable. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
 
 ## Durable tasks
 

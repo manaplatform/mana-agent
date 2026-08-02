@@ -15,6 +15,7 @@ class ComputerClientContext:
     client_type: str
     locally_confirmed: bool = False
     allowed_decision_ids: frozenset[str] = frozenset()
+    workspace_root: str = ""
 
 
 _context: ContextVar[ComputerClientContext | None] = ContextVar("mana_computer_client", default=None)
@@ -31,12 +32,14 @@ def computer_client_scope(
     *,
     locally_confirmed: bool = False,
     allowed_decision_ids: frozenset[str] = frozenset(),
+    workspace_root: str = "",
 ):
     token = _context.set(ComputerClientContext(
         session_id,
         client_type,
         locally_confirmed,
         allowed_decision_ids,
+        workspace_root,
     ))
     try:
         yield
@@ -54,6 +57,7 @@ def computer_decision_scope(source_decision_id: str):
         current.client_type,
         current.locally_confirmed,
         frozenset({source_decision_id}),
+        current.workspace_root,
     ))
     try:
         yield
@@ -76,7 +80,7 @@ def authenticated_computer_client(function: Callable[..., Any]) -> Callable[...,
     def wrapper(self, session_id: str, *args: Any, **kwargs: Any) -> Any:
         state = self._session(session_id)
         frontend = _normalized_frontend(str(state.get("frontend") or "untrusted"))
-        with computer_client_scope(session_id, frontend):
+        with computer_client_scope(session_id, frontend, workspace_root=str(self.root)):
             return function(self, session_id, *args, **kwargs)
 
     return wrapper

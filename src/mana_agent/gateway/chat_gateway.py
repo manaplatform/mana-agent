@@ -200,6 +200,41 @@ def _api_permission_requests_from_trace(response: Any) -> list[dict[str, Any]]:
     return list(requests.values())
 
 
+def _transactional_action_requests_from_trace(response: Any) -> list[dict[str, Any]]:
+    """Recover exact-action approval requests from isolated model-tool workers."""
+    requests: dict[str, dict[str, Any]] = {}
+
+    def visit(value: Any) -> None:
+        payload = value
+        if isinstance(value, str):
+            try:
+                payload = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return
+        if isinstance(payload, list):
+            for item in payload:
+                visit(item)
+            return
+        if not isinstance(payload, dict):
+            return
+        request_id = str(payload.get("action_id") or payload.get("permission_request_id") or "").strip()
+        if payload.get("error_code") == "transactional_approval_required" and request_id:
+            requests[request_id] = {
+                "permission_request_id": request_id,
+                "action_id": request_id,
+                "permission_scope": "transactional_action.once",
+                "preview": payload.get("preview") or {},
+                "transactional_action_approval": True,
+            }
+        for nested in payload.values():
+            if isinstance(nested, (dict, list, str)):
+                visit(nested)
+
+    for item in _serialize_tool_traces(response):
+        visit(item)
+    return list(requests.values())
+
+
 _API_WORKFLOW_EVIDENCE = {
     "api_docs_inspect": "documentation_inspection",
     "browser_inspect": "documentation_inspection",
@@ -416,6 +451,7 @@ class AgentChatGateway:
         lane_session_token_budget: int | None = None,
         lane_global_token_budget: int | None = None,
         session_id: str | None = None,
+        memory_user_id: str = "",
         event_sink: Callable[..., None] | None = None,
         # Allow passing pre-built objects (tests / transitional)
         chat_service: Any = None,
@@ -426,6 +462,12 @@ class AgentChatGateway:
         entry_route_registry: EntryRouteRegistry | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
+        # The chat gateway owns user-visible action approvals. Initialize the
+        # durable action store here so its audit target is available before a
+        # model tool proposes the first computer-control action.
+        from mana_agent.transactional_actions.runtime import default_action_gateway
+
+        default_action_gateway(self.root)
         self.settings = settings or Settings()
         self._workspaces = WorkspaceService()
 
@@ -489,6 +531,7 @@ class AgentChatGateway:
                     )
                 ),
                 session_id=session_id,
+                memory_user_id=memory_user_id,
                 chat_service=chat_service,
                 coding_agent_instance=coding_agent_instance,
                 tools_orchestrator=tools_orchestrator,
@@ -1100,18 +1143,27 @@ class AgentChatGateway:
         session_id: str = "",
     ) -> dict[str, Any]:
         """Approve one exact previewed transactional action for a trusted local session."""
-        from mana_agent.transactional_actions.runtime import approve_action
+        from mana_agent.transactional_actions.runtime import (
+            approve_action,
+            default_action_gateway,
+            execute_approved_computer_action,
+        )
 
         approval_id = approve_action(
             self.root,
             action_id,
             approved_by=f"local-session:{session_id or 'unknown'}",
         )
+        action = default_action_gateway(self.root).store.get_action(action_id)
+        result: dict[str, Any] = {}
+        if action is not None and action.tool_name == "computer":
+            result = execute_approved_computer_action(self.root, action_id, approval_id=approval_id)
         return {
             "status": "approved",
             "action_id": action_id,
             "approval_id": approval_id,
-            "message": "Exact action approved once. The originating tool may now resume the bound action.",
+            "result": result,
+            "message": "Approved computer action executed." if result else "Exact action approved once. The originating tool may now resume the bound action.",
         }
 
     def deny_transactional_action_command(
@@ -5692,12 +5744,14 @@ class AgentChatGateway:
             "Never invent IDs, paths, URLs, permissions, success, or "
             "private content. Never request or construct raw shell, AppleScript, PowerShell, D-Bus, "
             "COM, JavaScript, accessibility, mouse, or keyboard commands. If a tool returns "
-            "permission_required, stop: the active trusted local TUI or dashboard will show "
-            "once/session/always choices and resume the stored exact action after approval. If it returns "
+            "permission_required or transactional_approval_required, stop: the active trusted local "
+            "TUI or dashboard will show the exact-action approval prompt and resume the stored action "
+            "after approval. If it returns "
             "confirmation_required, show its preview and confirmation_request_id and stop; only a "
             "trusted local user can approve it. Stop the sequence after any denial, cancellation, "
             "timeout, unavailable capability, or partial failure."
         )
+        transactional_approvals: list[dict[str, Any]] = []
         try:
             from mana_agent.integrations.computer_control.context import (
                 computer_decision_scope,
@@ -5756,6 +5810,27 @@ class AgentChatGateway:
                             },
                         )
                     )
+                transactional_approvals = _transactional_action_requests_from_trace(response)
+                for approval in transactional_approvals:
+                    from mana_agent.chat.events import CodingActivityEvent
+                    from mana_agent.chat.history import get_history
+
+                    get_history().add(
+                        CodingActivityEvent(
+                            activity={
+                                "event_type": "action.approval.required",
+                                "title": "Transactional action approval required",
+                                "metadata": approval,
+                            },
+                            turn_id=context.turn_id,
+                        )
+                    )
+                    if callable(event_sink):
+                        event_sink(
+                            "action.approval.required",
+                            "Transactional action approval required",
+                            metadata=approval,
+                        )
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -5781,7 +5856,10 @@ class AgentChatGateway:
             decision=decision,
             trace=trace,
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={"route": "computer"},
+            payload={
+                "route": "computer",
+                "permission_requests": transactional_approvals,
+            },
         )
 
     async def process_turn_async(

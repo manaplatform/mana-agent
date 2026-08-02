@@ -66,6 +66,7 @@ class ChatGatewayConfig:
 
     # Session
     session_id: str | None = None
+    memory_user_id: str = ""
 
     # Optional injection (tests / transitional)
     chat_service: Any = None
@@ -139,6 +140,7 @@ class ChatGatewayConfig:
                 else None
             ),
             session_id=self.session_id,
+            memory_user_id=str(self.memory_user_id or "").strip(),
             chat_service=self.chat_service,
             coding_agent_instance=self.coding_agent_instance,
             tools_orchestrator=self.tools_orchestrator,

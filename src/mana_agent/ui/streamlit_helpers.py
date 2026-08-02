@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os  # used for MANA_DASHBOARD_ROOT env and safe paths
 import atexit
+import getpass
 from pathlib import Path
 from typing import Any
 from mana_agent.workspaces.paths import (
@@ -550,6 +551,8 @@ def run_dashboard_chat(
             root,
             coding_agent=True,
             agent_tools=True,
+            session_id=conversation_id,
+            memory_user_id=getpass.getuser(),
             event_sink=forwarder,
         )
         _dashboard_gateway_cache()[cache_key] = gw

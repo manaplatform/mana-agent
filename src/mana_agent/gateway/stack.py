@@ -548,6 +548,7 @@ def build_chat_stack(
         session_id=cfg.session_id or "",
         workspace_id=workspace_id,
         repository_id=repository_id,
+        user_id=cfg.memory_user_id,
         enable_compatibility=False,
     )
 

@@ -158,6 +158,20 @@ def deny_action(workspace_root: Path, action_id: str, *, denied_by: str) -> dict
     return action.model_dump(mode="json")
 
 
+def execute_approved_computer_action(
+    workspace_root: Path, action_id: str, *, approval_id: str,
+) -> dict[str, Any]:
+    """Resume the durable exact computer action selected before approval."""
+    from .computer import adapter_for_stored_action
+
+    gateway = default_action_gateway(workspace_root)
+    action = gateway.store.get_action(action_id)
+    if action is None or action.tool_name != "computer":
+        raise LookupError("unknown computer action")
+    outcome = gateway.execute(adapter_for_stored_action(action), approval_id=approval_id)
+    return outcome.result
+
+
 def _assert_workspace_scope(workspace_root: Path, action: Any) -> None:
     root = workspace_root.resolve()
     scoped_paths: list[str] = []

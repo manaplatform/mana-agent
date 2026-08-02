@@ -94,6 +94,13 @@ class ActionPolicy:
             return self._http(action)
         if action.tool_name == "git":
             return self._git(action)
+        if action.tool_name == "computer":
+            return (
+                PolicyOutcome.REQUIRE_APPROVAL,
+                ["computer_control"],
+                "Computer-control actions require exact approval.",
+                ["approve_computer_control"],
+            )
         return PolicyOutcome.DENY, ["unclassified_tool"], "No policy rule safely classifies this tool.", ["default_deny"]
 
     def _scoped_policy(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]] | None:

@@ -69,7 +69,7 @@ Default retention is seven days for private capsules, 30 for parent-child, 90 fo
 
 ## API and dashboard
 
-The typed `/api/v1/memory/capsules` endpoints query authorized projections, inspect metadata/lineage, list staged proposals, stage, merge/reject, resolve conflicts, and delete/redact. The API requires the host application to install an authenticated `capsule_identity_resolver`; it never accepts principal IDs from the request body and returns generic not-found responses for inaccessible IDs.
+The typed `/api/v1/memory/capsules` endpoints query authorized projections, inspect metadata/lineage, list staged proposals, stage, merge/reject, resolve conflicts, and delete/redact. `mana-agent api` binds a fixed local process identity for its startup repository and OS user, so local project/user reads work without accepting identity fields from requests. The dashboard supplies that same identity to its cached chat gateway, allowing the gateway to persist and retrieve task-private capsules only during its model-selected follow-up flow. Private and parent-child task capsules remain unavailable to broad API/dashboard queries. A deployed host should install an authenticated `capsule_identity_resolver` for task-aware access; the API never accepts principal IDs from the request body and returns generic not-found responses for inaccessible IDs.
 
 Dashboard → Memory Capsules calls the same API and never reads provider files directly. Authorized reviewers can inspect, approve/merge, or reject staged proposals there. `mana-agent memory capsules list|inspect|lineage|staged|review` uses that same authenticated API; list commands require explicit scopes, and no command accepts principal or namespace identity overrides.
 

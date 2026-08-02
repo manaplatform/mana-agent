@@ -33,11 +33,12 @@ def _request(path: str, *, body: dict | None = None):
 def render(_root: Path | None = None) -> None:
     st.header("Memory Capsules")
     st.caption("All results come through the authenticated capsule service; this page never reads provider storage directly.")
+    st.caption("Local dashboard access can read project and user capsules. Task-private chat capsules remain available only to the gateway's authorized follow-up flow.")
     query = st.text_input("Relevance query", value="")
     scopes = st.multiselect(
         "Allowed scopes",
         ["private", "parent_child", "team", "project", "user"],
-        default=["private", "parent_child", "team", "project", "user"],
+        default=["project", "user"],
     )
     max_capsules = st.number_input("Maximum capsules", min_value=1, max_value=100, value=12)
     if st.button("Load visible capsules", type="primary"):

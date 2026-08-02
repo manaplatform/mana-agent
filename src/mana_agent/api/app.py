@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import getpass
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -21,6 +24,61 @@ from mana_agent.api.routes.servers import router as servers_router
 from mana_agent.api.routes.tasks import router as tasks_router
 from mana_agent.api.routes.memory_capsules import router as memory_capsules_router
 from mana_agent.config.user_config import load_effective_settings, validate_bool
+
+
+def _local_capsule_identity_resolver(root: Path) -> Any:
+    """Resolve the fixed identity for one trusted local repository host.
+
+    The standalone server has no upstream identity provider.  Its process
+    owner, configured dashboard root, and repository identity are therefore
+    fixed when the app starts; request data never contributes to this binding.
+    Private and parent-child capsules remain unavailable because their durable
+    task identities cannot be established by this local host.
+    """
+    from mana_agent.memory import CapsuleTaskContext, MemoryPrincipal
+    from mana_agent.workspaces.paths import repository_id_for_path
+
+    user_id = getpass.getuser()
+    project_id = repository_id_for_path(root)
+    task_id = f"api-{project_id}"
+    principal = MemoryPrincipal(
+        user_id=user_id,
+        project_id=project_id,
+        task_id=task_id,
+        agent_id="api:local",
+        capabilities=frozenset({
+            "memory.capsule.read.project",
+            "memory.capsule.read.user",
+        }),
+    )
+    context = CapsuleTaskContext(
+        user_id=user_id,
+        organisation_id=None,
+        project_id=project_id,
+        team_ids=frozenset(),
+        task_id=task_id,
+        agent_id="api:local",
+    )
+
+    def resolve_local_identity(_request: Request) -> tuple[MemoryPrincipal, CapsuleTaskContext]:
+        return principal, context
+
+    return resolve_local_identity
+
+
+def _local_capsule_bindings() -> tuple[Any, Any]:
+    """Bind the standalone API to one trusted local repository identity."""
+    from mana_agent.memory import CapsuleService
+    from mana_agent.memory.config import CapsuleConfig
+
+    root = Path(os.getenv("MANA_DASHBOARD_ROOT") or Path.cwd()).expanduser().resolve()
+    settings = load_effective_settings(include_env=True)
+    service = CapsuleService(
+        root,
+        config=CapsuleConfig.load(settings),
+        provider=str(settings.get("MANA_MEMORY_PROVIDER") or "mana"),
+    )
+    return service, _local_capsule_identity_resolver(root)
 
 
 def create_app(
@@ -56,6 +114,15 @@ def create_app(
     ), fleet_registry=fleet_registry)
     from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
     from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+    gateway_memory_service = getattr(getattr(chat_gateway, "_stack", None), "memory_service", None)
+    gateway_capsule_service = (
+        getattr(gateway_memory_service, "capsules", None)
+        if gateway_memory_service is not None
+        else None
+    )
+    if capsule_service is None and gateway_capsule_service is not None:
+        capsule_service = gateway_capsule_service
 
     def supervisor_event(event_type: str, payload: dict[str, Any]) -> None:
         get_execution_event_hub().publish({
@@ -103,6 +170,15 @@ def create_app(
             if github_autopilot is not None:
                 await github_autopilot.stop()
 
+    if capsule_service is None and capsule_identity_resolver is None:
+        local_capsule_service, local_capsule_identity_resolver = _local_capsule_bindings()
+        capsule_service = local_capsule_service
+        capsule_identity_resolver = local_capsule_identity_resolver
+    elif capsule_identity_resolver is None and capsule_service is gateway_capsule_service:
+        capsule_identity_resolver = _local_capsule_identity_resolver(
+            Path(getattr(chat_gateway, "root", Path.cwd())).expanduser().resolve()
+        )
+
     app = FastAPI(
         title="Mana-Agent API",
         version=__version__,
@@ -137,9 +213,6 @@ def create_app(
     # Make the central chat gateway (if provided) available to routes / services
     if chat_gateway is not None:
         app.state.chat_gateway = chat_gateway
-        memory_service = getattr(getattr(chat_gateway, "_stack", None), "memory_service", None)
-        if memory_service is not None:
-            app.state.capsule_service = memory_service.capsules
     if capsule_identity_resolver is not None:
         app.state.capsule_identity_resolver = capsule_identity_resolver
     if capsule_service is not None:

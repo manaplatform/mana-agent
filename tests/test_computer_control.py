@@ -63,6 +63,11 @@ from mana_agent.services.execution_event_hub import (
 )
 from mana_agent.tui.app import ManaChatApp
 from mana_agent.tui.computer_permission import ComputerPermissionScreen
+from mana_agent.transactional_actions.computer import ComputerActionAdapter
+from mana_agent.transactional_actions.gateway import ActionGateway, ApprovalRequired
+from mana_agent.transactional_actions.approvals import ApprovalRegistry
+from mana_agent.transactional_actions.policy import ActionPolicy, PolicyConfig
+from mana_agent.transactional_actions.store import ActionStore
 
 
 def run(coro):
@@ -110,6 +115,35 @@ def service(tmp_path: Path, *, provider=None, config=None, confirmations=None, e
         audit=AuditLogger(path=tmp_path / "audit.jsonl"),
         event_sink=events.append if events is not None else (lambda _event: None),
     )
+
+
+def test_computer_action_uses_durable_exact_approval_and_initializes_audit(tmp_path: Path) -> None:
+    config = settings(
+        tmp_path,
+        permissions={spec.permission_scope: "ask" for spec in ACTION_SPECS.values()},
+    )
+    fake = FakeComputerControlProvider()
+    control = service(tmp_path, provider=fake, config=config)
+    state = tmp_path / "transactional"
+    gateway = ActionGateway(
+        store=ActionStore(state),
+        policy=ActionPolicy(PolicyConfig(workspace_roots=(tmp_path,))),
+        approvals=ApprovalRegistry(state / "approvals"),
+    )
+    adapter = ComputerActionAdapter(
+        action=action("media.pause"),
+        session_id="session-1",
+        client_type="tui",
+        service=control,
+    )
+    with pytest.raises(ApprovalRequired) as pending:
+        gateway.execute(adapter)
+    assert pending.value.action.tool_name == "computer"
+    assert (state / "audit" / "actions.jsonl").is_file()
+    approval_id = gateway.approve(pending.value.action.action_id, approved_by="local-user")
+    outcome = gateway.execute(adapter, approval_id=approval_id)
+    assert outcome.action.state.value == "committed"
+    assert len(fake.executed) == 1
 
 
 def test_platform_auto_detection_is_explicit() -> None:
@@ -387,7 +421,9 @@ def test_runtime_tools_require_authenticated_gateway_context(tmp_path: Path) -> 
     assert denied["error_code"] == "remote_control_denied"
     with computer_client_scope("session", "local_cli", allowed_decision_ids=frozenset({"decision-1"})):
         allowed = json.loads(tools["media_pause"].invoke(payload))
-    assert allowed["ok"] is True
+    assert allowed["ok"] is False
+    assert allowed["error_code"] == "transactional_approval_required"
+    assert allowed["action_id"] == allowed["permission_request_id"]
     with computer_client_scope("session", "local_cli", allowed_decision_ids=frozenset({"another-decision"})):
         wrong_decision = json.loads(tools["media_pause"].invoke(payload))
     assert wrong_decision["error_code"] == "remote_control_denied"
