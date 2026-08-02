@@ -19,7 +19,13 @@ class FollowupClassificationOutput(BaseModel):
     decision_id: str = Field(min_length=1)
     category: Literal["new_task", "followup_task", "task_expansion", "task_correction", "retry_request", "resume_request", "status_request", "clarification_answer", "conversation_only", "duplicate_message"]
     related_task_id: str = ""
-    safe_to_continue: bool
+    safe_to_continue: bool = Field(
+        description=(
+            "Whether this classification is unambiguous enough to proceed to the next "
+            "validated decision boundary; this does not authorize tools, mutations, or "
+            "other consequential actions."
+        )
+    )
     reason: str = Field(min_length=1)
 
 
@@ -37,7 +43,14 @@ Use new_task for independent actionable work; use followup_task, task_expansion,
 when one offered task is the intended parent; use retry_request/resume_request only for the same offered
 task; use status_request or conversation_only when no execution should be created. Do not use keyword
 matching. If no offered task is unambiguously applicable, select new_task or conversation_only. Return
-strict JSON matching the schema and select only an offered task ID."""
+strict JSON matching the schema and select only an offered task ID.
+
+safe_to_continue authorizes only use of this classification to reach the next independently validated
+decision boundary. It does not approve tools, mutations, retries, or consequential actions. Set it true
+when the selected category and optional offered task are unambiguous. In particular, select new_task or
+conversation_only with safe_to_continue true when no offered task applies. Set it false only when the
+turn cannot be safely classified at all, and explain the concrete ambiguity in reason. Do not set it
+false merely because downstream work may be consequential or require separate approval."""
 
 
 class FollowupClassifier:
@@ -65,5 +78,9 @@ class FollowupClassifier:
         if not needs_task and output.related_task_id:
             raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: non-task category selected a task.")
         if not output.safe_to_continue:
-            raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: decision did not authorize continuation.")
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was "
+                "executed. Reason: decision did not authorize continuation: "
+                f"{output.reason}"
+            )
         return FollowupClassification(**output.model_dump())

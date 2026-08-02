@@ -1,5 +1,27 @@
 # Configuration
 
+## Scoped memory capsules
+
+Scoped capsules are enabled with conservative review and retention defaults. The persisted `~/.mana/config.toml` keys correspond to these typed settings:
+
+```toml
+MANA_MEMORY_CAPSULES_ENABLED = true
+MANA_MEMORY_CAPSULES_DEFAULT_MAX_CAPSULES = 12
+MANA_MEMORY_CAPSULES_DEFAULT_MAX_TOKENS = 4000
+MANA_MEMORY_CAPSULES_SHARED_WRITES_REQUIRE_REVIEW = true
+MANA_MEMORY_CAPSULES_ORGANISATION_SCOPE_ENABLED = false
+MANA_MEMORY_CAPSULES_USER_SCOPE_ENABLED = true
+MANA_MEMORY_CAPSULES_RECORD_ACCESS_EVENTS = true
+MANA_MEMORY_CAPSULES_QUARANTINE_PROMPT_INJECTION = true
+MANA_MEMORY_CAPSULES_RETENTION_PRIVATE_DAYS = 7
+MANA_MEMORY_CAPSULES_RETENTION_PARENT_CHILD_DAYS = 30
+MANA_MEMORY_CAPSULES_RETENTION_TEAM_DAYS = 90
+MANA_MEMORY_CAPSULES_RETENTION_PROJECT_DAYS = 180
+MANA_MEMORY_CAPSULES_RETENTION_ORGANISATION_DAYS = 365
+```
+
+Disabling capsules preserves capsule storage and selects the existing supported memory path. It does not promote, migrate, or copy capsule data. Shared writes without review are rejected, and organisation scope remains disabled in the initial rollout. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
+
 ## Execution supervisor
 
 The supervisor is enabled by default and stores process-independent state below

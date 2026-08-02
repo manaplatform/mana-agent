@@ -19,6 +19,7 @@ from mana_agent.api.routes.workspaces import router as workspaces_router
 from mana_agent.api.routes.teach import router as teach_router
 from mana_agent.api.routes.servers import router as servers_router
 from mana_agent.api.routes.tasks import router as tasks_router
+from mana_agent.api.routes.memory_capsules import router as memory_capsules_router
 from mana_agent.config.user_config import load_effective_settings, validate_bool
 
 
@@ -28,6 +29,8 @@ def create_app(
     telegram_gateway: Any | None = None,
     chat_gateway: Any | None = None,
     github_autopilot: Any | None = None,
+    capsule_identity_resolver: Any | None = None,
+    capsule_service: Any | None = None,
 ) -> FastAPI:
     from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
     from mana_agent.config.settings import Settings
@@ -125,6 +128,7 @@ def create_app(
     app.include_router(teach_router)
     app.include_router(servers_router)
     app.include_router(tasks_router)
+    app.include_router(memory_capsules_router)
     app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:
         from mana_agent.github_autopilot.webhook import router as github_autopilot_router
@@ -133,6 +137,13 @@ def create_app(
     # Make the central chat gateway (if provided) available to routes / services
     if chat_gateway is not None:
         app.state.chat_gateway = chat_gateway
+        memory_service = getattr(getattr(chat_gateway, "_stack", None), "memory_service", None)
+        if memory_service is not None:
+            app.state.capsule_service = memory_service.capsules
+    if capsule_identity_resolver is not None:
+        app.state.capsule_identity_resolver = capsule_identity_resolver
+    if capsule_service is not None:
+        app.state.capsule_service = capsule_service
     app.state.worker_gateway = worker_gateway
     app.state.fleet_registry = fleet_registry
     app.state.execution_supervisor = execution_supervisor

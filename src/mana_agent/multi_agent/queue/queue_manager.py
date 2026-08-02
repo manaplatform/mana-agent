@@ -74,13 +74,14 @@ class QueueManager:
                 if execution_root:
                     kwargs["lock_key"] = f"worktree:{execution_root}"
             if self.memory_service is not None and not kwargs.get("memory_bundle_id"):
-                bundle = self.memory_service.build_bundle(
-                    agent_id=str(kwargs.get("requested_by_agent_id") or "agent_queue"),
-                    agent_role="queue",
-                    task_id=str(kwargs.get("task_id") or ""),
-                    target_files=list(kwargs.get("related_files") or []),
-                )
-                kwargs["memory_bundle_id"] = bundle.bundle_id
+                if not self.memory_service.config.capsules.enabled:
+                    bundle = self.memory_service.build_bundle(
+                        agent_id=str(kwargs.get("requested_by_agent_id") or "agent_queue"),
+                        agent_role="queue",
+                        task_id=str(kwargs.get("task_id") or ""),
+                        target_files=list(kwargs.get("related_files") or []),
+                    )
+                    kwargs["memory_bundle_id"] = bundle.bundle_id
             # Stamp execution root into payload for workers that only read payload.
             payload = dict(kwargs.get("payload") or {})
             if kwargs.get("execution_repo_root") and not payload.get("repo_root") and not payload.get("execution_repo_root"):

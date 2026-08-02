@@ -61,6 +61,10 @@ class AgentMemoryBundle:
     ) -> ScopedMemoryBundle | None:
         if self.service is None:
             return None
+        if self.service.config.capsules.enabled:
+            raise RuntimeError(
+                "Broad AgentMemoryBundle sharing is disabled; use an authorized CapsuleReadRequest."
+            )
         return self.service.build_bundle(
             agent_id=agent_id,
             agent_role=agent_role,

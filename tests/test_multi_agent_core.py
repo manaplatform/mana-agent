@@ -290,7 +290,7 @@ def test_multi_agent_file_read_reflects_hash_changed_without_storing_cache(tmp_p
 
 
 def test_agent_receives_scoped_memory_bundle(tmp_path):
-    memory = MultiAgentMemoryService(root=tmp_path)
+    memory = MultiAgentMemoryService(root=tmp_path, capsules_enabled=False)
     normalized, fingerprint = memory.normalize_task(goal="Update docs", target_files=["README.md"])
     memory.register_task(task_id="task_1", normalized_goal=normalized, fingerprint=fingerprint, related_files=["README.md"])
 
@@ -308,7 +308,7 @@ def test_agent_receives_scoped_memory_bundle(tmp_path):
 
 def test_lower_agent_cannot_access_upper_memory(tmp_path):
     (tmp_path / "secret.md").write_text("upper only\n", encoding="utf-8")
-    memory = MultiAgentMemoryService(root=tmp_path)
+    memory = MultiAgentMemoryService(root=tmp_path, capsules_enabled=False)
     memory.project_memory.append({"fact": "full project architecture"})
     memory.read_file_with_memory(file_path="secret.md", task_id="task_upper", agent_id="agent_main_0001")
 
@@ -403,7 +403,7 @@ def test_reusable_tool_memory_adds_cache_metadata(tmp_path):
 
 
 def test_verifier_uses_previous_memory(tmp_path):
-    memory = MultiAgentMemoryService(root=tmp_path)
+    memory = MultiAgentMemoryService(root=tmp_path, capsules_enabled=False)
     memory.record_verification(
         task_id="task_1",
         verifier_agent_id="agent_verifier_0001",

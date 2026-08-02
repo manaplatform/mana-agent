@@ -216,6 +216,7 @@ class CheckpointRecord(StrictModel):
     result_escrow_references: list[str] = Field(default_factory=list)
     artifact_references: list[str] = Field(default_factory=list)
     context_manifest_id: str = ""
+    capsule_revisions: dict[str, int] = Field(default_factory=dict)
     budget_snapshot: dict[str, Any] = Field(default_factory=dict)
     retry_state: dict[str, Any] = Field(default_factory=dict)
     idempotency_records: list[str] = Field(default_factory=list)
@@ -232,6 +233,7 @@ class EscrowResult(StrictModel):
     lease_token_hash: str
     created_at: datetime = Field(default_factory=utc_now)
     payload: dict[str, Any] = Field(default_factory=dict)
+    capsule_revisions: dict[str, int] = Field(default_factory=dict)
     artifacts: list[CompletionArtifact] = Field(default_factory=list)
     status: EscrowStatus = EscrowStatus.PRODUCED
     delivery_count: int = Field(default=0, ge=0)
@@ -325,6 +327,8 @@ class TaskRecord(StrictModel):
     trigger_turn_id: str = ""
     relation_type: str = "independent"
     previous_task_id: str = ""
+    delegated_capsule_revisions: dict[str, int] = Field(default_factory=dict)
+    result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":

@@ -1,5 +1,19 @@
 # Commands
 
+## Scoped memory capsules
+
+Capsule commands call the authenticated Mana API and never read provider storage directly:
+
+```bash
+mana-agent memory capsules list --scope private --scope project --query "routing decision"
+mana-agent memory capsules inspect <capsule-id>
+mana-agent memory capsules lineage <capsule-id>
+mana-agent memory capsules staged
+mana-agent memory capsules review <staged-id> --strategy append --reason "Evidence reviewed"
+```
+
+Set `MANA_API_BASE` (or pass `--api-base`) and the existing `MANA_API_TOKEN`. The API host must install its authenticated capsule identity resolver. Principal, project, team, and namespace overrides are intentionally unavailable. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
+
 ## Durable tasks
 
 `mana-agent tasks` reads and controls the durable execution state shared by the

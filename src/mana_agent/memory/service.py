@@ -48,6 +48,13 @@ class MemoryService:
         self.root = Path(project_root or root).resolve()
         self.config = (config or MemoryConfig.load()).validate()
         self.backend = create_memory_backend(self.config, root=self.root)
+        from mana_agent.memory.capsules.service import CapsuleService
+
+        self.capsules = CapsuleService(
+            self.root,
+            config=self.config.capsules,
+            provider=self.config.provider,
+        )
         self._coding: Any | None = None
         self._multi: Any | None = None
         self._external_runtime: Any | None = None
@@ -73,6 +80,8 @@ class MemoryService:
                 workspace_id=workspace_id,
                 session_id=session_id,
                 repository_id=repository_id or (repository_ids or [None])[0],
+                capsule_service=self.capsules,
+                capsules_enabled=self.config.capsules.enabled,
             )
         elif self.config.mode == "external" and enable_compatibility:
             from mana_agent.memory.compatibility import ExternalRuntimeMemory
@@ -166,6 +175,30 @@ class MemoryService:
     def status(self) -> dict[str, str]:
         return {"mode": self.config.mode, "provider": self.config.provider}
 
+    def capsule_diagnostics(self) -> dict[str, Any]:
+        """Expose effective non-secret capsule settings to diagnostics."""
+        return self.capsules.effective_settings()
+
+    def build_capsule_bundle(self, request: Any) -> list[Any]:
+        """Build a compact bundle only from an explicit authorized read request."""
+        from mana_agent.memory.capsules.models import CapsuleReadRequest
+
+        if not isinstance(request, CapsuleReadRequest):
+            raise MemoryConfigurationError(
+                "A validated CapsuleReadRequest is required; no legacy memory bundle was built."
+            )
+        return self.capsules.query_capsules(request)
+
+    def build_bundle(self, **kwargs: Any) -> Any:
+        """Retain legacy bundles only behind the disabled-capsule compatibility flag."""
+        if self.config.capsules.enabled:
+            raise MemoryConfigurationError(
+                "Broad legacy memory bundles are disabled while scoped capsules are enabled; "
+                "use build_capsule_bundle with a validated CapsuleReadRequest."
+            )
+        memory = self._require_internal(self._multi, "legacy multi-agent memory bundle")
+        return memory.build_bundle(**kwargs)
+
     @staticmethod
     def _scope_deleted(scope: MemoryScope) -> bool:
         session_id = str(scope.session_id or "").strip()
@@ -181,6 +214,10 @@ class MemoryService:
 
     def session_payload(self) -> dict[str, Any]:
         """Return legacy session evidence through the shared compatibility boundary."""
+        if self.config.capsules.enabled:
+            raise MemoryConfigurationError(
+                "Broad session memory is disabled while scoped capsules are enabled."
+            )
         memory = self._require_internal(self._multi, "session evidence")
         return {
             "tasks": [asdict(item) for item in memory.task_records.values()],
@@ -190,6 +227,10 @@ class MemoryService:
         }
 
     def project_snapshot(self, *, max_chars: int = 1200) -> str:
+        if self.config.capsules.enabled:
+            raise MemoryConfigurationError(
+                "Broad project memory is disabled while scoped capsules are enabled."
+            )
         memory = self._require_internal(self._multi, "project memory snapshot")
         legacy_reader = getattr(self.backend, "project_snapshot", None)
         legacy = legacy_reader(max_chars=max_chars) if legacy_reader is not None else ""

@@ -15,6 +15,7 @@ from mana_agent.multi_agent.core.types import (
     utc_now,
 )
 from mana_agent.memory import MultiAgentMemoryService, task_fingerprint
+from mana_agent.memory import CapsuleTaskContext, MemoryPrincipal
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.context_cost.compression import compress_tool_result, render_envelope
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
@@ -94,13 +95,14 @@ class TaskBoard:
                 repository_ids=repository_ids or [self.store.repository_id],
             )
             duplicate_of = record.duplicate_of
-            bundle = self.memory_service.build_bundle(
-                agent_id=owner_agent_id or "agent_taskboard",
-                agent_role="taskboard",
-                task_id=task_id,
-                target_files=related_files or [],
-            )
-            memory_bundle_id = bundle.bundle_id
+            if not self.memory_service.config.capsules.enabled:
+                bundle = self.memory_service.build_bundle(
+                    agent_id=owner_agent_id or "agent_taskboard",
+                    agent_role="taskboard",
+                    task_id=task_id,
+                    target_files=related_files or [],
+                )
+                memory_bundle_id = bundle.bundle_id
         task = TaskBoardItem(
             task_id=task_id,
             parent_task_id=None,
@@ -134,6 +136,7 @@ class TaskBoard:
                 "cache_hits": 0,
                 "file_reads_reused": 0,
                 "memory_bundle_id": memory_bundle_id,
+                "capsule_bundle_required": bool(self.memory_service and self.memory_service.config.capsules.enabled),
                 "last_memory_check_at": utc_now(),
                 "fingerprint": fingerprint,
             },
@@ -158,6 +161,8 @@ class TaskBoard:
         trigger_turn_id: str = "",
         relation_type: str = "followup",
         previous_task_id: str = "",
+        parent_memory_principal: MemoryPrincipal | None = None,
+        delegated_capsule_ids: list[str] | None = None,
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
         task_id = self._new_task_id()
@@ -203,6 +208,40 @@ class TaskBoard:
         if decomposition_local_id:
             parent.decomposition_id_map[decomposition_local_id] = task_id
         parent.updated_at = utc_now()
+        if delegated_capsule_ids:
+            if self.memory_service is None or parent_memory_principal is None:
+                raise ValueError("Explicit capsule delegation requires a memory service and parent principal.")
+            parent_context = CapsuleTaskContext(
+                user_id=parent_memory_principal.user_id,
+                organisation_id=parent_memory_principal.organisation_id,
+                project_id=parent_memory_principal.project_id,
+                team_ids=parent_memory_principal.team_ids,
+                task_id=parent.task_id,
+                parent_task_id=parent.parent_task_id,
+                agent_id=parent_memory_principal.agent_id,
+                session_id=parent.session_id,
+            )
+            child_context = CapsuleTaskContext(
+                user_id=parent_memory_principal.user_id,
+                organisation_id=parent_memory_principal.organisation_id,
+                project_id=parent_memory_principal.project_id,
+                team_ids=parent_memory_principal.team_ids,
+                task_id=task.task_id,
+                parent_task_id=parent.task_id,
+                agent_id=owner_agent_id,
+                session_id=task.session_id,
+            )
+            delegated = self.memory_service.capsules.delegate_to_child(
+                delegated_capsule_ids,
+                parent_principal=parent_memory_principal,
+                parent_context=parent_context,
+                child_context=child_context,
+                correlation_id=trigger_turn_id,
+            )
+            task.memory_status["delegated_capsules"] = [
+                {"capsule_id": item.capsule_id, "revision": item.revision}
+                for item in delegated
+            ]
         self._record("task.created", task)
         self.save()
         return task

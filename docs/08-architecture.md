@@ -46,6 +46,8 @@ without a default tool/provider/action. See
 
 ### Pluggable memory boundary
 
+Scoped sharing is implemented by the capsule service inside this same boundary; it is not a second application memory system. Central ACL decisions, trusted namespaces, reauthorization after provider retrieval, staging/merge, lineage, retention, and audit rules are described in [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
+
 All application consumers import `mana_agent.memory.MemoryService`. The service
 owns one validated backend selected centrally by `memory/factory.py`; callers do
 not import internal or Mem0 implementations. Canonical asynchronous add, search,
@@ -63,8 +65,9 @@ before execution; external failure never selects an internal backend implicitly.
 `ChatStack` owns one canonical service instance and rebinds its identity scope
 when the frontend opens a session; this does not construct a backend or create a
 session. Successful chat turns are written with session/workspace/repository/
-conversation scope, and follow-up turns recall relevant records into the
-ephemeral conversation prompt. Session history remains authoritative and a
+conversation scope only when capsules are disabled. With capsules enabled,
+successful durable task results become compact private capsules and follow-up
+turns recall only a model-selected related task after authorization. Session history remains authoritative and a
 reported degraded-memory path may continue without recall, but never writes to
 a different provider.
 

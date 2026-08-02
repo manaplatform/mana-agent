@@ -1,7 +1,28 @@
 """Public provider-neutral memory API."""
 
-from mana_agent.memory.config import MemoryConfig, MemorySecretStore
-from mana_agent.memory.contracts import MemoryBackend
+from mana_agent.memory.config import CapsuleConfig, CapsuleRetentionConfig, MemoryConfig, MemorySecretStore
+from mana_agent.memory.contracts import CapsuleBackend, MemoryBackend
+from mana_agent.memory.capsules.models import (
+    AuthorizationDecision,
+    CapsuleLineage,
+    CapsuleMergeRecord,
+    CapsuleProjection,
+    CapsuleReadRequest,
+    CapsuleScope,
+    CapsuleTaskContext,
+    DeleteMode,
+    MemoryCapsule,
+    MemoryPrincipal,
+    MergeState,
+    MergeStrategy,
+    ReviewState,
+    TrustState,
+)
+from mana_agent.memory.capsules.service import (
+    CapsuleAuthorizationError,
+    CapsuleMergeConflict,
+    CapsuleService,
+)
 from mana_agent.memory.errors import (
     MemoryAuthenticationError,
     MemoryConfigurationError,
@@ -50,11 +71,25 @@ from mana_agent.services.memory_service import (
 __all__ = [
     "AgentDecisionMemoryRecord",
     "CodingMemoryService",
+    "CapsuleAuthorizationError",
+    "CapsuleBackend",
+    "CapsuleConfig",
+    "CapsuleLineage",
+    "CapsuleMergeConflict",
+    "CapsuleMergeRecord",
+    "CapsuleProjection",
+    "CapsuleReadRequest",
+    "CapsuleRetentionConfig",
+    "CapsuleScope",
+    "CapsuleService",
+    "CapsuleTaskContext",
+    "DeleteMode",
     "EvidenceMemory",
     "FileReadMemoryRecord",
     "FlowSummary",
     "MemoryAuthenticationError",
     "MemoryBackend",
+    "MemoryCapsule",
     "MemoryConfig",
     "MemoryConfigurationError",
     "MemoryContent",
@@ -65,6 +100,7 @@ __all__ = [
     "MemoryNetworkError",
     "MemoryNotFoundError",
     "MemoryProviderError",
+    "MemoryPrincipal",
     "MemoryRecord",
     "MemoryScope",
     "MemorySearchRequest",
@@ -74,10 +110,15 @@ __all__ = [
     "MemoryUpdateRequest",
     "MemoryWriteRequest",
     "MultiAgentMemoryService",
+    "MergeState",
+    "MergeStrategy",
     "ReadMode",
+    "ReviewState",
     "ScopedMemoryBundle",
     "TaskMemoryRecord",
     "ToolExecutionMemoryRecord",
+    "TrustState",
+    "AuthorizationDecision",
     "VerificationMemoryRecord",
     "normalize_file_path",
     "normalize_text",

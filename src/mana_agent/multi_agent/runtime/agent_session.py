@@ -36,6 +36,8 @@ class AgentSession(BaseModel):
     execution_backend: str = "local"
     memory_snapshot: str | None = None
     task_memory: list[str] | None = None
+    memory_capsules: list[dict[str, Any]] | None = None
+    capsule_revisions: dict[str, int] = Field(default_factory=dict)
     repo_facts: list[str] | None = None
     
     @classmethod
@@ -51,6 +53,7 @@ class AgentSession(BaseModel):
         execution_backend: str = "local",
         memory_snapshot: str | None = None,
         task_memory: Sequence[str] | None = None,
+        memory_capsules: Sequence[dict[str, Any]] | None = None,
         repo_facts: Sequence[str] | None = None,
         workspace_id: str | None = None,
         repository_id: str | None = None,
@@ -58,6 +61,12 @@ class AgentSession(BaseModel):
         return cls(
             memory_snapshot=memory_snapshot,
             task_memory=[str(item) for item in (task_memory or [])] or None,
+            memory_capsules=[dict(item) for item in (memory_capsules or [])] or None,
+            capsule_revisions={
+                str(item.get("capsule_id")): int(item.get("revision", 0))
+                for item in (memory_capsules or [])
+                if item.get("capsule_id")
+            },
             repo_facts=[str(item) for item in (repo_facts or [])] or None,
             flow_id=flow_id or None,
             run_id=str(run_id),

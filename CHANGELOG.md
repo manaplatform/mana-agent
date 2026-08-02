@@ -4,6 +4,26 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-01
 
+- Converted the direct legacy multi-agent memory adapter to capsule-enabled operation by default and connected the canonical memory facade's existing `CapsuleService` to it. Authorized capsule reads now use the shared lifecycle service, while broad legacy bundles require an explicit `capsules_enabled=False` compatibility setting; the stable prompt test uses that explicit legacy snapshot mode.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/test_prompting_builder.py tests/memory/test_scoped_capsules.py tests/test_memory_architecture.py`.
+
+- Clarified the structured gateway follow-up decision contract so
+  `safe_to_continue` authorizes only proceeding to the next independently
+  validated routing boundary, not downstream tools or consequential actions.
+  Independent tasks and conversation-only turns with no applicable durable task
+  are now explicitly requested as safe classifications, while genuine unsafe
+  decisions still stop without fallback and surface the model's concrete reason.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_chat_gateway.py`.
+
+- Updated the gateway follow-up memory test double to declare its capsules-disabled legacy provider contract. The prompt now preserves the legacy label only for that compatibility path; capsule-derived context remains explicitly labeled as untrusted data.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_followup_classifier.py`.
+
+- Added ACL-enforced scoped shared-memory capsules with typed principals, trusted namespaces, compact retrieval budgets, post-provider reauthorization, parent-child delegation/return records, staged team/project review, optimistic versioned merges, conflicts and idempotent retries, lineage, retention/expiry, prompt-injection quarantine, redacted audit events, resilient-execution revision references, authorization-preserving API/dashboard visibility, and quarantined legacy migration. Organisation scope remains disabled and later federation/governance work is documented as a rollout limitation.
+  - Intentional breaking change: broad `build_bundle` and ambient project-memory prompt snapshots fail closed while capsules are enabled; callers must supply a validated `CapsuleReadRequest`. Disabling capsules retains the legacy provider path.
+  - User verification required: `python -m pytest tests/memory/test_scoped_capsules.py tests/test_memory_architecture.py`.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_followup_classifier.py tests/execution_supervisor/test_supervisor_core.py tests/context_cost/test_context_cost_core.py tests/test_cli_smoke.py tests/test_dashboard_navigation.py`.
+  - User verification required: `python -m pytest`.
+
 - Fixed API call workflows with a supplied documentation URL and an already saved matching
   integration. Gateway guidance now makes the model list saved integrations immediately after its
   workflow decision, use a matching enabled integration's operation search/preview/execution path,

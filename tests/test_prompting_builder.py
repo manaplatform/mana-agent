@@ -33,7 +33,11 @@ def test_build_agent_flow_connects_selection_context_and_verification(tmp_path: 
     assert flow.verification.commands or flow.verification.notes
 
 
-def test_coding_prompt_builder_composes_stable_layers(tmp_path: Path) -> None:
+def test_coding_prompt_builder_composes_stable_layers(tmp_path: Path, monkeypatch) -> None:
+    # This fixture intentionally exercises the supported legacy project-memory
+    # path. Capsule-enabled prompts require an authenticated task principal.
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("MANA_MEMORY_CAPSULES_ENABLED", "false")
     (tmp_path / "skills").mkdir()
     (tmp_path / "skills" / "testing").mkdir()
     (tmp_path / "skills" / "testing" / "SKILL.md").write_text(
