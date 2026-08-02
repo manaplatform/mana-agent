@@ -49,8 +49,9 @@ def test_mcp_queue_job_uses_namespaced_tool(monkeypatch, tmp_path):
     manager = ToolsManager(tmp_path)
     job = QueueJob("job", "task", "agent", QueueJobType.MCP_TOOL, {"tool_name": "mcp.demo.echo", "args": {"value": 1}})
     result = manager.execute_job(job)
-    assert result.ok is True
-    assert calls == [("mcp.demo.echo", {"value": 1})]
+    assert result.ok is False
+    assert result.result["error_code"] == "transactional_adapter_required"
+    assert calls == []
 
 
 def test_mcp_model_tool_name_is_openai_compatible():

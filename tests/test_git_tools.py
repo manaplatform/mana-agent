@@ -9,6 +9,7 @@ import pytest
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
+from mana_agent.transactional_actions.runtime import approve_action
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -24,6 +25,18 @@ def _init_repo(path: Path) -> Path:
     assert _git(path, "add", "README.md").returncode == 0
     assert _git(path, "commit", "-m", "test: initial commit").returncode == 0
     return path
+
+
+def _approve_and_retry(repo: Path, call: Any) -> dict[str, Any]:
+    pending = call()
+    assert pending["permission_required"] is True
+    approval_id = approve_action(
+        repo,
+        pending["action_id"],
+        approved_by="pytest-local-user",
+    )
+    assert approval_id
+    return call()
 
 
 def test_dynamic_git_command_discovery_uses_local_help(tmp_path: Path) -> None:
@@ -67,7 +80,10 @@ def test_status_and_diff_wrappers(tmp_path: Path) -> None:
 def test_branch_creation_wrapper_switches_to_new_branch(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
 
-    result = git_tools.create_branch(repo_path=repo, branch_name="feature/git-tools")
+    result = _approve_and_retry(
+        repo,
+        lambda: git_tools.create_branch(repo_path=repo, branch_name="feature/git-tools"),
+    )
 
     assert result["ok"] is True
     assert result["preflight"]["status"]["command"] == ["git", "status", "--short"]
@@ -78,9 +94,15 @@ def test_branch_creation_wrapper_switches_to_new_branch(tmp_path: Path) -> None:
 def test_commit_wrapper_commits_staged_files_with_generated_message(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\ncommit me\n", encoding="utf-8")
-    assert git_tools.add(repo_path=repo, paths=["README.md"])["ok"] is True
+    assert _approve_and_retry(
+        repo,
+        lambda: git_tools.add(repo_path=repo, paths=["README.md"]),
+    )["ok"] is True
 
-    result = git_tools.commit(repo_path=repo, message="feat: add git tools test fixture")
+    result = _approve_and_retry(
+        repo,
+        lambda: git_tools.commit(repo_path=repo, message="feat: add git tools test fixture"),
+    )
 
     assert result["ok"] is True
     assert result["preflight"]["status_short"]["command"] == ["git", "status", "--short"]
@@ -96,7 +118,7 @@ def test_push_wrapper_sets_upstream_when_missing(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
     assert _git(repo, "remote", "add", "origin", str(remote)).returncode == 0
 
-    result = git_tools.push(repo_path=repo)
+    result = _approve_and_retry(repo, lambda: git_tools.push(repo_path=repo))
 
     assert result["ok"] is True
     assert result["preflight"]["status_short"]["command"] == ["git", "status", "--short"]
@@ -108,7 +130,12 @@ def test_push_wrapper_sets_upstream_when_missing(tmp_path: Path) -> None:
 
 def test_secret_redaction_from_git_output(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
-    assert git_tools.generic(args=["config", "user.name", "sk-testsecret123"], repo_path=repo)["ok"] is True
+    assert _approve_and_retry(
+        repo,
+        lambda: git_tools.generic(
+            args=["config", "user.name", "sk-testsecret123"], repo_path=repo
+        ),
+    )["ok"] is True
 
     result = git_tools.generic(args=["config", "user.name"], repo_path=repo)
 
@@ -129,6 +156,12 @@ def test_destructive_and_force_push_commands_are_blocked(tmp_path: Path) -> None
     assert push["ok"] is False
     assert push["blocked"] is True
     assert push["risk_level"] == "HISTORY_REWRITE"
+
+
+def test_mutating_branch_and_remote_subcommands_are_not_classified_read_only() -> None:
+    assert git_tools.classify_git_risk(["branch", "-d", "topic"]) is git_tools.GitRiskLevel.LOCAL_SAFE_WRITE
+    assert git_tools.classify_git_risk(["branch", "-D", "topic"]) is git_tools.GitRiskLevel.DESTRUCTIVE
+    assert git_tools.classify_git_risk(["remote", "add", "origin", "example"]) is git_tools.GitRiskLevel.LOCAL_SAFE_WRITE
 
 
 def test_generic_git_executor_never_uses_shell_true(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

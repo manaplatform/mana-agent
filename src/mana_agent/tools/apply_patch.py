@@ -9,6 +9,7 @@ bound. Ambiguous matches never apply.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -1100,7 +1101,7 @@ def extract_patch_touched_files(patch: Any) -> dict[str, Any]:
     return {"ok": True, "touched_files": [item.path for item in parsed]}
 
 
-def safe_apply_patch(
+def _safe_apply_patch_direct(
     *,
     repo_root: Path,
     patch: str,
@@ -1346,6 +1347,178 @@ def safe_apply_patch(
     return result
 
 
+def safe_apply_patch(
+    *,
+    repo_root: Path,
+    patch: str,
+    allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES,
+    check_only: bool = False,
+    read_files: Sequence[str] | None = None,
+    require_read: bool = False,
+    enable_recovery: bool = True,
+    action_approval_id: str = "",
+) -> dict[str, Any]:
+    """Preview read-only, but gate every patch mutation through ActionGateway."""
+    if check_only:
+        return _safe_apply_patch_direct(
+            repo_root=repo_root,
+            patch=patch,
+            allowed_prefixes=allowed_prefixes,
+            check_only=True,
+            read_files=read_files,
+            require_read=require_read,
+            enable_recovery=enable_recovery,
+        )
+    preview_result = _safe_apply_patch_direct(
+        repo_root=repo_root,
+        patch=patch,
+        allowed_prefixes=allowed_prefixes,
+        check_only=True,
+        read_files=read_files,
+        require_read=require_read,
+        enable_recovery=enable_recovery,
+    )
+    if not preview_result.get("ok"):
+        return preview_result
+    parsed, parse_error = _parse_codex_patch(_strip_markdown_fences(str(patch or "")))
+    if parse_error:
+        return preview_result
+
+    from mana_agent.transactional_actions.adapters import ActionAdapter, ActionInvalidatedError
+    from mana_agent.transactional_actions.gateway import ApprovalRequired
+    from mana_agent.transactional_actions.models import (
+        ActionIntent,
+        ActionPreview,
+        BlastRadius,
+        DataDisclosure,
+        Reversibility,
+        VerificationEvidence,
+    )
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    root = repo_root.resolve()
+    before_hashes = {
+        item.path: hashlib.sha256((root / item.path).read_bytes()).hexdigest()
+        if (root / item.path).is_file() else "missing"
+        for item in parsed
+    }
+    expected_content: dict[str, str | None] = {}
+    for item in parsed:
+        if item.op == "add":
+            expected_content[item.path] = _text_from_patch_lines(item.lines, "+")
+        elif item.op == "delete":
+            expected_content[item.path] = None
+        else:
+            current = expected_content.get(item.path)
+            if current is None:
+                current = (root / item.path).read_text(encoding="utf-8")
+            if enable_recovery:
+                applied, after, _error, _metadata = _apply_codex_update_with_recovery(current, item.lines, item.path)
+            else:
+                applied, after, _error = _apply_codex_update_exact(current, item.lines, item.path)
+            if not applied:
+                return preview_result
+            expected_content[item.path] = after
+    patch_hash = hashlib.sha256(str(patch).encode("utf-8")).hexdigest()
+
+    class PatchAdapter(ActionAdapter):
+        def build_intent(self) -> ActionIntent:
+            includes_delete = any(item.op == "delete" for item in parsed)
+            return ActionIntent(
+                parent_task_id="patch-tool",
+                actor="model_tool",
+                originating_agent="coding_agent",
+                tool_name="file",
+                operation_name="patch_delete" if includes_delete else "patch",
+                target_resources=[str((root / item.path).resolve()) for item in parsed],
+                normalized_arguments={"patch_sha256": patch_hash},
+                requested_capabilities=sorted({f"file.{item.op}" for item in parsed}),
+                expected_side_effects=[f"{item.op} {item.path}" for item in parsed],
+                data_disclosure=DataDisclosure.NONE,
+                blast_radius=BlastRadius.MULTIPLE_RESOURCES if len(parsed) > 1 else BlastRadius.SINGLE_RESOURCE,
+                reversibility=Reversibility.PARTIALLY_REVERSIBLE,
+                idempotency_key=f"patch:{hashlib.sha256(json.dumps({'patch': patch_hash, 'root': str(root)}, sort_keys=True).encode()).hexdigest()}",
+                verification_plan=["re-run deterministic patch validation against resulting files", "require already-applied evidence"],
+                compensation_strategy="Restore each pre-action file snapshot through a separately approved file transaction.",
+            )
+
+        def preview(self, action: ActionIntent) -> ActionPreview:
+            return ActionPreview(
+                summary="apply repository patch",
+                resources=[{"path": str((root / item.path).resolve()), "change": item.op, "before_sha256": before_hashes[item.path]} for item in parsed],
+                diff=str(patch),
+                exact_invocation=action.normalized_arguments,
+                expected_side_effects=action.expected_side_effects,
+                risks=["patch includes deletion"] if any(item.op == "delete" for item in parsed) else [],
+            )
+
+        def execute(self, action: ActionIntent) -> dict[str, Any]:
+            current = {
+                item.path: hashlib.sha256((root / item.path).read_bytes()).hexdigest()
+                if (root / item.path).is_file() else "missing"
+                for item in parsed
+            }
+            if current != before_hashes:
+                raise ActionInvalidatedError("patch targets changed after preview; policy and approval must be reevaluated")
+            return _safe_apply_patch_direct(
+                repo_root=root,
+                patch=patch,
+                allowed_prefixes=allowed_prefixes,
+                check_only=False,
+                read_files=read_files,
+                require_read=require_read,
+                enable_recovery=enable_recovery,
+            )
+
+        def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:
+            checks: list[dict[str, Any]] = [{"check": "execution_result", "ok": bool(result.get("ok"))}]
+            complete = bool(result.get("ok"))
+            for path, expected in expected_content.items():
+                target = root / path
+                if expected is None:
+                    observed = not target.exists()
+                    checks.append({"check": "deleted", "path": path, "expected": True, "observed": observed})
+                else:
+                    expected_hash = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+                    observed_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else "missing"
+                    observed = observed_hash == expected_hash
+                    checks.append({"check": "content_sha256", "path": path, "expected": expected_hash, "observed": observed_hash})
+                complete = complete and observed
+            return VerificationEvidence(
+                complete=complete,
+                summary="Every patched resource matched the independently computed expected state." if complete else "Patch verification failed or remained incomplete.",
+                checks=checks,
+            )
+
+    gateway = default_action_gateway(root)
+    adapter = PatchAdapter()
+    try:
+        outcome = gateway.execute(adapter, approval_id=action_approval_id)
+    except ApprovalRequired as exc:
+        action = exc.action
+        return {
+            "ok": False,
+            "error_code": "approval_required",
+            "error": str(exc),
+            "permission_required": True,
+            "permission_request_id": action.action_id,
+            "action_id": action.action_id,
+            "preview": action.preview.redacted() if action.preview else {},
+            "preview_digest": action.preview_digest,
+            "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+            "touched_files": [item.path for item in parsed],
+        }
+    result = dict(outcome.result)
+    result.update({
+        "ok": outcome.action.state.value == "committed",
+        "action_id": outcome.action.action_id,
+        "action_state": outcome.action.state.value,
+        "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+        "duplicate_suppressed": outcome.duplicate,
+    })
+    return result
+
+
 def _format_recovery_error(*, path: str, patch_err: str, rec_meta: dict[str, Any]) -> str:
     strategy = str(rec_meta.get("strategy") or "")
     anchors = list(rec_meta.get("anchors_searched") or [])
@@ -1386,6 +1559,7 @@ def build_apply_patch_tool(
         diff: Any | None = None,
         input: Any | None = None,  # noqa: A002 - tool-call compatibility alias
         check_only: bool = False,
+        action_approval_id: str = "",
     ) -> dict[str, Any]:
         raw_patch = patch if patch is not None else (diff if diff is not None else input)
         patch_text, normalise_err = _normalise_patch_payload(raw_patch)
@@ -1396,6 +1570,7 @@ def build_apply_patch_tool(
             patch=patch_text,
             allowed_prefixes=allowed_prefixes,
             check_only=check_only,
+            action_approval_id=action_approval_id,
         )
 
     return StructuredTool.from_function(

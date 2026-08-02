@@ -257,11 +257,21 @@ def safe_write_file_part(
             return WriteFileResult(ok=False, path=path, error=err or "Error: invalid path").to_dict()
 
         parts_dir = _parts_dir_for_target(target)
-        parts_dir.mkdir(parents=True, exist_ok=True)
         part_file = parts_dir / f"{part_index:06d}.part"
 
         data = content.encode("utf-8")
-        _atomic_write_bytes(part_file, data)
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        part_relative = part_file.relative_to(repo_root.resolve()).as_posix()
+        gated = execute_file_action(
+            workspace_root=repo_root,
+            operation="edit" if part_file.exists() else "create",
+            path=part_relative,
+            content=data,
+            originating_agent="write_file",
+            parent_task_id="write-file-part",
+        )
+        if not gated.get("ok"):
+            return gated
 
         logger.info("Wrote file part: %s (part=%06d, %d bytes)", rel_posix, part_index, len(data))
         return WriteFileResult(
@@ -269,7 +279,7 @@ def safe_write_file_part(
             path=rel_posix,
             bytes_written=len(data),
             sha256=hashlib.sha256(data).hexdigest(),
-        ).to_dict()
+        ).to_dict() | {key: gated[key] for key in ("action_id", "action_state", "verification") if key in gated}
     except Exception as exc:  # noqa: BLE001
         logger.exception("write_file part failed for %s", path)
         return WriteFileResult(ok=False, path=path, error=f"Error: {exc}").to_dict()
@@ -319,31 +329,170 @@ def safe_finalize_file_parts(
             total += len(b)
         final_data = b"".join(data_chunks)
 
-        _atomic_write_bytes(target, final_data)
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        gated = execute_file_action(
+            workspace_root=repo_root,
+            operation="edit" if target.exists() else "create",
+            path=rel_posix,
+            content=final_data,
+            originating_agent="write_file",
+            parent_task_id="write-file-finalize",
+        )
+        if not gated.get("ok"):
+            return gated
 
+        cleanup_result: dict[str, Any] | None = None
         if cleanup_parts:
-            for part in part_files:
-                try:
-                    part.unlink(missing_ok=True)
-                except Exception:  # noqa: BLE001
-                    pass
-            try:
-                parts_dir.rmdir()
-            except OSError:
-                # Ignore if not empty (unexpected files left behind)
-                pass
+            cleanup_result = _cleanup_generated_parts(
+                repo_root=repo_root,
+                target=target,
+                parts_dir=parts_dir,
+                part_files=part_files,
+                final_sha256=hashlib.sha256(final_data).hexdigest(),
+            )
+            if not cleanup_result.get("ok"):
+                return {
+                    **cleanup_result,
+                    "final_file_action_id": gated.get("action_id", ""),
+                    "final_file_committed": True,
+                    "path": rel_posix,
+                }
 
         logger.info("Finalized file from parts: %s (parts=%d, %d bytes)", rel_posix, len(part_files), total)
-        return WriteFileResult(
+        payload = WriteFileResult(
             ok=True,
             path=rel_posix,
             bytes_written=total,
             sha256=hashlib.sha256(final_data).hexdigest(),
             files_changed=[rel_posix],
         ).to_dict()
+        payload.update({key: gated[key] for key in ("action_id", "action_state", "verification") if key in gated})
+        if cleanup_result is not None:
+            payload["cleanup_action_id"] = cleanup_result.get("action_id", "")
+            payload["cleanup_verification"] = cleanup_result.get("verification", {})
+        return payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("write_file finalize failed for %s", path)
         return WriteFileResult(ok=False, path=path, error=f"Error: {exc}").to_dict()
+
+
+def _cleanup_generated_parts(
+    *,
+    repo_root: Path,
+    target: Path,
+    parts_dir: Path,
+    part_files: list[Path],
+    final_sha256: str,
+) -> dict[str, Any]:
+    """Remove redundant chunk artifacts through a verified transactional action."""
+    from mana_agent.transactional_actions.adapters import ActionAdapter, ActionInvalidatedError
+    from mana_agent.transactional_actions.gateway import ApprovalRequired
+    from mana_agent.transactional_actions.models import (
+        ActionIntent,
+        ActionPreview,
+        BlastRadius,
+        DataDisclosure,
+        Reversibility,
+        VerificationEvidence,
+    )
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    root = repo_root.resolve()
+    directory = parts_dir.resolve()
+    files = [path.resolve() for path in part_files]
+    part_hashes = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+    material = "\x1f".join(
+        [str(root), str(target.resolve()), final_sha256]
+        + [f"{path}:{digest}" for path, digest in sorted(part_hashes.items())]
+    )
+
+    class GeneratedPartsCleanupAdapter(ActionAdapter):
+        def build_intent(self) -> ActionIntent:
+            return ActionIntent(
+                parent_task_id="write-file-finalize",
+                actor="model_tool",
+                originating_agent="write_file",
+                tool_name="file",
+                operation_name="cleanup_generated_parts",
+                target_resources=[str(path) for path in files] + [str(directory)],
+                normalized_arguments={
+                    "parts_directory": str(directory),
+                    "part_hashes": part_hashes,
+                    "final_target": str(target.resolve()),
+                    "final_sha256": final_sha256,
+                    "aggregate_matches_target": True,
+                    "ephemeral_generated": True,
+                },
+                requested_capabilities=["file.cleanup_generated"],
+                expected_side_effects=["remove verified redundant write-file chunks"],
+                data_disclosure=DataDisclosure.NONE,
+                blast_radius=BlastRadius.MULTIPLE_RESOURCES,
+                reversibility=Reversibility.PARTIALLY_REVERSIBLE,
+                idempotency_key="chunk-cleanup:" + hashlib.sha256(material.encode("utf-8")).hexdigest(),
+                verification_plan=["verify every generated part and its directory are absent"],
+                compensation_strategy="Chunks are redundant with the independently verified final file; generic compensation is unavailable.",
+            )
+
+        def preview(self, action: ActionIntent) -> ActionPreview:
+            return ActionPreview(
+                summary="remove verified redundant write-file chunks",
+                resources=[
+                    {"path": str(path), "change": "delete_generated_part", "before_sha256": part_hashes[str(path)]}
+                    for path in files
+                ] + [{"path": str(directory), "change": "remove_empty_generated_directory"}],
+                exact_invocation=action.normalized_arguments,
+                expected_side_effects=action.expected_side_effects,
+                risks=["chunk artifacts cannot be reconstructed individually after cleanup"],
+            )
+
+        def execute(self, action: ActionIntent) -> dict[str, Any]:
+            actual_entries = sorted(path.resolve() for path in directory.iterdir()) if directory.is_dir() else []
+            if actual_entries != sorted(files):
+                raise ActionInvalidatedError("generated parts directory changed after preview")
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != final_sha256:
+                raise ActionInvalidatedError("finalized file no longer matches the verified chunk aggregate")
+            for path in files:
+                if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != part_hashes[str(path)]:
+                    raise ActionInvalidatedError("a generated part changed after preview")
+            for path in files:
+                path.unlink()
+            directory.rmdir()
+            return {"removed_parts": len(files), "parts_directory": str(directory)}
+
+        def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:
+            directory_absent = not directory.exists()
+            parts_absent = all(not path.exists() for path in files)
+            complete = directory_absent and parts_absent
+            return VerificationEvidence(
+                complete=complete,
+                summary="Generated chunk artifacts were removed." if complete else "Chunk cleanup verification failed.",
+                checks=[
+                    {"check": "parts_absent", "expected": True, "observed": parts_absent},
+                    {"check": "directory_absent", "expected": True, "observed": directory_absent},
+                ],
+            )
+
+    try:
+        outcome = default_action_gateway(root).execute(GeneratedPartsCleanupAdapter())
+    except ApprovalRequired as exc:
+        return {
+            "ok": False,
+            "error_code": "approval_required",
+            "error": str(exc),
+            "permission_required": True,
+            "permission_request_id": exc.action.action_id,
+            "action_id": exc.action.action_id,
+            "preview": exc.action.preview.redacted() if exc.action.preview else {},
+            "preview_digest": exc.action.preview_digest,
+            "policy_decision": exc.action.policy_decision.model_dump(mode="json") if exc.action.policy_decision else {},
+        }
+    return {
+        "ok": outcome.action.state.value == "committed",
+        **outcome.result,
+        "action_id": outcome.action.action_id,
+        "action_state": outcome.action.state.value,
+        "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+    }
 
 
 def safe_write_file(
@@ -383,7 +532,10 @@ def safe_write_file(
             logger.warning("write_file received content that looks like a diff for %s", rel_posix)
 
         data = content.encode("utf-8")
-        _atomic_write_bytes(target, data)
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        gated = execute_file_action(workspace_root=repo_root, operation="edit" if target.exists() else "create", path=rel_posix, content=data)
+        if not gated.get("ok"):
+            return gated
 
         result = WriteFileResult(
             ok=True,
@@ -393,7 +545,9 @@ def safe_write_file(
             files_changed=[rel_posix],
         )
         logger.info("Wrote file: %s (%d bytes)", rel_posix, result.bytes_written)
-        return result.to_dict()
+        payload = result.to_dict()
+        payload.update({key: gated[key] for key in ("action_id", "action_state", "preview_digest", "verification", "duplicate_suppressed") if key in gated})
+        return payload
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("write_file failed for %s", path)
@@ -415,10 +569,10 @@ def safe_create_file(
             return WriteFileResult(ok=False, path=rel_posix, error="Blocked: target file already exists").to_dict()
 
         data = content.encode("utf-8")
-        try:
-            _atomic_create_bytes(target, data)
-        except FileExistsError:
-            return WriteFileResult(ok=False, path=rel_posix, error="Blocked: target file already exists").to_dict()
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        gated = execute_file_action(workspace_root=repo_root, operation="create", path=rel_posix, content=data)
+        if not gated.get("ok"):
+            return gated
 
         result = WriteFileResult(
             ok=True,
@@ -428,7 +582,9 @@ def safe_create_file(
             files_changed=[rel_posix],
         )
         logger.info("Created file: %s (%d bytes)", rel_posix, result.bytes_written)
-        return result.to_dict()
+        payload = result.to_dict()
+        payload.update({key: gated[key] for key in ("action_id", "action_state", "preview_digest", "verification", "duplicate_suppressed") if key in gated})
+        return payload
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("create_file failed for %s", path)
@@ -440,6 +596,7 @@ def safe_delete_file(
     repo_root: Path,
     path: str,
     allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES,
+    action_approval_id: str = "",
 ) -> dict[str, Any]:
     try:
         target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
@@ -450,11 +607,16 @@ def safe_delete_file(
         if not target.is_file():
             return DeleteFileResult(ok=False, path=rel_posix, error="Blocked: target is not a file").to_dict()
 
-        target.unlink()
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        gated = execute_file_action(workspace_root=repo_root, operation="delete", path=rel_posix, approval_id=action_approval_id)
+        if not gated.get("ok"):
+            return gated
 
         result = DeleteFileResult(ok=True, path=rel_posix, deleted=True, files_changed=[rel_posix])
         logger.info("Deleted file: %s", rel_posix)
-        return result.to_dict()
+        payload = result.to_dict()
+        payload.update({key: gated[key] for key in ("action_id", "action_state", "preview_digest", "verification", "duplicate_suppressed") if key in gated})
+        return payload
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("delete_file failed for %s", path)
@@ -592,8 +754,15 @@ def build_delete_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequen
     except Exception:  # pragma: no cover
         from langchain.tools import StructuredTool  # type: ignore
 
-    def _tool(path: str) -> dict[str, Any]:
-        return safe_delete_file(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
+    def _tool(path: str, action_approval_id: str = "") -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "repo_root": repo_root,
+            "path": path,
+            "allowed_prefixes": allowed_prefixes,
+        }
+        if action_approval_id:
+            kwargs["action_approval_id"] = action_approval_id
+        return safe_delete_file(**kwargs)
 
     return StructuredTool.from_function(
         func=_tool,

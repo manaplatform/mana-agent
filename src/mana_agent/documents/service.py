@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
 from .cache import DocumentCache
@@ -200,12 +202,33 @@ class DocumentService:
             file_type=file_type,
         )
 
-        result = create_document(
-            resolved,
-            content=normalized_content,
-            file_type=file_type,
-            overwrite=overwrite,
-        )
+        if resolved.exists() and not overwrite:
+            return {"ok": False, "error": "target_exists", "path": str(resolved)}
+        with tempfile.TemporaryDirectory(prefix="mana-document-preview-") as temporary:
+            preview_path = Path(temporary) / resolved.name
+            generated = create_document(
+                preview_path,
+                content=normalized_content,
+                file_type=file_type,
+                overwrite=False,
+            )
+            if not generated.get("ok"):
+                return {**generated, "path": str(resolved)}
+            from mana_agent.transactional_actions.runtime import execute_file_action
+            result = execute_file_action(
+                workspace_root=self.repo_root,
+                operation="edit" if resolved.exists() else "create",
+                path=resolved.relative_to(self.repo_root).as_posix(),
+                content=preview_path.read_bytes(),
+                originating_agent="document_service",
+                parent_task_id="document-create",
+            )
+            action_verification = result.pop("verification", None)
+            result.update({key: value for key, value in generated.items() if key not in {"ok", "path", "files_changed", "action_id", "action_state"}})
+            result["action_verification"] = action_verification
+            result["path"] = str(resolved)
+            if result.get("ok"):
+                result["files_changed"] = [str(resolved)]
 
         self._invalidate_cache_safely(resolved)
         return result
@@ -228,12 +251,35 @@ class DocumentService:
             payload=payload,
         )
 
-        result = update_document(
-            resolved,
-            operation=operation,
-            payload=normalized_payload,
-            backup=backup,
-        )
+        if not resolved.is_file():
+            return {"ok": False, "error": "file_not_found", "path": str(resolved)}
+        with tempfile.TemporaryDirectory(prefix="mana-document-preview-") as temporary:
+            preview_path = Path(temporary) / resolved.name
+            shutil.copy2(resolved, preview_path)
+            generated = update_document(
+                preview_path,
+                operation=operation,
+                payload=normalized_payload,
+                backup=False,
+            )
+            if not generated.get("ok"):
+                return {**generated, "path": str(resolved)}
+            from mana_agent.transactional_actions.runtime import execute_file_action
+            result = execute_file_action(
+                workspace_root=self.repo_root,
+                operation="edit",
+                path=resolved.relative_to(self.repo_root).as_posix(),
+                content=preview_path.read_bytes(),
+                originating_agent="document_service",
+                parent_task_id="document-update",
+            )
+            action_verification = result.pop("verification", None)
+            result.update({key: value for key, value in generated.items() if key not in {"ok", "path", "files_changed", "backup_path", "action_id", "action_state"}})
+            result["action_verification"] = action_verification
+            result["path"] = str(resolved)
+            result["backup_path"] = str(result.get("snapshot_reference") or "") if backup else ""
+            if result.get("ok"):
+                result["files_changed"] = [str(resolved)]
 
         self._invalidate_cache_safely(resolved)
         return result
@@ -244,16 +290,27 @@ class DocumentService:
         *,
         explicit: bool = False,
         backup: bool = True,
+        action_approval_id: str = "",
     ) -> dict[str, Any]:
-        from .writers import delete_document
-
         resolved = self.resolve_path(path)
 
-        result = delete_document(
-            resolved,
-            explicit=explicit,
-            backup=backup,
+        if not explicit:
+            return {"ok": False, "error": "explicit_delete_required", "path": str(resolved)}
+        if not resolved.is_file():
+            return {"ok": False, "error": "file_not_found", "path": str(resolved)}
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        result = execute_file_action(
+            workspace_root=self.repo_root,
+            operation="delete",
+            path=resolved.relative_to(self.repo_root).as_posix(),
+            originating_agent="document_service",
+            parent_task_id="document-delete",
+            approval_id=action_approval_id,
         )
+        result["path"] = str(resolved)
+        result["backup_path"] = str(result.get("snapshot_reference") or "") if backup else ""
+        if result.get("ok"):
+            result.update({"deleted": True, "files_changed": [str(resolved)]})
 
         self._invalidate_cache_safely(resolved)
         return result

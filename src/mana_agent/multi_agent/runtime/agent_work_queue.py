@@ -365,6 +365,7 @@ def execute_registered_mutation_command(
             str(args["path"]),
             explicit=bool(args.get("explicit", False)),
             backup=bool(args.get("backup", True)),
+            action_approval_id=str(args.get("action_approval_id") or ""),
         )
     else:
         trace = [

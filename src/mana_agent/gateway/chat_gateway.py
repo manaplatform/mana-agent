@@ -1093,6 +1093,42 @@ class AgentChatGateway:
             ),
         }
 
+    def transactional_action_approval_command(
+        self,
+        action_id: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Approve one exact previewed transactional action for a trusted local session."""
+        from mana_agent.transactional_actions.runtime import approve_action
+
+        approval_id = approve_action(
+            self.root,
+            action_id,
+            approved_by=f"local-session:{session_id or 'unknown'}",
+        )
+        return {
+            "status": "approved",
+            "action_id": action_id,
+            "approval_id": approval_id,
+            "message": "Exact action approved once. The originating tool may now resume the bound action.",
+        }
+
+    def deny_transactional_action_command(
+        self,
+        action_id: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        from mana_agent.transactional_actions.runtime import deny_action
+
+        deny_action(self.root, action_id, denied_by=f"local-session:{session_id or 'unknown'}")
+        return {
+            "status": "denied",
+            "action_id": action_id,
+            "message": "Transactional action denied. No action was executed.",
+        }
+
     def deny_api_approval_command(
         self,
         approval_request_id: str,

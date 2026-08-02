@@ -1,5 +1,7 @@
 # Architecture
 
+Consequential tool execution is mediated by the durable policy-gated action layer described in [Policy-Gated Transactional Actions](31-policy-gated-transactional-actions.md). Tool-call generation and authorization are separate states; preview, deterministic policy, exact approval when required, observable verification, idempotency, and compensation evidence form the execution boundary.
+
 ## Teach Mode pipeline
 
 Teach Mode follows `explicit start → semantic raw events → redaction →

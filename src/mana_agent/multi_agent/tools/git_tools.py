@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import subprocess
 import time
@@ -118,6 +119,29 @@ _PROTECTED_PATTERNS = (
 _SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
 
 
+def _redact_git_argv(args: list[str]) -> list[str]:
+    sensitive_flags = {"--password", "--token", "--api-key", "--authorization"}
+    redacted: list[str] = []
+    hide_next = False
+    for raw in args:
+        item = str(raw)
+        if hide_next:
+            redacted.append("***REDACTED***")
+            hide_next = False
+            continue
+        lowered = item.lower()
+        if lowered in sensitive_flags:
+            redacted.append(item)
+            hide_next = True
+            continue
+        if any(lowered.startswith(f"{flag}=") for flag in sensitive_flags):
+            redacted.append(item.split("=", 1)[0] + "=***REDACTED***")
+            continue
+        item = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1***REDACTED***@", item)
+        redacted.append(_redact_text(item))
+    return redacted
+
+
 def _redact_text(text: str) -> str:
     return redact_json_line(str(text or ""))
 
@@ -200,10 +224,16 @@ def observe_git_state(repo_path: str | Path | None = None) -> GitObservation:
 def classify_git_risk(args: list[str]) -> GitRiskLevel:
     command = str(args[0] if args else "").strip()
     lowered = [str(item).strip().lower() for item in args]
-    if _matches_protected(lowered):
+    if _matches_protected(args):
         if command == "push" and any(item in lowered for item in {"--force", "--force-with-lease", "--mirror", "--delete"}):
             return GitRiskLevel.HISTORY_REWRITE
         return GitRiskLevel.DESTRUCTIVE if command not in _HISTORY_REWRITE else GitRiskLevel.HISTORY_REWRITE
+    if command == "config" and len(args) >= 3:
+        return GitRiskLevel.LOCAL_SAFE_WRITE
+    if command == "branch" and any(item in args for item in {"-d", "-m", "-M", "--delete", "--move"}):
+        return GitRiskLevel.LOCAL_SAFE_WRITE
+    if command == "remote" and len(lowered) >= 2 and lowered[1] in {"add", "remove", "rename", "set-head", "set-url", "prune", "update"}:
+        return GitRiskLevel.LOCAL_SAFE_WRITE
     if command in _READ_ONLY:
         return GitRiskLevel.READ_ONLY
     if command in _LOCAL_SAFE_WRITE:
@@ -219,10 +249,19 @@ def classify_git_risk(args: list[str]) -> GitRiskLevel:
     return GitRiskLevel.LOCAL_SAFE_WRITE
 
 
-def _matches_protected(lowered_args: list[str]) -> bool:
-    joined = " ".join(lowered_args)
+def _matches_protected(args: list[str]) -> bool:
+    tokens = [str(item).strip() for item in args]
+    lowered = [item.lower() for item in tokens]
+    joined = " ".join(lowered)
     for pattern in _PROTECTED_PATTERNS:
-        if all(part in lowered_args or part in joined for part in pattern):
+        matches = []
+        for part in pattern:
+            if part.startswith("-"):
+                matches.append(part in tokens)
+            else:
+                lowered_part = part.lower()
+                matches.append(lowered_part in lowered or lowered_part in joined)
+        if all(matches):
             return True
     return False
 
@@ -238,7 +277,7 @@ def _validate_args(args: list[str]) -> list[str]:
     return normalized
 
 
-def run_git(
+def _run_git_direct(
     args: list[str],
     *,
     repo_path: str | Path | None = None,
@@ -249,8 +288,7 @@ def run_git(
     normalized = _validate_args(args)
     repo_root = resolve_repo_root(repo_path)
     risk = classify_git_risk(normalized)
-    lowered = [item.lower() for item in normalized]
-    if _matches_protected(lowered) and not allow_protected:
+    if _matches_protected(normalized) and not allow_protected:
         state = observe_git_state(repo_root).to_dict()
         return GitExecutionResult(
             ok=False,
@@ -298,6 +336,144 @@ def run_git(
             duration_ms=duration,
             error="timeout",
         ).to_dict()
+
+
+def run_git(
+    args: list[str],
+    *,
+    repo_path: str | Path | None = None,
+    timeout: int | None = None,
+    allow_protected: bool = False,
+    memory: GitStateMemory | None = None,
+    action_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = _validate_args(args)
+    risk = classify_git_risk(normalized)
+    if risk is GitRiskLevel.READ_ONLY:
+        return _run_git_direct(
+            normalized, repo_path=repo_path, timeout=timeout,
+            allow_protected=allow_protected, memory=memory,
+        )
+    repo_root = resolve_repo_root(repo_path)
+    context = redact_secrets(dict(action_context or {}))
+
+    from mana_agent.transactional_actions.adapters import ActionAdapter
+    from mana_agent.transactional_actions.gateway import ApprovalRequired
+    from mana_agent.transactional_actions.models import (
+        ActionIntent, ActionPreview, BlastRadius, DataDisclosure,
+        Reversibility, VerificationEvidence,
+    )
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    class GitActionAdapter(ActionAdapter):
+        def build_intent(self) -> ActionIntent:
+            return ActionIntent(
+                parent_task_id=str(context.get("parent_task_id") or "git-tool"),
+                actor=str(context.get("actor") or "model_tool"),
+                originating_agent=str(context.get("originating_agent") or "git_tool"),
+                tool_name="git",
+                operation_name=normalized[0],
+                target_resources=[str(repo_root), *[str(item) for item in context.get("target_resources") or []]],
+                normalized_arguments={"argv": ["git", *_redact_git_argv(normalized)], "argv_fingerprint": hashlib.sha256(json.dumps(normalized, ensure_ascii=False).encode("utf-8")).hexdigest(), "cwd": str(repo_root), "risk_level": risk.value, "policy_context": context},
+                requested_capabilities=["git.write", *[str(item) for item in context.get("requested_capabilities") or []]],
+                expected_side_effects=[f"execute git {normalized[0]} in {repo_root}"],
+                data_disclosure=DataDisclosure.EXTERNAL_PRIVATE if risk is GitRiskLevel.REMOTE_WRITE else DataDisclosure.NONE,
+                blast_radius=BlastRadius.EXTERNAL_ACCOUNT if risk is GitRiskLevel.REMOTE_WRITE else BlastRadius.WORKSPACE,
+                reversibility=Reversibility.IRREVERSIBLE if risk in {GitRiskLevel.DESTRUCTIVE, GitRiskLevel.HISTORY_REWRITE, GitRiskLevel.REMOTE_WRITE} else Reversibility.PARTIALLY_REVERSIBLE,
+                idempotency_key="git:" + hashlib.sha256(
+                    (str(repo_root) + "\x1f" + "\x1f".join(normalized)).encode("utf-8")
+                ).hexdigest(),
+                verification_plan=["observe repository state after execution", "match observation to execution evidence"],
+                compensation_strategy="Use a separately approved Git revert/restore action when safe; never rewrite history automatically.",
+            )
+
+        def preview(self, action: ActionIntent) -> ActionPreview:
+            before = observe_git_state(repo_root).to_dict()
+            return ActionPreview(
+                summary=f"git {normalized[0]}",
+                resources=[{"repository": str(repo_root), "before_state": before}],
+                exact_invocation=action.normalized_arguments,
+                expected_side_effects=action.expected_side_effects,
+                risks=[risk.value],
+            )
+
+        def execute(self, action: ActionIntent) -> dict[str, Any]:
+            return _run_git_direct(
+                normalized, repo_path=repo_root, timeout=timeout,
+                allow_protected=allow_protected, memory=memory,
+            )
+
+        def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:
+            observed = observe_git_state(repo_root).to_dict()
+            recorded = dict(result.get("state") or {})
+            same = bool(recorded.get("fingerprint") and recorded.get("fingerprint") == observed.get("fingerprint"))
+            checks = [{"check": "command_ok", "observed": bool(result.get("ok"))}, {"check": "state_fingerprint", "expected": recorded.get("fingerprint", ""), "observed": observed.get("fingerprint", "")}]
+            remote_verified = True
+            if normalized[0] == "push" and result.get("ok"):
+                positional = [item for item in normalized[1:] if not item.startswith("-")]
+                remote = positional[0] if positional else "origin"
+                branch_name = positional[1] if len(positional) > 1 else str(observed.get("current_branch") or "")
+                remote_state = _run_raw_git(["ls-remote", "--heads", remote, branch_name], cwd=repo_root, timeout=30)
+                remote_head = remote_state.stdout.split()[0] if remote_state.returncode == 0 and remote_state.stdout.split() else ""
+                remote_verified = bool(remote_head and remote_head == observed.get("head"))
+                checks.append({"check": "remote_head", "expected": observed.get("head", ""), "observed": remote_head})
+            managed_verified = True
+            if context.get("kind") == "managed_workspace" and context.get("operation") == "create":
+                workspace_path = Path(str(context.get("workspace_path") or "")).resolve()
+                branch = _run_raw_git(["branch", "--show-current"], cwd=workspace_path, timeout=15) if workspace_path.is_dir() else None
+                managed_verified = bool(
+                    branch
+                    and branch.returncode == 0
+                    and branch.stdout.strip() == str(context.get("branch_name") or "")
+                )
+                checks.append({"check": "managed_worktree_branch", "expected": context.get("branch_name", ""), "observed": branch.stdout.strip() if branch else "missing"})
+            elif context.get("kind") == "managed_workspace" and context.get("operation") == "remove":
+                workspace_path = Path(str(context.get("workspace_path") or "")).resolve()
+                managed_verified = not workspace_path.exists()
+                checks.append({"check": "managed_worktree_absent", "expected": True, "observed": managed_verified})
+            complete = bool(result.get("ok") and same and remote_verified and managed_verified)
+            return VerificationEvidence(
+                complete=complete,
+                summary="Git result was matched to a fresh repository observation." if complete else "Git state could not be verified against execution evidence.",
+                checks=checks,
+            )
+
+    try:
+        outcome = default_action_gateway(repo_root).execute(GitActionAdapter())
+    except ApprovalRequired as exc:
+        action = exc.action
+        return {
+            "ok": False,
+            "blocked": True,
+            "error": str(exc),
+            "error_code": "approval_required",
+            "permission_required": True,
+            "permission_request_id": action.action_id,
+            "action_id": action.action_id,
+            "preview": action.preview.redacted() if action.preview else {},
+            "preview_digest": action.preview_digest,
+            "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+            "risk_level": risk.value,
+            "command": ["git", *normalized],
+            "repo_root": str(repo_root),
+        }
+    result = dict(outcome.result)
+    result.update({
+        "ok": outcome.action.state.value == "committed",
+        "blocked": bool(
+            outcome.action.policy_decision
+            and outcome.action.policy_decision.outcome.value == "deny"
+        ),
+        "error": outcome.action.error,
+        "action_id": outcome.action.action_id,
+        "action_state": outcome.action.state.value,
+        "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+        "duplicate_suppressed": outcome.duplicate,
+        "risk_level": risk.value,
+        "command": ["git", *normalized],
+        "repo_root": str(repo_root),
+    })
+    return result
 
 
 def git_help(

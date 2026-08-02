@@ -9,6 +9,7 @@ from mana_agent.multi_agent.core.ids import new_task_id
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobStatus, QueueJobType
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
 from mana_agent.tools.contracts import coding_tool_contracts_payload
+from mana_agent.transactional_actions.runtime import approve_action
 
 
 def test_document_detection_supports_requested_types() -> None:
@@ -88,7 +89,18 @@ def test_xlsx_create_read_formula_safety_and_delete(tmp_path: Path) -> None:
 
     delete_blocked = service.delete("budget.xlsx")
     assert delete_blocked["error"] == "explicit_delete_required"
-    deleted = service.delete("budget.xlsx", explicit=True)
+    pending_delete = service.delete("budget.xlsx", explicit=True)
+    assert pending_delete["error_code"] == "approval_required"
+    approval_id = approve_action(
+        tmp_path,
+        pending_delete["action_id"],
+        approved_by="pytest-local-user",
+    )
+    deleted = service.delete(
+        "budget.xlsx",
+        explicit=True,
+        action_approval_id=approval_id,
+    )
     assert deleted["ok"] is True
     assert not (tmp_path / "budget.xlsx").exists()
 

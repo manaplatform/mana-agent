@@ -4,6 +4,7 @@ from pathlib import Path
 
 from mana_agent.tools.apply_patch import build_apply_patch_tool
 from mana_agent.tools.write_file import build_create_file_tool, build_delete_file_tool, build_write_file_tool, safe_delete_file
+from mana_agent.transactional_actions.runtime import approve_action
 
 
 def test_apply_patch_tool_accepts_patch_alias(monkeypatch, tmp_path: Path) -> None:
@@ -149,7 +150,18 @@ def test_safe_delete_file_deletes_existing_file(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True)
     target.write_text("old\n", encoding="utf-8")
 
-    result = safe_delete_file(repo_root=tmp_path, path="src/old.py")
+    pending = safe_delete_file(repo_root=tmp_path, path="src/old.py")
+    assert pending["error_code"] == "approval_required"
+    approval_id = approve_action(
+        tmp_path,
+        pending["action_id"],
+        approved_by="pytest-local-user",
+    )
+    result = safe_delete_file(
+        repo_root=tmp_path,
+        path="src/old.py",
+        action_approval_id=approval_id,
+    )
 
     assert result["ok"] is True
     assert result["path"] == "src/old.py"

@@ -334,7 +334,7 @@ def _document_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]
         (
             "document_delete",
             "Delete a supported document file only when explicit delete intent has been validated.",
-            {"path": {"type": "string"}, "explicit": {"type": "boolean"}, "backup": {"type": "boolean"}},
+            {"path": {"type": "string"}, "explicit": {"type": "boolean"}, "backup": {"type": "boolean"}, "action_approval_id": {"type": "string"}},
             ["path", "explicit"],
             {"path": "docs/generated-report.docx", "explicit": True},
         ),
@@ -476,6 +476,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 {
                     "patch": {"type": "string"},
                     "check_only": {"type": "boolean"},
+                    "action_approval_id": {"type": "string"},
                 },
                 ["patch"],
             ),
@@ -501,6 +502,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "Never resubmit the original stale patch unchanged after recovery; prefer minimal rebuilt hunks.",
                 "Treat already-present intended content as an idempotent success.",
                 "Store patch preview and result under .mana/logs/ before returning.",
+                "Execute mutations only through a persisted transactional action; destructive patches require the exact action_approval_id.",
             ],
             examples=[{"input": {"patch": "*** Begin Patch\n*** Update File: a.py\n@@\n-old\n+new\n*** End Patch"}}],
         ),
@@ -640,7 +642,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ToolContract(
             name="delete_file",
             description="Delete one existing repository file without touching directories or paths outside the repository.",
-            input_schema=_schema({"path": {"type": "string"}}, ["path"]),
+            input_schema=_schema({"path": {"type": "string"}, "action_approval_id": {"type": "string"}}, ["path"]),
             output_schema=_schema(
                 {
                     "ok": {"type": "boolean"},
@@ -655,6 +657,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "Reject traversal, absolute paths, paths outside root, and disallowed prefixes.",
                 "Refuse to delete directories.",
                 "Refuse missing targets so accidental no-op deletes do not count as progress.",
+                "Require an approval bound to the exact preview digest before deletion.",
             ],
             examples=[{"input": {"path": "docs/obsolete-note.md"}}],
         ),

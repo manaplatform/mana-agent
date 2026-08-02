@@ -15,6 +15,7 @@ from mana_agent.search.config import SearchConfig
 from mana_agent.search.memory import SearchMemoryStore
 from mana_agent.search.models import SearchResult
 from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
+from mana_agent.transactional_actions.runtime import approve_action
 
 
 class _FakeSearchService:
@@ -135,7 +136,12 @@ class _CountingTool:
 
 def _register_tool(agent: AskAgent, name: str, func) -> None:  # noqa: ANN001
     agent.tools = [
-        StructuredTool.from_function(func=func, name=name, description=f"Test tool {name}.")
+        StructuredTool.from_function(
+            func=func,
+            name=name,
+            description=f"Test tool {name}.",
+            metadata={"read_only": True},
+        )
     ]
 
 
@@ -485,7 +491,9 @@ def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
         raise subprocess.TimeoutExpired(cmd="rg x", timeout=1)
 
     monkeypatch.setattr("mana_agent.multi_agent.runtime.ask_agent.subprocess.run", _raise_timeout)
-    output = run_command.invoke({"cmd": "rg demo"})
+    pending = json.loads(run_command.invoke({"cmd": "rg demo"}))
+    approval_id = approve_action(tmp_path, pending["action_id"], approved_by="pytest-local-user")
+    output = run_command.invoke({"cmd": "rg demo", "action_approval_id": approval_id})
     assert "timed out" in output.lower()
     assert traces[-1].status == "timeout"
 
@@ -508,12 +516,14 @@ def test_ask_agent_run_command_rewrites_python_to_local_venv_python3(tmp_path: P
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     monkeypatch.setattr("mana_agent.multi_agent.runtime.ask_agent.subprocess.run", _fake_run)
-    payload = json.loads(run_command.invoke({"cmd": "python -V"}))
+    pending = json.loads(run_command.invoke({"cmd": "python -V"}))
+    approval_id = approve_action(tmp_path, pending["action_id"], approved_by="pytest-local-user")
+    payload = json.loads(run_command.invoke({"cmd": "python -V", "action_approval_id": approval_id}))
 
     assert payload["interpreter_rewritten"] is True
     assert payload["original_cmd"] == "python -V"
     assert payload["executed_cmd"].startswith(str(venv_python))
-    assert captured["cmd"].startswith(str(venv_python))
+    assert str(venv_python) in captured["cmd"]
 
 
 def test_ask_agent_run_command_rewrites_python_to_python3_without_local_venv(tmp_path: Path, monkeypatch) -> None:
@@ -529,12 +539,14 @@ def test_ask_agent_run_command_rewrites_python_to_python3_without_local_venv(tmp
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     monkeypatch.setattr("mana_agent.multi_agent.runtime.ask_agent.subprocess.run", _fake_run)
-    payload = json.loads(run_command.invoke({"cmd": "python -m pytest -q"}))
+    pending = json.loads(run_command.invoke({"cmd": "python -m pytest -q"}))
+    approval_id = approve_action(tmp_path, pending["action_id"], approved_by="pytest-local-user")
+    payload = json.loads(run_command.invoke({"cmd": "python -m pytest -q", "action_approval_id": approval_id}))
 
     assert payload["interpreter_rewritten"] is True
     assert payload["executed_cmd"].startswith("python3 ")
     assert payload["original_cmd"] == "python -m pytest -q"
-    assert captured["cmd"].startswith("python3 ")
+    assert "python3 -m pytest -q" in captured["cmd"]
 
 
 def test_ask_agent_read_file_uses_policy_line_window(tmp_path: Path) -> None:
@@ -890,6 +902,7 @@ def test_ask_agent_invokes_externally_registered_tool(tmp_path: Path) -> None:
             func=lambda query: f'{{"ok": true, "query": "{query}"}}',
             name="external_lookup",
             description="Lookup external information.",
+            metadata={"read_only": True},
         )
     ]
     agent.llm = _FakeLLM(
@@ -913,6 +926,7 @@ def test_ask_agent_does_not_disable_external_tool_after_repeated_calls(tmp_path:
             func=lambda query: {"ok": True, "query": query, "results": [{"title": "x"}], "error": ""},
             name="external_lookup",
             description="Lookup external information.",
+            metadata={"read_only": True},
         )
     ]
     agent.llm = _FakeLLM(

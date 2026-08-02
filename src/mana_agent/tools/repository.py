@@ -311,7 +311,12 @@ def apply_patch_batch(repo_root: Path, *, patches: list[dict[str, Any]]) -> dict
     changed: list[str] = []
     for index, item in enumerate(patch_rows):
         patch_text = str(item.get("patch", "") if isinstance(item, dict) else "")
-        result = safe_apply_patch(repo_root=repo_root, patch=patch_text, check_only=False)
+        result = safe_apply_patch(
+            repo_root=repo_root,
+            patch=patch_text,
+            check_only=False,
+            action_approval_id=str(item.get("action_approval_id") or "") if isinstance(item, dict) else "",
+        )
         results.append({"index": index, **result})
         changed.extend(str(path) for path in result.get("files_changed") or [])
         if not result.get("ok"):

@@ -59,7 +59,7 @@ class VerifierAgent(BaseAgent):
                 requested_by_agent_id=self.agent_id,
                 approved_by_agent_id="agent_main_0001",
                 job_type=QueueJobType.SHELL,
-                payload={"command": text},
+                payload={"command": text, "verification": True},
                 purpose=f"Execute verification command: {text}",
                 priority=80,
             )

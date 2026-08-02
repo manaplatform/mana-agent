@@ -444,6 +444,58 @@ def decide_api_approval_in_chat(
     return {"ok": True, "decision": payload.decision, "result": result}
 
 
+@router.post(
+    "/conversations/{conversation_id}/transactional-actions/{action_id}"
+)
+def decide_transactional_action_in_chat(
+    conversation_id: str,
+    action_id: str,
+    payload: ServerApprovalDecisionRequest,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Approve or deny one exact policy-gated action from a trusted dashboard."""
+    _require_mutation_token(authorization)
+    service = _service(root=payload.root, repository_id=payload.repository_id)
+    try:
+        service.get_or_raise(conversation_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+
+    from mana_agent.transactional_actions.runtime import approve_action, deny_action
+
+    try:
+        if payload.decision == "approve":
+            approval_id = approve_action(
+                service.root,
+                action_id,
+                approved_by=f"dashboard:{conversation_id}",
+            )
+            result: dict[str, Any] = {"approval_id": approval_id, "executed": False}
+        else:
+            result = deny_action(
+                service.root,
+                action_id,
+                denied_by=f"dashboard:{conversation_id}",
+            )
+            result["executed"] = False
+    except (LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise ManaApiError(409, str(exc)) from exc
+    get_execution_event_hub().emit(
+        "action.approval.granted" if payload.decision == "approve" else "action.approval.denied",
+        title="Transactional action approved" if payload.decision == "approve" else "Transactional action denied",
+        conversation_id=conversation_id,
+        repository_id=service.repository_id,
+        status="success" if payload.decision == "approve" else "cancelled",
+        metadata={
+            "permission_request_id": action_id,
+            "action_id": action_id,
+            "decision": payload.decision,
+            "transactional_action_approval": True,
+        },
+    )
+    return {"ok": True, "decision": payload.decision, "result": result}
+
+
 @router.get("/conversations/{conversation_id}/execution")
 def get_execution_state(
     conversation_id: str,

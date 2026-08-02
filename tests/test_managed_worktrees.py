@@ -192,7 +192,7 @@ def test_verification_runs_in_worktree_root(repo: Path) -> None:
         requested_by_agent_id="agent_verifier_0001",
         approved_by_agent_id="agent_main_0001",
         job_type=QueueJobType.SHELL,
-        payload={"command": "git rev-parse --show-toplevel"},
+        payload={"command": "git rev-parse --show-toplevel", "verification": True},
         purpose="verify inside worktree",
     )
     ran = queue.run_next(worker_agent_id=job.assigned_worker_agent_id)
