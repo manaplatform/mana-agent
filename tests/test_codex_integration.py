@@ -16,7 +16,11 @@ from mana_agent.coding.models import (
 )
 from mana_agent.coding.registry import CodingBackendDecisionError, CodingBackendRegistry
 from mana_agent.coding.routing_policy import validate_backend_decision
-from mana_agent.integrations.codex.backend import CodexCodingBackend
+from mana_agent.integrations.codex.backend import (
+    CodexCodingBackend,
+    _git_changed_file_state,
+    _git_changed_files,
+)
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.event_adapter import adapt_codex_event
@@ -116,6 +120,25 @@ def _workspace(tmp_path: Path) -> WorkspaceContext:
     repository.mkdir()
     _git_repo(worktree)
     return WorkspaceContext(repository_path=repository, worktree_path=worktree, branch_name="mana/task-1")
+
+
+def test_codex_changed_files_are_attempt_scoped_and_expand_untracked_directories(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    _git_repo(worktree)
+    (worktree / ".DS_Store").write_bytes(b"pre-existing")
+    baseline = _git_changed_file_state(worktree)
+
+    package = worktree / "test"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "settings.py").write_text("DEBUG = True\n", encoding="utf-8")
+
+    assert _git_changed_files(worktree, baseline=baseline) == [
+        "test/__init__.py",
+        "test/settings.py",
+    ]
 
 
 def test_registry_executes_only_model_selected_backend() -> None:

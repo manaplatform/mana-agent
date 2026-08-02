@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 import subprocess
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -123,6 +125,11 @@ class CodexCodingBackend:
         if self._client is None:
             raise CodexUnavailableError("Codex app-server did not start")
         async with self._run_lock:
+            baseline_changes = (
+                await asyncio.to_thread(_git_changed_file_state, workspace.worktree_path)
+                if task.requires_repository_write
+                else {}
+            )
             notifications: list[dict[str, Any]] = []
             seen_event_ids: set[str] = set()
             sequence = 0
@@ -306,7 +313,11 @@ class CodexCodingBackend:
                     )
                 self._active.pop(task.task_id, None)
                 changed_files = (
-                    await asyncio.to_thread(_git_changed_files, workspace.worktree_path)
+                    await asyncio.to_thread(
+                        _git_changed_files,
+                        workspace.worktree_path,
+                        baseline=baseline_changes,
+                    )
                     if task.requires_repository_write
                     else []
                 )
@@ -401,24 +412,67 @@ def _codex_sandbox(workspace: WorkspaceContext) -> str:
         ) from exc
 
 
-def _git_changed_files(worktree: Path) -> list[str]:
+def _git_changed_file_state(worktree: Path) -> dict[str, str]:
     completed = subprocess.run(
-        ["git", "status", "--short"],
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
         cwd=worktree,
         capture_output=True,
-        text=True,
         check=False,
     )
     if completed.returncode != 0:
-        return []
-    changed: list[str] = []
-    for line in completed.stdout.splitlines():
-        value = line[3:].strip() if len(line) >= 4 else ""
-        if " -> " in value:
-            value = value.split(" -> ", 1)[1]
-        if value:
-            changed.append(value)
-    return sorted(set(changed))
+        return {}
+    root = worktree.expanduser().resolve()
+    records = completed.stdout.split(b"\0")
+    changed: dict[str, str] = {}
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        status = record[:2].decode("ascii", errors="replace")
+        value = os.fsdecode(record[3:])
+        if status[0] in {"R", "C"} or status[1] in {"R", "C"}:
+            # Porcelain v1 -z emits the destination first and the source as a
+            # second NUL-delimited field. The destination is the final artifact.
+            index += 1
+        if not value:
+            continue
+        target = (root / value).resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        changed[value] = f"{status}:{_path_state_fingerprint(target)}"
+    return changed
+
+
+def _git_changed_files(worktree: Path, *, baseline: dict[str, str] | None = None) -> list[str]:
+    current = _git_changed_file_state(worktree)
+    if baseline is None:
+        return sorted(current)
+    return sorted(
+        path
+        for path, fingerprint in current.items()
+        if baseline.get(path) != fingerprint
+    )
+
+
+def _path_state_fingerprint(path: Path) -> str:
+    try:
+        if path.is_symlink():
+            return "symlink:" + hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()
+        if path.is_file():
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return "file:" + digest.hexdigest()
+        if path.is_dir():
+            return f"directory:{path.stat().st_mtime_ns}"
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+    return "missing"
 
 
 __all__ = ["CodexCodingBackend"]
