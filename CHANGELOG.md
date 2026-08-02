@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-02
+
+- Fixed Windows Textual chat-message layout so the initial auto-height measurement rewraps the document at the width being measured. Long messages now receive their correct multi-line height during the first layout pass instead of depending on a later resize or render cycle.
+  - User verification required: `python -m pytest tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py`.
+
 ## 2026-08-01
 
 - Converted the direct legacy multi-agent memory adapter to capsule-enabled operation by default and connected the canonical memory facade's existing `CapsuleService` to it. Authorized capsule reads now use the shared lifecycle service, while broad legacy bundles require an explicit `capsules_enabled=False` compatibility setting; the stable prompt test uses that explicit legacy snapshot mode.
