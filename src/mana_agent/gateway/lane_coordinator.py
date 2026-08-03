@@ -402,6 +402,10 @@ class LaneCoordinator:
             supervisor_config,
             event_sink=self._supervisor_event,
         )
+        self.taskboard.set_task_id_reservation_checker(
+            lambda task_id: self.execution_supervisor.store.get_task_or_none(task_id)
+            is not None
+        )
         self._supervisor_heartbeat_stops: dict[str, threading.Event] = {}
         self._supervisor_heartbeat_threads: dict[str, threading.Thread] = {}
         self.lock_manager = GatewayLockManager(self)

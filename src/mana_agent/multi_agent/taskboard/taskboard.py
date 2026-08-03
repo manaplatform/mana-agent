@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from mana_agent.multi_agent.core.ids import new_task_id
 from mana_agent.multi_agent.core.types import (
@@ -32,19 +32,35 @@ def _append_unique(target: list[str], values: list[str]) -> None:
 
 
 class TaskBoard:
-    def __init__(self, root: str | Path = ".", *, memory_service: MultiAgentMemoryService | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path = ".",
+        *,
+        memory_service: MultiAgentMemoryService | None = None,
+        task_id_is_reserved: Callable[[str], bool] | None = None,
+    ) -> None:
         self.store = JsonStateStore(root)
         self._save_lock = threading.RLock()
         self.memory_service = memory_service
+        self._task_id_is_reserved = task_id_is_reserved
         self.tasks: dict[str, TaskBoardItem] = {}
         self.load()
 
     def _new_task_id(self) -> str:
-        """Allocate an ID that cannot overwrite a durable task after restart."""
+        """Allocate an ID unused by this projection or an authoritative store."""
         task_id = new_task_id()
-        while task_id in self.tasks:
+        while task_id in self.tasks or (
+            self._task_id_is_reserved is not None
+            and self._task_id_is_reserved(task_id)
+        ):
             task_id = new_task_id()
         return task_id
+
+    def set_task_id_reservation_checker(
+        self, checker: Callable[[str], bool] | None
+    ) -> None:
+        """Bind authoritative task-ID reservations before creating new tasks."""
+        self._task_id_is_reserved = checker
 
     def create_task(
         self,

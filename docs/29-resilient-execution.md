@@ -119,6 +119,10 @@ configured cap. Task identity remains stable while attempts change. A typed
 selected agent/worker/model, checkpoint, and `safe_to_continue`; invalid or
 missing decisions stop without fallback routing.
 
+New task allocation checks both the TaskBoard projection and the authoritative
+supervisor store. A missing or stale projection therefore cannot reuse a durable
+task identity with a different immutable contract.
+
 Startup recovery is idempotent. It reconnects parent-child links, re-verifies
 escrowed results, marks expired attempts lost, schedules only policy-safe work,
 preserves ambiguous side effects for review, and repairs the LaneCoordinator and

@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+from mana_agent.execution_supervisor import SideEffectClassification
 from mana_agent.gateway.lane_coordinator import (
     LaneBudget,
     LaneBudgetError,
@@ -104,6 +105,32 @@ def test_duplicate_active_task_reuses_existing_reference(coordinator: LaneCoordi
 
     assert second.duplicate is True
     assert second.execution.task_id == first.execution.task_id
+
+
+def test_task_id_allocation_skips_supervisor_only_record(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing_task_id = "task_20260803_000002"
+    coordinator.execution_supervisor.create_task(
+        task_id=existing_task_id,
+        routing_decision_id="existing-decision",
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    generated_ids = iter([existing_task_id, "task_20260803_000003"])
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.taskboard.taskboard.new_task_id",
+        lambda: next(generated_ids),
+    )
+
+    reservation = _reserve(coordinator, LaneId.RESEARCH, intent="new task")
+
+    assert reservation.execution.task_id == "task_20260803_000003"
+    assert (
+        coordinator.execution_supervisor.store.get_task(
+            existing_task_id
+        ).routing_decision_id
+        == "existing-decision"
+    )
 
 
 def test_explicit_taskboard_root_and_child_keep_their_persisted_lineage(
