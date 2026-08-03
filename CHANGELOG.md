@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-03
+
+- Deferred durable human-inbox initialization until a validated workflow needs a human approval or structured response. Capability-error routes, including `COMPUTER_NOT_AVAILABLE`, no longer create `~/.mana/inbox` or its files; partial gateway fixtures retain their transient remote-worker behavior without forcing durable inbox setup.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py`.
+
 ## 2026-08-02
 
 - Fixed Windows Textual chat-message layout so the initial auto-height measurement rewraps the document at the width being measured. Long messages now receive their correct multi-line height during the first layout pass instead of depending on a later resize or render cycle.

@@ -478,11 +478,15 @@ class AgentChatGateway:
         from mana_agent.human_inbox import default_human_inbox_service
         from mana_agent.human_inbox.notifications import ChatHistoryNotificationAdapter
 
-        self.human_inbox_service = default_human_inbox_service()
-        self.human_inbox_service.notification_adapters.append(
-            ChatHistoryNotificationAdapter()
-        )
-        default_action_gateway(self.root)
+        self._human_inbox_service = None
+
+        def create_human_inbox_service():
+            service = default_human_inbox_service()
+            service.notification_adapters.append(ChatHistoryNotificationAdapter())
+            return service
+
+        self._human_inbox_service_factory = create_human_inbox_service
+        default_action_gateway(self.root, enable_human_inbox=False)
         self.settings = settings or Settings()
         self._workspaces = WorkspaceService()
 
@@ -609,9 +613,10 @@ class AgentChatGateway:
         from mana_agent.chat_commands import CommandDispatcher, build_default_registry
 
         self.command_registry = build_default_registry()
-        self.remote_execution_service = RemoteExecutionService(
-            inbox_service=self.human_inbox_service,
-        )
+        # Remote execution attaches the durable inbox only when a
+        # model-selected remote action is submitted. This keeps unavailable
+        # routes side-effect free with respect to ~/.mana/inbox.
+        self.remote_execution_service = RemoteExecutionService()
         self.server_management_service = ServerManagementService()
         self.media_service = MediaService(
             event_sink=self._event_sink,
@@ -683,6 +688,29 @@ class AgentChatGateway:
     # ------------------------------------------------------------------
     # Typed media gateway operations
     # ------------------------------------------------------------------
+
+    @property
+    def human_inbox_service(self):
+        """Create durable inbox state only for a workflow that actually uses it."""
+        if self._human_inbox_service is None:
+            self._human_inbox_service = self._human_inbox_service_factory()
+        return self._human_inbox_service
+
+    @human_inbox_service.setter
+    def human_inbox_service(self, service) -> None:
+        self._human_inbox_service = service
+
+    def _attach_human_inbox_to_remote_execution(self) -> None:
+        if self.remote_execution_service.inbox_service is not None:
+            return
+        inbox_service = getattr(self, "_human_inbox_service", None)
+        if inbox_service is None:
+            # A transient remote-execution coordinator has no configured
+            # durable inbox authority. Do not infer or create one here.
+            if not hasattr(self, "_human_inbox_service_factory"):
+                return
+            inbox_service = self.human_inbox_service
+        self.remote_execution_service.attach_inbox(inbox_service)
 
     def propose_human_input(self, request: InboxRequest) -> InboxItem:
         """Persist a typed agent request before any frontend prompt is emitted."""
@@ -930,6 +958,7 @@ class AgentChatGateway:
         """Approve and resume only the exact remote SSH job bound to this ID."""
         from mana_agent.execution.manager import run_sync
 
+        self._attach_human_inbox_to_remote_execution()
         job = self.remote_execution_service.approve_permission(permission_request_id)
         lane_task_id = getattr(self, "_remote_job_lanes", {}).get(job.request.job_id)
         supervision_error = ""
@@ -4510,6 +4539,7 @@ class AgentChatGateway:
                 self._lane_coordinator.authorize_tool(
                     lane_task_id, "remote_ssh_execute"
                 )
+            self._attach_human_inbox_to_remote_execution()
             job = self.remote_execution_service.submit(request)
             if job.state.value == "awaiting_permission":
                 permission = self.remote_execution_service.pending_permissions()[-1]

@@ -482,6 +482,41 @@ def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:
     }
 
 
+def test_capability_error_does_not_create_human_inbox(tmp_path: Path, monkeypatch) -> None:
+    mana_root = tmp_path / "mana-home"
+    monkeypatch.setattr("mana_agent.human_inbox.mana_home", lambda: mana_root)
+    monkeypatch.setattr(
+        "mana_agent.transactional_actions.runtime.mana_home", lambda: mana_root
+    )
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    decision = EntryRoutingDecision(
+        route="capability_error",
+        confidence=1.0,
+        reason="computer control is unavailable",
+        required_sources=("computer",),
+        error_code="COMPUTER_NOT_AVAILABLE",
+    )
+
+    result = gateway._execute_entry_route(
+        decision=decision,
+        context=EntryRouteContext(
+            session_id="session", conversation_id="session", turn_id="turn"
+        ),
+        text="use the computer",
+        state={},
+        ask_service=None,
+        sink=None,
+        options={},
+    )
+
+    assert result.error == "COMPUTER_NOT_AVAILABLE"
+    assert not (mana_root / "inbox").exists()
+
+
 def test_gateway_creates_session_and_simple_send(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "mana_agent.commands.cli_internal.build_ask_service",

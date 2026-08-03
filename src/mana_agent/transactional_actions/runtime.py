@@ -22,6 +22,7 @@ def default_action_gateway(
     *,
     allowed_http_hosts: tuple[str, ...] = (),
     surface_approval_events: bool = True,
+    enable_human_inbox: bool = True,
 ) -> ActionGateway:
     root = mana_home() / "transactional_actions"
     hub = get_execution_event_hub()
@@ -32,7 +33,10 @@ def default_action_gateway(
             allowed_http_hosts=allowed_http_hosts,
         )),
         approvals=ApprovalRegistry(root / "approvals"),
-        inbox_service=default_human_inbox_service(),
+        # Gateway startup prepares the transactional store before route
+        # selection. Do not materialize the durable human inbox until a route
+        # actually needs an approval or structured human response.
+        inbox_service=(default_human_inbox_service() if enable_human_inbox else None),
         event_sink=lambda event: (
             hub.publish(event, persist=False)
             if surface_approval_events or event.get("event_type") != "action.approval.required"
