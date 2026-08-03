@@ -4,6 +4,23 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Removed completed-result reuse from checkpoint recovery. Follow-up classification now rejects
+  resuming a completed task and requires the model to classify a downstream live operation as a
+  task expansion, which creates a fresh durable action and its own approval boundary.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py`.
+
+- Updated the model-selected MCP executor contract to keep credentials out of tool arguments and require provider identifiers and input references before it invokes a mutable operation. Removed the forced initial MCP tool call so the model can return a clarification rather than sending an empty mutable request.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py`.
+
+- Added a durable post-routing checkpoint for compound child lanes before they invoke an MCP route, allowing their approval inbox requests to suspend and resume the exact supervised child action.
+  - User verification required: `python -m pytest tests/gateway/test_multi_task_orchestration.py tests/gateway/test_entry_routing.py`.
+
+- Unwrapped and redacted concrete MCP async transport failures so approved-action lanes report the underlying provider error instead of an opaque `ExceptionGroup`.
+  - User verification required: `python -m pytest tests/test_mcp.py`.
+
+- Normalized MCP credential headers case-insensitively so a locally stored provider token replaces placeholder or stale `authorization` configuration values instead of sending conflicting headers.
+  - User verification required: `python -m pytest tests/test_mcp.py`.
+
 - Scoped MCP transactional idempotency to the durable model-selected task, allowing a fresh external attempt after a failed action while retaining exact-call deduplication within that task.
   - User verification required: `python -m pytest tests/test_mcp.py tests/gateway/test_entry_routing.py`.
 

@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from mana_agent.utils.redaction import redact_secrets
+
 from .config import McpServerConfig
 
 
@@ -53,7 +55,12 @@ class McpClient:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(coro)
+            try:
+                return asyncio.run(coro)
+            except ExceptionGroup as exc:
+                raise RuntimeError(
+                    "MCP transport failed: " + _exception_group_detail(exc)
+                ) from exc
         raise RuntimeError("MCP client cannot run synchronously inside an active event loop")
 
     def _parse_tool_name(self, value: str) -> tuple[str, str]:
@@ -136,3 +143,12 @@ class McpClient:
             async with ClientSession(read, write) as session:
                 await asyncio.wait_for(session.initialize(), timeout=server.timeout_seconds)
                 yield session
+
+
+def _exception_group_detail(error: ExceptionGroup) -> str:
+    """Return one safe, concrete transport failure from an async task group."""
+    current: BaseException = error
+    while isinstance(current, BaseExceptionGroup) and current.exceptions:
+        current = current.exceptions[0]
+    detail = str(current).strip() or type(current).__name__
+    return str(redact_secrets(detail))[:1000]

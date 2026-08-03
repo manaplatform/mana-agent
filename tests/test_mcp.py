@@ -62,6 +62,14 @@ def test_mcp_model_tool_name_is_openai_compatible():
     assert mcp_model_tool_name("context7", "query-docs") == "mcp__context7__query-docs"
 
 
+def test_mcp_client_reports_the_concrete_task_group_failure():
+    async def fail() -> None:
+        raise ExceptionGroup("transport", [ValueError("credential rejected")])
+
+    with pytest.raises(RuntimeError, match="credential rejected"):
+        McpClient._run(fail())
+
+
 def test_mcp_transactional_adapter_requires_provider_success_for_verification():
     adapter = McpActionAdapter(
         provider_id="kaggle",
@@ -213,6 +221,21 @@ def test_mcp_token_is_stored_outside_server_config(monkeypatch, tmp_path):
     config = McpServerConfig(id="remote", transport="streamable_http", url="https://example.test/mcp")
     assert config.resolved_headers()["Authorization"] == "Bearer secret-value"
     assert "secret-value" not in config.model_dump_json()
+
+
+def test_mcp_stored_token_replaces_case_variant_authorization_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    save_mcp_token("kaggle", "stored-token")
+    config = McpServerConfig(
+        id="kaggle",
+        transport="streamable_http",
+        url="https://www.kaggle.com/mcp",
+        headers={"authorization": "Bearer <YOUR_TOKEN>"},
+    )
+
+    headers = config.resolved_headers()
+
+    assert headers == {"Authorization": "Bearer stored-token"}
 
 
 def test_context7_stdio_receives_its_stored_token(monkeypatch, tmp_path):

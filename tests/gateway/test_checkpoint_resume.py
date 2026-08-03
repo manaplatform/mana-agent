@@ -124,6 +124,9 @@ def test_model_can_require_fresh_execution_for_time_sensitive_work() -> None:
 
 
 def test_mcp_submission_route_starts_fresh_instead_of_resuming_upload_checkpoint() -> None:
+    completed_upload = candidate()
+    completed_upload["state"] = "completed"
+    completed_upload["verification_status"] = "passed"
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
@@ -145,7 +148,7 @@ def test_mcp_submission_route_starts_fresh_instead_of_resuming_upload_checkpoint
         current_request="Use Kaggle MCP to retry the competition submission.",
         route="mcp",
         requires_live_data=True,
-        candidates=[candidate()],
+        candidates=[completed_upload],
     )
 
     assert decision.action == "start_fresh"

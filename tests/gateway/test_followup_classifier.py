@@ -81,6 +81,27 @@ def test_non_task_category_cannot_select_a_related_task() -> None:
         )
 
 
+def test_completed_task_cannot_be_classified_as_a_resume() -> None:
+    classifier = FollowupClassifier(
+        _StructuredModel(
+            {
+                "decision_id": "followup_completed_resume",
+                "category": "resume_request",
+                "related_task_id": "task_completed",
+                "safe_to_continue": True,
+                "reason": "continue the earlier work",
+            }
+        )
+    )
+
+    with pytest.raises(FollowupClassificationError, match="completed task cannot be resumed"):
+        classifier.decide(
+            message="submit the uploaded Kaggle file now",
+            recent_history=[],
+            candidates=[{"task_id": "task_completed", "state": "completed"}],
+        )
+
+
 def test_unsafe_classification_reports_the_model_reason() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(

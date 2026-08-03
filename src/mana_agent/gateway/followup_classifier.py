@@ -41,9 +41,11 @@ class FollowupClassification:
 _PROMPT = """Classify this newly received chat turn. A completed task does not complete its conversation.
 Use new_task for independent actionable work; use followup_task, task_expansion, or task_correction only
 when one offered task is the intended parent; use retry_request/resume_request only for the same offered
-task; use status_request or conversation_only when no execution should be created. Do not use keyword
-matching. If no offered task is unambiguously applicable, select new_task or conversation_only. Return
-strict JSON matching the schema and select only an offered task ID.
+unfinished task; use status_request or conversation_only when no execution should be created. A new
+downstream action after a completed task, especially one that changes live external state, is a
+task_expansion, not a resume, retry, duplicate, or status request. Do not use keyword matching. If no
+offered task is unambiguously applicable, select new_task or conversation_only. Return strict JSON
+matching the schema and select only an offered task ID.
 
 Set related_task_id only for followup_task, task_expansion, task_correction, retry_request,
 resume_request, status_request, or duplicate_message. For new_task, clarification_answer, and
@@ -79,6 +81,23 @@ class FollowupClassifier:
         needs_task = output.category in {"followup_task", "task_expansion", "task_correction", "retry_request", "resume_request", "status_request", "duplicate_message"}
         if needs_task and output.related_task_id not in offered:
             raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: selected task was not offered.")
+        selected = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("task_id") or "") == output.related_task_id
+            ),
+            None,
+        )
+        if (
+            output.category in {"retry_request", "resume_request"}
+            and str((selected or {}).get("state") or "") == "completed"
+        ):
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was "
+                "executed. Reason: a completed task cannot be resumed or retried; select "
+                "task_expansion for a downstream action."
+            )
         if not needs_task and output.related_task_id:
             raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: non-task category selected a task.")
         if not output.safe_to_continue:

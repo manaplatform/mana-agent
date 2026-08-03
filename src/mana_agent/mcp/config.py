@@ -54,9 +54,18 @@ class McpServerConfig(BaseModel):
         token = str(os.getenv(self.token_env) or "").strip() if self.token_env else load_mcp_token(self.id)
         if token:
             if self.id.casefold() == "context7":
-                headers.setdefault("CONTEXT7_API_KEY", token)
+                for key in list(headers):
+                    if key.casefold() == "context7_api_key":
+                        del headers[key]
+                headers["CONTEXT7_API_KEY"] = token
             else:
-                headers.setdefault("Authorization", f"Bearer {token}")
+                # HTTP header names are case-insensitive. A configured example
+                # header such as `authorization: Bearer <YOUR_TOKEN>` must not
+                # be sent alongside the locally stored real credential.
+                for key in list(headers):
+                    if key.casefold() == "authorization":
+                        del headers[key]
+                headers["Authorization"] = f"Bearer {token}"
         return headers
 
     def resolved_env(self) -> dict[str, str] | None:

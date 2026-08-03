@@ -22,7 +22,7 @@ class CheckpointResumeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision_id: str = Field(min_length=1)
-    action: Literal["resume_checkpoint", "retry_task", "return_verified", "reverify", "start_fresh", "stop"]
+    action: Literal["resume_checkpoint", "retry_task", "start_fresh", "stop"]
     task_id: str = ""
     checkpoint_id: str = ""
     same_work: bool
@@ -36,7 +36,7 @@ class CheckpointResumeOutput(BaseModel):
 @dataclass(frozen=True, slots=True)
 class CheckpointResumeDecision:
     decision_id: str
-    action: Literal["resume_checkpoint", "retry_task", "return_verified", "reverify", "start_fresh", "stop"]
+    action: Literal["resume_checkpoint", "retry_task", "start_fresh", "stop"]
     task_id: str
     checkpoint_id: str
     same_work: bool
@@ -66,10 +66,10 @@ select resume_checkpoint or retry_task for the applicable candidate; do not sele
 start_fresh only when the work is different or fresh data is required. If the work is the same but
 cannot safely resume or repeat, select stop.
 
-Select return_verified for the same work when a candidate is complete, its verification status is
-passed, and neither live data nor mutable external state is involved. Select reverify for a complete
-same-work candidate when its artifacts or external state may have changed. Both actions must copy
-the candidate task_id, leave checkpoint_id empty, and set same_work and safe_to_continue true.
+Completed results are returned only by the caller after it has already classified the turn as a
+duplicate or status request; this decision boundary must never select or reuse a completed result.
+Do not resume or retry a completed task. A requested downstream action, including an operation on a
+live external provider, must select start_fresh so it receives its own task identity and approval.
 
 For resume_checkpoint, copy one exact candidate task_id and checkpoint_id and set same_work,
 checkpoint_still_valid, side_effects_safe_to_repeat, and safe_to_continue true and
@@ -184,27 +184,6 @@ class CheckpointResumeDecider:
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
                     "Reason: same-task retry safety fields are inconsistent."
-                )
-        elif output.action in {"return_verified", "reverify"}:
-            complete_task_ids = {
-                str(item["task_id"])
-                for item in candidates
-                if str(item.get("state") or "") == "completed"
-                and str(item.get("verification_status") or "") == "passed"
-            }
-            if output.task_id not in complete_task_ids or output.checkpoint_id:
-                raise CheckpointResumeError(
-                    "Model decision failed: checkpoint_resume. No result was reused. "
-                    "Reason: completed-result action did not select a verified candidate."
-                )
-            if not output.same_work or not output.safe_to_continue:
-                raise CheckpointResumeError(
-                    "Model decision failed: checkpoint_resume. No result was reused. "
-                    "Reason: completed-result safety fields are inconsistent."
-                )
-            if output.action == "return_verified" and (output.fresh_data_required or requires_live_data):
-                raise CheckpointResumeError(
-                    "Model decision failed: checkpoint_resume. No stale result was returned."
                 )
         else:
             if output.task_id or output.checkpoint_id:

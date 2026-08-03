@@ -249,8 +249,9 @@ def test_configured_kaggle_mcp_route_uses_only_the_model_selected_provider(
     assert result.payload["provider_id"] == "kaggle"
     assert ask_agent.calls[0]["required_mcp_server"] == "kaggle"
     assert ask_agent.calls[0]["tool_policy"]["mcp_provider_only"] == "kaggle"
-    assert ask_agent.calls[0]["tool_policy"]["require_initial_tool_call"] is True
+    assert "require_initial_tool_call" not in ask_agent.calls[0]["tool_policy"]
     assert ask_agent.calls[0]["transactional_parent_task_id"] == result.payload["lane_task_id"]
+    assert "Do not send an empty object" in ask_agent.calls[0]["system_prompt"]
 
 
 def test_failed_kaggle_mcp_tool_marks_the_route_failed(
