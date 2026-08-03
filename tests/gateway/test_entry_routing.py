@@ -53,6 +53,7 @@ class _RouteModel:
         route = self.routes.pop(0) if self.routes else "conversation"
         source_by_route = {
             "conversation": ["none"], "unsupported": ["none"], "coding": ["repository"],
+            "mcp": ["mcp"],
             "gmail": ["gmail"], "calendar": ["calendar"], "browser": ["browser"],
             "search": ["search"], "github": ["github"], "repository": ["repository"],
             "memory": ["memory"], "automation": ["repository"], "api": ["api"],
@@ -68,12 +69,13 @@ class _RouteModel:
                     "reason": f"selected {route}",
                     "required_sources": source_by_route.get(route, ["none"]),
                     "target_urls": ["https://example.com"] if route == "browser" else [],
-                    "requires_live_data": route in {"browser", "search", "github"},
+                    "requires_live_data": route in {"browser", "search", "github", "mcp"},
                     "reason_code": "TEST_ROUTE",
                     "error_code": "GMAIL_NOT_AVAILABLE" if route == "capability_error" else "",
                     "reuse_active_route": len(self.payloads) > 1,
                     "artifact_family": "pdf" if route == "artifact" else "",
                     "automation_operation": "create" if route == "automation" else "",
+                    "mcp_request": {"provider_id": "kaggle"} if route == "mcp" else None,
                 }
             )
         )
@@ -142,12 +144,16 @@ class _CodingAgent:
         return {"allowed_tools": ["read_file"]}
 
 
-def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
+def _registry(
+    gmail: RouteAvailability | None = None,
+    mcp: RouteAvailability | None = None,
+) -> EntryRouteRegistry:
     registry = EntryRouteRegistry()
     for name, description in (
         ("multi_task", "compound task orchestration"),
         ("conversation", "ordinary conversation"),
         ("coding", "Codex coding"),
+        ("mcp", "MCP provider operations"),
         ("gmail", "Gmail inbox"),
         ("calendar", "calendar"),
         ("browser", "browser inspection"),
@@ -162,7 +168,15 @@ def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
         ("unsupported", "safe stop"),
         ("capability_error", "missing capability"),
     ):
-        availability = gmail if name == "gmail" and gmail is not None else RouteAvailability(True)
+        availability = (
+            gmail
+            if name == "gmail" and gmail is not None
+            else mcp
+            if name == "mcp" and mcp is not None
+            else RouteAvailability(False, reason="No MCP provider is configured.")
+            if name == "mcp"
+            else RouteAvailability(True)
+        )
         registry.register(
             RouteRegistration(
                 name,  # type: ignore[arg-type]
@@ -178,13 +192,14 @@ def _gateway(
     model: _RouteModel,
     *,
     gmail: RouteAvailability | None = None,
+    mcp: RouteAvailability | None = None,
     ask_agent: _AskAgent | None = None,
     coding_agent: _CodingAgent | None = None,
 ) -> tuple[AgentChatGateway, _ChatService, _AskAgent]:
     agent = ask_agent or _AskAgent()
     ask_service = _AskService(agent)
     chat_service = _ChatService(ask_service)
-    registry = _registry(gmail)
+    registry = _registry(gmail, mcp)
     gateway = AgentChatGateway(
         root,
         coding_agent=coding_agent is not None,
@@ -210,6 +225,54 @@ def test_latest_gmail_routes_to_connector_and_preserves_identifiers(tmp_path: Pa
     assert result.payload["session_id"] == session_id
     assert result.payload["conversation_id"] == session_id
     assert result.payload["turn_id"] == "turn_exact"
+
+
+def test_configured_kaggle_mcp_route_uses_only_the_model_selected_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, ask_agent = _gateway(
+        tmp_path,
+        _RouteModel("mcp"),
+        mcp=RouteAvailability(
+            True,
+            details={"providers": [{"id": "kaggle", "namespace": "mcp.kaggle"}]},
+        ),
+    )
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Use Kaggle MCP to upload the submission and submit it to the competition.",
+    )
+
+    assert result.mode == "route-mcp"
+    assert result.payload["provider_id"] == "kaggle"
+    assert ask_agent.calls[0]["required_mcp_server"] == "kaggle"
+    assert ask_agent.calls[0]["tool_policy"]["mcp_provider_only"] == "kaggle"
+    assert ask_agent.calls[0]["tool_policy"]["require_initial_tool_call"] is True
+
+
+def test_unsupported_route_bypasses_checkpoint_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+
+    def _checkpoint_must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unsupported routes must not enter checkpoint recovery")
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        _checkpoint_must_not_run,
+    )
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("unsupported"))
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Perform an unavailable external action.",
+    )
+
+    assert result.mode == "route-unsupported"
+    assert result.error == "unsupported_route"
 
 
 def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_path: Path, monkeypatch) -> None:
@@ -267,6 +330,14 @@ def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path
         authorized=False,
         reason="No enabled Gmail account is configured.",
         setup_action="Run `mana-agent connector email add --provider gmail ...`.",
+    )
+
+    def _checkpoint_must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("capability errors must not enter checkpoint recovery")
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        _checkpoint_must_not_run,
     )
     gateway, chat, ask_agent = _gateway(tmp_path, _RouteModel("capability_error"), gmail=unavailable)
     result = gateway.process_turn(gateway.create_session(frontend="test"), "Check Gmail")

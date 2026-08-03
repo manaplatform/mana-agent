@@ -1959,6 +1959,7 @@ class AskAgent:
         raw_allowed = [str(x) for x in (policy.get("allowed_tools") or []) if str(x).strip()]
         allowed_tools = set(resolve_allowed_tools(raw_allowed, strict=False))
         allowed_tools.update(name for name in raw_allowed if name.startswith(("mcp.", "mcp__")))
+        mcp_provider_only = str(policy.get("mcp_provider_only") or "").strip()
         search_budget = int(policy.get("search_budget", 0) or 0)
         read_budget = int(policy.get("read_budget", 0) or 0)
         read_line_window = max(200, min(int(policy.get("read_line_window", 400) or 400), 2000))
@@ -1978,7 +1979,11 @@ class AskAgent:
         # run evidence only if the validated policy exposes file reading.  Email
         # tools are registered after this policy normalization, so retain the
         # raw decision as the source of truth here.
-        use_run_evidence = not raw_allowed or "read_file" in allowed_tools or "read_file" in raw_allowed
+        use_run_evidence = (
+            (not raw_allowed and not mcp_provider_only)
+            or "read_file" in allowed_tools
+            or "read_file" in raw_allowed
+        )
         evidence_memory = (
             EvidenceMemory(repo_root=self.project_root, run_id=run_id)
             if use_run_evidence
@@ -2006,6 +2011,16 @@ class AskAgent:
         # of the repository alias registry (for example browser_* connectors).
         # Unknown names remain excluded and never widen the policy.
         allowed_tools.update(name for name in raw_allowed if name in tool_map)
+        if mcp_provider_only:
+            provider_prefix = f"mcp__{mcp_provider_only}__"
+            allowed_tools = {
+                name for name in tool_map if name.startswith(provider_prefix)
+            }
+            if not allowed_tools:
+                raise RuntimeError(
+                    "Model-selected MCP provider returned no registered tools: "
+                    f"{mcp_provider_only}"
+                )
 
         capability_registry: CapabilityRegistry | None = None
         governor = self.context_cost_governor

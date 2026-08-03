@@ -19,6 +19,7 @@ EntryRouteName = Literal[
     "multi_task",
     "conversation",
     "coding",
+    "mcp",
     "gmail",
     "calendar",
     "computer",
@@ -45,7 +46,7 @@ AutomationOperation = Literal[
 
 RequiredSource = Literal[
     "repository", "browser", "search", "gmail", "calendar", "computer", "github",
-    "memory", "artifact", "media", "remote_execution", "server", "canvas", "api", "internal_knowledge", "none",
+    "memory", "artifact", "media", "remote_execution", "server", "canvas", "api", "mcp", "internal_knowledge", "none",
 ]
 
 REQUIRED_SOURCES: set[str] = set(get_args(RequiredSource))
@@ -103,6 +104,7 @@ class EntryRoutingDecision:
     command_arguments: tuple[str, ...] = ()
     remote_request: dict[str, Any] = field(default_factory=dict)
     server_request: dict[str, Any] = field(default_factory=dict)
+    mcp_request: dict[str, Any] = field(default_factory=dict)
     artifact_family: str = ""
     media_request: dict[str, Any] = field(default_factory=dict)
     automation_operation: AutomationOperation | str = ""
@@ -169,6 +171,12 @@ class EntryRoutingServerRequest(_StrictRoutingOutput):
     decision: EntryRoutingServerDecision
 
 
+class EntryRoutingMcpRequest(_StrictRoutingOutput):
+    """Exact configured MCP provider selected by the entry-routing model."""
+
+    provider_id: str = Field(min_length=1)
+
+
 class EntryRoutingOutput(_StrictRoutingOutput):
     """Schema enforced at the model boundary before routing validation."""
 
@@ -185,6 +193,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     command_arguments: list[str] = Field(default_factory=list)
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
     server_request: EntryRoutingServerRequest | None = None
+    mcp_request: EntryRoutingMcpRequest | None = None
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
     media_request: MediaOperationDecision | None = None
     automation_operation: Literal[
@@ -256,6 +265,10 @@ Route semantics:
   `["register"|"start"|"stop", worker_id]`. This is a model decision, never keyword routing.
 - conversation: ordinary discussion that needs no tool, connector, repository, or coding action.
 - coding: repository code/file changes handled by the Codex coding workflow.
+- mcp: execute a request through one configured Model Context Protocol provider. Return a complete
+  mcp_request with one exact provider_id from the route availability details. MCP provider state and
+  tool results are live external state, so requires_live_data must be true. The provider selection is
+  a model decision; never invent a provider or substitute another provider.
 - remote_execution: explicit user-authorized SSH work. Never select coding for
   SSH. Return an exact structured remote_request. Select `remote-ssh` for direct
   local OpenSSH execution or `reverse-worker` for an enrolled worker. Read the
@@ -361,12 +374,12 @@ required_sources is required for every decision and must never be omitted or emp
 single-source decisions: coding/repository/automation -> ["repository"], api -> ["api"], server -> ["server"], gmail -> ["gmail"],
 calendar -> ["calendar"], browser -> ["browser"], search -> ["search"], github -> ["github"],
 canvas -> ["canvas"], media -> ["media"],
-and memory -> ["memory"]. capability_error must name the unavailable tool source. Do not use an
+memory -> ["memory"], and mcp -> ["mcp"]. capability_error must name the unavailable tool source. Do not use an
 empty array for a request that needs no external information.
 
 Return JSON only:
 {
-  "route": "multi_task|conversation|coding|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|api|canvas|unsupported|capability_error",
+  "route": "multi_task|conversation|coding|mcp|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|api|canvas|unsupported|capability_error",
   "confidence": 0.0,
   "reason": "short routing reason",
   "required_sources": ["browser"],
@@ -379,6 +392,7 @@ Return JSON only:
   "command_arguments": ["list"],
   "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
   "server_request": null,
+  "mcp_request": null,
   "artifact_family": "",
   "media_request": null,
   "automation_operation": ""
@@ -404,6 +418,8 @@ Examples:
 - “Check media generation media_abc” -> media, ["media"], media_request.operation=generation.status with generation_id=media_abc.
 - “Check my latest Gmail” -> gmail, ["gmail"], even when Gmail is unavailable; use
   capability_error with GMAIL_NOT_AVAILABLE rather than repository, memory, or conversation.
+- “Use the configured Kaggle MCP provider to upload this competition submission” -> mcp, ["mcp"],
+  mcp_request.provider_id="kaggle", requires_live_data=true.
 - “At 12:52, check my Gmail” -> automation, ["repository"], automation_operation=create; create
   only the scheduled one-time connector action in this turn and do not inspect Gmail now.
 """
@@ -449,6 +465,7 @@ class EntryRouter:
                 "command": [["none"]],
                 "unsupported": [["none"]],
                 "coding": [["repository"]],
+                "mcp": [["mcp"]],
                 "remote_execution": [["remote_execution"]],
                 "server": [["server"]],
                 "artifact": [["artifact"]],
@@ -623,6 +640,11 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 'Reason: server route requires required_sources=["server"].'
             )
+        if route == "mcp" and sources != ("mcp",):
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                'Reason: mcp route requires required_sources=["mcp"].'
+            )
         target_urls = tuple(str(item).strip() for item in (payload.get("target_urls") or []) if str(item).strip())
         if not isinstance(payload.get("target_urls") or [], list) or any(not url.startswith(("http://", "https://")) for url in target_urls):
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: target_urls must contain valid HTTP(S) URLs.")
@@ -636,7 +658,7 @@ class EntryRouter:
         if route == "capability_error" and not error_code:
             raise EntryRoutingError("Model decision failed: entry_route. No response was generated. Reason: capability_error requires error_code.")
         availability = {row["name"]: bool(row["availability"]["available"]) for row in self.registry.snapshot()}
-        source_routes = {"browser": "browser", "search": "search", "github": "github", "repository": "repository", "gmail": "gmail", "calendar": "calendar", "computer": "computer", "memory": "memory", "remote_execution": "remote_execution", "server": "server"}
+        source_routes = {"browser": "browser", "search": "search", "github": "github", "repository": "repository", "gmail": "gmail", "calendar": "calendar", "computer": "computer", "memory": "memory", "mcp": "mcp", "remote_execution": "remote_execution", "server": "server"}
         unavailable = [source for source in sources if source in source_routes and not availability.get(source_routes[source], False)]
         if unavailable and route != "capability_error":
             raise EntryRoutingError(
@@ -666,7 +688,46 @@ class EntryRouter:
                 )
         remote_request = payload.get("remote_request") or {}
         server_request = payload.get("server_request")
+        mcp_request = payload.get("mcp_request")
         media_request = payload.get("media_request")
+        requires_live_data = bool(payload.get("requires_live_data", False))
+        if route == "mcp":
+            try:
+                mcp_request = EntryRoutingMcpRequest.model_validate(mcp_request).model_dump()
+            except Exception as exc:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    f"Reason: mcp route requires a valid mcp_request: {exc}."
+                ) from exc
+            mcp_details = next(
+                (
+                    dict(row["availability"].get("details") or {})
+                    for row in self.registry.snapshot()
+                    if row["name"] == "mcp"
+                ),
+                {},
+            )
+            provider_ids = {
+                str(item.get("id") or "").strip()
+                for item in list(mcp_details.get("providers") or [])
+                if isinstance(item, dict)
+            }
+            provider_id = str(mcp_request["provider_id"]).strip()
+            if provider_id not in provider_ids:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: mcp route selected a provider that is not configured."
+                )
+            if not requires_live_data:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: mcp route must require live execution."
+                )
+        elif mcp_request is not None:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: mcp_request is only valid for the mcp route."
+            )
         if route == "media":
             try:
                 media_request = MediaOperationDecision.model_validate(media_request).model_dump(
@@ -807,7 +868,7 @@ class EntryRouter:
             reason=reason,
             required_sources=sources,  # type: ignore[arg-type]
             target_urls=target_urls,
-            requires_live_data=bool(payload.get("requires_live_data", False)),
+            requires_live_data=requires_live_data,
             reason_code=str(payload.get("reason_code") or "").strip(),
             error_code=error_code,
             reuse_active_route=bool(payload.get("reuse_active_route", False)),
@@ -820,6 +881,7 @@ class EntryRouter:
             ),
             remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
             server_request=dict(server_request) if isinstance(server_request, dict) else {},
+            mcp_request=dict(mcp_request) if isinstance(mcp_request, dict) else {},
             artifact_family=artifact_family,
             media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,

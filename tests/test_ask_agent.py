@@ -482,6 +482,63 @@ def test_ask_agent_discovers_only_the_explicitly_required_mcp_provider(tmp_path:
     assert calls == [{"overrides": [], "server_ids": ["context7"]}]
 
 
+def test_ask_agent_mcp_provider_only_policy_binds_only_selected_provider_tools(
+    tmp_path: Path, monkeypatch
+) -> None:
+    agent = _build_agent(tmp_path)
+    bound_tool_names: list[list[str]] = []
+
+    class _RecordingMcpModel:
+        def bind_tools(self, tools, **_kwargs):  # noqa: ANN001
+            bound_tool_names.append([tool.name for tool in tools])
+            return _FakeBoundModel([_FakeAIMessage("Done", tool_calls=[])])
+
+    def _discover(**_kwargs):
+        return [
+            StructuredTool.from_function(
+                func=lambda: "ok",
+                name="mcp__kaggle__submit_to_competition",
+                description="Submit a Kaggle competition entry.",
+            ),
+            StructuredTool.from_function(
+                func=lambda: "ok",
+                name="mcp__other__unrelated",
+                description="An unrelated MCP tool.",
+            ),
+        ], []
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        _discover,
+    )
+
+    class _EvidenceMustNotOpen:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise AssertionError("provider-only MCP work must not open run evidence memory")
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.EvidenceMemory",
+        _EvidenceMustNotOpen,
+    )
+    agent.llm = _RecordingMcpModel()
+
+    agent.run(
+        "Submit the competition entry.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=1,
+        timeout_seconds=2,
+        required_mcp_server="kaggle",
+        tool_policy={
+            "mcp_provider_only": "kaggle",
+            "require_initial_tool_call": True,
+        },
+    )
+
+    assert bound_tool_names
+    assert all(names == ["mcp__kaggle__submit_to_competition"] for names in bound_tool_names)
+
+
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
     agent = _build_agent(tmp_path)
     tools, traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1)

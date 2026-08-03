@@ -123,6 +123,35 @@ def test_model_can_require_fresh_execution_for_time_sensitive_work() -> None:
     assert decision.fresh_data_required is True
 
 
+def test_mcp_submission_route_starts_fresh_instead_of_resuming_upload_checkpoint() -> None:
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "fresh-kaggle-submission",
+                "action": "start_fresh",
+                "task_id": "",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": True,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": False,
+                "safe_to_continue": True,
+                "reason": "Kaggle submission state must be observed and executed again.",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="Use Kaggle MCP to retry the competition submission.",
+        route="mcp",
+        requires_live_data=True,
+        candidates=[candidate()],
+    )
+
+    assert decision.action == "start_fresh"
+    assert decision.fresh_data_required is True
+
+
 def test_model_may_retry_same_stable_task_without_checkpoint() -> None:
     retry_candidate = candidate()
     retry_candidate["checkpoint_id"] = ""
