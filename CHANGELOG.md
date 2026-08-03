@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Restored browser-backed API documentation inspection by explicitly classifying the isolated
+  `browser_open` and `browser_inspect` tools as read-only. The transactional gate now permits a
+  model-selected public documentation page to be opened and inspected, while browser controls
+  that can interact with page state remain fail-closed without a transactional adapter. This
+  allows the API workflow to collect the documentation evidence needed before semantic import,
+  operation search, request preview, and execution.
+  - The API executor now supplies its initial workflow decision with a redacted snapshot of
+    enabled saved integrations. A documentation URL supplied as context no longer causes an
+    unnecessary re-import when that snapshot already contains the requested operation; the model
+    must select search, preview, and execution against the saved integration instead.
+  - User verification required: `python -m pytest tests/connectors/test_browser_core.py tests/gateway/test_api_manager_route.py tests/transactional_actions/test_policy_gated_actions.py`.
+
 - Removed completed-result reuse from checkpoint recovery. Follow-up classification now rejects
   resuming a completed task and requires the model to classify a downstream live operation as a
   task expansion, which creates a fresh durable action and its own approval boundary.

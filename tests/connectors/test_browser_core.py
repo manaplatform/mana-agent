@@ -7,7 +7,12 @@ from pydantic import ValidationError
 from mana_agent.connectors.browser.approval import BrowserApprovalBinding, issue_approval
 from mana_agent.connectors.browser.contracts import browser_tool_contracts
 from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
+from mana_agent.connectors.browser.runtime_tools import build_browser_langchain_tools
 from mana_agent.connectors.browser.session import BrowserConnectorError, BrowserSession, BrowserSessionManager
+from mana_agent.transactional_actions.enforcement import (
+    TransactionalGatewayRequired,
+    assert_model_tool_routed,
+)
 
 
 def test_sensitive_decision_requires_confirmation() -> None:
@@ -50,6 +55,27 @@ def test_contracts_are_strict_and_complete() -> None:
     assert expected == set(contracts)
     assert all(item.input_schema["additionalProperties"] is False for item in contracts.values())
     assert all(any("model decision" in rule for rule in item.safety_rules) for item in contracts.values())
+
+
+def test_documentation_browser_tools_are_explicitly_read_only() -> None:
+    tools = {item.name: item for item in build_browser_langchain_tools()}
+
+    for name in (
+        "browser_open",
+        "browser_inspect",
+        "browser_scroll",
+        "browser_wait",
+        "browser_tabs",
+        "browser_switch_tab",
+        "browser_close",
+    ):
+        assert tools[name].metadata == {"read_only": True, "side_effecting": False}
+        assert_model_tool_routed(name, tools[name].metadata)
+
+    assert tools["browser_click"].metadata is None
+    assert tools["browser_type"].metadata is None
+    with pytest.raises(TransactionalGatewayRequired, match="no registered transactional"):
+        assert_model_tool_routed("browser_click", tools["browser_click"].metadata)
 
 
 def test_playwright_status_is_structured_when_optional_dependency_missing(monkeypatch) -> None:  # noqa: ANN001

@@ -30,6 +30,8 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
             assert "api_docs_import_semantic" in system_prompt
             assert "retry the same import" in system_prompt
             assert "refresh_integration_id" in system_prompt
+            assert "redacted saved-integration snapshot" in system_prompt
+            assert "declare only operation_search, request_preview, and request_execution" in system_prompt
             assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
             assert kwargs["flow_id"] == "session-api"

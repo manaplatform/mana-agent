@@ -30,8 +30,37 @@ def build_browser_langchain_tools() -> list[Any]:
     def switch(**kw): return _result(lambda: manager.switch_tab(**_Switch.model_validate(kw).model_dump()))
     def check_links(**kw): return _result(lambda: manager.check_links(**_CheckLinks.model_validate(kw).model_dump()))
     def close(**kw): return _result(lambda: manager.close(**_Session.model_validate(kw).model_dump()))
-    tools = [StructuredTool.from_function(func=open_page,name="browser_open",description="Open an absolute HTTP(S) URL in an isolated model-selected browser session.",args_schema=_Open),StructuredTool.from_function(func=inspect,name="browser_inspect",description="Inspect page text, semantic accessibility snapshot, forms and interactive element refs.",args_schema=_Inspect)]
-    for name in ("click","type","select","scroll","wait","back","download"):
-        tools.append(StructuredTool.from_function(func=lambda _name=name, **kw: action(_name, kw),name=f"browser_{name}",description=f"Perform validated browser {name}; sensitive terminal actions return confirmation_required.",args_schema=_Act))
-    tools += [StructuredTool.from_function(func=screenshot,name="browser_screenshot",description="Save a screenshot in the private session artifact directory.",args_schema=_Screenshot),StructuredTool.from_function(func=upload,name="browser_upload",description="Upload an allowed local file through a current file-input ref.",args_schema=_Upload),StructuredTool.from_function(func=check_links,name="browser_check_links",description="Validate rendered HTTP(S) links without navigating away; return status and broken-link results.",args_schema=_CheckLinks),StructuredTool.from_function(func=tabs,name="browser_tabs",description="List browser tabs and popups.",args_schema=_Session),StructuredTool.from_function(func=switch,name="browser_switch_tab",description="Switch to a model-selected tab id.",args_schema=_Switch),StructuredTool.from_function(func=close,name="browser_close",description="Close and clean an isolated browser session.",args_schema=_Session)]
+    # These operations cannot submit a form, type data, or invoke a page
+    # control.  Declare that narrow property to the shared transactional gate
+    # so public documentation inspection can reach the browser connector.
+    # Browser controls that can change remote state remain unclassified and
+    # therefore fail closed until they have a transactional adapter.
+    read_only_metadata = {"read_only": True, "side_effecting": False}
+    tools = [
+        StructuredTool.from_function(
+            func=open_page,
+            name="browser_open",
+            description="Open an absolute HTTP(S) URL in an isolated model-selected browser session.",
+            args_schema=_Open,
+            metadata=read_only_metadata,
+        ),
+        StructuredTool.from_function(
+            func=inspect,
+            name="browser_inspect",
+            description="Inspect page text, semantic accessibility snapshot, forms and interactive element refs.",
+            args_schema=_Inspect,
+            metadata=read_only_metadata,
+        ),
+    ]
+    for name in ("click", "type", "select", "scroll", "wait", "back", "download"):
+        tools.append(
+            StructuredTool.from_function(
+                func=lambda _name=name, **kw: action(_name, kw),
+                name=f"browser_{name}",
+                description=f"Perform validated browser {name}; sensitive terminal actions return confirmation_required.",
+                args_schema=_Act,
+                metadata=(read_only_metadata if name in {"scroll", "wait"} else None),
+            )
+        )
+    tools += [StructuredTool.from_function(func=screenshot,name="browser_screenshot",description="Save a screenshot in the private session artifact directory.",args_schema=_Screenshot),StructuredTool.from_function(func=upload,name="browser_upload",description="Upload an allowed local file through a current file-input ref.",args_schema=_Upload),StructuredTool.from_function(func=check_links,name="browser_check_links",description="Validate rendered HTTP(S) links without navigating away; return status and broken-link results.",args_schema=_CheckLinks),StructuredTool.from_function(func=tabs,name="browser_tabs",description="List browser tabs and popups.",args_schema=_Session,metadata=read_only_metadata),StructuredTool.from_function(func=switch,name="browser_switch_tab",description="Switch to a model-selected tab id.",args_schema=_Switch,metadata=read_only_metadata),StructuredTool.from_function(func=close,name="browser_close",description="Close and clean an isolated browser session.",args_schema=_Session,metadata=read_only_metadata)]
     return tools

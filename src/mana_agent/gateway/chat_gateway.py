@@ -5877,10 +5877,43 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": "api"},
             )
-        from mana_agent.api_manager.runtime_tools import API_MANAGER_TOOL_NAMES
+        from mana_agent.api_manager.runtime_tools import (
+            API_MANAGER_TOOL_NAMES,
+            api_manager_service,
+        )
         from mana_agent.config.settings import default_index_dir
 
         source_decision_id = f"{context.turn_id}:api-entry-decision"
+        try:
+            saved_integrations = api_manager_service(self.root).list_integrations(
+                include_disabled=False
+            )
+        except Exception as exc:
+            return ChatTurnResult(
+                answer=(
+                    "API workflow context is unavailable because saved integrations could not "
+                    f"be read safely: {exc}"
+                ),
+                error="api_integration_context_unavailable",
+                mode="route-api-error",
+                decision=decision,
+                payload={"route": "api"},
+            )
+        saved_integration_snapshot = [
+            {
+                "integration_id": item.get("integration_id"),
+                "name": item.get("name"),
+                "enabled": item.get("enabled"),
+                "operation_count": int(item.get("operations") or 0),
+                "servers": [
+                    server.get("url")
+                    for server in item.get("servers") or []
+                    if isinstance(server, dict)
+                ],
+            }
+            for item in saved_integrations
+            if isinstance(item, dict)
+        ]
         allowed_tools = list(API_MANAGER_TOOL_NAMES)
         allowed_tools.extend(
             [
@@ -5925,6 +5958,13 @@ class AgentChatGateway:
             "integration_configuration when the model determines it is also required. Every workflow "
             "containing request_execution must declare and successfully "
             "perform operation_search and request_preview first, including read-only requests. "
+            "The following is the current redacted saved-integration snapshot, collected before "
+            "your workflow decision: "
+            + json.dumps(saved_integration_snapshot, ensure_ascii=False, sort_keys=True)
+            + ". If that snapshot contains an enabled integration with the requested operation, "
+            "declare only operation_search, request_preview, and request_execution. A documentation "
+            "URL supplied for context is not an explicit request to refresh or re-import an already "
+            "suitable integration. "
             "Do not declare documentation_inspection or integration_import merely to call an already saved "
             "suitable integration; api_integration_get does not satisfy either action. Declare those "
             "actions only when this turn must inspect and import or refresh documentation. Never "
