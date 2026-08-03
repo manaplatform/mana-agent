@@ -2501,12 +2501,22 @@ class AskAgent:
                                 )
                             except ApprovalRequired as exc:
                                 action = exc.action
+                                inbox_item_id = str(
+                                    exc.inbox_item_id
+                                    or action.inbox_item_id
+                                    or ""
+                                )
                                 content = json.dumps(
                                     {
                                         "ok": False,
                                         "error_code": "approval_required",
                                         "permission_required": True,
-                                        "permission_request_id": action.action_id,
+                                        # The durable inbox item is the only approval
+                                        # handle that a trusted UI may present to the
+                                        # reviewer.  The action ID remains audit data,
+                                        # never a substitute for an inbox request.
+                                        "permission_request_id": inbox_item_id,
+                                        "inbox_item_id": inbox_item_id,
                                         "action_id": action.action_id,
                                         "preview": (
                                             action.preview.redacted()

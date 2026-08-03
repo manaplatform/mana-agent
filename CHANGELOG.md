@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Forwarded isolated MCP transactional approval requests through the owning gateway's activity stream and preserved their durable inbox item IDs so connected TUI and dashboard clients can present the approval modal.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/test_ask_agent.py tests/test_mcp.py`.
+
 - Registered a background, branch-owned transactional action dispatcher after a durable human-resume claim. Approval handlers now only persist the response and queue the matching branch; the dispatcher reacquires that branch before consuming the exact grant and executing the stored computer action.
   - Gateway startup also recovers only approved, unclaimed, still-queued branches; claimed executions remain manual-recovery cases and are never retried automatically.
   - Cleared the released pre-approval supervisor lease from the lane projection so the resumed dispatcher always acquires a fresh valid lease.

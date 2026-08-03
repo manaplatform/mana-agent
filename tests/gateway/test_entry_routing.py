@@ -307,7 +307,8 @@ def test_kaggle_mcp_action_approval_keeps_the_route_waiting(
                         {
                             "ok": False,
                             "error_code": "approval_required",
-                            "permission_request_id": "act_kaggle_authorize",
+                            "permission_request_id": "inbox_kaggle_authorize",
+                            "inbox_item_id": "inbox_kaggle_authorize",
                             "action_id": "act_kaggle_authorize",
                         }
                     ),
@@ -331,7 +332,8 @@ def test_kaggle_mcp_action_approval_keeps_the_route_waiting(
     )
 
     assert result.mode == "route-mcp-awaiting-approval"
-    assert result.payload["confirmation_request_id"] == "act_kaggle_authorize"
+    assert result.payload["confirmation_request_id"] == "inbox_kaggle_authorize"
+    assert result.payload["inbox_item_id"] == "inbox_kaggle_authorize"
 
 
 def test_unsupported_route_bypasses_checkpoint_recovery(

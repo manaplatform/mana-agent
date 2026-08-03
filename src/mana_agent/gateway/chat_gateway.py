@@ -4438,6 +4438,7 @@ class AgentChatGateway:
                 text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
+                event_sink=sink,
             )
         if len(decision.required_sources) > 1 or decision.required_sources[0] in {
             "browser",
@@ -6218,6 +6219,7 @@ class AgentChatGateway:
         text: str,
         ask_service: Any,
         callbacks: Any,
+        event_sink: Callable[..., None] | None = None,
     ) -> ChatTurnResult:
         """Execute only the provider selected by the validated entry decision."""
         ask_agent = getattr(ask_service, "ask_agent", None)
@@ -6282,10 +6284,42 @@ class AgentChatGateway:
                 continue
             approval_request_id = str(
                 tool_payload.get("permission_request_id")
-                or tool_payload.get("action_id")
                 or ""
             )
             if approval_request_id:
+                approval_metadata = {
+                    "permission_request_id": approval_request_id,
+                    "inbox_item_id": str(
+                        tool_payload.get("inbox_item_id")
+                        or approval_request_id
+                    ),
+                    "action_id": str(tool_payload.get("action_id") or ""),
+                    "permission_scope": "transactional_action.once",
+                    "preview": tool_payload.get("preview") or {},
+                    "preview_digest": str(tool_payload.get("preview_digest") or ""),
+                    "transactional_action_approval": True,
+                }
+                # MCP workers may be isolated from the active frontend process.
+                # Re-emit the structured, durable approval request in this
+                # process so the connected TUI and dashboard receive the same
+                # modal/inbox signal as other transactional actions.
+                from mana_agent.chat.events import CodingActivityEvent
+                from mana_agent.chat.history import get_history
+
+                get_history().add(CodingActivityEvent(
+                    activity={
+                        "event_type": "action.approval.required",
+                        "title": "MCP action approval required",
+                        "metadata": approval_metadata,
+                    },
+                    turn_id=context.turn_id,
+                ))
+                if callable(event_sink):
+                    event_sink(
+                        "action.approval.required",
+                        "MCP action approval required",
+                        metadata=approval_metadata,
+                    )
                 return ChatTurnResult(
                     answer="The selected MCP action is waiting for approval.",
                     mode="route-mcp-awaiting-approval",
@@ -6296,6 +6330,7 @@ class AgentChatGateway:
                         "route": "mcp",
                         "provider_id": provider_id,
                         "confirmation_request_id": approval_request_id,
+                        "inbox_item_id": approval_metadata["inbox_item_id"],
                         "action_id": str(tool_payload.get("action_id") or ""),
                     },
                 )
