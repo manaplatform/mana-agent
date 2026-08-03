@@ -4,7 +4,22 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Added GitHub funding metadata for GitHub Sponsors, Open Collective, and Polar.
+  - User verification required: confirm the repository's GitHub funding panel lists the configured links.
+
+- Made `mana-agent inbox approve`, `deny`, and `answer` return a clear CLI validation error for recorded terminal notices instead of exposing an internal traceback; rejected response attempts remain audited.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py`.
+
 - Corrected the transactional inbox approval command's response construction so gateway imports no longer fail during test collection.
+  - User verification required: `python -m pytest tests/test_computer_control.py`.
+
+- Required computer-route responses to be backed by a typed tool outcome. A model prose-only refusal now creates a redacted terminal request/inbox notice and reports that no operating-system request or approval was sent; recording guidance directs the model to the typed recording tool for clarification or approval.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/test_computer_control.py`.
+
+- Bound computer-control execution to the model-selected `TOOL` role for each route, restoring the chat model afterward. Tool roles now require the routing model to select a profile with tool-call support.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/test_computer_control.py`.
+
+- Updated computer-control coverage to assert the durable inbox item, rather than the action record, is the transactional approval identity.
   - User verification required: `python -m pytest tests/test_computer_control.py`.
 
 - Added a durable redacted ledger for model-selected computer requests, terminal inbox notices for blocked or incomplete requests, linked policy-denial evidence, and authoritative inbox-ID approval handling in dashboard and TUI flows. TUI now reloads and queues durable approval cards before displaying its modal; approval responses remain non-executing handoffs to the matching resumed branch.

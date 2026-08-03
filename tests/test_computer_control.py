@@ -448,7 +448,10 @@ def test_runtime_tools_require_authenticated_gateway_context(tmp_path: Path) -> 
         allowed = json.loads(tools["media_pause"].invoke(payload))
     assert allowed["ok"] is False
     assert allowed["error_code"] == "transactional_approval_required"
-    assert allowed["action_id"] == allowed["permission_request_id"]
+    assert allowed["permission_request_id"] == allowed["inbox_item_id"]
+    assert allowed["action_id"] != allowed["inbox_item_id"]
+    assert allowed["action_id"].startswith("act_")
+    assert allowed["inbox_item_id"].startswith("inbox_")
     with computer_client_scope("session", "local_cli", allowed_decision_ids=frozenset({"another-decision"})):
         wrong_decision = json.loads(tools["media_pause"].invoke(payload))
     assert wrong_decision["error_code"] == "remote_control_denied"

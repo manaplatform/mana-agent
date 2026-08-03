@@ -251,6 +251,37 @@ def _transactional_action_requests_from_trace(response: Any) -> list[dict[str, A
     return list(requests.values())
 
 
+def _has_typed_computer_tool_outcome(response: Any) -> bool:
+    """Return whether the computer worker produced a machine-readable tool result.
+
+    A computer-route answer is only trustworthy when it follows registered tool
+    evidence. This validates the model-selected tool outcome; it does not
+    infer an operation from the user's wording.
+    """
+    for item in _serialize_tool_traces(response):
+        for candidate in (
+            item.get("output_preview"),
+            item.get("result_summary"),
+            item.get("result"),
+            item.get("error"),
+        ):
+            payload: Any = candidate
+            if isinstance(candidate, str):
+                try:
+                    payload = json.loads(candidate)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            if not isinstance(payload, dict):
+                continue
+            if isinstance(payload.get("ok"), bool) and (
+                "result" in payload
+                or "error_code" in payload
+                or "message" in payload
+            ):
+                return True
+    return False
+
+
 _API_WORKFLOW_EVIDENCE = {
     "api_docs_inspect": "documentation_inspection",
     "browser_inspect": "documentation_inspection",
@@ -6001,6 +6032,11 @@ class AgentChatGateway:
     ) -> ChatTurnResult:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
+            self._record_computer_route_rejection(
+                context=context,
+                outcome_code="computer_executor_unavailable",
+                state="route_unavailable",
+            )
             return ChatTurnResult(
                 answer="Computer control is enabled, but its tool execution agent is unavailable.",
                 error="computer_executor_unavailable",
@@ -6012,6 +6048,52 @@ class AgentChatGateway:
         from mana_agent.integrations.computer_control.tool_contracts import (
             computer_tool_contracts,
         )
+        from mana_agent.model_routing.router import RoutingFailure
+        from mana_agent.multi_agent.core.types import AgentRole
+        from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
+
+        try:
+            tool_model = resolve_model_for_role(
+                AgentRole.TOOL,
+                global_model=str(getattr(ask_agent, "model", "") or self._stack.effective_model or ""),
+                routing_authority=self._stack.routing_authority,
+                task_description="Execute the validated computer-control workflow with registered tools.",
+                session_id=context.session_id,
+                workspace_id=str(self._stack.workspace_id or ""),
+                repository_id=str(self._stack.repository_id or ""),
+                execution_lane="computer",
+            ).resolved_model
+        except RoutingFailure:
+            self._record_computer_route_rejection(
+                context=context,
+                outcome_code="computer_executor_model_unavailable",
+                state="route_unavailable",
+            )
+            return ChatTurnResult(
+                answer=(
+                    "No configured model with tool-call support is available for the selected "
+                    "computer workflow. No operating-system request or approval was sent."
+                ),
+                error="computer_executor_model_unavailable",
+                mode="route-computer-error",
+                decision=decision,
+                payload={"route": "computer"},
+            )
+        if not tool_model:
+            self._record_computer_route_rejection(
+                context=context,
+                outcome_code="computer_executor_model_missing",
+                state="route_unavailable",
+            )
+            return ChatTurnResult(
+                answer="The model decision for the computer tool executor was unavailable.",
+                error="computer_executor_model_missing",
+                mode="route-computer-error",
+                decision=decision,
+                payload={"route": "computer"},
+            )
+        original_model = str(getattr(ask_agent, "model", "") or "")
+        update_model = getattr(ask_agent, "update_model", None)
 
         source_decision_id = f"{context.turn_id}:computer-entry-decision"
         system_prompt = (
@@ -6025,6 +6107,10 @@ class AgentChatGateway:
             "mean a prompt already exists. For a concrete user request, invoke the exact narrow action "
             "tool; that action creates the bound in-chat permission request. Never tell the user to "
             "approve a prompt unless a tool actually returned permission_required with a request ID. "
+            "For a recording workflow, invoke computer_record_screen even when the material request is "
+            "incomplete so the typed tool can return its clarification result. Never replace a tool "
+            "result with an environment-blocked explanation. If no typed tool outcome exists, do not "
+            "claim that any operating-system action or approval request was sent. "
             "Prefer a direct media action when it does not require installed-app discovery. "
             "Never invent IDs, paths, URLs, permissions, success, or "
             "private content. Never request or construct raw shell, AppleScript, PowerShell, D-Bus, "
@@ -6068,24 +6154,30 @@ class AgentChatGateway:
                 computer_transactional_runtime_scope(self._transactional_runtime),
                 computer_event_scope(event_sink),
             ):
-                response = ask_agent.run(
-                    question=text,
-                    index_dir=self._index_dir or default_index_dir(self.root),
-                    k=self._resolved_k,
-                    max_steps=max(12, int(self.config.agent_max_steps or 6)),
-                    timeout_seconds=max(30, self._agent_timeout_seconds),
-                    callbacks=callbacks,
-                    system_prompt=system_prompt,
-                    tool_policy={
-                        "allowed_tools": [
-                            contract.name for contract in computer_tool_contracts()
-                        ],
-                        "disable_external_search": True,
-                        "require_initial_tool_call": True,
-                    },
-                    flow_id=context.session_id,
-                    run_id=context.turn_id,
-                )
+                if callable(update_model):
+                    update_model(tool_model)
+                try:
+                    response = ask_agent.run(
+                        question=text,
+                        index_dir=self._index_dir or default_index_dir(self.root),
+                        k=self._resolved_k,
+                        max_steps=max(12, int(self.config.agent_max_steps or 6)),
+                        timeout_seconds=max(30, self._agent_timeout_seconds),
+                        callbacks=callbacks,
+                        system_prompt=system_prompt,
+                        tool_policy={
+                            "allowed_tools": [
+                                contract.name for contract in computer_tool_contracts()
+                            ],
+                            "disable_external_search": True,
+                            "require_initial_tool_call": True,
+                        },
+                        flow_id=context.session_id,
+                        run_id=context.turn_id,
+                    )
+                finally:
+                    if callable(update_model) and original_model:
+                        update_model(original_model)
                 # Computer tools may run in an isolated worker process. Its
                 # process-local event stream cannot reach the owning TUI, so
                 # reconstruct only validated permission-required events from
@@ -6136,6 +6228,11 @@ class AgentChatGateway:
                             metadata=approval,
                         )
         except Exception as exc:
+            self._record_computer_route_rejection(
+                context=context,
+                outcome_code="computer_executor_failure",
+                state="failed",
+            )
             return ChatTurnResult(
                 answer=str(exc),
                 error=f"Computer-control route failed: {exc}",
@@ -6143,8 +6240,9 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": "computer"},
             )
+        raw_trace = _serialize_tool_traces(response)
         trace = []
-        for item in _serialize_tool_traces(response):
+        for item in raw_trace:
             trace.append(
                 {
                     "tool_name": str(item.get("tool_name") or "computer"),
@@ -6152,6 +6250,26 @@ class AgentChatGateway:
                     "error_code": str(item.get("error_code") or ""),
                     "result_summary": "[computer-control tool content omitted]",
                 }
+            )
+        if not _has_typed_computer_tool_outcome(response):
+            self._record_computer_route_rejection(
+                context=context,
+                outcome_code="computer_typed_outcome_missing",
+                state="failed",
+            )
+            return ChatTurnResult(
+                answer=(
+                    "The selected computer workflow did not produce a typed tool outcome, so no "
+                    "operating-system request or approval was sent."
+                ),
+                error="computer_typed_outcome_missing",
+                mode="route-computer-error",
+                decision=decision,
+                trace=trace,
+                payload={
+                    "route": "computer",
+                    "outcome_code": "computer_typed_outcome_missing",
+                },
             )
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),

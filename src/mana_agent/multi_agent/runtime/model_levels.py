@@ -155,7 +155,19 @@ def resolve_model_for_role(
             repository=repository or RepositoryMetadata(),
             latency_requirement=LatencyClass.STANDARD if complexity is not Complexity.LOW else LatencyClass.INTERACTIVE,
             budgets=routing_budgets_from_settings(settings),
-            required_capabilities=frozenset({"structured_output"}) if role in {AgentRole.MAIN, AgentRole.HEAD_DECISION, AgentRole.PLANNER, AgentRole.REVIEWER, AgentRole.VERIFIER} else frozenset(),
+            required_capabilities=(
+                frozenset({"structured_output"})
+                if role in {
+                    AgentRole.MAIN,
+                    AgentRole.HEAD_DECISION,
+                    AgentRole.PLANNER,
+                    AgentRole.REVIEWER,
+                    AgentRole.VERIFIER,
+                }
+                else frozenset({"tool_calls"})
+                if role in {AgentRole.TOOL, AgentRole.TOOL_WORKER}
+                else frozenset()
+            ),
             task_id=task_id,
             parent_task_id=parent_task_id,
             session_id=session_id,

@@ -6,11 +6,13 @@ from pathlib import Path
 import getpass
 
 import pytest
+from typer.testing import CliRunner
 
 from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import LeaseConflictError
 from mana_agent.execution_supervisor.models import ExecutionState, SideEffectClassification
 from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
+from mana_agent.human_inbox import cli as inbox_cli
 from mana_agent.human_inbox.models import (
     ClarificationField,
     ExpectedResponseType,
@@ -111,6 +113,33 @@ def test_terminal_notice_is_persisted_without_response_or_delivery(tmp_path: Pat
         "request_created",
         "reviewer_resolved",
     ]
+
+
+def test_cli_rejects_terminal_notice_without_traceback(tmp_path: Path, monkeypatch) -> None:
+    clock = Clock()
+    inbox = service(tmp_path, clock)
+    notice = inbox.create(request(
+        clock,
+        request_type=InboxRequestType.NOTICE,
+        title="Computer request recorded without execution",
+        summary="The selected action was unavailable.",
+        allowed_responses=[],
+        requested_fields=[],
+        idempotency_key="notice-cli-1",
+        deduplication_key="notice-cli-dedupe-1",
+    ))
+    monkeypatch.setattr(inbox_cli, "_service", lambda: inbox)
+    monkeypatch.setattr(inbox_cli, "_actor", lambda _actor: "reviewer-1")
+
+    result = CliRunner().invoke(inbox_cli.inbox_app, ["approve", notice.inbox_item_id])
+
+    assert result.exit_code == 2
+    assert "recorded terminal notice" in result.output
+    assert "Traceback" not in result.output
+    assert any(
+        event.event_type == "response_rejected"
+        for event in inbox.repository.audit_for_item(notice.inbox_item_id)
+    )
 
 
 def respond(item, **changes) -> ResponseSubmission:
