@@ -582,6 +582,19 @@ class McpActionAdapter(ActionAdapter):
             supports_native_idempotency=False,
         )
 
+    def protected_action_context(self) -> dict[str, Any]:
+        """Keep exact arguments out of the redacted durable action record.
+
+        A resumed action must bind to the same provider, tool, and arguments
+        that were previewed. The store protects this context separately from
+        the user-visible, redacted action intent.
+        """
+        return {
+            "provider_id": self.provider_id,
+            "tool_name": self.tool_name,
+            "arguments": self.arguments,
+        }
+
     def execute(self, action: ActionIntent) -> dict[str, Any]:
         raw = self.invoke()
         if isinstance(raw, str):

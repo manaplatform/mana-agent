@@ -752,9 +752,8 @@ class AgentChatGateway:
         resume_claim_id: str,
         structured_response: dict[str, Any],
     ) -> None:
-        """Execute only the already-approved computer action from its resumed branch."""
+        """Execute only the already-approved action from its resumed branch."""
         from mana_agent.human_inbox.models import InboxStatus, canonical_digest
-        from mana_agent.transactional_actions.computer import adapter_for_stored_action
         from mana_agent.transactional_actions.models import ActionState
 
         del structured_response
@@ -769,7 +768,7 @@ class AgentChatGateway:
         action = self._transactional_runtime.store.get_action(item.action_intent_id)
         if (
             action is None
-            or action.tool_name != "computer"
+            or action.tool_name not in {"computer", "mcp"}
             or action.parent_task_id != task_id
             or action.state is not ActionState.AWAITING_APPROVAL
         ):
@@ -790,8 +789,18 @@ class AgentChatGateway:
                 if action.protected_context_ref
                 else None
             )
+            if action.tool_name == "computer":
+                from mana_agent.transactional_actions.computer import adapter_for_stored_action
+
+                adapter = adapter_for_stored_action(
+                    action, protected_context=protected_context
+                )
+            else:
+                adapter = self._mcp_adapter_for_stored_action(
+                    action, protected_context=protected_context
+                )
             outcome = self._transactional_runtime.gateway.execute(
-                adapter_for_stored_action(action, protected_context=protected_context),
+                adapter,
                 approval_id=grant.approval_id,
             )
             if outcome.action.state is not ActionState.COMMITTED:
@@ -825,6 +834,61 @@ class AgentChatGateway:
                     error="resumed transactional action failed; inspect durable action recovery state",
                 )
             raise
+
+    @staticmethod
+    def _mcp_adapter_for_stored_action(
+        action: Any,
+        *,
+        protected_context: dict[str, Any] | None,
+    ) -> Any:
+        """Rebind one approved MCP action to its exact registered provider tool."""
+        from mana_agent.mcp.tools import discovered_mcp_langchain_tools
+        from mana_agent.transactional_actions.adapters import McpActionAdapter
+
+        context = dict(protected_context or {})
+        provider_id = str(context.get("provider_id") or "").strip()
+        tool_name = str(context.get("tool_name") or "").strip()
+        arguments = context.get("arguments")
+        if not provider_id or not tool_name or not isinstance(arguments, dict):
+            raise ValueError(
+                "approved MCP action lacks its protected provider, tool, or arguments"
+            )
+        expected_provider = str(
+            action.normalized_arguments.get("provider_id") or ""
+        ).strip()
+        expected_tool = str(action.normalized_arguments.get("tool_name") or "").strip()
+        if provider_id != expected_provider or tool_name != expected_tool:
+            raise PermissionError("stored MCP action no longer matches its protected binding")
+        tools, warnings = discovered_mcp_langchain_tools(server_ids=[provider_id])
+        if warnings:
+            raise RuntimeError("; ".join(str(item) for item in warnings))
+        selected = next(
+            (
+                candidate
+                for candidate in tools
+                if str((getattr(candidate, "metadata", None) or {}).get("mcp_provider_id") or "")
+                == provider_id
+                and str((getattr(candidate, "metadata", None) or {}).get("mcp_tool_name") or "")
+                == tool_name
+            ),
+            None,
+        )
+        if selected is None:
+            raise LookupError(
+                "the approved MCP provider tool is no longer registered; no substitute was executed"
+            )
+        adapter = McpActionAdapter(
+            provider_id=provider_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            invoke=lambda: selected.invoke(arguments),
+            parent_task_id=action.parent_task_id,
+            actor=action.actor,
+            originating_agent=action.originating_agent,
+        )
+        if adapter.idempotency_key != action.idempotency_key:
+            raise PermissionError("stored MCP arguments no longer match the approved action")
+        return adapter
 
     def _recover_queued_transactional_action_dispatches(self) -> None:
         """Resume only approved, unclaimed actions left queued across a process restart."""
@@ -1503,13 +1567,26 @@ class AgentChatGateway:
         if action is None:
             raise LookupError("approved inbox item has no durable transactional action")
         grant = self._transactional_runtime.gateway.approvals.find_valid(action)
+        if not item.checkpoint_id or action.parent_task_id != item.task_id:
+            return {
+                "status": "approved_no_resumable_task",
+                "inbox_item_id": inbox_item_id,
+                "action_id": action.action_id,
+                "approval_id": grant.approval_id if grant is not None else "",
+                "result": {},
+                "message": (
+                    "Exact action approved, but this legacy MCP approval is not bound "
+                    "to a resumable durable task. No provider action was executed; "
+                    "submit a fresh model-selected MCP request."
+                ),
+            }
         return {
             "status": "approved",
             "inbox_item_id": inbox_item_id,
             "action_id": action.action_id,
             "approval_id": grant.approval_id if grant is not None else "",
             "result": {},
-            "message": "Exact action approved once. Only the matching durable branch may resume and execute the stored action.",
+            "message": "Exact action approved once. The matching durable branch is resuming the stored action.",
         }
 
     def deny_transactional_action_command(
@@ -4439,6 +4516,7 @@ class AgentChatGateway:
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
                 event_sink=sink,
+                lane_task_id=lane_task_id,
             )
         if len(decision.required_sources) > 1 or decision.required_sources[0] in {
             "browser",
@@ -6220,6 +6298,7 @@ class AgentChatGateway:
         ask_service: Any,
         callbacks: Any,
         event_sink: Callable[..., None] | None = None,
+        lane_task_id: str = "",
     ) -> ChatTurnResult:
         """Execute only the provider selected by the validated entry decision."""
         ask_agent = getattr(ask_service, "ask_agent", None)
@@ -6265,6 +6344,7 @@ class AgentChatGateway:
                 flow_id=context.session_id,
                 run_id=context.turn_id,
                 required_mcp_server=provider_id,
+                transactional_parent_task_id=lane_task_id or None,
             )
         except Exception as exc:
             return ChatTurnResult(

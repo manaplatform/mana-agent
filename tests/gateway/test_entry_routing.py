@@ -250,6 +250,7 @@ def test_configured_kaggle_mcp_route_uses_only_the_model_selected_provider(
     assert ask_agent.calls[0]["required_mcp_server"] == "kaggle"
     assert ask_agent.calls[0]["tool_policy"]["mcp_provider_only"] == "kaggle"
     assert ask_agent.calls[0]["tool_policy"]["require_initial_tool_call"] is True
+    assert ask_agent.calls[0]["transactional_parent_task_id"] == result.payload["lane_task_id"]
 
 
 def test_failed_kaggle_mcp_tool_marks_the_route_failed(

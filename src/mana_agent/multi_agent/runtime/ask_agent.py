@@ -1930,6 +1930,7 @@ class AskAgent:
         flow_id: str | None = None,
         run_id: str | None = None,
         required_mcp_server: str | None = None,
+        transactional_parent_task_id: str | None = None,
     ) -> AskResponseWithTrace:
         started = perf_counter()
 
@@ -2491,7 +2492,12 @@ class AskAgent:
                                 tool_name=str(tool_metadata.get("mcp_tool_name") or ""),
                                 arguments=dict(args) if isinstance(args, dict) else {},
                                 invoke=lambda: tool_map[name].invoke(args, config=cfg),
-                                parent_task_id=str(flow_id or run_id or "ask-mcp"),
+                                parent_task_id=str(
+                                    transactional_parent_task_id
+                                    or flow_id
+                                    or run_id
+                                    or "ask-mcp"
+                                ),
                                 actor="model_tool",
                                 originating_agent="ask_agent",
                             )

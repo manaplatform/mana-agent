@@ -13,6 +13,7 @@ from mana_agent.mcp.server import protected_http_app
 from mana_agent.transactional_actions.adapters import McpActionAdapter
 from mana_agent.transactional_actions.models import PolicyOutcome
 from mana_agent.transactional_actions.policy import ActionPolicy
+from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision
@@ -80,6 +81,44 @@ def test_mcp_transactional_adapter_requires_provider_success_for_verification():
     assert action.target_resources == ["mcp.kaggle.authorize"]
     assert verification.complete is True
     assert ActionPolicy().evaluate(action).outcome is PolicyOutcome.REQUIRE_APPROVAL
+
+
+def test_approved_mcp_action_rehydrates_only_its_exact_provider_tool(monkeypatch):
+    adapter = McpActionAdapter(
+        provider_id="kaggle",
+        tool_name="authorize",
+        arguments={"request": "authorize this session"},
+        invoke=lambda: {"ok": True},
+        parent_task_id="task-kaggle",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+    action = adapter.build_intent()
+    calls = []
+
+    class _RegisteredTool:
+        metadata = {
+            "mcp_provider_id": "kaggle",
+            "mcp_tool_name": "authorize",
+        }
+
+        def invoke(self, arguments):
+            calls.append(arguments)
+            return {"ok": True, "tool_name": "authorize"}
+
+    monkeypatch.setattr(
+        "mana_agent.mcp.tools.discovered_mcp_langchain_tools",
+        lambda *, server_ids: ([_RegisteredTool()], []),
+    )
+
+    resumed = AgentChatGateway._mcp_adapter_for_stored_action(
+        action,
+        protected_context=adapter.protected_action_context(),
+    )
+
+    assert resumed.idempotency_key == action.idempotency_key
+    assert resumed.execute(action)["ok"] is True
+    assert calls == [{"request": "authorize this session"}]
 
 
 def test_explicit_mcp_discovery_uses_only_the_requested_configured_provider(monkeypatch, tmp_path):
