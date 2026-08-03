@@ -251,7 +251,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             handoff_targets=(LaneId.CODING,),
             allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server", "api", "mcp"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
-            max_concurrent_jobs=1, max_subagents=0, token_budget=25_000, cost_budget=12.0,
+            max_concurrent_jobs=1, max_subagents=0, token_budget=32_000, cost_budget=32.0,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
             requires_write_access=True, lock_policy=LockMode.WORKSPACE_WRITE, timeout_seconds=1800,
         ),

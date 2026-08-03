@@ -336,6 +336,8 @@ All frontends use the gateway's six specialist lanes. Defaults are conservative 
 
 Lane overrides use the existing user configuration as a table/object. Only `enabled`, `max_concurrent_jobs`, `max_subagents`, `token_budget`, `cost_budget`, `priority`, `timeout_seconds`, and `allowed_models` are configurable; invalid lane names, fields, priorities, or non-positive limits stop gateway construction with an actionable validation error.
 
+For execution routing, Mana uses the more restrictive of `MANA_ROUTING_TASK_TOKEN_BUDGET` / `MANA_ROUTING_TASK_COST_BUDGET` and the validated selected lane's `token_budget` / `cost_budget`. A model decision that cannot fit the selected lane stops during routing; Mana does not reserve the lane and then retry through a different route or budget.
+
 ```toml
 MANA_LANE_GLOBAL_WORKER_LIMIT = 8
 MANA_LANE_SESSION_TOKEN_BUDGET = 120000

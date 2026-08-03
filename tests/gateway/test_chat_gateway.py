@@ -25,6 +25,7 @@ from mana_agent.gateway import (
     RichChatContext,
 )
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
+from mana_agent.gateway.lanes import LaneId
 from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
 from mana_agent.human_inbox.models import (
     InboxRequest,
@@ -1041,6 +1042,28 @@ def test_gateway_config_normalized_full_auto() -> None:
     assert cfg.execution_profile == "full-auto"
     assert cfg.auto_execute_plan is True
     assert cfg.auto_execute_max_passes == 10
+
+
+def test_gateway_constrains_model_routing_budgets_to_the_selected_lane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *args, **kwargs: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        settings=Settings(
+            MANA_ROUTING_TASK_TOKEN_BUDGET=40_000,
+            MANA_ROUTING_TASK_COST_BUDGET=40.0,
+        ),
+    )
+
+    budgets = gateway._routing_budgets_for_lane(LaneId.OPERATIONS)
+
+    assert budgets.task_token_limit == 32_000
+    assert budgets.task_cost_limit == 32.0
 
 
 def test_gateway_decision_failure_no_fallback(tmp_path: Path, monkeypatch) -> None:

@@ -20,7 +20,7 @@ import shlex
 import shutil
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -48,7 +48,7 @@ from mana_agent.gateway.entry_routing import (
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.lane_coordinator import LaneCoordinator, LaneCoordinatorError, LaneReservation
-from mana_agent.gateway.lanes import LaneTaskState
+from mana_agent.gateway.lanes import LaneId, LaneTaskState, select_lane
 from mana_agent.gateway.artifact_routing import (
     artifact_handler_availability,
     artifact_routing_evidence,
@@ -2880,6 +2880,30 @@ class AgentChatGateway:
             task_id=task_id, session_id=session_id
         )
 
+    def _routing_budgets_for_lane(self, lane_id: LaneId):
+        """Constrain model estimates to the already selected lane contract."""
+        configured = routing_budgets_from_settings(self.settings)
+        contract = self._lane_coordinator.contracts[lane_id]
+
+        def most_restrictive(
+            configured_limit: int | float | None, lane_limit: int | float
+        ) -> int | float:
+            return (
+                lane_limit
+                if configured_limit is None
+                else min(configured_limit, lane_limit)
+            )
+
+        return replace(
+            configured,
+            task_token_limit=int(
+                most_restrictive(configured.task_token_limit, contract.token_budget)
+            ),
+            task_cost_limit=float(
+                most_restrictive(configured.task_cost_limit, contract.cost_budget)
+            ),
+        )
+
     def latest_routing_decision(
         self, *, session_id: str = "", task_id: str = ""
     ) -> dict[str, Any] | None:
@@ -3175,6 +3199,11 @@ class AgentChatGateway:
                     options.pop("request_parallel_candidates", False)
                 )
                 route_tools = self._entry_route_registry.get(entry_decision.route).tools
+                model_lane = options.pop("lane_id", None)
+                lane_id = select_lane(
+                    entry_route=entry_decision.route,
+                    model_lane=model_lane,
+                )
                 execution_decision = self.routing_authority.route(
                     RoutingRequest(
                         role=execution_role,
@@ -3196,7 +3225,7 @@ class AgentChatGateway:
                         ),
                         required_tools=frozenset(route_tools),
                         latency_requirement=LatencyClass.STANDARD,
-                        budgets=routing_budgets_from_settings(self.settings),
+                        budgets=self._routing_budgets_for_lane(lane_id),
                         task_id=turn_id,
                         parent_task_id=f"{turn_id}:entry",
                         session_id=session_id,
@@ -3261,7 +3290,7 @@ class AgentChatGateway:
                         raise _RoutePreflightComplete(result)
                     lane_id = self._lane_coordinator.select_lane(
                         entry_route=entry_decision.route,
-                        model_lane=options.pop("lane_id", None),
+                        model_lane=model_lane,
                     )
                     target_files = [
                         str(item) for item in options.pop("target_files", [])
@@ -4244,6 +4273,7 @@ class AgentChatGateway:
             "canvas": "tool",
         }.get(decision.route, "main")
         route_tools = registration.tools
+        lane_id = select_lane(entry_route=decision.route)
         execution_decision = self.routing_authority.route(
             RoutingRequest(
                 role=execution_role,
@@ -4265,7 +4295,7 @@ class AgentChatGateway:
                 ),
                 required_tools=frozenset(route_tools),
                 latency_requirement=LatencyClass.STANDARD,
-                budgets=routing_budgets_from_settings(self.settings),
+                budgets=self._routing_budgets_for_lane(lane_id),
                 task_id=child_task_id,
                 parent_task_id=root_lane_task_id,
                 session_id=context.session_id,
