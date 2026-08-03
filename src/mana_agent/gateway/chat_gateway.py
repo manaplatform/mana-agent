@@ -781,6 +781,13 @@ class AgentChatGateway:
         self._lane_coordinator.start(
             LaneReservation(self._lane_coordinator.inspect_task(task_id))
         )
+        action_label = "MCP" if action.tool_name == "mcp" else "computer"
+        self._publish_transactional_resume_activity(
+            event_type="action.execution.started",
+            title=f"Approved {action_label} action started",
+            action=action,
+            inbox_item_id=inbox_item_id,
+        )
         try:
             protected_context = (
                 self._transactional_runtime.store.read_protected_action_context(
@@ -821,7 +828,13 @@ class AgentChatGateway:
                     else {},
                 },
             )
-        except Exception:
+            self._publish_transactional_resume_activity(
+                event_type="action.committed",
+                title=f"Approved {action_label} action completed",
+                action=outcome.action,
+                inbox_item_id=inbox_item_id,
+            )
+        except Exception as exc:
             execution = self._lane_coordinator.inspect_task(task_id)
             if execution.state not in {
                 LaneTaskState.COMPLETED,
@@ -833,7 +846,43 @@ class AgentChatGateway:
                     state=LaneTaskState.FAILED,
                     error="resumed transactional action failed; inspect durable action recovery state",
                 )
+            self._publish_transactional_resume_activity(
+                event_type="action.manual_recovery.required",
+                title=f"Approved {action_label} action failed",
+                action=action,
+                inbox_item_id=inbox_item_id,
+                error=redact_text(str(exc))[:1000],
+            )
             raise
+
+    def _publish_transactional_resume_activity(
+        self,
+        *,
+        event_type: str,
+        title: str,
+        action: Any,
+        inbox_item_id: str,
+        error: str = "",
+    ) -> None:
+        """Surface terminal resumed-action state in the owning frontend process."""
+        from mana_agent.chat.events import CodingActivityEvent
+        from mana_agent.chat.history import get_history
+
+        metadata = {
+            "transactional_action_approval": True,
+            "action_id": str(action.action_id),
+            "inbox_item_id": inbox_item_id,
+            "permission_request_id": inbox_item_id,
+            "tool_name": str(action.tool_name),
+            "operation_name": str(action.operation_name),
+            "state": str(action.state.value),
+            "error": error,
+        }
+        get_history().add(CodingActivityEvent(
+            activity={"event_type": event_type, "title": title, "metadata": metadata}
+        ))
+        if callable(self._event_sink):
+            self._event_sink(event_type, title, metadata=metadata)
 
     @staticmethod
     def _mcp_adapter_for_stored_action(

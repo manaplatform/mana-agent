@@ -83,6 +83,21 @@ def test_mcp_transactional_adapter_requires_provider_success_for_verification():
     assert ActionPolicy().evaluate(action).outcome is PolicyOutcome.REQUIRE_APPROVAL
 
 
+def test_mcp_transactional_adapter_reports_a_provider_failure_without_inventing_detail():
+    adapter = McpActionAdapter(
+        provider_id="kaggle",
+        tool_name="start_competition_submission_upload",
+        arguments={"request": {}},
+        invoke=lambda: {"ok": False},
+        parent_task_id="task-kaggle",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    with pytest.raises(RuntimeError, match="ok=false without a diagnostic"):
+        adapter.execute(adapter.build_intent())
+
+
 def test_approved_mcp_action_rehydrates_only_its_exact_provider_tool(monkeypatch):
     adapter = McpActionAdapter(
         provider_id="kaggle",

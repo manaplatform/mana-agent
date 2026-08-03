@@ -607,7 +607,13 @@ class McpActionAdapter(ActionAdapter):
         else:
             result = {"ok": False, "error": "MCP tool returned an unsupported result type"}
         if not bool(result.get("ok")):
-            raise RuntimeError(str(result.get("error") or result.get("error_code") or "MCP provider reported failure"))
+            detail = str(
+                result.get("error")
+                or result.get("error_code")
+                or result.get("message")
+                or "MCP provider returned ok=false without a diagnostic detail"
+            )
+            raise RuntimeError(redact_secrets(detail)[:1000])
         return result
 
     def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:
