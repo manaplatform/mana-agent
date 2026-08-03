@@ -7,6 +7,9 @@ All notable repository changes should be recorded here.
 - Added a bounded, policy-gated macOS screen-recording computer action with typed clarification for incomplete requests, redacted transactional/inbox diagnostics, durable inbox correlation in approval events, and no inline computer execution from approval handlers. Recording remains macOS-only; user verification is required for provider capability, privacy authorization, restart recovery, and artifact verification.
   - User verification required: `python -m pytest tests/test_computer_control.py tests/transactional_actions/test_policy_gated_actions.py tests/human_inbox/test_durable_inbox.py tests/gateway/test_chat_gateway.py`.
 
+- Normalized absent supervisor parent-task IDs in durable computer execution context so root branches preserve the typed context contract.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py`.
+
 - Deferred durable human-inbox initialization until a validated workflow needs a human approval or structured response. Capability-error routes, including `COMPUTER_NOT_AVAILABLE`, no longer create `~/.mana/inbox` or its files; partial gateway fixtures retain their transient remote-worker behavior without forcing durable inbox setup.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py`.
 
