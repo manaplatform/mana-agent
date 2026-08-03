@@ -18,6 +18,7 @@ class ComputerClientContext:
     allowed_decision_ids: frozenset[str] = frozenset()
     workspace_root: str = ""
     execution_context: DurableExecutionContext | None = None
+    transactional_runtime: Any | None = None
 
 
 _context: ContextVar[ComputerClientContext | None] = ContextVar("mana_computer_client", default=None)
@@ -36,6 +37,7 @@ def computer_client_scope(
     allowed_decision_ids: frozenset[str] = frozenset(),
     workspace_root: str = "",
     execution_context: DurableExecutionContext | None = None,
+    transactional_runtime: Any | None = None,
 ):
     token = _context.set(ComputerClientContext(
         session_id,
@@ -44,6 +46,7 @@ def computer_client_scope(
         allowed_decision_ids,
         workspace_root,
         execution_context,
+        transactional_runtime,
     ))
     try:
         yield
@@ -63,6 +66,7 @@ def computer_decision_scope(source_decision_id: str):
         frozenset({source_decision_id}),
         current.workspace_root,
         current.execution_context,
+        current.transactional_runtime,
     ))
     try:
         yield
@@ -77,7 +81,28 @@ def computer_execution_context_scope(context: DurableExecutionContext):
         raise RuntimeError("Computer execution context requires an authenticated client context.")
     token = _context.set(ComputerClientContext(
         current.session_id, current.client_type, current.locally_confirmed,
-        current.allowed_decision_ids, current.workspace_root, context,
+        current.allowed_decision_ids, current.workspace_root, context, current.transactional_runtime,
+    ))
+    try:
+        yield
+    finally:
+        _context.reset(token)
+
+
+@contextmanager
+def computer_transactional_runtime_scope(runtime: Any):
+    """Bind the gateway-owned durable runtime to model tool execution."""
+    current = _context.get()
+    if current is None:
+        raise RuntimeError("Computer transactional runtime requires an authenticated client context.")
+    token = _context.set(ComputerClientContext(
+        current.session_id,
+        current.client_type,
+        current.locally_confirmed,
+        current.allowed_decision_ids,
+        current.workspace_root,
+        current.execution_context,
+        runtime,
     ))
     try:
         yield

@@ -26,6 +26,7 @@ class StrictModel(BaseModel):
 class InboxRequestType(str, Enum):
     APPROVAL = "approval"
     CLARIFICATION = "clarification"
+    NOTICE = "notice"
 
 
 class InboxStatus(str, Enum):
@@ -38,6 +39,7 @@ class InboxStatus(str, Enum):
     CANCELLED = "cancelled"
     DELEGATED = "delegated"
     SUPERSEDED = "superseded"
+    RECORDED = "recorded"
 
 
 UNRESOLVED_STATUSES = frozenset({InboxStatus.PENDING, InboxStatus.DELIVERED})
@@ -178,7 +180,7 @@ class InboxItem(StrictModel):
     summary: str = Field(min_length=1)
     risk_level: RiskLevel = RiskLevel.UNKNOWN
     requested_fields: list[ClarificationField] = Field(default_factory=list)
-    allowed_responses: list[ResponseOperation] = Field(min_length=1)
+    allowed_responses: list[ResponseOperation] = Field(default_factory=list)
     editable_parameters: list[str] = Field(default_factory=list)
     minimal_context: dict[str, Any] = Field(default_factory=dict)
     protected_context_ref: str = ""
@@ -226,16 +228,22 @@ class InboxItem(StrictModel):
                 raise ValueError("approval requests allow only approve or deny")
             if not {ResponseOperation.APPROVE, ResponseOperation.DENY}.issubset(self.allowed_responses):
                 raise ValueError("binary approvals must allow both approve and deny")
-        else:
+        elif self.request_type is InboxRequestType.CLARIFICATION:
             if self.allowed_responses != [ResponseOperation.ANSWER]:
                 raise ValueError("clarification requests must allow only answer")
             if not self.requested_fields:
                 raise ValueError("clarification requests require at least one typed field")
+        else:
+            if self.status is not InboxStatus.RECORDED:
+                raise ValueError("notice requests must be terminal recorded items")
+            if self.allowed_responses or self.requested_fields:
+                raise ValueError("notice requests cannot accept human responses")
         field_ids = [field.field_id for field in self.requested_fields]
         if len(field_ids) != len(set(field_ids)):
             raise ValueError("clarification field IDs must be unique")
         if self.status in TERMINAL_STATUSES and self.status not in {
-            InboxStatus.EXPIRED, InboxStatus.CANCELLED, InboxStatus.DELEGATED, InboxStatus.SUPERSEDED
+            InboxStatus.EXPIRED, InboxStatus.CANCELLED, InboxStatus.DELEGATED, InboxStatus.SUPERSEDED,
+            InboxStatus.RECORDED,
         } and self.response is None:
             raise ValueError("responded inbox items require a structured response")
         for name in (
@@ -306,7 +314,7 @@ class InboxRequest(StrictModel):
     summary: str = Field(min_length=1)
     risk_level: RiskLevel = RiskLevel.UNKNOWN
     requested_fields: list[ClarificationField] = Field(default_factory=list)
-    allowed_responses: list[ResponseOperation]
+    allowed_responses: list[ResponseOperation] = Field(default_factory=list)
     editable_parameters: list[str] = Field(default_factory=list)
     minimal_context: dict[str, Any] = Field(default_factory=dict)
     protected_context: dict[str, Any] = Field(default_factory=dict)

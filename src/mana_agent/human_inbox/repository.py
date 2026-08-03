@@ -74,6 +74,8 @@ class LocalInboxRepository:
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
+        layout_marker = self.root / ".layout-v2"
+        first_initialization = not layout_marker.exists()
         self.root.mkdir(parents=True, exist_ok=True)
         try:
             self.root.chmod(0o700)
@@ -89,8 +91,14 @@ class LocalInboxRepository:
         self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".repository.lock"
         self._lock_path.touch(exist_ok=True)
-        from mana_agent.utils.durable_diagnostics import append_diagnostic
-        append_diagnostic(self.root / "logs" / "inbox.jsonl", component="human_inbox", event="repository_initialized")
+        if first_initialization:
+            layout_marker.touch(exist_ok=True)
+            from mana_agent.utils.durable_diagnostics import append_diagnostic
+            append_diagnostic(
+                self.root / "logs" / "inbox.jsonl",
+                component="human_inbox",
+                event="repository_initialized",
+            )
 
     @contextmanager
     def locked(self) -> Iterator[None]:

@@ -99,6 +99,7 @@ class HumanInboxService:
             )
         item = InboxItem(
             request_type=request.request_type,
+            status=(InboxStatus.RECORDED if request.request_type is InboxRequestType.NOTICE else InboxStatus.PENDING),
             tenant_id=request.tenant_id,
             project_id=request.project_id,
             task_id=request.task_id,
@@ -148,7 +149,7 @@ class HumanInboxService:
             eligible_reviewer_ids=item.eligible_reviewer_ids,
             configuration_error=item.configuration_error,
         )
-        if self.branch_controller is not None and item.checkpoint_id:
+        if item.request_type is not InboxRequestType.NOTICE and self.branch_controller is not None and item.checkpoint_id:
             self.branch_controller.suspend_for_human_input(
                 item.task_id,
                 inbox_item_id=item.inbox_item_id,
@@ -156,7 +157,9 @@ class HumanInboxService:
                 request_type=item.request_type.value,
             )
             self._audit("branch_suspended", item, checkpoint_id=item.checkpoint_id)
-        if item.eligible_reviewer_ids:
+        if item.request_type is InboxRequestType.NOTICE:
+            self._emit("inbox.item.recorded", item)
+        elif item.eligible_reviewer_ids:
             self._deliver(item)
         else:
             self._emit("inbox.item.configuration_error", item)
@@ -866,16 +869,13 @@ class HumanInboxService:
         }
 
     def record_action_event(self, action_intent_id: str, event_type: str, details: dict[str, Any]) -> None:
-        mapped = {
-            "action.policy.revalidated": "policy_revalidated",
-            "action.execution.started": "action_executed",
-            "action.verification.completed": "action_verification_completed",
-        }.get(event_type)
-        if mapped is None:
-            return
         items = self.repository.find_for_action(action_intent_id)
         if items:
-            self._audit(mapped, items[0], **details)
+            self._audit(
+                "transactional_" + event_type.replace(".", "_"),
+                items[0],
+                **details,
+            )
 
     def record_execution_event(
         self,

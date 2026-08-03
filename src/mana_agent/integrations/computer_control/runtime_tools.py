@@ -13,7 +13,11 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from mana_agent.integrations.computer_control.context import current_computer_client
-from mana_agent.integrations.computer_control.errors import ComputerControlError, RemoteControlDenied
+from mana_agent.integrations.computer_control.errors import (
+    ComputerControlError,
+    OperatingSystemPermissionDenied,
+    RemoteControlDenied,
+)
 from mana_agent.integrations.computer_control.models import (
     CalendarEvent,
     ComputerAction,
@@ -24,6 +28,8 @@ from mana_agent.integrations.computer_control.models import (
 from mana_agent.integrations.computer_control.policy import ACTION_SPECS
 from mana_agent.integrations.computer_control.service import ComputerControlService, default_computer_control_service
 from mana_agent.runtime_context import DurableExecutionContext
+from mana_agent.transactional_actions.models import ActionState, TransactionalRequestState
+from mana_agent.utils.durable_diagnostics import resource_digest
 
 
 class _Decision(BaseModel):
@@ -210,6 +216,36 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
         )
         return client
 
+    def record_terminal_request(
+        *,
+        payload: _Decision,
+        operation: str,
+        outcome_code: str,
+        state: TransactionalRequestState,
+        resource: str = "",
+    ) -> None:
+        client = authenticated_client()
+        from mana_agent.transactional_actions.runtime import create_transactional_runtime
+
+        context = client.execution_context
+        workspace_root = Path(client.workspace_root).resolve() if client.workspace_root else Path.cwd()
+        runtime = client.transactional_runtime or create_transactional_runtime(workspace_root)
+        runtime.record_request(
+            state=state,
+            source_decision_id=payload.source_decision_id,
+            session_id=client.session_id,
+            conversation_id=context.conversation_id if context else "",
+            turn_id=context.turn_id if context else "",
+            task_id=context.task_id if context else "",
+            branch_id=context.branch_id if context else "",
+            client_type=client.client_type,
+            tool_name="computer",
+            operation_name=operation,
+            resource_digest=resource_digest(resource) if resource else "",
+            outcome_code=outcome_code,
+            create_notice=True,
+        )
+
     def execute(action: ComputerAction) -> Any:
         client = authenticated_client()
         if action.source_decision_id not in client.allowed_decision_ids:
@@ -218,7 +254,7 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
             )
         from mana_agent.transactional_actions.computer import ComputerActionAdapter
         from mana_agent.transactional_actions.gateway import ApprovalRequired
-        from mana_agent.transactional_actions.runtime import default_action_gateway
+        from mana_agent.transactional_actions.runtime import create_transactional_runtime
 
         adapter = ComputerActionAdapter(
             action=action,
@@ -226,16 +262,80 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
             client_type=client.client_type,
             service=control,
         )
+        workspace_root = Path(client.workspace_root).resolve() if client.workspace_root else Path.cwd()
+        runtime = client.transactional_runtime or create_transactional_runtime(workspace_root)
+        execution_context = action.execution_context
+        target_material = str(
+            action.arguments.get("output_path")
+            or action.target.display_id
+            or action.target.resource_id
+            or action.target.path
+            or action.capability
+        )
+        request = runtime.record_request(
+            state=TransactionalRequestState.RECEIVED,
+            source_decision_id=action.source_decision_id,
+            session_id=client.session_id,
+            conversation_id=execution_context.conversation_id if execution_context else "",
+            turn_id=execution_context.turn_id if execution_context else "",
+            task_id=execution_context.task_id if execution_context else "",
+            branch_id=execution_context.branch_id if execution_context else "",
+            client_type=client.client_type,
+            tool_name="computer",
+            operation_name=action.operation,
+            resource_digest=resource_digest(target_material),
+        )
         try:
-            workspace_root = Path(client.workspace_root).resolve() if client.workspace_root else Path.cwd()
-            outcome = default_action_gateway(workspace_root).execute(adapter)
+            capability_report = _run(control.capabilities())
+        except ComputerControlError as exc:
+            runtime.update_request(
+                request,
+                TransactionalRequestState.ROUTE_UNAVAILABLE,
+                outcome_code=exc.code,
+                create_notice=True,
+            )
+            raise
+        if not capability_report.supports(action.capability, action.operation):
+            runtime.update_request(
+                request,
+                TransactionalRequestState.CAPABILITY_UNAVAILABLE,
+                outcome_code="capability_unavailable",
+                create_notice=True,
+            )
+            return {
+                "ok": False,
+                "error_code": "capability_unavailable",
+                "message": f"{action.operation!r} is not implemented by {capability_report.provider}.",
+                "inbox_item_id": request.inbox_item_id,
+            }
+        os_permission = _run(control.provider.check_permission(action.capability))
+        if not os_permission.granted:
+            runtime.update_request(
+                request,
+                TransactionalRequestState.PERMISSION_DENIED,
+                outcome_code="os_permission_denied",
+                create_notice=True,
+            )
+            raise OperatingSystemPermissionDenied(
+                os_permission.reason or "Operating-system privacy authorization is unavailable.",
+                corrective_action="Enable Screen Recording in macOS Privacy & Security settings.",
+            )
+        try:
+            outcome = runtime.gateway.execute(adapter)
         except ApprovalRequired as exc:
+            runtime.update_request(
+                request,
+                TransactionalRequestState.APPROVAL_REQUIRED,
+                outcome_code="approval_required",
+                action_id=exc.action.action_id,
+                inbox_item_id=exc.inbox_item_id,
+            )
             decision = exc.action.policy_decision.model_dump(mode="json") if exc.action.policy_decision else {}
             return {
                 "ok": False,
                 "error_code": "transactional_approval_required",
                 "message": "This exact computer action is waiting for approval in the active local TUI or dashboard.",
-                "permission_request_id": exc.action.action_id,
+                "permission_request_id": exc.inbox_item_id,
                 "permission_scope": "transactional_action.once",
                 "action_id": exc.action.action_id,
                 "transaction_id": exc.action.transaction_id,
@@ -246,6 +346,47 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
                 "risk_effect_labels": exc.action.approval_effect_labels(),
                 "transactional_action_approval": True,
             }
+        except ComputerControlError as exc:
+            stored = runtime.store.action_for_idempotency_key(adapter.build_intent().idempotency_key)
+            runtime.update_request(
+                request,
+                TransactionalRequestState.PERMISSION_DENIED if exc.code in {"os_permission_denied", "mana_permission_denied", "permission_required"} else TransactionalRequestState.FAILED,
+                outcome_code=exc.code,
+                action_id=stored.action_id if stored else "",
+                inbox_item_id=stored.inbox_item_id if stored else "",
+                create_notice=stored is None,
+            )
+            raise
+        if outcome.action.state is ActionState.FAILED:
+            runtime.update_request(
+                request,
+                TransactionalRequestState.POLICY_DENIED if outcome.action.policy_decision and outcome.action.policy_decision.outcome.value == "deny" else TransactionalRequestState.FAILED,
+                outcome_code=(outcome.action.policy_decision.reason_codes[0] if outcome.action.policy_decision else "action_failed"),
+                action_id=outcome.action.action_id,
+                create_notice=True,
+            )
+            return {
+                "ok": False,
+                "error_code": (
+                    outcome.action.policy_decision.reason_codes[0]
+                    if outcome.action.policy_decision
+                    else "action_failed"
+                ),
+                "message": outcome.action.error or (
+                    outcome.action.policy_decision.explanation
+                    if outcome.action.policy_decision
+                    else "The transactional action did not reach execution."
+                ),
+                "action_id": outcome.action.action_id,
+                "inbox_item_id": request.inbox_item_id,
+            }
+        else:
+            runtime.update_request(
+                request,
+                TransactionalRequestState.VERIFIED if outcome.action.state is ActionState.COMMITTED else TransactionalRequestState.EXECUTING,
+                action_id=outcome.action.action_id,
+                inbox_item_id=outcome.action.inbox_item_id,
+            )
         return {"ok": True, "result": outcome.result, "action_id": outcome.action.action_id}
 
     def capabilities() -> str:
@@ -343,8 +484,22 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
             ("maximum_duration_seconds", request.maximum_duration_seconds),
         ) if value in {None, ""}]
         if missing:
+            record_terminal_request(
+                payload=payload,
+                operation="screen_recording.capture",
+                outcome_code="screen_recording_clarification_required",
+                state=TransactionalRequestState.CLARIFICATION_REQUIRED,
+                resource=str(request.output_path or ""),
+            )
             return json.dumps({"ok": False, "error_code": "screen_recording_clarification_required", "message": "A bounded recording requires the missing material parameters before an action can be proposed.", "clarification_fields": missing, "capability": "screen_recording"}, ensure_ascii=False)
         if request.system_audio:
+            record_terminal_request(
+                payload=payload,
+                operation="screen_recording.capture",
+                outcome_code="capability_unavailable",
+                state=TransactionalRequestState.CAPABILITY_UNAVAILABLE,
+                resource=str(request.output_path or ""),
+            )
             return json.dumps({"ok": False, "error_code": "capability_unavailable", "message": "System-audio recording is not implemented by the bounded native provider."}, ensure_ascii=False)
         return _response(lambda: execute(_action("screen_recording.capture", payload, capability="screen_recording", target=ComputerTarget(display_id=request.display_id), arguments=request.model_dump(mode="json"))))
 

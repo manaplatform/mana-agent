@@ -68,8 +68,13 @@ class ComputerActionAdapter(ActionAdapter):
         self.service = service or default_computer_control_service()
 
     def build_intent(self) -> ActionIntent:
-        action_payload = self.computer_action.model_dump(mode="json")
-        material = json.dumps(action_payload, sort_keys=True, default=str)
+        full_action_payload = self.computer_action.model_dump(mode="json")
+        action_payload = json.loads(json.dumps(full_action_payload))
+        if self.computer_action.operation == "screen_recording.capture":
+            output_path = str((action_payload.get("arguments") or {}).get("output_path") or "")
+            if output_path:
+                action_payload["arguments"]["output_path"] = "<protected:" + hashlib.sha256(output_path.encode("utf-8")).hexdigest()[:24] + ">"
+        material = json.dumps(full_action_payload, sort_keys=True, default=str)
         target = self.computer_action.target.model_dump(mode="json", exclude_none=True)
         target_label = next((str(value) for value in target.values() if value), self.computer_action.capability)
         spec = ACTION_SPECS[self.computer_action.operation]
@@ -105,6 +110,11 @@ class ComputerActionAdapter(ActionAdapter):
             verification_plan=["record the computer-control provider completion receipt", "independently verify declared artifact metadata when present"],
             compensation_strategy="Computer-control actions do not have a general safe compensation.",
         )
+
+    def protected_action_context(self) -> dict[str, Any]:
+        if self.computer_action.operation != "screen_recording.capture":
+            return {}
+        return {"computer_action": self.computer_action.model_dump(mode="json")}
 
     def preview(self, action: ActionIntent) -> ActionPreview:
         spec = ACTION_SPECS[self.computer_action.operation]
@@ -149,11 +159,25 @@ class ComputerActionAdapter(ActionAdapter):
             checks=[{"check": "computer_control_result", "state": result.get("state")}],
         )
 
+    def persistable_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        persisted = super().persistable_result(result)
+        if self.computer_action.operation != "screen_recording.capture":
+            return persisted
+        data = dict(persisted.get("data") or {})
+        artifact_path = str(data.get("artifact_path") or "")
+        if artifact_path:
+            data["artifact_path"] = "<protected:" + hashlib.sha256(artifact_path.encode("utf-8")).hexdigest()[:24] + ">"
+        persisted["data"] = data
+        return persisted
 
-def adapter_for_stored_action(action: ActionIntent) -> ComputerActionAdapter:
+
+def adapter_for_stored_action(action: ActionIntent, *, protected_context: dict[str, Any] | None = None) -> ComputerActionAdapter:
     payload = action.normalized_arguments
+    computer_action = payload["computer_action"]
+    if protected_context and isinstance(protected_context.get("computer_action"), dict):
+        computer_action = protected_context["computer_action"]
     return ComputerActionAdapter(
-        action=ComputerAction.model_validate(payload["computer_action"]),
+        action=ComputerAction.model_validate(computer_action),
         session_id=str(payload["session_id"]),
         client_type=str(payload["client_type"]),
     )

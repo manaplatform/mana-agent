@@ -226,13 +226,15 @@ def _transactional_action_requests_from_trace(response: Any) -> list[dict[str, A
             return
         if not isinstance(payload, dict):
             return
-        request_id = str(payload.get("action_id") or payload.get("permission_request_id") or "").strip()
+        action_id = str(payload.get("action_id") or "").strip()
+        inbox_item_id = str(payload.get("inbox_item_id") or "").strip()
+        request_id = str(payload.get("permission_request_id") or inbox_item_id or action_id).strip()
         if payload.get("error_code") == "transactional_approval_required" and request_id:
             requests[request_id] = {
                 "permission_request_id": request_id,
-                "action_id": request_id,
+                "action_id": action_id,
                 "transaction_id": str(payload.get("transaction_id") or ""),
-                "inbox_item_id": str(payload.get("inbox_item_id") or ""),
+                "inbox_item_id": inbox_item_id,
                 "permission_scope": "transactional_action.once",
                 "preview": payload.get("preview") or {},
                 "preview_digest": str(payload.get("preview_digest") or ""),
@@ -476,22 +478,19 @@ class AgentChatGateway:
         entry_route_registry: EntryRouteRegistry | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
-        # The chat gateway owns user-visible action approvals. Initialize the
-        # durable action store here so its audit target is available before a
-        # model tool proposes the first computer-control action.
-        from mana_agent.transactional_actions.runtime import default_action_gateway
         from mana_agent.human_inbox import default_human_inbox_service
         from mana_agent.human_inbox.notifications import ChatHistoryNotificationAdapter
 
         self._human_inbox_service = None
 
         def create_human_inbox_service():
-            service = default_human_inbox_service()
+            service = default_human_inbox_service(
+                branch_controller=getattr(self, "_lane_coordinator", None),
+            )
             service.notification_adapters.append(ChatHistoryNotificationAdapter())
             return service
 
         self._human_inbox_service_factory = create_human_inbox_service
-        default_action_gateway(self.root, enable_human_inbox=False)
         self.settings = settings or Settings()
         self._workspaces = WorkspaceService()
 
@@ -664,6 +663,12 @@ class AgentChatGateway:
             provider_limits=self.config.lane_provider_limits,
             session_token_budget=self.config.lane_session_token_budget,
             global_token_budget=self.config.lane_global_token_budget,
+        )
+        from mana_agent.transactional_actions.runtime import create_transactional_runtime
+
+        self._transactional_runtime = create_transactional_runtime(
+            self.root,
+            inbox_service=self.human_inbox_service,
         )
         from mana_agent.connectors.browser.session import default_browser_manager
         from mana_agent.sessions.service import SessionService
@@ -1289,40 +1294,61 @@ class AgentChatGateway:
 
     def transactional_action_approval_command(
         self,
-        action_id: str,
+        inbox_item_id: str,
         *,
         session_id: str = "",
     ) -> dict[str, Any]:
-        """Approve one exact previewed transactional action for a trusted local session."""
-        from mana_agent.transactional_actions.runtime import (
-            approve_action,
-        )
+        """Approve the authoritative inbox item; branch resumption owns execution."""
+        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
-        approval_id = approve_action(
-            self.root,
-            action_id,
-            approved_by=f"local-session:{session_id or 'unknown'}",
+        item = self.human_inbox_service.repository.get(inbox_item_id)
+        if item.request_type.value != "approval" or not item.action_intent_id:
+            raise ValueError("inbox item is not an actionable transactional approval")
+        actor_id = getpass.getuser()
+        self.human_inbox_service.respond(ResponseSubmission(
+            inbox_item_id=inbox_item_id,
+            operation=ResponseOperation.APPROVE,
+            actor_id=actor_id,
+            channel="tui-local",
+            idempotency_key=f"tui-approve:{inbox_item_id}:{item.version}",
+            expected_version=item.version,
+            current_action_digest=item.action_digest,
         )
+        action = self._transactional_runtime.store.get_action(item.action_intent_id)
+        if action is None:
+            raise LookupError("approved inbox item has no durable transactional action")
+        grant = self._transactional_runtime.gateway.approvals.find_valid(action)
         return {
             "status": "approved",
-            "action_id": action_id,
-            "approval_id": approval_id,
+            "inbox_item_id": inbox_item_id,
+            "action_id": action.action_id,
+            "approval_id": grant.approval_id if grant is not None else "",
             "result": {},
             "message": "Exact action approved once. Only the matching durable branch may resume and execute the stored action.",
         }
 
     def deny_transactional_action_command(
         self,
-        action_id: str,
+        inbox_item_id: str,
         *,
         session_id: str = "",
     ) -> dict[str, Any]:
-        from mana_agent.transactional_actions.runtime import deny_action
+        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
-        deny_action(self.root, action_id, denied_by=f"local-session:{session_id or 'unknown'}")
+        item = self.human_inbox_service.repository.get(inbox_item_id)
+        self.human_inbox_service.respond(ResponseSubmission(
+            inbox_item_id=inbox_item_id,
+            operation=ResponseOperation.DENY,
+            actor_id=getpass.getuser(),
+            channel="tui-local",
+            idempotency_key=f"tui-deny:{inbox_item_id}:{item.version}",
+            expected_version=item.version,
+            current_action_digest=item.action_digest,
+        ))
         return {
             "status": "denied",
-            "action_id": action_id,
+            "inbox_item_id": inbox_item_id,
+            "action_id": item.action_intent_id,
             "message": "Transactional action denied. No action was executed.",
         }
 
@@ -1665,6 +1691,30 @@ class AgentChatGateway:
                 setup_action="Set [computer_control].enabled = true in ~/.mana/config.toml.",
             )
         return RouteAvailability(available=True, configured=True, authorized=True)
+
+    def _record_computer_route_rejection(
+        self,
+        *,
+        context: EntryRouteContext,
+        outcome_code: str,
+        state: str,
+    ) -> None:
+        """Persist a redacted terminal record when computer routing cannot begin."""
+        from mana_agent.transactional_actions.models import TransactionalRequestState
+
+        self._transactional_runtime.record_request(
+            state=TransactionalRequestState(state),
+            source_decision_id=f"{context.turn_id}:computer-entry-decision",
+            session_id=context.session_id,
+            conversation_id=context.conversation_id,
+            turn_id=context.turn_id,
+            task_id=context.turn_id,
+            branch_id=context.turn_id,
+            client_type="gateway",
+            tool_name="computer",
+            outcome_code=outcome_code,
+            create_notice=True,
+        )
 
     def _search_route_availability(self) -> RouteAvailability:
         from mana_agent.search.config import SearchConfig
@@ -4119,6 +4169,12 @@ class AgentChatGateway:
         registration = self._entry_route_registry.get(decision.route)
         availability = registration.availability()
         if decision.route == "capability_error":
+            if "computer" in decision.required_sources:
+                self._record_computer_route_rejection(
+                    context=context,
+                    outcome_code=decision.error_code or "capability_unavailable",
+                    state="route_unavailable",
+                )
             missing = ", ".join(decision.required_sources)
             return ChatTurnResult(
                 answer=(
@@ -4134,6 +4190,12 @@ class AgentChatGateway:
                 },
             )
         if not availability.available:
+            if decision.route == "computer":
+                self._record_computer_route_rejection(
+                    context=context,
+                    outcome_code="route_unavailable",
+                    state="route_unavailable",
+                )
             message = availability.reason
             if availability.setup_action:
                 message = f"{message} {availability.setup_action}".strip()
@@ -5979,6 +6041,7 @@ class AgentChatGateway:
             from mana_agent.integrations.computer_control.context import (
                 computer_decision_scope,
                 computer_execution_context_scope,
+                computer_transactional_runtime_scope,
             )
             from mana_agent.integrations.computer_control.events import (
                 computer_event_scope,
@@ -6002,6 +6065,7 @@ class AgentChatGateway:
             with (
                 computer_decision_scope(source_decision_id),
                 computer_execution_context_scope(execution_scope) if execution_scope else nullcontext(),
+                computer_transactional_runtime_scope(self._transactional_runtime),
                 computer_event_scope(event_sink),
             ):
                 response = ask_agent.run(

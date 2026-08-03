@@ -25,7 +25,7 @@ def render(_root: Path) -> None:
     selected_statuses = st.multiselect(
         "Status",
         options=[status.value for status in InboxStatus],
-        default=[InboxStatus.PENDING.value, InboxStatus.DELIVERED.value],
+        default=[InboxStatus.PENDING.value, InboxStatus.DELIVERED.value, InboxStatus.RECORDED.value],
     )
     rows = service.list(
         InboxQuery(statuses={InboxStatus(value) for value in selected_statuses}),
@@ -58,7 +58,11 @@ def render(_root: Path) -> None:
                 "delivery_status": card["delivery_status"],
                 "minimal_context": item.minimal_context,
             })
-            comment = st.text_area("Reviewer comment", key=f"comment-{item.inbox_item_id}")
+            comment = ""
+            if item.request_type.value != "notice":
+                comment = st.text_area("Reviewer comment", key=f"comment-{item.inbox_item_id}")
+            else:
+                st.caption("Recorded terminal notice; no human response can change this outcome.")
             if item.request_type.value == "approval" and item.status in {InboxStatus.PENDING, InboxStatus.DELIVERED}:
                 approve_col, deny_col = st.columns(2)
                 if approve_col.button("Approve", key=f"approve-{item.inbox_item_id}", type="primary"):

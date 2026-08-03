@@ -91,6 +91,28 @@ def request(clock: Clock, **changes) -> InboxRequest:
     return InboxRequest(**values)
 
 
+def test_terminal_notice_is_persisted_without_response_or_delivery(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = service(tmp_path, clock)
+    notice = inbox.create(request(
+        clock,
+        request_type=InboxRequestType.NOTICE,
+        title="Computer request recorded without execution",
+        summary="The selected action was unavailable.",
+        allowed_responses=[],
+        requested_fields=[],
+        idempotency_key="notice-1",
+        deduplication_key="notice-dedupe-1",
+    ))
+    assert notice.status is InboxStatus.RECORDED
+    assert notice.allowed_responses == []
+    assert inbox.repository.delivery_attempts(notice.inbox_item_id) == []
+    assert [event.event_type for event in inbox.repository.audit_for_item(notice.inbox_item_id)] == [
+        "request_created",
+        "reviewer_resolved",
+    ]
+
+
 def respond(item, **changes) -> ResponseSubmission:
     values = {
         "inbox_item_id": item.inbox_item_id,

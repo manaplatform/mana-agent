@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Added a durable redacted ledger for model-selected computer requests, terminal inbox notices for blocked or incomplete requests, linked policy-denial evidence, and authoritative inbox-ID approval handling in dashboard and TUI flows. TUI now reloads and queues durable approval cards before displaying its modal; approval responses remain non-executing handoffs to the matching resumed branch.
+  - User verification required: `python -m pytest tests/test_computer_control.py tests/transactional_actions/test_policy_gated_actions.py tests/human_inbox/test_durable_inbox.py tests/test_dashboard_live_chat.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+
 - Added a bounded, policy-gated macOS screen-recording computer action with typed clarification for incomplete requests, redacted transactional/inbox diagnostics, durable inbox correlation in approval events, and no inline computer execution from approval handlers. Recording remains macOS-only; user verification is required for provider capability, privacy authorization, restart recovery, and artifact verification.
   - User verification required: `python -m pytest tests/test_computer_control.py tests/transactional_actions/test_policy_gated_actions.py tests/human_inbox/test_durable_inbox.py tests/gateway/test_chat_gateway.py`.
 

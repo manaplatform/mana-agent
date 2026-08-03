@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import threading
@@ -8,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from .models import ActionIntent, ActionState, TransactionIntent
+from .models import ActionIntent, ActionState, TransactionIntent, TransactionalRequestRecord
 
 if os.name == "nt":  # pragma: no cover
     import msvcrt
@@ -21,7 +22,9 @@ class ActionStore:
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
-        for child in ("actions", "transactions", "idempotency", "audit", "protected", "logs"):
+        layout_marker = self.root / ".layout-v2"
+        first_initialization = not layout_marker.exists()
+        for child in ("actions", "transactions", "idempotency", "audit", "protected", "logs", "requests"):
             (self.root / child).mkdir(parents=True, exist_ok=True)
         (self.root / "audit" / "actions.jsonl").touch(exist_ok=True)
         self._thread_lock = threading.RLock()
@@ -31,8 +34,14 @@ class ActionStore:
             self.root.chmod(0o700)
         except OSError:
             pass
-        from mana_agent.utils.durable_diagnostics import append_diagnostic
-        append_diagnostic(self.root / "logs" / "runtime.jsonl", component="transactional_actions", event="store_initialized")
+        if first_initialization:
+            layout_marker.touch(exist_ok=True)
+            from mana_agent.utils.durable_diagnostics import append_diagnostic
+            append_diagnostic(
+                self.root / "logs" / "runtime.jsonl",
+                component="transactional_actions",
+                event="store_initialized",
+            )
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -73,6 +82,28 @@ class ActionStore:
         with self.locked():
             self._write(self.root / "actions" / f"{action.action_id}.json", action.model_dump(mode="json"))
 
+    def save_protected_action_context(self, action_id: str, context: dict) -> tuple[str, str]:
+        """Persist owner-only material that must not appear in action/audit records."""
+        digest = hashlib.sha256(
+            json.dumps(context, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        ).hexdigest()
+        path = self.root / "protected" / f"{action_id}.json"
+        with self.locked():
+            self._write(path, context)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+        return f"protected:{action_id}", digest
+
+    def read_protected_action_context(self, reference: str) -> dict:
+        if not reference.startswith("protected:"):
+            raise ValueError("invalid protected action-context reference")
+        path = self.root / "protected" / f"{reference.removeprefix('protected:')}.json"
+        if not path.is_file():
+            raise LookupError("protected action context is unavailable")
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def create_action(self, action: ActionIntent) -> None:
         with self.locked():
             path = self.root / "actions" / f"{action.action_id}.json"
@@ -90,6 +121,40 @@ class ActionStore:
     def get_action(self, action_id: str) -> ActionIntent | None:
         path = self.root / "actions" / f"{action_id}.json"
         return ActionIntent.model_validate_json(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def create_request(self, request: TransactionalRequestRecord) -> TransactionalRequestRecord:
+        """Durably deduplicate a redacted consequential-request observation."""
+        with self.locked():
+            for path in (self.root / "requests").glob("*.json"):
+                current = TransactionalRequestRecord.model_validate_json(path.read_text(encoding="utf-8"))
+                if current.idempotency_key == request.idempotency_key:
+                    return current
+            self._write(
+                self.root / "requests" / f"{request.request_id}.json",
+                request.model_dump(mode="json"),
+            )
+            return request
+
+    def save_request(self, request: TransactionalRequestRecord) -> None:
+        with self.locked():
+            self._write(
+                self.root / "requests" / f"{request.request_id}.json",
+                request.model_dump(mode="json"),
+            )
+
+    def get_request(self, request_id: str) -> TransactionalRequestRecord | None:
+        path = self.root / "requests" / f"{request_id}.json"
+        return (
+            TransactionalRequestRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            if path.is_file()
+            else None
+        )
+
+    def list_requests(self) -> list[TransactionalRequestRecord]:
+        return [
+            TransactionalRequestRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in sorted((self.root / "requests").glob("*.json"))
+        ]
 
     def claim_execution(self, action_id: str) -> ActionIntent:
         """Atomically fence duplicate workers before any side effect occurs."""

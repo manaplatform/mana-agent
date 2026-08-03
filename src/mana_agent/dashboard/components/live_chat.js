@@ -240,9 +240,8 @@
     const inboxItemId = text(metadata.inbox_item_id);
     if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
       const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
-      state.permissionRequests.set(authorityId, {
+      const request = {
         requestId: authorityId,
-        actionId: text(metadata.action_id) || permissionRequestId,
         scope: text(metadata.permission_scope),
         preview: typeof (metadata.approval_display || metadata.preview) === "object"
           ? JSON.stringify(metadata.approval_display || metadata.preview, null, 2)
@@ -250,7 +249,11 @@
         kind: type === "server.waiting_approval" ? "server" : type === "api.waiting_approval" ? "api" : type === "action.approval.required" ? "transactional" : "computer",
         status: "pending",
         decision: "",
-      });
+      };
+      if (type === "action.approval.required") {
+        request.actionId = text(metadata.action_id);
+      }
+      state.permissionRequests.set(authorityId, request);
     } else if ((type === "computer.permission_decided" || type === "server.approval_decided" || type === "api.approval_decided" || type === "action.approval.granted" || type === "action.approval.denied") && permissionRequestId) {
       const previous = state.permissionRequests.get(permissionRequestId) || {
         requestId: permissionRequestId,
@@ -452,7 +455,7 @@
                   render();
                   try {
                     const permissionPath = serverApproval ? "server-approvals" : apiApproval ? "api-approvals" : transactionalApproval ? "transactional-actions" : "computer-permissions";
-                    const requestTarget = transactionalApproval ? (request.actionId || permissionRequestId) : permissionRequestId;
+                    const requestTarget = transactionalApproval ? authorityId : permissionRequestId;
                     const response = await fetch(
                       `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(requestTarget)}`,
                       {
