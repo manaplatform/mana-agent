@@ -10,8 +10,10 @@ These verify:
 
 from __future__ import annotations
 
-from pathlib import Path
+import getpass
 import json
+from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,11 +25,25 @@ from mana_agent.gateway import (
     RichChatContext,
 )
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
+from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
+from mana_agent.human_inbox.models import (
+    InboxRequest,
+    InboxRequestType,
+    ResponseOperation,
+    ReviewerAssignment,
+    ReviewerType,
+)
+from mana_agent.human_inbox.repository import (
+    InboxConcurrentUpdateError,
+    LocalInboxRepository,
+)
+from mana_agent.human_inbox.service import HumanInboxService
+from mana_agent.human_inbox.tokens import ResponseTokenSigner
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.memory import MemoryContent, MemoryRecord
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
-from mana_agent.remote_execution.models import RemoteExecutionEvent, RemoteExecutionRequest
+from mana_agent.remote_execution.models import RemoteExecutionRequest
 from mana_agent.remote_execution.providers.local_ssh import LocalSSHProvider
 from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.remote_execution.target_policy import TargetPolicy, TargetPolicyMode
@@ -153,17 +169,73 @@ class _DummyCodingAgent:
         self.orch = orch
 
 
-def test_missing_managed_worker_uses_direct_ssh_and_operations_lane_tool(
+def _human_inbox(tmp_path: Path) -> HumanInboxService:
+    root = tmp_path / "inbox"
+    reviewer = getpass.getuser()
+    return HumanInboxService(
+        repository=LocalInboxRepository(root),
+        identities=StaticIdentityDirectory(
+            [
+                ReviewerIdentity(identity_id=reviewer),
+            ]
+        ),
+        token_signer=ResponseTokenSigner(root / "signing.key"),
+    )
+
+
+def _persist_server_approval(
+    gateway: AgentChatGateway,
+    tmp_path: Path,
+    *,
+    request_id: str,
+    pending: dict[str, Any],
+) -> None:
+    gateway.human_inbox_service = _human_inbox(tmp_path)
+    decision = dict(pending.get("decision") or {})
+    reviewer = getpass.getuser()
+    gateway.human_inbox_service.create(
+        InboxRequest(
+            request_type=InboxRequestType.APPROVAL,
+            task_id=str(
+                pending.get("lane_task_id") or f"server:{pending['session_id']}"
+            ),
+            branch_id=str(
+                pending.get("lane_task_id") or f"server:{pending['session_id']}"
+            ),
+            policy_decision_id=str(
+                decision.get("decision_id") or "server-test-decision"
+            ),
+            permission_request_id=request_id,
+            action_intent_id=(
+                f"server:{decision.get('decision_id') or 'server-test-decision'}"
+            ),
+            action_digest=str(pending["exact_action_key"]),
+            requested_by_agent_id="chat_gateway",
+            reviewer=ReviewerAssignment(
+                reviewer_type=ReviewerType.PERSON,
+                reviewer_id=reviewer,
+            ),
+            title="Approve exact server action",
+            summary="Review one exact server operation.",
+            allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+            minimal_context={"action_count": 1, "resource_count": 1},
+            protected_context={"server_action": pending},
+            disclosed_fields=["action_count", "resource_count"],
+            expires_at=gateway.human_inbox_service.clock() + timedelta(minutes=15),
+            idempotency_key=f"server-test:{request_id}",
+            deduplication_key=f"server-test:{request_id}",
+        )
+    )
+
+
+def test_missing_managed_worker_fails_closed_without_direct_ssh(
     monkeypatch, tmp_path: Path
 ) -> None:
+    direct_calls: list[str] = []
+
     async def execute_direct(self, request, emit, cancel):
-        emit(RemoteExecutionEvent(
-            job_id=request.job_id,
-            session_id=request.session_id,
-            kind="stdout",
-            data={"chunk": "direct output"},
-        ))
-        return 0, "direct output", ""
+        direct_calls.append(request.job_id)
+        raise AssertionError("missing workers must not select direct SSH")
 
     monkeypatch.setattr(LocalSSHProvider, "execute", execute_direct)
     gateway = object.__new__(AgentChatGateway)
@@ -204,21 +276,21 @@ def test_missing_managed_worker_uses_direct_ssh_and_operations_lane_tool(
         options={"_lane_task_id": "lane-task"},
     )
 
-    assert result.mode == "remote-completed"
-    assert result.payload["provider"] == "remote-ssh"
-    assert "direct output" in result.answer
-    assert authorized == [("lane-task", "remote_ssh_execute")]
+    assert result.mode == "route-error"
+    assert result.error == "remote_request_invalid"
+    assert result.payload == {"route": "remote_execution"}
+    assert direct_calls == []
+    assert authorized == []
 
 
-def test_missing_worker_at_permission_resume_uses_direct_ssh(monkeypatch) -> None:
+def test_missing_worker_at_permission_resume_fails_without_provider_change(
+    monkeypatch,
+) -> None:
+    direct_calls: list[str] = []
+
     async def execute_direct(self, request, emit, cancel):
-        emit(RemoteExecutionEvent(
-            job_id=request.job_id,
-            session_id=request.session_id,
-            kind="stdout",
-            data={"chunk": "Top client: 203.0.113.8 (42 requests)\n"},
-        ))
-        return 0, "Top client: 203.0.113.8 (42 requests)\n", ""
+        direct_calls.append(request.job_id)
+        raise AssertionError("approved worker requests must not switch providers")
 
     monkeypatch.setattr(LocalSSHProvider, "execute", execute_direct)
     gateway = object.__new__(AgentChatGateway)
@@ -250,19 +322,20 @@ def test_missing_worker_at_permission_resume_uses_direct_ssh(monkeypatch) -> Non
     result = gateway.remote_permission_command(permission["permission_request_id"])
 
     assert result == {
-        "status": "succeeded",
+        "status": "worker_unavailable",
         "job_id": "job",
         "message": (
-            "Approved remote SSH job completed through direct SSH.\n\n"
-            "Remote command output:\nTop client: 203.0.113.8 (42 requests)\n"
+            "No trusted external SSH worker is connected. "
+            "No local SSH fallback was attempted."
         ),
     }
     assert transitions == [("lane-task", "running", "remote SSH permission approved")]
-    assert finishes == [("lane-task", "completed")]
+    assert finishes == [("lane-task", "failed")]
     assert gateway._remote_job_lanes == {}
+    assert direct_calls == []
 
 
-def test_server_approval_is_session_bound_exact_and_single_use() -> None:
+def test_server_approval_is_session_bound_exact_and_single_use(tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
     transitions: list[tuple[str, str, str]] = []
     finishes: list[tuple[str, str]] = []
@@ -303,19 +376,24 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
         ),
         finish=finish,
     )
-    gateway._pending_server_approvals = {
-        "server_approval_1": {
-            "session_id": "session-1",
-            "decision": decision.model_dump(mode="json"),
-            "argv": ["sh", "-c", "install-nginx"],
-            "exact_action_key": "exact-key",
-            "cwd": None,
-            "timeout_seconds": 60,
-            "pty": False,
-            "environment": {},
-            "lane_task_id": "lane-task",
-        }
+    pending = {
+        "session_id": "session-1",
+        "decision": decision.model_dump(mode="json"),
+        "argv": ["sh", "-c", "install-nginx"],
+        "exact_action_key": "exact-key",
+        "cwd": None,
+        "timeout_seconds": 60,
+        "pty": False,
+        "environment": {},
+        "lane_task_id": "lane-task",
     }
+    gateway._pending_server_approvals = {"server_approval_1": pending}
+    _persist_server_approval(
+        gateway,
+        tmp_path,
+        request_id="server_approval_1",
+        pending=pending,
+    )
 
     try:
         gateway.server_approval_command(
@@ -344,13 +422,13 @@ def test_server_approval_is_session_bound_exact_and_single_use() -> None:
     assert finishes == [("lane-task", "completed")]
     try:
         gateway.server_approval_command("server_approval_1", session_id="session-1")
-    except LookupError as exc:
-        assert "already consumed" in str(exc)
+    except InboxConcurrentUpdateError as exc:
+        assert "already completed" in str(exc)
     else:
         raise AssertionError("server approvals must be single use")
 
 
-def test_server_approval_denial_consumes_request_without_execution() -> None:
+def test_server_approval_denial_consumes_request_without_execution(tmp_path: Path) -> None:
     cancellations: list[tuple[str, str]] = []
     gateway = object.__new__(AgentChatGateway)
     gateway._lane_coordinator = SimpleNamespace(
@@ -358,12 +436,18 @@ def test_server_approval_denial_consumes_request_without_execution() -> None:
             (task_id, reason)
         )
     )
-    gateway._pending_server_approvals = {
-        "server_approval_1": {
-            "session_id": "session-1",
-            "lane_task_id": "lane-task",
-        }
+    pending = {
+        "session_id": "session-1",
+        "lane_task_id": "lane-task",
+        "exact_action_key": "exact-key",
     }
+    gateway._pending_server_approvals = {"server_approval_1": pending}
+    _persist_server_approval(
+        gateway,
+        tmp_path,
+        request_id="server_approval_1",
+        pending=pending,
+    )
 
     result = gateway.deny_server_approval_command(
         "server_approval_1",

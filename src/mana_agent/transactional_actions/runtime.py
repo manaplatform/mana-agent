@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import getpass
 from pathlib import Path
 from typing import Any
 
 from mana_agent.config.settings import mana_home
 from mana_agent.services.execution_event_hub import get_execution_event_hub
+from mana_agent.human_inbox import default_human_inbox_service
 
 from .adapters import FileActionAdapter
 from .approvals import ApprovalRegistry
@@ -30,6 +32,7 @@ def default_action_gateway(
             allowed_http_hosts=allowed_http_hosts,
         )),
         approvals=ApprovalRegistry(root / "approvals"),
+        inbox_service=default_human_inbox_service(),
         event_sink=lambda event: (
             hub.publish(event, persist=False)
             if surface_approval_events or event.get("event_type") != "action.approval.required"
@@ -86,6 +89,7 @@ def execute_file_action(
             "error": str(exc),
             "permission_required": True,
             "permission_request_id": exc.action.action_id,
+            "inbox_item_id": exc.inbox_item_id,
             "action_id": exc.action.action_id,
             "transaction_id": exc.action.transaction_id,
             "preview": exc.action.preview.redacted() if exc.action.preview else {},
@@ -114,14 +118,26 @@ def execute_file_action(
     }
 
 
-def approve_action(workspace_root: Path, action_id: str, *, approved_by: str, ttl_seconds: int = 300) -> str:
+def approve_action(
+    workspace_root: Path,
+    action_id: str,
+    *,
+    approved_by: str,
+    reviewer_id: str | None = None,
+    ttl_seconds: int = 300,
+) -> str:
     """Issue a narrow approval; execution must separately present the returned ID."""
     gateway = default_action_gateway(workspace_root)
     action = gateway.store.get_action(action_id)
     if action is None:
         raise LookupError("unknown action")
     _assert_workspace_scope(workspace_root, action)
-    return gateway.approve(action_id, approved_by=approved_by, ttl_seconds=ttl_seconds)
+    return gateway.approve(
+        action_id,
+        approved_by=approved_by,
+        reviewer_id=reviewer_id or getpass.getuser(),
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def approve_transaction(
@@ -129,6 +145,7 @@ def approve_transaction(
     transaction_id: str,
     *,
     approved_by: str,
+    reviewer_id: str | None = None,
     ttl_seconds: int = 300,
 ) -> dict[str, str]:
     """Issue exact per-action grants bound to one durable transaction plan."""
@@ -144,17 +161,28 @@ def approve_transaction(
     return gateway.approve_transaction(
         transaction_id,
         approved_by=approved_by,
+        reviewer_id=reviewer_id or getpass.getuser(),
         ttl_seconds=ttl_seconds,
     )
 
 
-def deny_action(workspace_root: Path, action_id: str, *, denied_by: str) -> dict[str, Any]:
+def deny_action(
+    workspace_root: Path,
+    action_id: str,
+    *,
+    denied_by: str,
+    reviewer_id: str | None = None,
+) -> dict[str, Any]:
     gateway = default_action_gateway(workspace_root)
     pending = gateway.store.get_action(action_id)
     if pending is None:
         raise LookupError("unknown action")
     _assert_workspace_scope(workspace_root, pending)
-    action = gateway.deny(action_id, denied_by=denied_by)
+    action = gateway.deny(
+        action_id,
+        denied_by=denied_by,
+        reviewer_id=reviewer_id or getpass.getuser(),
+    )
     return action.model_dump(mode="json")
 
 

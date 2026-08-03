@@ -97,6 +97,16 @@ class CompensationActionAdapter(ActionAdapter):
             exact_invocation=action.normalized_arguments,
             expected_side_effects=action.expected_side_effects,
             risks=["compensation is a new side effect and is not atomic rollback"],
+            externally_visible=(
+                self.original.preview.externally_visible
+                if self.original.preview is not None
+                else None
+            ),
+            potentially_billable=(
+                self.original.preview.potentially_billable
+                if self.original.preview is not None
+                else None
+            ),
         )
 
     def execute(self, action: ActionIntent) -> dict[str, Any]:
@@ -222,6 +232,8 @@ class FileActionAdapter(ActionAdapter):
             exact_invocation=action.normalized_arguments,
             expected_side_effects=action.expected_side_effects,
             risks=risks,
+            externally_visible=False,
+            potentially_billable=False,
             supports_native_idempotency=False,
         )
 
@@ -466,7 +478,7 @@ class HttpActionAdapter(ActionAdapter):
         return ActionIntent(parent_task_id=self.parent_task_id, transaction_id=self.transaction_id, actor=self.actor, originating_agent=self.originating_agent, tool_name="http", operation_name=self.method, target_resources=[f"{parsed.scheme}://{parsed.hostname}{parsed.path}"], normalized_arguments={"method": self.method, "url": redacted_url, "host": parsed.hostname or "", "headers": redact_secrets(self.headers), "body_sha256": _sha(self.body or b""), "body_bytes": len(self.body or b"")}, requested_capabilities=["network.write", "data.disclose" if self.body else "network.connect"], expected_side_effects=[f"mutate remote resource with HTTP {self.method}"], data_disclosure=DataDisclosure.EXTERNAL_PRIVATE if self.body else DataDisclosure.NONE, blast_radius=BlastRadius.EXTERNAL_ACCOUNT, reversibility=Reversibility.IRREVERSIBLE if self.method == "DELETE" else Reversibility.UNKNOWN, idempotency_key=self.idempotency_key, verification_plan=["verify response semantics", "query remote state when an adapter verifier is configured"], compensation_strategy="No generic rollback exists; any provider-specific compensation is a separately gated action.")
 
     def preview(self, action: ActionIntent) -> ActionPreview:
-        return ActionPreview(summary=f"HTTP {self.method} remote mutation", resources=[{"url": action.normalized_arguments["url"], "host": action.normalized_arguments["host"], "change": "remote mutation"}], exact_invocation=action.normalized_arguments, expected_side_effects=action.expected_side_effects, disclosed_data=[f"request body sha256={action.normalized_arguments['body_sha256']} bytes={action.normalized_arguments['body_bytes']}"] if self.body else [], risks=["remote mutation may be irreversible", "request-body disclosure cannot be recalled" if self.body else ""], supports_native_idempotency=self.native_idempotency)
+        return ActionPreview(summary=f"HTTP {self.method} remote mutation", resources=[{"url": action.normalized_arguments["url"], "host": action.normalized_arguments["host"], "change": "remote mutation"}], exact_invocation=action.normalized_arguments, expected_side_effects=action.expected_side_effects, disclosed_data=[f"request body sha256={action.normalized_arguments['body_sha256']} bytes={action.normalized_arguments['body_bytes']}"] if self.body else [], risks=["remote mutation may be irreversible", "request-body disclosure cannot be recalled" if self.body else ""], externally_visible=True, potentially_billable=None, supports_native_idempotency=self.native_idempotency)
 
     def execute(self, action: ActionIntent) -> dict[str, Any]:
         request = urllib.request.Request(self.url, data=self.body, headers=self.headers, method=self.method)

@@ -132,6 +132,10 @@ def cancel_task(
         if body.attempt_id
         else supervisor.cancel(task_id, reason=body.reason, propagate=body.propagate)
     )
+    inbox = getattr(request.app.state, "human_inbox", None)
+    if inbox is not None:
+        for cancelled_task_id in changed:
+            inbox.cancel_for_task(cancelled_task_id, reason=body.reason)
     return {"task_id": task_id, "cancelled": changed}
 
 

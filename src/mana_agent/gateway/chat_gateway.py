@@ -13,6 +13,7 @@ building AskService / CodingAgent directly.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import logging
 import shlex
@@ -20,6 +21,7 @@ import shutil
 import threading
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -94,6 +96,13 @@ from mana_agent.execution_supervisor.models import (
     RetryCategory,
 )
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
+from mana_agent.human_inbox.models import (
+    AgentInboxObservation,
+    HumanResponse,
+    InboxItem,
+    InboxRequest,
+    canonical_digest,
+)
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
 from mana_agent.integrations.computer_control.context import (
     authenticated_computer_client,
@@ -466,7 +475,13 @@ class AgentChatGateway:
         # durable action store here so its audit target is available before a
         # model tool proposes the first computer-control action.
         from mana_agent.transactional_actions.runtime import default_action_gateway
+        from mana_agent.human_inbox import default_human_inbox_service
+        from mana_agent.human_inbox.notifications import ChatHistoryNotificationAdapter
 
+        self.human_inbox_service = default_human_inbox_service()
+        self.human_inbox_service.notification_adapters.append(
+            ChatHistoryNotificationAdapter()
+        )
         default_action_gateway(self.root)
         self.settings = settings or Settings()
         self._workspaces = WorkspaceService()
@@ -594,7 +609,9 @@ class AgentChatGateway:
         from mana_agent.chat_commands import CommandDispatcher, build_default_registry
 
         self.command_registry = build_default_registry()
-        self.remote_execution_service = RemoteExecutionService()
+        self.remote_execution_service = RemoteExecutionService(
+            inbox_service=self.human_inbox_service,
+        )
         self.server_management_service = ServerManagementService()
         self.media_service = MediaService(
             event_sink=self._event_sink,
@@ -666,6 +683,38 @@ class AgentChatGateway:
     # ------------------------------------------------------------------
     # Typed media gateway operations
     # ------------------------------------------------------------------
+
+    def propose_human_input(self, request: InboxRequest) -> InboxItem:
+        """Persist a typed agent request before any frontend prompt is emitted."""
+        return self.human_inbox_service.create(request)
+
+    def observe_human_input(
+        self,
+        inbox_item_id: str,
+        *,
+        requesting_agent_id: str,
+        task_id: str,
+    ) -> AgentInboxObservation:
+        """Read status/structured response without granting response authority."""
+        return self.human_inbox_service.observe_for_agent(
+            inbox_item_id,
+            requesting_agent_id=requesting_agent_id,
+            task_id=task_id,
+        )
+
+    def consume_human_input(
+        self,
+        inbox_item_id: str,
+        *,
+        requesting_agent_id: str,
+        task_id: str,
+    ) -> HumanResponse:
+        """Consume the terminal structured response for one authorized task agent."""
+        return self.human_inbox_service.consume_for_agent(
+            inbox_item_id,
+            requesting_agent_id=requesting_agent_id,
+            task_id=task_id,
+        )
 
     def generate_image(
         self, session_id: str, request: ImageGenerationRequest, *, turn_id: str = ""
@@ -881,27 +930,6 @@ class AgentChatGateway:
         """Approve and resume only the exact remote SSH job bound to this ID."""
         from mana_agent.execution.manager import run_sync
 
-        pending = next(
-            (
-                item
-                for item in self.remote_execution_service.pending_permissions()
-                if item["permission_request_id"] == permission_request_id
-            ),
-            None,
-        )
-        if pending is not None:
-            pending_job = self.remote_execution_service.jobs[pending["job_id"]]
-            request = pending_job.request
-            if request.provider in {"reverse-worker", "external_worker"}:
-                try:
-                    self.remote_execution_service.workers.worker(request.worker_id)
-                except LookupError:
-                    # Rebind the still-pending approval to the direct request,
-                    # so a worker disappearing between prompt and approval does
-                    # not leave the chat route stranded.
-                    pending_job.request = request.model_copy(
-                        update={"provider": "remote-ssh", "worker_id": ""}
-                    )
         job = self.remote_execution_service.approve_permission(permission_request_id)
         lane_task_id = getattr(self, "_remote_job_lanes", {}).get(job.request.job_id)
         supervision_error = ""
@@ -985,20 +1013,49 @@ class AgentChatGateway:
     ) -> dict[str, Any]:
         """Consume and execute one exact session-bound server approval."""
         from mana_agent.execution.manager import run_sync
+        from mana_agent.human_inbox.models import (
+            InboxStatus,
+            ResponseOperation,
+            ResponseSubmission,
+            UNRESOLVED_STATUSES,
+        )
         from mana_agent.server.models import ServerActionDecision, ServerApproval
 
-        pending = self._pending_server_approvals.get(approval_request_id)
-        if pending is None:
-            raise LookupError("Server approval request was not found or was already consumed.")
+        item, pending = self._server_inbox_pending(approval_request_id)
         if str(pending["session_id"]) != str(session_id):
             raise PermissionError("Server approval belongs to a different session.")
         decision = ServerActionDecision.model_validate(pending["decision"])
+        current_action_key = str(pending["exact_action_key"])
+        if item.action_digest != current_action_key:
+            raise PermissionError("server action changed after the durable approval preview")
+        if item.status in UNRESOLVED_STATUSES:
+            item = self.human_inbox_service.respond(ResponseSubmission(
+                inbox_item_id=item.inbox_item_id,
+                operation=ResponseOperation.APPROVE,
+                actor_id=getpass.getuser(),
+                channel="server_legacy_prompt",
+                idempotency_key=f"server-approve:{approval_request_id}",
+                current_action_digest=current_action_key,
+            ))
+        if item.status is not InboxStatus.APPROVED:
+            raise PermissionError(f"server action approval is {item.status.value}")
+        if item.expires_at <= self.human_inbox_service.clock():
+            raise PermissionError("server action approval expired before execution")
+        self.human_inbox_service.assert_response_actor_is_currently_authorized(item)
+        self.human_inbox_service.record_execution_event(
+            item.inbox_item_id,
+            event_type="policy_revalidated",
+            details={"exact_action_key": current_action_key},
+        )
+        execution_claim_id = self.human_inbox_service.claim_action_execution(
+            item.inbox_item_id
+        )
         approval = ServerApproval(
             approval_id=approval_request_id,
             decision_id=decision.decision_id,
             server_id=decision.server_id,
-            exact_action_key=str(pending["exact_action_key"]),
-            approved_by="user",
+            exact_action_key=current_action_key,
+            approved_by=item.response_actor_id,
         )
         lane_task_id = str(pending.get("lane_task_id") or "")
         if lane_task_id:
@@ -1008,6 +1065,11 @@ class AgentChatGateway:
                 reason="server action approved by the user",
             )
         self._pending_server_approvals.pop(approval_request_id)
+        self.human_inbox_service.record_execution_event(
+            item.inbox_item_id,
+            event_type="action_executed",
+            details={"server_id": decision.server_id},
+        )
         try:
             outcome = run_sync(
                 self.server_management_service.execute(
@@ -1032,6 +1094,20 @@ class AgentChatGateway:
         serialized = outcome.model_dump(mode="json")
         succeeded = (
             outcome.exit_code == 0 and not outcome.timed_out and not outcome.cancelled
+        )
+        self.human_inbox_service.complete_action_execution(
+            item.inbox_item_id,
+            execution_claim_id=execution_claim_id,
+            result_digest=canonical_digest(outcome.model_dump(mode="json")),
+        )
+        self.human_inbox_service.record_execution_event(
+            item.inbox_item_id,
+            event_type="action_verification_completed",
+            details={
+                "server_id": decision.server_id,
+                "succeeded": succeeded,
+                "exit_code": outcome.exit_code,
+            },
         )
         supervision_error = ""
         if lane_task_id:
@@ -1081,11 +1157,28 @@ class AgentChatGateway:
         session_id: str,
     ) -> dict[str, Any]:
         """Deny and consume one exact session-bound server approval."""
-        pending = self._pending_server_approvals.get(approval_request_id)
-        if pending is None:
-            raise LookupError("Server approval request was not found or was already consumed.")
+        from mana_agent.human_inbox.models import (
+            InboxStatus,
+            ResponseOperation,
+            ResponseSubmission,
+            UNRESOLVED_STATUSES,
+        )
+
+        item, pending = self._server_inbox_pending(approval_request_id)
         if str(pending["session_id"]) != str(session_id):
             raise PermissionError("Server approval belongs to a different session.")
+        current_action_key = str(pending["exact_action_key"])
+        if item.status in UNRESOLVED_STATUSES:
+            item = self.human_inbox_service.respond(ResponseSubmission(
+                inbox_item_id=item.inbox_item_id,
+                operation=ResponseOperation.DENY,
+                actor_id=getpass.getuser(),
+                channel="server_legacy_prompt",
+                idempotency_key=f"server-deny:{approval_request_id}",
+                current_action_digest=current_action_key,
+            ))
+        if item.status is not InboxStatus.DENIED:
+            raise PermissionError(f"server action approval is {item.status.value}")
         lane_task_id = str(pending.get("lane_task_id") or "")
         if lane_task_id:
             self._lane_coordinator.cancel_task(
@@ -1098,6 +1191,30 @@ class AgentChatGateway:
             "approval_request_id": approval_request_id,
             "message": "Server action denied. No server command was executed.",
         }
+
+    def _server_inbox_pending(self, approval_request_id: str):
+        """Load authoritative server approval state and recover protected intent."""
+        matches = [
+            item
+            for item in self.human_inbox_service.repository.list()
+            if item.permission_request_id == approval_request_id
+            and item.action_intent_id.startswith("server:")
+        ]
+        if not matches:
+            raise LookupError("Durable server approval request was not found.")
+        item = matches[0]
+        pending = self._pending_server_approvals.get(approval_request_id)
+        if pending is None:
+            if not item.protected_context_ref:
+                raise LookupError("Durable server approval context was not found.")
+            context = self.human_inbox_service.repository.read_protected_context(
+                item.protected_context_ref
+            )
+            pending = context.get("server_action")
+            if not isinstance(pending, dict):
+                raise LookupError("Durable server approval context is invalid.")
+            self._pending_server_approvals[approval_request_id] = pending
+        return item, pending
 
     def api_approval_command(
         self,
@@ -4171,8 +4288,8 @@ class AgentChatGateway:
                     and preview_argv
                 ):
                     preview_argv[-1] = "<redacted-file-content>"
-                command_preview = shlex.join(preview_argv)
-                self._pending_server_approvals[approval_request_id] = {
+                command_preview = str(redact_secrets(shlex.join(preview_argv)))
+                pending_server_action = {
                     "session_id": context.session_id,
                     "decision": server_decision.model_dump(mode="json"),
                     "argv": list(argv),
@@ -4190,6 +4307,85 @@ class AgentChatGateway:
                     },
                     "lane_task_id": lane_task_id,
                 }
+                from mana_agent.human_inbox.models import (
+                    InboxRequestType,
+                    ResponseOperation,
+                    ReviewerAssignment,
+                    ReviewerType,
+                    RiskLevel as InboxRiskLevel,
+                )
+
+                reversibility = (
+                    "compensatable"
+                    if server_decision.recovery_plan
+                    else "irreversible" if server_decision.destructive else "unknown"
+                )
+                effect_labels: dict[str, bool | None] = {
+                    "reversible": False if reversibility != "unknown" else None,
+                    "compensatable": (
+                        True if reversibility == "compensatable"
+                        else False if reversibility == "irreversible" else None
+                    ),
+                    "irreversible": (
+                        True if reversibility == "irreversible"
+                        else False if reversibility == "compensatable" else None
+                    ),
+                    "externally_visible": True,
+                    "data_disclosing": (
+                        True if pending_server_action["environment"] else None
+                    ),
+                    "potentially_billable": None,
+                }
+                inbox_item = self.human_inbox_service.create(InboxRequest(
+                    request_type=InboxRequestType.APPROVAL,
+                    task_id=lane_task_id or f"server:{context.session_id}",
+                    branch_id=lane_task_id or f"server:{context.session_id}",
+                    policy_decision_id=server_decision.decision_id,
+                    permission_request_id=approval_request_id,
+                    action_intent_id=f"server:{server_decision.decision_id}",
+                    action_digest=exc.exact_action_key,
+                    requested_by_agent_id="chat_gateway",
+                    reviewer=ReviewerAssignment(
+                        reviewer_type=ReviewerType.PERSON,
+                        reviewer_id=getpass.getuser(),
+                    ),
+                    title=f"Approve server {server_decision.action.value}",
+                    summary=(
+                        f"Review an exact server action affecting "
+                        f"{len(server_decision.affected_resources)} resource(s)."
+                    ),
+                    risk_level=(
+                        InboxRiskLevel.CRITICAL
+                        if server_decision.destructive
+                        else InboxRiskLevel.HIGH
+                    ),
+                    allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+                    minimal_context={
+                        "action": server_decision.action.value,
+                        "action_count": 1,
+                        "resource_count": len(server_decision.affected_resources),
+                        "destructive": server_decision.destructive,
+                        "effect_labels": effect_labels,
+                    },
+                    protected_context={
+                        "server_action": pending_server_action,
+                        "effect_labels": effect_labels,
+                    },
+                    disclosed_fields=[
+                        "action", "action_count", "resource_count", "destructive",
+                        "effect_labels",
+                    ],
+                    reversibility=reversibility,
+                    expires_at=self.human_inbox_service.clock() + timedelta(minutes=15),
+                    idempotency_key=(
+                        f"server-approval:{server_decision.decision_id}:{exc.exact_action_key}"
+                    ),
+                    deduplication_key=(
+                        f"server-approval:{server_decision.decision_id}:{exc.exact_action_key}"
+                    ),
+                ))
+                approval_request_id = inbox_item.permission_request_id
+                self._pending_server_approvals[approval_request_id] = pending_server_action
                 approval_metadata = {
                     "permission_request_id": approval_request_id,
                     "permission_scope": "server.action.execute",
@@ -4198,7 +4394,9 @@ class AgentChatGateway:
                     "decision_id": server_decision.decision_id,
                     "server_id": server_decision.server_id,
                     "tool_name": server_decision.tool_name,
-                    "affected_resources": list(server_decision.affected_resources),
+                    "affected_resources": list(
+                        redact_secrets(server_decision.affected_resources)
+                    ),
                 }
                 from mana_agent.chat.events import CodingActivityEvent
                 from mana_agent.chat.history import get_history
@@ -4276,19 +4474,11 @@ class AgentChatGateway:
                     remote_payload["worker_id"] = ""
                 elif provider in {"reverse-worker", "external_worker"}:
                     worker_id = str(remote_payload.get("worker_id") or "").strip()
-                    try:
-                        if worker_id == "auto":
-                            worker_id = self.remote_execution_service.workers.select_connected_worker().registration.worker_id
-                        else:
-                            self.remote_execution_service.workers.worker(worker_id)
-                    except LookupError:
-                        # The user explicitly requested that a missing managed
-                        # worker use the same model-selected direct SSH target.
-                        # The request remains subject to direct-SSH permission.
-                        remote_payload["provider"] = "remote-ssh"
-                        remote_payload["worker_id"] = ""
+                    if worker_id == "auto":
+                        worker_id = self.remote_execution_service.workers.select_connected_worker().registration.worker_id
                     else:
-                        remote_payload["worker_id"] = worker_id
+                        self.remote_execution_service.workers.worker(worker_id)
+                    remote_payload["worker_id"] = worker_id
                 authentication = remote_payload.get("authentication")
                 if (
                     isinstance(authentication, dict)
@@ -4323,6 +4513,7 @@ class AgentChatGateway:
             job = self.remote_execution_service.submit(request)
             if job.state.value == "awaiting_permission":
                 permission = self.remote_execution_service.pending_permissions()[-1]
+                safe_permission = dict(redact_secrets(permission))
                 from mana_agent.chat.events import CodingActivityEvent
                 from mana_agent.chat.history import get_history
 
@@ -4336,7 +4527,7 @@ class AgentChatGateway:
                                     "permission_request_id"
                                 ],
                                 "permission_scope": "remote.ssh.execute",
-                                "preview": f"{permission['target']} · {permission['command']}",
+                                "preview": f"{safe_permission['target']} · {safe_permission['command']}",
                                 "remote_permission": True,
                             },
                         },
@@ -4352,7 +4543,7 @@ class AgentChatGateway:
                                 "permission_request_id"
                             ],
                             "permission_scope": "remote.ssh.execute",
-                            "preview": f"{permission['target']} · {permission['command']}",
+                            "preview": f"{safe_permission['target']} · {safe_permission['command']}",
                             "remote_permission": True,
                         },
                     )
@@ -4363,7 +4554,7 @@ class AgentChatGateway:
                     payload={
                         "route": decision.route,
                         "job_id": request.job_id,
-                        "permission_request": permission,
+                        "permission_request": safe_permission,
                         "events": [
                             event.model_dump(mode="json") for event in job.events
                         ],

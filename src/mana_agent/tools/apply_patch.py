@@ -1450,6 +1450,8 @@ def safe_apply_patch(
                 exact_invocation=action.normalized_arguments,
                 expected_side_effects=action.expected_side_effects,
                 risks=["patch includes deletion"] if any(item.op == "delete" for item in parsed) else [],
+                externally_visible=False,
+                potentially_billable=False,
             )
 
         def execute(self, action: ActionIntent) -> dict[str, Any]:

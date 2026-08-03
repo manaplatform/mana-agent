@@ -1,5 +1,13 @@
 # Policy-Gated Transactional Actions
 
+Approval-required decisions now create a persisted human inbox item before any
+UI prompt is surfaced. The record binds the policy decision ID, exact action and
+preview digest, reviewer assignment, disclosed snapshot, expiry, and existing
+permission request ID. Dashboard/TUI compatibility endpoints delegate into that
+record and the existing single-use `ApprovalGrant`; they are not a second source
+of approval truth. Denial and expiration remain distinct human/action states.
+See [Durable Human-in-the-Loop Inbox](32-durable-human-inbox.md#binary-action-approval).
+
 Mana-Agent treats a generated tool call as an action proposal, never as authorization. Consequential actions use the shared `transactional_actions` gateway:
 
 ```text

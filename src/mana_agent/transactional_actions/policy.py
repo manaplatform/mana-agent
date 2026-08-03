@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import getpass
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -44,6 +45,8 @@ class PolicyConfig(StrictModel):
         "authorization", "api_key", "apikey", "password", "secret", "token", "credential"
     )
     approval_ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    approval_reviewer_type: str = "person"
+    approval_reviewer_id: str = Field(default_factory=getpass.getuser)
 
     def fingerprint(self) -> str:
         encoded = json.dumps(self.model_dump(mode="json"), sort_keys=True, default=str)
@@ -76,6 +79,8 @@ class ActionPolicy:
             policy_fingerprint=self.config.fingerprint(),
             decided_at=now,
             expires_at=min(action.expires_at, now + timedelta(seconds=self.config.approval_ttl_seconds)),
+            assigned_reviewer_type=self.config.approval_reviewer_type,
+            assigned_reviewer_id=self.config.approval_reviewer_id,
         )
 
     def _classify(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:

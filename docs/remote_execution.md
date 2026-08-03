@@ -10,3 +10,12 @@ Use `mana ssh add <name> --host <host> --user <user> --identity <path>` (or `--u
 The direct-SSH CLI supports `list`, `show`, `edit`, `remove`, `test`, `run`, `logs`, `doctor`, `upload`, and `download`. Chat routing uses the same `remote-ssh` contract and recognizes an explicit profile or explicitly supplied host, user, and authorized key/agent details. Tool actions are bound to `computer.ssh.connect`, `computer.ssh.execute`, `computer.ssh.read`, `computer.ssh.transfer`, profile mutations, and host trust permissions.
 
 Managed workers remain the route for persistent reverse connectivity. They use an authenticated WebSocket or HTTPS long-poll connection to the coordinator; the coordinator never calls into the worker. Worker credentials are owner-readable only, and worker jobs remain distinct from SSH-only targets. Interactive shells, forwarding, transfers, writes, and privileged actions require distinct permissions and exact action approval.
+
+Remote permission prompts are durable inbox items. The existing
+`remote_permission_*` ID remains a compatibility handle, while the full typed SSH
+request is stored only in owner-protected context and the notification discloses
+only risk/category counts. A coordinator restart restores unresolved or approved
+jobs from that record; concurrent or repeated reviewer responses still use the
+inbox's single terminal transition. The selected provider is part of the exact
+request: direct `local_ssh`/`remote-ssh` requests never switch to a worker, and
+worker requests never switch to direct SSH when availability changes.

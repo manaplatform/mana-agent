@@ -395,6 +395,8 @@ def run_git(
                 exact_invocation=action.normalized_arguments,
                 expected_side_effects=action.expected_side_effects,
                 risks=[risk.value],
+                externally_visible=(risk is GitRiskLevel.REMOTE_WRITE),
+                potentially_billable=None if risk is GitRiskLevel.REMOTE_WRITE else False,
             )
 
         def execute(self, action: ActionIntent) -> dict[str, Any]:

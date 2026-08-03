@@ -256,7 +256,7 @@ class ExecutionEvent(StrictModel):
 
 
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=3, ge=1)
+    schema_version: int = Field(default=4, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
@@ -329,6 +329,11 @@ class TaskRecord(StrictModel):
     previous_task_id: str = ""
     delegated_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
+    waiting_inbox_item_id: str = ""
+    waiting_reason: Literal["", "waiting_for_approval", "waiting_for_clarification"] = ""
+    human_inputs: list[dict[str, Any]] = Field(default_factory=list)
+    human_resume_claim_ids: list[str] = Field(default_factory=list)
+    human_wait_started_at: datetime | None = None
 
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":
@@ -339,6 +344,7 @@ class TaskRecord(StrictModel):
         for field_name in (
             "created_at", "updated_at", "started_at", "finished_at",
             "heartbeat_at", "lease_expires_at", "retry_not_before", "deadline_at",
+            "human_wait_started_at",
         ):
             value = getattr(self, field_name)
             if value is None:

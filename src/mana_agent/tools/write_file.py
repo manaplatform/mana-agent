@@ -443,6 +443,8 @@ def _cleanup_generated_parts(
                 exact_invocation=action.normalized_arguments,
                 expected_side_effects=action.expected_side_effects,
                 risks=["chunk artifacts cannot be reconstructed individually after cleanup"],
+                externally_visible=False,
+                potentially_billable=False,
             )
 
         def execute(self, action: ActionIntent) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+import getpass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -115,11 +116,15 @@ class ActionPreview(StrictModel):
     expected_side_effects: list[str] = Field(default_factory=list)
     disclosed_data: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    externally_visible: bool | None = None
+    potentially_billable: bool | None = None
     supports_native_idempotency: bool = False
     supports_dry_run: bool = False
 
     def redacted(self) -> dict[str, Any]:
-        return redact_secrets(self.model_dump(mode="json"))
+        # Omit unknown tri-state labels so existing stored preview digests remain
+        # stable across the schema addition; explicitly declared labels are bound.
+        return redact_secrets(self.model_dump(mode="json", exclude_none=True))
 
     def digest(self) -> str:
         payload = json.dumps(self.redacted(), sort_keys=True, ensure_ascii=False, default=str)
@@ -127,6 +132,7 @@ class ActionPreview(StrictModel):
 
 
 class PolicyDecision(StrictModel):
+    decision_id: str = ""
     outcome: PolicyOutcome
     reason_codes: list[str] = Field(min_length=1)
     explanation: str
@@ -135,6 +141,18 @@ class PolicyDecision(StrictModel):
     decided_at: datetime = Field(default_factory=utc_now)
     policy_fingerprint: str
     expires_at: datetime
+    assigned_reviewer_type: str = "person"
+    assigned_reviewer_id: str = Field(default_factory=getpass.getuser)
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_compatible_decision_id(cls, value: Any) -> Any:
+        if isinstance(value, dict) and not str(value.get("decision_id") or "").strip():
+            value = dict(value)
+            material = {key: item for key, item in value.items() if key != "decision_id"}
+            encoded = json.dumps(material, sort_keys=True, ensure_ascii=False, default=str)
+            value["decision_id"] = "policy_" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:32]
+        return value
 
     @model_validator(mode="after")
     def approval_scope_matches_outcome(self) -> "PolicyDecision":
@@ -142,6 +160,11 @@ class PolicyDecision(StrictModel):
             raise ValueError("approval decisions require an approval scope")
         if self.outcome is not PolicyOutcome.REQUIRE_APPROVAL and self.required_approval_scope is not None:
             raise ValueError("approval scope is valid only for require_approval")
+        if self.outcome is PolicyOutcome.REQUIRE_APPROVAL and (
+            self.assigned_reviewer_type not in {"person", "group", "role"}
+            or not self.assigned_reviewer_id.strip()
+        ):
+            raise ValueError("approval policy decisions require an explicit reviewer assignment")
         return self
 
 
@@ -247,6 +270,61 @@ class ActionIntent(StrictModel):
         }
         encoded = json.dumps(material, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def approval_digest(self) -> str:
+        """Canonical human authorization boundary for the exact action."""
+        material = {
+            "action_type": {"tool": self.tool_name, "operation": self.operation_name},
+            "target_resources": self.target_resources,
+            "parameters": self.normalized_arguments,
+            "disclosed_side_effects": self.expected_side_effects,
+            "risk_classification": {
+                "reversibility": self.reversibility.value,
+                "data_disclosure": self.data_disclosure.value,
+                "blast_radius": self.blast_radius.value,
+                "effect_labels": self.approval_effect_labels(),
+            },
+            "preview_digest": self.preview_digest,
+            "policy_decision_id": self.policy_decision.decision_id if self.policy_decision else "",
+            "policy_fingerprint": self.policy_decision.policy_fingerprint if self.policy_decision else "",
+            "expires_at": self.expires_at.isoformat(),
+        }
+        encoded = json.dumps(material, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def approval_effect_labels(self) -> dict[str, bool | None]:
+        """Return explicit human-facing effect labels without guessing unknowns."""
+        reversibility_unknown = self.reversibility is Reversibility.UNKNOWN
+        disclosure_unknown = self.data_disclosure is DataDisclosure.UNKNOWN
+        return {
+            "reversible": (
+                None
+                if reversibility_unknown
+                else self.reversibility
+                in {Reversibility.FULLY_REVERSIBLE, Reversibility.PARTIALLY_REVERSIBLE}
+            ),
+            "compensatable": (
+                None
+                if reversibility_unknown
+                else self.reversibility is Reversibility.COMPENSATABLE
+            ),
+            "irreversible": (
+                None
+                if reversibility_unknown
+                else self.reversibility is Reversibility.IRREVERSIBLE
+            ),
+            "externally_visible": (
+                self.preview.externally_visible if self.preview is not None else None
+            ),
+            "data_disclosing": (
+                None
+                if disclosure_unknown
+                else self.data_disclosure is not DataDisclosure.NONE
+            ),
+            "potentially_billable": (
+                self.preview.potentially_billable if self.preview is not None else None
+            ),
+        }
 
     def transition(self, target: ActionState) -> None:
         if target not in VALID_TRANSITIONS[self.state]:

@@ -23,6 +23,7 @@ from mana_agent.api.routes.teach import router as teach_router
 from mana_agent.api.routes.servers import router as servers_router
 from mana_agent.api.routes.tasks import router as tasks_router
 from mana_agent.api.routes.memory_capsules import router as memory_capsules_router
+from mana_agent.human_inbox.api import router as human_inbox_router
 from mana_agent.config.user_config import load_effective_settings, validate_bool
 
 
@@ -89,6 +90,7 @@ def create_app(
     github_autopilot: Any | None = None,
     capsule_identity_resolver: Any | None = None,
     capsule_service: Any | None = None,
+    human_inbox_identity_resolver: Any | None = None,
 ) -> FastAPI:
     from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
     from mana_agent.config.settings import Settings
@@ -102,16 +104,26 @@ def create_app(
         # so the standalone coordinator must own the same persistent registry.
         fleet_config = FleetConfig.from_settings(Settings())
         fleet_registry = FleetRegistry(FleetStore(fleet_config.root), fleet_config)
-    worker_gateway = WorkerGateway(WorkerGatewayConfig(
-        enabled=validate_bool(gateway_settings["MANA_WORKER_GATEWAY_ENABLED"]),
-        public_url=str(gateway_settings["MANA_WORKER_GATEWAY_PUBLIC_URL"]),
-        allow_insecure_http=validate_bool(
-            gateway_settings["MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP"]
+    shared_remote_execution = getattr(chat_gateway, "remote_execution_service", None)
+    worker_gateway = WorkerGateway(
+        WorkerGatewayConfig(
+            enabled=validate_bool(gateway_settings["MANA_WORKER_GATEWAY_ENABLED"]),
+            public_url=str(gateway_settings["MANA_WORKER_GATEWAY_PUBLIC_URL"]),
+            allow_insecure_http=validate_bool(
+                gateway_settings["MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP"]
+            ),
+            allow_insecure_local_development=validate_bool(
+                gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
+            ),
         ),
-        allow_insecure_local_development=validate_bool(
-            gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
+        registry=(
+            shared_remote_execution.workers
+            if shared_remote_execution is not None
+            else None
         ),
-    ), fleet_registry=fleet_registry)
+        execution=shared_remote_execution,
+        fleet_registry=fleet_registry,
+    )
     from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
     from mana_agent.services.execution_event_hub import get_execution_event_hub
 
@@ -138,6 +150,9 @@ def create_app(
         ExecutionSupervisorConfig.from_settings(Settings()),
         event_sink=supervisor_event,
     )
+    from mana_agent.human_inbox import default_human_inbox_service
+    human_inbox = default_human_inbox_service(branch_controller=execution_supervisor)
+    worker_gateway.execution.attach_inbox(human_inbox)
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
@@ -152,7 +167,10 @@ def create_app(
         if execution_supervisor.config.startup_recovery:
             execution_supervisor.reconnect_tree()
             execution_supervisor.recover()
+        human_inbox.expire_due()
+        application.state.human_inbox_reconciliation = human_inbox.reconcile()
         application.state.execution_supervisor = execution_supervisor
+        application.state.human_inbox = human_inbox
         if telegram_connector is not None:
             await telegram_connector.initialize()
             assert telegram_connector.task_queue is not None
@@ -205,6 +223,7 @@ def create_app(
     app.include_router(servers_router)
     app.include_router(tasks_router)
     app.include_router(memory_capsules_router)
+    app.include_router(human_inbox_router)
     app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:
         from mana_agent.github_autopilot.webhook import router as github_autopilot_router
@@ -220,6 +239,9 @@ def create_app(
     app.state.worker_gateway = worker_gateway
     app.state.fleet_registry = fleet_registry
     app.state.execution_supervisor = execution_supervisor
+    app.state.human_inbox = human_inbox
+    if human_inbox_identity_resolver is not None:
+        app.state.human_inbox_identity_resolver = human_inbox_identity_resolver
     if telegram_connector is not None:
         from fastapi import Response
 

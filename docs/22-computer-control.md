@@ -106,6 +106,10 @@ scope names and decisions, never private desktop content.
 
 When a scope is `ask`, Mana-Agent does not end with instructions to edit
 configuration. It places the exact pending action inside the active chat.
+Model-routed computer actions first pass through the shared transactional action
+pipeline, whose exact approval is persisted in the durable human inbox. The
+computer permission service then treats that one bound action as authorized; it
+does not create a second approval authority or let the model broaden parameters.
 Textual opens an in-chat permission modal, the Dashboard chat timeline renders
 an actionable permission card, and Dashboard → Computer Control also shows it with
 **Deny**, **Allow once**, **This session**, and **Always** choices. Approval

@@ -3,6 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from mana_agent.human_inbox.models import (
+    InboxRequest,
+    InboxRequestType,
+    InboxStatus,
+    ResponseOperation,
+    ResponseSubmission,
+    ReviewerAssignment,
+    ReviewerType,
+    RiskLevel,
+    canonical_digest,
+)
+from mana_agent.human_inbox.service import HumanInboxService
+
 from .adapters import ActionAdapter, ActionInvalidatedError, CompensationActionAdapter
 from .approvals import ApprovalRegistry
 from .compensation import CompensationRegistry, file_compensation_registry
@@ -21,9 +34,10 @@ from .store import ActionStore
 
 
 class ApprovalRequired(PermissionError):
-    def __init__(self, action: ActionIntent) -> None:
+    def __init__(self, action: ActionIntent, *, inbox_item_id: str = "") -> None:
         super().__init__("The action requires approval bound to its exact preview and policy decision.")
         self.action = action
+        self.inbox_item_id = inbox_item_id
 
 
 @dataclass(frozen=True)
@@ -44,9 +58,11 @@ class ActionGateway:
         approvals: ApprovalRegistry,
         event_sink: ActionEventSink | None = None,
         compensation_registry: CompensationRegistry | None = None,
+        inbox_service: HumanInboxService | None = None,
     ) -> None:
         self.store, self.policy, self.approvals, self.event_sink = store, policy, approvals, event_sink
         self.compensation_registry = compensation_registry or file_compensation_registry()
+        self.inbox_service = inbox_service
 
     def propose(self, adapter: ActionAdapter) -> ActionIntent:
         action = adapter.build_intent()
@@ -57,6 +73,8 @@ class ActionGateway:
                     ActionState.AWAITING_APPROVAL, ActionState.APPROVED, ActionState.FAILED
                 }:
                     self.approvals.invalidate_for_action(prior.action_id)
+                    if self.inbox_service is not None:
+                        self.inbox_service.supersede_for_action(prior.action_id)
                     if prior.state in {ActionState.AWAITING_APPROVAL, ActionState.APPROVED}:
                         prior.transition(ActionState.CANCELLED)
                         prior.error = "action material changed after preview; approval invalidated"
@@ -86,7 +104,8 @@ class ActionGateway:
         if action.policy_decision.outcome is PolicyOutcome.REQUIRE_APPROVAL:
             action.transition(ActionState.AWAITING_APPROVAL)
             self.store.save_action(action)
-            self._emit("action.approval.required", action)
+            inbox_item_id = self._ensure_inbox(action)
+            self._emit("action.approval.required", action, inbox_item_id=inbox_item_id)
             return action
         action.transition(ActionState.APPROVED)
         self.store.save_action(action)
@@ -108,6 +127,8 @@ class ActionGateway:
             and action.execution_attempts == 0
         ):
             self.approvals.invalidate_for_action(action.action_id)
+            if self.inbox_service is not None:
+                self.inbox_service.supersede_for_action(action.action_id)
             if action.state in {ActionState.AWAITING_APPROVAL, ActionState.APPROVED}:
                 action.transition(ActionState.CANCELLED)
                 action.error = "policy changed after preview; approval invalidated"
@@ -144,12 +165,64 @@ class ActionGateway:
             raise PermissionError("action or policy decision expired before execution")
         if action.state is ActionState.AWAITING_APPROVAL:
             transaction_binding = self._transaction_binding(action)
+            inbox_item = None
+            if self.inbox_service is not None:
+                items = self.inbox_service.repository.find_for_action(action.action_id)
+                inbox_item = items[0] if items else None
+                if inbox_item is None:
+                    inbox_item_id = self._ensure_inbox(action)
+                    inbox_item = self.inbox_service.repository.get(inbox_item_id)
+                if inbox_item is not None and inbox_item.status is InboxStatus.APPROVED:
+                    if inbox_item.action_digest != action.approval_digest():
+                        self.inbox_service.supersede_for_action(action.action_id)
+                        raise PermissionError("action material changed after the human decision")
+                    self.inbox_service.assert_response_actor_is_currently_authorized(inbox_item)
+                elif inbox_item is not None and inbox_item.status in {
+                    InboxStatus.DENIED,
+                    InboxStatus.CANCELLED,
+                    InboxStatus.SUPERSEDED,
+                    InboxStatus.EXPIRED,
+                }:
+                    action.transition(
+                        ActionState.EXPIRED if inbox_item.status is InboxStatus.EXPIRED else ActionState.CANCELLED
+                    )
+                    action.error = f"human decision: {inbox_item.status.value}"
+                    self.store.save_action(action)
+                    self.store.release_idempotency(action)
+                    raise PermissionError(action.error)
+                elif approval_id:
+                    raise PermissionError(
+                        "an approval grant cannot bypass the unresolved durable inbox item"
+                    )
             if not approval_id:
                 pending_grant = self.approvals.find_valid(
                     action, transaction_binding_digest=transaction_binding
                 )
+                if pending_grant is None and self.inbox_service is not None:
+                    if inbox_item is not None and inbox_item.action_digest != action.approval_digest():
+                        self.inbox_service.supersede_for_action(action.action_id)
+                        raise PermissionError("action material changed after the human decision")
+                    if inbox_item is not None and inbox_item.status is InboxStatus.APPROVED:
+                        pending_grant = self.approvals.issue(
+                            action,
+                            approved_by=inbox_item.response_actor_id,
+                            ttl_seconds=max(1, int((inbox_item.expires_at - utc_now()).total_seconds())),
+                        )
+                    elif inbox_item is not None and inbox_item.status in {
+                        InboxStatus.DENIED,
+                        InboxStatus.CANCELLED,
+                        InboxStatus.SUPERSEDED,
+                        InboxStatus.EXPIRED,
+                    }:
+                        action.transition(
+                            ActionState.EXPIRED if inbox_item.status is InboxStatus.EXPIRED else ActionState.CANCELLED
+                        )
+                        action.error = f"human decision: {inbox_item.status.value}"
+                        self.store.save_action(action)
+                        self.store.release_idempotency(action)
+                        raise PermissionError(action.error)
                 if pending_grant is None:
-                    raise ApprovalRequired(action)
+                    raise ApprovalRequired(action, inbox_item_id=self._ensure_inbox(action))
                 approval_id = pending_grant.approval_id
             self.approvals.consume(
                 approval_id,
@@ -158,8 +231,21 @@ class ActionGateway:
             )
             action.transition(ActionState.APPROVED)
             self.store.save_action(action)
+            self._emit("action.policy.revalidated", action, approval_id=approval_id)
         if action.state is not ActionState.APPROVED:
             raise PermissionError(f"action is not executable in state {action.state.value}")
+        if self.inbox_service is not None:
+            approved_items = [
+                item
+                for item in self.inbox_service.repository.find_for_action(action.action_id)
+                if item.status is InboxStatus.APPROVED
+            ]
+            if approved_items:
+                approved_item = approved_items[0]
+                if approved_item.action_digest != action.approval_digest():
+                    raise PermissionError("approved action digest no longer matches execution intent")
+                self.inbox_service.assert_response_actor_is_currently_authorized(approved_item)
+                self._assert_branch_runnable(approved_item)
         action = self.store.claim_execution(action.action_id)
         self._emit("action.execution.started", action)
         try:
@@ -192,6 +278,8 @@ class ActionGateway:
             self.store.save_action(action)
             if isinstance(exc, ActionInvalidatedError):
                 self.approvals.invalidate_for_action(action.action_id)
+                if self.inbox_service is not None:
+                    self.inbox_service.supersede_for_action(action.action_id)
                 self.store.release_idempotency(action)
                 self._emit("action.approval.invalidated", action)
             if side_effect_status_unknown:
@@ -227,7 +315,14 @@ class ActionGateway:
             self.store.save_action(original)
         return outcome.action
 
-    def approve(self, action_id: str, *, approved_by: str, ttl_seconds: int = 300) -> str:
+    def approve(
+        self,
+        action_id: str,
+        *,
+        approved_by: str,
+        reviewer_id: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> str:
         action = self.store.get_action(action_id)
         if action is None:
             raise LookupError("unknown action")
@@ -239,7 +334,21 @@ class ActionGateway:
             self.store.release_idempotency(action)
             self._emit("action.approval.expired", action)
             raise PermissionError("action or policy decision expired before approval")
-        grant = self.approvals.issue(action, approved_by=approved_by, ttl_seconds=ttl_seconds)
+        if self.inbox_service is not None:
+            item_id = self._ensure_inbox(action)
+            self.inbox_service.respond(ResponseSubmission(
+                inbox_item_id=item_id,
+                operation=ResponseOperation.APPROVE,
+                actor_id=reviewer_id or approved_by,
+                channel=f"transactional_action:{approved_by}",
+                idempotency_key=f"legacy-approve:{action.action_id}:{approved_by}",
+                comment=f"Submitted through trusted legacy principal {approved_by}.",
+                current_action_digest=action.approval_digest(),
+            ))
+        grant = self.approvals.find_valid(
+            action,
+            transaction_binding_digest=self._transaction_binding(action),
+        ) or self.approvals.issue(action, approved_by=approved_by, ttl_seconds=ttl_seconds)
         self._emit(
             "action.approval.granted",
             action,
@@ -256,6 +365,7 @@ class ActionGateway:
         transaction_id: str,
         *,
         approved_by: str,
+        reviewer_id: str | None = None,
         ttl_seconds: int = 300,
     ) -> dict[str, str]:
         transaction = self.store.get_transaction(transaction_id)
@@ -269,7 +379,21 @@ class ActionGateway:
                 raise ValueError("transaction membership does not match persisted actions")
             if action.state is not ActionState.AWAITING_APPROVAL:
                 continue
-            grant = self.approvals.issue(
+            if self.inbox_service is not None:
+                item_id = self._ensure_inbox(action)
+                self.inbox_service.respond(ResponseSubmission(
+                    inbox_item_id=item_id,
+                    operation=ResponseOperation.APPROVE,
+                    actor_id=reviewer_id or approved_by,
+                    channel=f"transactional_action:{approved_by}",
+                    idempotency_key=f"legacy-transaction-approve:{transaction_id}:{action.action_id}:{approved_by}",
+                    comment=f"Submitted through trusted legacy principal {approved_by}.",
+                    current_action_digest=action.approval_digest(),
+                ))
+            grant = self.approvals.find_valid(
+                action,
+                transaction_binding_digest=binding,
+            ) or self.approvals.issue(
                 action,
                 approved_by=approved_by,
                 ttl_seconds=ttl_seconds,
@@ -323,12 +447,33 @@ class ActionGateway:
         self._emit("action.committed" if evidence.complete else "action.manual_recovery.required", action)
         return action
 
-    def deny(self, action_id: str, *, denied_by: str) -> ActionIntent:
+    def deny(
+        self,
+        action_id: str,
+        *,
+        denied_by: str,
+        reviewer_id: str | None = None,
+    ) -> ActionIntent:
         action = self.store.get_action(action_id)
         if action is None:
             raise LookupError("unknown action")
         if action.state is not ActionState.AWAITING_APPROVAL:
             raise ValueError(f"action is not awaiting approval: {action.state.value}")
+        if self.inbox_service is not None:
+            item_id = self._ensure_inbox(action)
+            self.inbox_service.respond(ResponseSubmission(
+                inbox_item_id=item_id,
+                operation=ResponseOperation.DENY,
+                actor_id=reviewer_id or denied_by,
+                channel=f"transactional_action:{denied_by}",
+                idempotency_key=f"legacy-deny:{action.action_id}:{denied_by}",
+                comment=f"Submitted through trusted legacy principal {denied_by}.",
+                current_action_digest=action.approval_digest(),
+            ))
+            refreshed = self.store.get_action(action_id)
+            if refreshed is not None and refreshed.state is ActionState.CANCELLED:
+                self._emit("action.approval.denied", refreshed, denied_by=denied_by)
+                return refreshed
         self.approvals.invalidate_for_action(action_id)
         action.transition(ActionState.CANCELLED)
         action.error = f"denied by {denied_by}"
@@ -337,7 +482,110 @@ class ActionGateway:
         self._emit("action.approval.denied", action, denied_by=denied_by)
         return action
 
+    def _ensure_inbox(self, action: ActionIntent) -> str:
+        if self.inbox_service is None:
+            return ""
+        existing = self.inbox_service.repository.find_for_action(action.action_id)
+        if existing:
+            return existing[0].inbox_item_id
+        decision = action.policy_decision
+        if decision is None or decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL:
+            raise ValueError("durable approval inbox requires a validated approval policy decision")
+        reviewer = ReviewerAssignment(
+            reviewer_type=ReviewerType(decision.assigned_reviewer_type),
+            reviewer_id=decision.assigned_reviewer_id,
+        )
+        risk = (
+            RiskLevel.CRITICAL
+            if action.reversibility.value == "irreversible" or action.data_disclosure.value == "secret"
+            else RiskLevel.HIGH
+            if action.blast_radius.value in {"organisation", "physical", "unknown"}
+            or action.data_disclosure.value in {"confidential", "external_public", "external_private"}
+            else RiskLevel.MEDIUM
+        )
+        preview = action.preview.redacted() if action.preview else {}
+        effect_labels = action.approval_effect_labels()
+        checkpoint_id = ""
+        execution_attempt_id = ""
+        parent_task_id = action.parent_task_id
+        project_id = "local"
+        branch_controller = self.inbox_service.branch_controller
+        if branch_controller is not None:
+            task = branch_controller.store.get_task_or_none(action.parent_task_id)
+            if task is not None:
+                if not task.checkpoint_id:
+                    raise ValueError(
+                        "a supervised action approval requires the branch's durable checkpoint"
+                    )
+                checkpoint_id = task.checkpoint_id
+                execution_attempt_id = task.attempt_id
+                parent_task_id = task.parent_task_id
+                project_id = task.repository_id or task.workspace_id or "local"
+        item = self.inbox_service.create(InboxRequest(
+            request_type=InboxRequestType.APPROVAL,
+            project_id=project_id,
+            task_id=action.parent_task_id,
+            branch_id=action.parent_task_id,
+            parent_task_id=parent_task_id,
+            checkpoint_id=checkpoint_id,
+            execution_attempt_id=execution_attempt_id,
+            policy_decision_id=decision.decision_id,
+            permission_request_id=action.action_id,
+            action_intent_id=action.action_id,
+            action_digest=action.approval_digest(),
+            requested_by_agent_id=action.originating_agent,
+            reviewer=reviewer,
+            title=f"Approve {action.tool_name} {action.operation_name}",
+            summary=action.preview.summary if action.preview else decision.explanation,
+            risk_level=risk,
+            allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+            minimal_context={
+                "action_type": action.tool_name,
+                "operation": action.operation_name,
+                "action_count": 1,
+                "resource_count": len(action.target_resources),
+                "side_effect_count": len(action.expected_side_effects),
+                "effect_labels": effect_labels,
+            },
+            protected_context={
+                "action_id": action.action_id,
+                "binding_digest": action.binding_digest(),
+                "approval_digest": action.approval_digest(),
+                "preview": preview,
+                "target_resources": action.target_resources,
+                "normalized_arguments": action.normalized_arguments,
+                "effect_labels": effect_labels,
+            },
+            disclosed_fields=["action_type", "operation", "action_count", "resource_count", "side_effect_count", "effect_labels"],
+            reversibility=action.reversibility.value,
+            expires_at=min(action.expires_at, decision.expires_at),
+            idempotency_key=f"action-approval:{action.action_id}:{action.approval_digest()}",
+            deduplication_key=canonical_digest({
+                "action_digest": action.approval_digest(),
+                "reviewer": reviewer.model_dump(mode="json"),
+            }),
+        ))
+        return item.inbox_item_id
+
+    def _assert_branch_runnable(self, item: Any) -> None:
+        if self.inbox_service is None or not item.checkpoint_id:
+            return
+        controller = self.inbox_service.branch_controller
+        if controller is None:
+            raise PermissionError("approved action branch controller is unavailable")
+        task = controller.store.get_task_or_none(item.task_id)
+        if task is None:
+            raise PermissionError("approved action branch no longer exists")
+        if task.checkpoint_id != item.checkpoint_id:
+            raise PermissionError("approved action checkpoint no longer matches the branch")
+        if task.state.value != "running" or task.waiting_inbox_item_id:
+            raise PermissionError(
+                "approved action may execute only from its resumed running branch"
+            )
+
     def _emit(self, event_type: str, action: ActionIntent, **details: Any) -> None:
         self.store.append_audit(action, event_type, details)
+        if self.inbox_service is not None:
+            self.inbox_service.record_action_event(action.action_id, event_type, details)
         if self.event_sink:
             self.event_sink(event_payload(event_type, action, **details))

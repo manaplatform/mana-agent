@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import http.client
 import ipaddress
@@ -330,6 +331,7 @@ class ApiExecutor:
         transactional_approval_id = action_gateway.approve(
             action.action_id,
             approved_by=f"api-approval:{approval_reference}",
+            reviewer_id=getpass.getuser(),
             ttl_seconds=60,
         )
         outcome = action_gateway.execute(adapter, approval_id=transactional_approval_id)

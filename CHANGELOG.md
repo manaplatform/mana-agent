@@ -2,7 +2,18 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-03
+
+- Updated gateway regression coverage after user verification reported four failures while `tests/test_api_manager.py` passed. Missing managed workers and approval-time worker disconnects now assert exact-provider fail-closed behavior without direct SSH fallback, and server approval tests create and consume the durable inbox record instead of relying only on transient process state.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/test_api_manager.py`.
+
 ## 2026-08-02
+
+- Added a durable human-in-the-loop inbox for binary approvals and structured clarifications, with atomic local persistence, optimistic concurrency, request/response idempotency, deduplication, protected context references, immutable audit and notification-attempt evidence, reviewer person/role/group resolution, delegation history, signed expiring single-purpose response tokens, CSRF validation, expiry/reminder hooks, metrics, diagnostics, and startup reconciliation. Supervised input waits now checkpoint and release only the affected branch, persist structured human inputs, and resume it once through durable claims while sibling branches continue. Policy-gated action approvals persist an inbox item bound to the policy decision and canonical action digest, including explicit reversible, compensatable, irreversible, externally visible, data-disclosing, and potentially billable preview labels that preserve unknown values instead of guessing; legacy dashboard/TUI, server-management, and remote-SSH permission entry points delegate to durable items while retaining their compatibility request IDs and one-attempt execution fences. Approved remote requests also retain their exact selected provider and fail closed if that route becomes unavailable. Added authoritative API, CLI, TUI/chat command and minimal notification, Streamlit dashboard inbox, cron/automation maintenance command, architecture/security/recovery documentation, and focused recovery/concurrency/security coverage.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py tests/transactional_actions/test_policy_gated_actions.py tests/execution_supervisor/test_supervisor_core.py tests/remote_execution/test_remote_execution.py tests/server/test_server_management.py tests/gateway/test_chat_gateway.py tests/test_api_manager.py`.
+  - User verification required: `python -m pytest tests/test_git_tools.py tests/test_apply_patch_json_only.py tests/test_write_file_chunking.py tests/test_computer_control.py`.
+  - User verification required: `python -m pytest tests/test_api_conversations.py tests/test_dashboard_navigation.py tests/test_dashboard_live_chat.py tests/test_cli_smoke.py`.
+  - User verification required: `python -m pytest`.
 
 - Bound the standalone API's capsule routes to a trusted local process identity and the startup repository's capsule service, so `mana-agent api` no longer returns 503 for authorized project/user capsule queries. Request bodies still cannot choose an identity, and private or parent-child task capsules remain unavailable without a host-provided task-aware resolver.
   - Integrated the local dashboard and its cached chat gateway with that same process identity. Dashboard chat can now persist task-private capsule results for authorized model-selected follow-ups, while the Memory Capsules page limits its default view to the project/user scopes available to the local API identity.

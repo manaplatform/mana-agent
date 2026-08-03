@@ -8,6 +8,7 @@ ACTION_EVENT_TYPES = frozenset({
     "action.proposed", "action.preview.ready", "action.policy.allowed", "action.policy.denied",
     "action.approval.required", "action.approval.granted", "action.approval.denied",
     "action.approval.expired", "action.approval.invalidated", "action.execution.started",
+    "action.policy.revalidated",
     "action.verification.started", "action.verification.completed", "action.committed",
     "action.compensation.started", "action.compensation.completed", "action.manual_recovery.required",
 })

@@ -225,6 +225,7 @@ class WorkerGateway:
                         if job and job.state not in {job.state.SUCCEEDED, job.state.FAILED, job.state.CANCELLED}:
                             job.state = {MessageType.COMPLETED: job.state.SUCCEEDED, MessageType.FAILED: job.state.FAILED,
                                          MessageType.CANCELLED: job.state.CANCELLED}[message.type]
+                            self.execution.record_worker_terminal(job.request.job_id)
                     self.audit(message.type.value, worker_id=worker_id, job_id=message.job_id)
             finally:
                 sender_task.cancel()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import getpass
 from typing import Any
 
 from pydantic import BaseModel
@@ -279,6 +280,85 @@ def _computer_permission(context: CommandContext, args: list[str]) -> CommandRes
     )
 
 
+def _human_inbox(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None or not hasattr(context.gateway, "human_inbox_service"):
+        raise RuntimeError("Durable human inbox is unavailable. No fallback action was executed.")
+    from mana_agent.human_inbox.models import (
+        InboxQuery,
+        ResponseOperation,
+        ResponseSubmission,
+        UNRESOLVED_STATUSES,
+    )
+
+    service = context.gateway.human_inbox_service
+    actor = getpass.getuser()
+    action = args[0].lower() if args else "list"
+    if action == "list":
+        rows = service.list(
+            InboxQuery(statuses=set(UNRESOLVED_STATUSES)),
+            actor_id=actor,
+        )
+        cards = [item.card() for item in rows]
+        lines = [
+            f"{item['inbox_item_id']}  {item['request_type']}  {item['risk_level']}  "
+            f"{item['title']}  branch={item['branch_id']}"
+            for item in cards
+        ]
+        return CommandResult(
+            status="success",
+            message="\n".join(lines) or "No durable inbox requests are waiting for you.",
+            data={"inbox_items": cards},
+        )
+    if action == "show" and len(args) == 2:
+        item = service.get(args[1], actor_id=actor)
+        return CommandResult(
+            status="success",
+            message=json.dumps(item.card(), indent=2, ensure_ascii=False, default=str),
+            data={"inbox_item": item.card()},
+        )
+    if action in {"approve", "deny"} and len(args) >= 2:
+        item = service.repository.get(args[1])
+        operation = (
+            ResponseOperation.APPROVE
+            if action == "approve"
+            else ResponseOperation.DENY
+        )
+        resolved = service.respond(ResponseSubmission(
+            inbox_item_id=item.inbox_item_id,
+            operation=operation,
+            actor_id=actor,
+            channel=f"{context.frontend}_slash_command",
+            idempotency_key=f"{context.frontend}:{operation.value}:{item.inbox_item_id}:{item.version}",
+            comment=" ".join(args[2:]),
+            expected_version=item.version,
+            current_action_digest=item.action_digest,
+        ))
+    elif action == "answer" and len(args) == 3:
+        answer = json.loads(args[2])
+        if not isinstance(answer, dict):
+            raise ValueError("Clarification answer must be a JSON object.")
+        item = service.repository.get(args[1])
+        resolved = service.respond(ResponseSubmission(
+            inbox_item_id=item.inbox_item_id,
+            operation=ResponseOperation.ANSWER,
+            actor_id=actor,
+            channel=f"{context.frontend}_slash_command",
+            idempotency_key=f"{context.frontend}:answer:{item.inbox_item_id}:{item.version}",
+            answer=answer,
+            expected_version=item.version,
+            current_action_digest=item.action_digest,
+        ))
+    else:
+        raise ValueError(
+            "Usage: /inbox [list|show <id>|approve <id> [comment]|deny <id> [comment]|answer <id> '<json>']"
+        )
+    return CommandResult(
+        status="success",
+        message=f"Inbox request {resolved.inbox_item_id} is now {resolved.status.value}.",
+        data={"inbox_item": resolved.card()},
+    )
+
+
 def _identity(context: CommandContext, _args: list[str]) -> CommandResult:
     if context.frontend != "telegram":
         return CommandResult(status="error", message="/id is intentionally available only in Telegram.")
@@ -342,6 +422,14 @@ def definitions() -> list[CommandDefinition]:
             required_capability="gateway",
             frontends=frozenset({"cli", "tui", "dashboard"}),
             handler=_computer_permission,
+        ),
+        CommandDefinition(
+            canonical_name="inbox",
+            description="List or respond to durable approval and clarification requests.",
+            argument_schema="[list|show <id>|approve <id> [comment]|deny <id> [comment]|answer <id> '<json>']",
+            required_capability="gateway",
+            frontends=frozenset({"cli", "tui", "dashboard"}),
+            handler=_human_inbox,
         ),
         CommandDefinition(canonical_name="id", description="Show connector identity details.", required_capability="gateway", frontends=frozenset({"telegram"}), handler=_identity),
     ]
