@@ -9,6 +9,11 @@ All notable repository changes should be recorded here.
   task expansion, which creates a fresh durable action and its own approval boundary.
   - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py`.
 
+- Published a bounded, redacted provider receipt into the owning chat history and frontend event
+  stream after an approved MCP action commits, so approval completion exposes the exact MCP result
+  instead of only an activity status.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py`.
+
 - Updated the model-selected MCP executor contract to keep credentials out of tool arguments and require provider identifiers and input references before it invokes a mutable operation. Removed the forced initial MCP tool call so the model can return a clarification rather than sending an empty mutable request.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py`.
 

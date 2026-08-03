@@ -50,6 +50,8 @@ from mana_agent.remote_execution.target_policy import TargetPolicy, TargetPolicy
 from mana_agent.server.models import ServerActionDecision
 from mana_agent.services.chat_session_history import ChatSessionHistory
 from mana_agent.transactional_actions.store import ActionStore
+from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
+from mana_agent.chat.history import reset_global_history
 
 
 class _DummyAskService:
@@ -481,6 +483,55 @@ def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:
         "automation_update", "automation_delete", "automation_enable",
         "automation_disable", "automation_run_now",
     }
+
+
+def test_resumed_mcp_action_surfaces_its_result_in_chat_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    history = reset_global_history()
+    emitted: list[dict[str, Any]] = []
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        config=ChatGatewayConfig(
+            event_sink=lambda event_type, title, **kwargs: emitted.append(
+                {"event_type": event_type, "title": title, **kwargs}
+            )
+        ),
+    )
+    action = SimpleNamespace(
+        action_id="action_context7_docs",
+        parent_task_id="task_context7",
+        tool_name="mcp",
+        operation_name="query-docs",
+        normalized_arguments={"provider_id": "context7"},
+        state=SimpleNamespace(value="committed"),
+    )
+
+    gateway._publish_transactional_resume_activity(
+        event_type="action.committed",
+        title="Approved MCP action completed",
+        action=action,
+        inbox_item_id="inbox_context7",
+        result={"ok": True, "content": [{"type": "text", "text": "FastAPI docs"}]},
+    )
+
+    assistant_messages = [
+        event for event in history.get_events() if isinstance(event, AssistantMessageEvent)
+    ]
+    activity_events = [
+        event for event in history.get_events() if isinstance(event, CodingActivityEvent)
+    ]
+    assert assistant_messages[-1].turn_id == "task_context7"
+    assert "mcp.context7.query-docs" in assistant_messages[-1].content
+    assert "FastAPI docs" in assistant_messages[-1].content
+    assert activity_events[-1].activity["output_preview"]
+    assert emitted[-1]["output_preview"]
 
 
 def test_capability_error_records_terminal_computer_notice(tmp_path: Path, monkeypatch) -> None:

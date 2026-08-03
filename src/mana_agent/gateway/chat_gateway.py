@@ -833,6 +833,7 @@ class AgentChatGateway:
                 title=f"Approved {action_label} action completed",
                 action=outcome.action,
                 inbox_item_id=inbox_item_id,
+                result=outcome.result,
             )
         except Exception as exc:
             execution = self._lane_coordinator.inspect_task(task_id)
@@ -863,11 +864,20 @@ class AgentChatGateway:
         action: Any,
         inbox_item_id: str,
         error: str = "",
+        result: dict[str, Any] | None = None,
     ) -> None:
         """Surface terminal resumed-action state in the owning frontend process."""
-        from mana_agent.chat.events import CodingActivityEvent
+        from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
         from mana_agent.chat.history import get_history
 
+        result_preview = self._transactional_result_preview(result)
+        status = (
+            "success"
+            if event_type == "action.committed"
+            else "failed"
+            if event_type == "action.manual_recovery.required"
+            else "running"
+        )
         metadata = {
             "transactional_action_approval": True,
             "action_id": str(action.action_id),
@@ -877,12 +887,61 @@ class AgentChatGateway:
             "operation_name": str(action.operation_name),
             "state": str(action.state.value),
             "error": error,
+            "result_preview": result_preview,
         }
         get_history().add(CodingActivityEvent(
-            activity={"event_type": event_type, "title": title, "metadata": metadata}
+            activity={
+                "event_type": event_type,
+                "title": title,
+                "status": status,
+                "output_preview": result_preview,
+                "metadata": metadata,
+            },
+            turn_id=str(action.parent_task_id),
         ))
+        if event_type == "action.committed" and action.tool_name == "mcp":
+            get_history().add(
+                AssistantMessageEvent(
+                    content=self._mcp_completion_message(action, result_preview),
+                    turn_id=str(action.parent_task_id),
+                )
+            )
         if callable(self._event_sink):
-            self._event_sink(event_type, title, metadata=metadata)
+            self._event_sink(
+                event_type,
+                title,
+                status=status,
+                output_preview=result_preview,
+                message=result_preview,
+                metadata=metadata,
+            )
+
+    @staticmethod
+    def _transactional_result_preview(result: dict[str, Any] | None) -> str:
+        """Serialize one provider result for display without exposing secrets or unbounded output."""
+        if not result:
+            return ""
+        try:
+            encoded = json.dumps(
+                redact_secrets(result), ensure_ascii=False, sort_keys=True, default=str
+            )
+        except (TypeError, ValueError):
+            encoded = redact_text(str(result))
+        limit = 4_000
+        return encoded if len(encoded) <= limit else encoded[:limit] + "… [truncated]"
+
+    @staticmethod
+    def _mcp_completion_message(action: Any, result_preview: str) -> str:
+        """Create a deterministic user-visible receipt for an approved MCP action."""
+        provider_id = str(action.normalized_arguments.get("provider_id") or "")
+        target = f"mcp.{provider_id}.{action.operation_name}".strip(".")
+        if not result_preview:
+            return f"Approved MCP action completed: `{target}`. The provider returned no displayable result."
+        return (
+            f"Approved MCP action completed: `{target}`.\n\n"
+            "Provider result (untrusted data):\n"
+            f"```json\n{result_preview}\n```"
+        )
 
     @staticmethod
     def _mcp_adapter_for_stored_action(
