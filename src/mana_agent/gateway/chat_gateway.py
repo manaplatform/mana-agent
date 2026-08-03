@@ -6272,12 +6272,41 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": "mcp", "provider_id": provider_id},
             )
+        trace = _serialize_tool_traces(response)
+        failed_tools = [
+            item
+            for item in trace
+            if str(item.get("status") or "").strip().lower() not in {"ok", "success"}
+        ]
+        if failed_tools:
+            failed = failed_tools[0]
+            detail = str(
+                failed.get("output_preview")
+                or failed.get("result_summary")
+                or "the MCP tool did not complete"
+            ).strip()
+            return ChatTurnResult(
+                answer=(
+                    "The model-selected MCP operation was not completed: "
+                    f"{detail}"
+                ),
+                error="mcp_tool_execution_failed",
+                mode="route-mcp-error",
+                decision=decision,
+                trace=trace,
+                warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
+                payload={
+                    "route": "mcp",
+                    "provider_id": provider_id,
+                    "failed_tool": str(failed.get("tool_name") or "mcp"),
+                },
+            )
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),
             sources=list(getattr(response, "sources", []) or []),
             mode="route-mcp",
             decision=decision,
-            trace=_serialize_tool_traces(response),
+            trace=trace,
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
             payload={"route": "mcp", "provider_id": provider_id},
         )

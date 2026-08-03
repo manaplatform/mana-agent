@@ -252,6 +252,44 @@ def test_configured_kaggle_mcp_route_uses_only_the_model_selected_provider(
     assert ask_agent.calls[0]["tool_policy"]["require_initial_tool_call"] is True
 
 
+def test_failed_kaggle_mcp_tool_marks_the_route_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    failed_agent = _AskAgent(
+        SimpleNamespace(
+            answer="The upload was not performed.",
+            sources=[],
+            warnings=[],
+            trace=[
+                {
+                    "tool_name": "mcp__kaggle__start_competition_submission_upload",
+                    "status": "error",
+                    "output_preview": "no registered transactional action adapter",
+                }
+            ],
+        )
+    )
+    gateway, _chat, _ask_agent = _gateway(
+        tmp_path,
+        _RouteModel("mcp"),
+        mcp=RouteAvailability(
+            True,
+            details={"providers": [{"id": "kaggle", "namespace": "mcp.kaggle"}]},
+        ),
+        ask_agent=failed_agent,
+    )
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Use Kaggle MCP to upload the submission.",
+    )
+
+    assert result.mode == "route-mcp-error"
+    assert result.error == "mcp_tool_execution_failed"
+    assert result.payload["failed_tool"] == "mcp__kaggle__start_competition_submission_upload"
+
+
 def test_unsupported_route_bypasses_checkpoint_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

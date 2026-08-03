@@ -60,6 +60,7 @@ All notable repository changes should be recorded here.
 
 - Added a model-selected MCP gateway route with a typed configured-provider decision, provider-only tool execution, live external-state checkpoint handling, and direct unsupported/capability stop responses that bypass lane recovery. Configured providers are surfaced to the routing model without starting MCP servers; provider tools are discovered only after the validated provider selection.
   - Provider-only MCP turns no longer initialize repository run-evidence memory, so an external-memory configuration cannot block an MCP operation with an unmapped internal evidence requirement.
+  - MCP tool-denial traces now fail the selected MCP route, so compound workflows report the failed upload truthfully and block dependent submission work instead of marking both steps complete.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_checkpoint_resume.py tests/test_ask_agent.py`.
 
 - Updated gateway regression coverage after user verification reported four failures while `tests/test_api_manager.py` passed. Missing managed workers and approval-time worker disconnects now assert exact-provider fail-closed behavior without direct SSH fallback, and server approval tests create and consume the durable inbox record instead of relying only on transient process state.
