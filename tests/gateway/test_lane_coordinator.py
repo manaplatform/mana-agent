@@ -524,6 +524,40 @@ def test_completion_failure_surfaces_the_persisted_contract_reason(
     assert "artifact was not produced or modified by this attempt" in finished.error
 
 
+def test_synchronize_usage_is_cumulative_and_does_not_double_count(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="account model usage")
+    coordinator.start(reservation)
+
+    coordinator.synchronize_usage(
+        reservation.execution.task_id,
+        consumed_input_tokens=20,
+        consumed_output_tokens=10,
+        actual_cost=0.03,
+    )
+    synchronized = coordinator.synchronize_usage(
+        reservation.execution.task_id,
+        consumed_input_tokens=20,
+        consumed_output_tokens=10,
+        actual_cost=0.03,
+    )
+
+    assert synchronized.budget.consumed_input_tokens == 20
+    assert synchronized.budget.consumed_output_tokens == 10
+    assert synchronized.budget.actual_cost == pytest.approx(0.03)
+
+    coordinator.finish(
+        reservation.execution.task_id,
+        verification_state={"status": "accounted"},
+    )
+    supervised = coordinator.execution_supervisor.store.get_task(
+        reservation.execution.task_id
+    )
+    assert supervised.token_usage == 30
+    assert supervised.actual_cost == pytest.approx(0.03)
+
+
 def test_stale_lock_recovery(coordinator: LaneCoordinator) -> None:
     lease = coordinator.lock_manager.acquire(
         task_id="stale", mode=LockMode.REPOSITORY_WRITE,

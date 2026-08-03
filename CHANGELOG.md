@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-04
+
+- Connected durable lane budgets to the validated routing decision and provider-accounted context usage. Reserved token and cost estimates now use the selected model decision, while completed lanes record actual input/output usage and exact cost only when provider usage and configured pricing are available; estimated usage remains explicitly estimated.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py -q`.
+
+- Made human-inbox signing-key initialization atomically publish complete key files so concurrent response handling cannot read an empty key during creation.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py -q` and `python -m pytest -q`.
+
 ## 2026-08-03
 
 - Restored browser-backed API documentation inspection by explicitly classifying the isolated

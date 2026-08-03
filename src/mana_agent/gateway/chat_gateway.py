@@ -819,7 +819,7 @@ class AgentChatGateway:
                 execution_claim_id=execution_claim_id,
                 result_digest=canonical_digest(outcome.result),
             )
-            self._lane_coordinator.finish(
+            self._finish_lane(
                 task_id,
                 verification_state={
                     "transactional_action_id": outcome.action.action_id,
@@ -842,7 +842,7 @@ class AgentChatGateway:
                 LaneTaskState.CANCELLED,
                 LaneTaskState.FAILED,
             }:
-                self._lane_coordinator.finish(
+                self._finish_lane(
                     task_id,
                     state=LaneTaskState.FAILED,
                     error="resumed transactional action failed; inspect durable action recovery state",
@@ -1339,7 +1339,7 @@ class AgentChatGateway:
             job = run_sync(self.remote_execution_service.execute(job.request.job_id))
         except RuntimeError as exc:
             if lane_task_id:
-                self._lane_coordinator.finish(
+                self._finish_lane(
                     lane_task_id,
                     state=LaneTaskState.FAILED,
                     error=str(exc),
@@ -1356,7 +1356,7 @@ class AgentChatGateway:
                 if job.state.value == "succeeded"
                 else LaneTaskState.FAILED
             )
-            finished = self._lane_coordinator.finish(
+            finished = self._finish_lane(
                 lane_task_id,
                 state=lane_state,
                 verification_state={"remote_job_state": job.state.value},
@@ -1481,7 +1481,7 @@ class AgentChatGateway:
             )
         except Exception as exc:
             if lane_task_id:
-                self._lane_coordinator.finish(
+                self._finish_lane(
                     lane_task_id,
                     state=LaneTaskState.FAILED,
                     error=str(exc),
@@ -1507,7 +1507,7 @@ class AgentChatGateway:
         )
         supervision_error = ""
         if lane_task_id:
-            finished = self._lane_coordinator.finish(
+            finished = self._finish_lane(
                 lane_task_id,
                 state=LaneTaskState.COMPLETED if succeeded else LaneTaskState.FAILED,
                 verification_state={"server_result": serialized},
@@ -3266,9 +3266,11 @@ class AgentChatGateway:
                     target_files = [
                         str(item) for item in options.pop("target_files", [])
                     ]
-                    requested_input = max(1, len(text) // 4)
+                    requested_input = max(
+                        1, int(execution_decision.estimated_input_tokens)
+                    )
                     requested_output = max(
-                        256, int(options.pop("reserved_output_tokens", 2048))
+                        1, int(execution_decision.estimated_output_tokens)
                     )
                     route_capabilities = {
                         "coding": (
@@ -3486,6 +3488,7 @@ class AgentChatGateway:
                             model=f"{execution_decision.provider}/{execution_decision.selected_model}",
                             requested_input_tokens=requested_input,
                             requested_output_tokens=requested_output,
+                            estimated_cost=execution_decision.estimated_cost,
                             capabilities=route_capabilities,
                             routing_decision_id=execution_decision.decision_id,
                             provider=execution_decision.provider,
@@ -3569,7 +3572,7 @@ class AgentChatGateway:
                                 options=options,
                             )
                         except BaseException as exc:
-                            self._lane_coordinator.finish(
+                            self._finish_lane(
                                 reservation.execution.task_id,
                                 state=LaneTaskState.FAILED,
                                 error=str(exc),
@@ -3577,6 +3580,9 @@ class AgentChatGateway:
                             raise
                         approval_ids = self._approval_request_ids(result.payload)
                         if result.mode == "remote-awaiting-permission":
+                            self._synchronize_lane_usage(
+                                reservation.execution.task_id
+                            )
                             job_id = str(result.payload.get("job_id") or "")
                             if not job_id:
                                 raise RuntimeError(
@@ -3591,6 +3597,9 @@ class AgentChatGateway:
                                 reason="waiting for remote SSH permission",
                             )
                         elif approval_ids:
+                            self._synchronize_lane_usage(
+                                reservation.execution.task_id
+                            )
                             self._lane_coordinator.transition(
                                 reservation.execution.task_id,
                                 LaneTaskState.WAITING,
@@ -3607,7 +3616,7 @@ class AgentChatGateway:
                                 completed_steps=("routing", "execute_route"),
                                 pending_steps=("verify", "final_response"),
                             )
-                            finished = self._lane_coordinator.finish(
+                            finished = self._finish_lane(
                                 reservation.execution.task_id,
                                 state=(
                                     LaneTaskState.FAILED
@@ -3615,10 +3624,6 @@ class AgentChatGateway:
                                     else LaneTaskState.COMPLETED
                                 ),
                                 changed_files=result.changed_files,
-                                consumed_input_tokens=requested_input,
-                                consumed_output_tokens=max(
-                                    0, len(result.answer or "") // 4
-                                ),
                                 verification_state={
                                     "mode": result.mode,
                                     "error": result.error,
@@ -3858,6 +3863,24 @@ class AgentChatGateway:
         )
         return result
 
+    def _finish_lane(self, task_id: str, **kwargs: Any) -> Any:
+        """Finish a lane with the provider usage accrued under its execution identity."""
+        usage = self._synchronize_lane_usage(task_id)
+        verification_state = dict(kwargs.get("verification_state") or {})
+        verification_state.setdefault("context_cost_usage", usage)
+        kwargs["verification_state"] = verification_state
+        return self._lane_coordinator.finish(task_id, **kwargs)
+
+    def _synchronize_lane_usage(self, task_id: str) -> dict[str, int | float]:
+        usage = self._stack.context_cost_governor.task_usage(task_id)
+        self._lane_coordinator.synchronize_usage(
+            task_id,
+            consumed_input_tokens=int(usage["consumed_input_tokens"]),
+            consumed_output_tokens=int(usage["consumed_output_tokens"]),
+            actual_cost=float(usage["actual_cost"]),
+        )
+        return usage
+
     def _execute_multi_task_route(
         self,
         *,
@@ -3930,6 +3953,13 @@ class AgentChatGateway:
             aggregate_progress="0/? completed",
         )
         board.update_status(root_task.task_id, TaskStatus.PLANNING)
+        self._stack.context_cost_governor.set_execution_identity(
+            turn_id=context.turn_id,
+            task_id=root_task.task_id,
+            root_task_id=root_task.task_id,
+            agent_id="main",
+            step_id="multi_task_planning",
+        )
         orchestrator = MultiTaskOrchestrator(
             llm=self._entry_router.llm,
             taskboard=board,
@@ -3989,8 +4019,13 @@ class AgentChatGateway:
             workspace_id=board.store.workspace_id,
             repository_id=board.store.repository_id,
             model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
-            requested_input_tokens=max(1, len(text) // 4),
-            requested_output_tokens=min(40_000, max(4096, len(plan.tasks) * 4096)),
+            requested_input_tokens=max(
+                1, int(root_model_decision.estimated_input_tokens)
+            ),
+            requested_output_tokens=max(
+                1, int(root_model_decision.estimated_output_tokens)
+            ),
+            estimated_cost=root_model_decision.estimated_cost,
             capabilities=(),
             routing_decision_id=root_model_decision.decision_id,
             provider=root_model_decision.provider,
@@ -4089,7 +4124,7 @@ class AgentChatGateway:
             overall = "cancelled"
         elif statuses <= {"completed", "skipped"}:
             overall = "done"
-            finished_root = self._lane_coordinator.finish(
+            finished_root = self._finish_lane(
                 root_reservation.execution.task_id,
                 changed_files=changed_files,
                 verification_state={"children": child_payloads, "status": overall},
@@ -4104,7 +4139,7 @@ class AgentChatGateway:
             )
         else:
             overall = "failed"
-            self._lane_coordinator.finish(
+            self._finish_lane(
                 root_reservation.execution.task_id,
                 state=LaneTaskState.FAILED,
                 changed_files=changed_files,
@@ -4288,10 +4323,13 @@ class AgentChatGateway:
                 root_lane_task_id
             ).root_task_id,
             model=f"{execution_decision.provider}/{execution_decision.selected_model}",
-            requested_input_tokens=max(1, len(item.request) // 4),
-            requested_output_tokens=max(
-                256, int(options.get("reserved_output_tokens", 2048))
+            requested_input_tokens=max(
+                1, int(execution_decision.estimated_input_tokens)
             ),
+            requested_output_tokens=max(
+                1, int(execution_decision.estimated_output_tokens)
+            ),
+            estimated_cost=execution_decision.estimated_cost,
             capabilities=capabilities,
             routing_decision_id=execution_decision.decision_id,
             provider=execution_decision.provider,
@@ -4305,6 +4343,15 @@ class AgentChatGateway:
             routing_evidence=decision.to_dict(),
         )
         self._lane_coordinator.start(reservation)
+        self._stack.context_cost_governor.set_execution_identity(
+            turn_id=context.turn_id,
+            task_id=reservation.execution.task_id,
+            root_task_id=reservation.execution.root_task_id,
+            attempt_id=reservation.execution.supervisor_attempt_id,
+            checkpoint_id=reservation.execution.checkpoint_id,
+            agent_id="main",
+            step_id="after_child_routing",
+        )
         if (
             decision.route not in {"capability_error", "unsupported"}
             and not availability.available
@@ -4365,6 +4412,7 @@ class AgentChatGateway:
         approval_ids = self._approval_request_ids(result.payload)
         awaiting = result.mode in {"remote-awaiting-permission"} or bool(approval_ids)
         if awaiting:
+            self._synchronize_lane_usage(reservation.execution.task_id)
             status = "awaiting_approval"
             job_id = str(result.payload.get("job_id") or "")
             if result.mode == "remote-awaiting-permission" and job_id:
@@ -4384,14 +4432,14 @@ class AgentChatGateway:
             )
         elif result.error:
             status = "failed"
-            self._lane_coordinator.finish(
+            self._finish_lane(
                 reservation.execution.task_id,
                 state=LaneTaskState.FAILED,
                 changed_files=result.changed_files,
                 error=str(result.error),
             )
         else:
-            finished = self._lane_coordinator.finish(
+            finished = self._finish_lane(
                 reservation.execution.task_id,
                 changed_files=result.changed_files,
                 verification_state={"mode": result.mode, "status": "completed"},

@@ -63,6 +63,41 @@ def test_parent_child_budget_allocation_and_consumption() -> None:
         parent.allocate_child("candidate", token_limit=800)
 
 
+def test_task_usage_keeps_actual_and_estimated_costs_separate() -> None:
+    governor = ContextCostGovernor(session_id="s", settings=settings())
+    governor.register_model_profiles((
+        SimpleNamespace(
+            provider="test-provider",
+            model_id="test-model",
+            input_cost_per_million=2.0,
+            output_cost_per_million=4.0,
+            configuration={},
+        ),
+    ))
+    governor.set_execution_identity(task_id="task-1")
+
+    governor.record_model_call(
+        "actual-call",
+        usage={"input_tokens": 100, "output_tokens": 50},
+        provider="test-provider",
+        model="test-model",
+    )
+    governor.record_model_call(
+        "estimated-call",
+        provider="test-provider",
+        model="test-model",
+        estimated_input="estimated prompt",
+        estimated_output="estimated result",
+    )
+
+    usage = governor.task_usage("task-1")
+    assert usage["consumed_input_tokens"] >= 100
+    assert usage["consumed_output_tokens"] >= 50
+    assert usage["actual_cost"] == pytest.approx(0.0004)
+    assert usage["estimated_cost"] > 0
+    assert governor.observability_snapshot()["actual_cost"] == pytest.approx(0.0004)
+
+
 def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_path: Path) -> None:
     governor = ContextCostGovernor(
         session_id="s", repository_id="r", workspace_id="w",

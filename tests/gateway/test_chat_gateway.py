@@ -306,6 +306,7 @@ def test_missing_worker_at_permission_resume_fails_without_provider_change(
         return SimpleNamespace(state=state, error="")
 
     gateway._remote_job_lanes = {"job": "lane-task"}
+    gateway._finish_lane = finish
     gateway._lane_coordinator = SimpleNamespace(
         transition=lambda task_id, state, reason: transitions.append((task_id, state.value, reason)),
         finish=finish,
@@ -373,6 +374,7 @@ def test_server_approval_is_session_bound_exact_and_single_use(tmp_path: Path) -
     })
     gateway = object.__new__(AgentChatGateway)
     gateway.server_management_service = SimpleNamespace(execute=execute)
+    gateway._finish_lane = finish
     gateway._lane_coordinator = SimpleNamespace(
         transition=lambda task_id, state, *, reason: transitions.append(
             (task_id, state.value, reason)

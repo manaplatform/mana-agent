@@ -68,6 +68,7 @@ class ContextCostGovernor:
         self._call_snapshots: dict[str, BudgetSnapshot] = {}
         self._reservations: dict[str, BudgetReservation] = {}
         self._context_manifests: dict[str, ContextManifest] = {}
+        self._task_usage: dict[str, dict[str, int | float]] = {}
         self._profiles: tuple[Any, ...] = ()
 
     def register_model_profiles(self, profiles: Iterable[Any]) -> None:
@@ -183,6 +184,7 @@ class ContextCostGovernor:
             self._call_snapshots.clear()
             self._reservations.clear()
             self._context_manifests.clear()
+            self._task_usage.clear()
             for key in self.metrics:
                 self.metrics[key] = 0.0 if "cost" in key else 0
 
@@ -409,6 +411,7 @@ class ContextCostGovernor:
             agent_id=agent_id, subagent_id=subagent_id, step_id=step_id, turn_id=turn_id,
         )
         cost = self._cost(normalized.input_tokens, normalized.output_tokens, profile)
+        estimated = bool(normalized.estimated or cost.estimated)
         with self._lock:
             self._reservations.pop(call_id, None)
             ledger = self.ledger
@@ -424,24 +427,53 @@ class ContextCostGovernor:
                 tokens=normalized.total_tokens,
                 input_cost=cost.input_cost,
                 output_cost=cost.output_cost,
-                estimated=cost.estimated,
+                estimated=estimated,
             )
-            if cost.estimated:
+            if estimated:
                 self.metrics["estimated_cost"] = float(self.metrics["estimated_cost"]) + cost.total_cost
             else:
                 self.metrics["actual_cost"] = float(self.metrics["actual_cost"]) + cost.total_cost
+            if task_id:
+                task_usage = self._task_usage.setdefault(
+                    task_id,
+                    {
+                        "consumed_input_tokens": 0,
+                        "consumed_output_tokens": 0,
+                        "estimated_cost": 0.0,
+                        "actual_cost": 0.0,
+                    },
+                )
+                task_usage["consumed_input_tokens"] = int(
+                    task_usage["consumed_input_tokens"]
+                ) + normalized.input_tokens
+                task_usage["consumed_output_tokens"] = int(
+                    task_usage["consumed_output_tokens"]
+                ) + normalized.output_tokens
+                cost_key = "estimated_cost" if estimated else "actual_cost"
+                task_usage[cost_key] = float(task_usage[cost_key]) + cost.total_cost
         metadata = self._base_metadata(provider=provider, model=model, turn_id=turn_id, task_id=task_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         metadata.update({
             "model_call_id": call_id, "input_tokens": normalized.input_tokens,
             "output_tokens": normalized.output_tokens, "used_tokens": normalized.total_tokens,
             "cumulative_tokens": self.ledger.tokens_used, "cumulative_cost": self.ledger.total_cost,
             "remaining_cost": self._implementation_cost_remaining(), "input_cost": cost.input_cost,
-            "output_cost": cost.output_cost, "estimated": cost.estimated or normalized.estimated,
+            "output_cost": cost.output_cost, "estimated": estimated,
             "action": "record_usage", "reason": "provider_usage" if not normalized.estimated else "fallback_estimate",
         })
         self.logger.write(metadata)
         emit_context_event(self.event_sink, "cost.updated", title="Context and cost usage updated", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         return normalized
+
+    def task_usage(self, task_id: str) -> dict[str, int | float]:
+        """Return provider-accounted model usage attributed to one durable task."""
+        with self._lock:
+            usage = self._task_usage.get(str(task_id), {})
+            return {
+                "consumed_input_tokens": int(usage.get("consumed_input_tokens", 0)),
+                "consumed_output_tokens": int(usage.get("consumed_output_tokens", 0)),
+                "estimated_cost": float(usage.get("estimated_cost", 0.0)),
+                "actual_cost": float(usage.get("actual_cost", 0.0)),
+            }
 
     def release_reservation(self, reservation_id: str, *, reason: str) -> None:
         """Release a failed or cancelled admission without recording usage."""

@@ -53,24 +53,39 @@ class ResponseTokenSigner:
 
     def _load_or_create_secret(self) -> bytes:
         if self.secret_path.is_file():
-            value = self.secret_path.read_bytes()
-            if len(value) < 32:
-                raise RuntimeError("human inbox signing key is invalid")
-            return value
+            return self._read_secret()
         value = secrets.token_bytes(32)
+        candidate_path = self.secret_path.with_name(
+            f".{self.secret_path.name}.{secrets.token_hex(16)}.tmp"
+        )
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         try:
-            descriptor = os.open(self.secret_path, flags, 0o600)
-        except FileExistsError:
-            existing = self.secret_path.read_bytes()
-            if len(existing) < 32:
-                raise RuntimeError("human inbox signing key is invalid")
-            return existing
+            descriptor = os.open(candidate_path, flags, 0o600)
+        except FileExistsError as exc:
+            raise RuntimeError("unable to create human inbox signing key candidate") from exc
         try:
-            os.write(descriptor, value)
-            os.fsync(descriptor)
+            try:
+                offset = 0
+                while offset < len(value):
+                    written = os.write(descriptor, value[offset:])
+                    if written <= 0:
+                        raise RuntimeError("unable to write human inbox signing key candidate")
+                    offset += written
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(candidate_path, self.secret_path)
+            except FileExistsError:
+                return self._read_secret()
+            return value
         finally:
-            os.close(descriptor)
+            candidate_path.unlink(missing_ok=True)
+
+    def _read_secret(self) -> bytes:
+        value = self.secret_path.read_bytes()
+        if len(value) < 32:
+            raise RuntimeError("human inbox signing key is invalid")
         return value
 
     def issue(

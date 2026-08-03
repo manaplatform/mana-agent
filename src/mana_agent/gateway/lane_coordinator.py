@@ -1013,6 +1013,9 @@ class LaneCoordinator:
             execution.verification_state.update(dict(verification_state or {}))
             execution.error = error
             execution.updated_at = execution.last_heartbeat = _iso()
+            accounted_input_tokens = execution.budget.consumed_input_tokens
+            accounted_output_tokens = execution.budget.consumed_output_tokens
+            accounted_actual_cost = execution.budget.actual_cost
         self._stop_supervisor_heartbeats(task_id)
         verified = False
         if state == LaneTaskState.COMPLETED:
@@ -1081,11 +1084,11 @@ class LaneCoordinator:
                         "verification_state": dict(execution.verification_state),
                         "chat_result": dict(execution.verification_state.get("chat_result") or {}),
                         "evidence": list(execution.evidence),
-                        "token_usage": consumed_input_tokens + consumed_output_tokens,
-                        "actual_cost": actual_cost,
+                        "token_usage": accounted_input_tokens + accounted_output_tokens,
+                        "actual_cost": accounted_actual_cost,
                     },
-                    token_usage=consumed_input_tokens + consumed_output_tokens,
-                    actual_cost=actual_cost,
+                    token_usage=accounted_input_tokens + accounted_output_tokens,
+                    actual_cost=accounted_actual_cost,
                 )
             except CompletionVerificationError as exc:
                 execution.error = str(exc)
@@ -1171,6 +1174,41 @@ class LaneCoordinator:
         with self._condition:
             self._condition.notify_all()
         return execution
+
+    def synchronize_usage(
+        self,
+        task_id: str,
+        *,
+        consumed_input_tokens: int = 0,
+        consumed_output_tokens: int = 0,
+        actual_cost: float = 0.0,
+    ) -> LaneExecution:
+        """Persist cumulative provider usage without double-counting a later finish."""
+        with self._condition:
+            execution = self._executions[task_id]
+            input_delta = max(
+                0,
+                int(consumed_input_tokens)
+                - execution.budget.consumed_input_tokens,
+            )
+            output_delta = max(
+                0,
+                int(consumed_output_tokens)
+                - execution.budget.consumed_output_tokens,
+            )
+            cost_delta = max(0.0, float(actual_cost) - execution.budget.actual_cost)
+            execution.budget.consumed_input_tokens += input_delta
+            execution.budget.consumed_output_tokens += output_delta
+            execution.budget.actual_cost += cost_delta
+            if execution.parent_task_id and execution.parent_task_id in self._executions:
+                parent = self._executions[execution.parent_task_id]
+                parent.budget.consumed_input_tokens += input_delta
+                parent.budget.consumed_output_tokens += output_delta
+                parent.budget.actual_cost += cost_delta
+                parent.updated_at = _iso()
+            execution.updated_at = _iso()
+            self._persist_locked()
+            return execution
 
     def transition(
         self,

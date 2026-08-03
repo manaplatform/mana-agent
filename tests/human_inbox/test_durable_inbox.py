@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Lock
 import getpass
 
 import pytest
@@ -30,6 +31,7 @@ from mana_agent.human_inbox.models import (
 from mana_agent.human_inbox.notifications import NotificationResult
 from mana_agent.human_inbox.repository import InboxConcurrentUpdateError, LocalInboxRepository
 from mana_agent.human_inbox.service import HumanInboxService
+from mana_agent.human_inbox import tokens as inbox_tokens
 from mana_agent.human_inbox.tokens import ResponseTokenSigner
 from mana_agent.transactional_actions.adapters import ActionInvalidatedError, FileActionAdapter
 from mana_agent.transactional_actions.approvals import ApprovalRegistry
@@ -268,6 +270,41 @@ def test_concurrent_approve_and_deny_accepts_one_terminal_response(tmp_path: Pat
         results = list(pool.map(submit, [ResponseOperation.APPROVE, ResponseOperation.DENY]))
     assert results.count("conflict") == 1
     assert inbox.repository.get(item.inbox_item_id).status in {InboxStatus.APPROVED, InboxStatus.DENIED}
+
+
+def test_concurrent_signers_publish_only_complete_key_files(tmp_path: Path, monkeypatch) -> None:
+    key_path = tmp_path / "inbox" / "signing.key"
+    first = ResponseTokenSigner(key_path)
+    second = ResponseTokenSigner(key_path)
+    first_write_started = Event()
+    release_first_write = Event()
+    write_lock = Lock()
+    write_count = 0
+    original_write = inbox_tokens.os.write
+
+    def delayed_first_write(descriptor: int, value: bytes) -> int:
+        nonlocal write_count
+        with write_lock:
+            write_count += 1
+            is_first_write = write_count == 1
+        if is_first_write:
+            first_write_started.set()
+            assert release_first_write.wait(timeout=5)
+        return original_write(descriptor, value)
+
+    monkeypatch.setattr(inbox_tokens.os, "write", delayed_first_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_digest = pool.submit(first.protected_digest, {"response": "value"})
+        assert first_write_started.wait(timeout=5)
+        second_digest = pool.submit(second.protected_digest, {"response": "value"})
+        try:
+            second_result = second_digest.result(timeout=5)
+        finally:
+            release_first_write.set()
+        first_result = first_digest.result(timeout=5)
+
+    assert first_result == second_result
+    assert len(key_path.read_bytes()) >= 32
 
 
 def test_response_idempotency_key_cannot_be_rebound(tmp_path: Path) -> None:
