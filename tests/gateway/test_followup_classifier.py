@@ -60,6 +60,27 @@ def test_followup_cannot_attach_to_an_unoffered_task() -> None:
         )
 
 
+def test_non_task_category_cannot_select_a_related_task() -> None:
+    classifier = FollowupClassifier(
+        _StructuredModel(
+            {
+                "decision_id": "followup_2b",
+                "category": "conversation_only",
+                "related_task_id": "task_1",
+                "safe_to_continue": True,
+                "reason": "the user is only acknowledging prior output",
+            }
+        )
+    )
+
+    with pytest.raises(FollowupClassificationError, match="non-task category"):
+        classifier.decide(
+            message="thanks",
+            recent_history=[],
+            candidates=[{"task_id": "task_1"}],
+        )
+
+
 def test_unsafe_classification_reports_the_model_reason() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(

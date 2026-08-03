@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Made invalid follow-up classifications return their direct model-decision error before lane coordination, and clarified that non-task categories may not select a related task.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py`.
+
 - Bound approved MCP actions to their active durable lane task and added exact-provider/tool rehydration for the human-resume dispatcher; the dispatcher refuses missing or changed provider bindings instead of substituting an operation. Legacy unbound approvals now report that no task can resume and require a fresh model-selected MCP request.
   - The owning frontend now receives explicit resumed MCP start, completion, and failure activity events; provider failures without a diagnostic are reported as such rather than appearing to remain in progress.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/test_ask_agent.py tests/test_mcp.py`.

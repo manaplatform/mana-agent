@@ -45,6 +45,10 @@ task; use status_request or conversation_only when no execution should be create
 matching. If no offered task is unambiguously applicable, select new_task or conversation_only. Return
 strict JSON matching the schema and select only an offered task ID.
 
+Set related_task_id only for followup_task, task_expansion, task_correction, retry_request,
+resume_request, status_request, or duplicate_message. For new_task, clarification_answer, and
+conversation_only, related_task_id must be the empty string.
+
 safe_to_continue authorizes only use of this classification to reach the next independently validated
 decision boundary. It does not approve tools, mutations, retries, or consequential actions. Set it true
 when the selected category and optional offered task are unambiguous. In particular, select new_task or
