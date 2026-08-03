@@ -7,7 +7,10 @@ import threading
 
 import pytest
 
-from mana_agent.execution_supervisor import SideEffectClassification
+from mana_agent.execution_supervisor import (
+    ExecutionState as SupervisorState,
+    SideEffectClassification,
+)
 from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.gateway.lane_coordinator import (
     LaneBudget,
@@ -611,6 +614,31 @@ def test_token_and_cost_budget_exhaustion(coordinator: LaneCoordinator) -> None:
             repository_id=coordinator.taskboard.store.repository_id,
             estimated_cost=coding.cost_budget + 0.01,
         )
+
+
+def test_finish_preserves_supervisor_budget_exhaustion(coordinator: LaneCoordinator) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="complete within the reserved budget",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-exhaustion",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+
+    finished = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+
+    assert finished.state is LaneTaskState.BUDGET_EXHAUSTED
+    assert "execution budget exceeded before result acceptance" in finished.error
+    supervised = coordinator.execution_supervisor.store.get_task(finished.task_id)
+    assert supervised.state is SupervisorState.BUDGET_EXHAUSTED
 
 
 def test_child_agent_reserves_and_consumes_parent_budget(coordinator: LaneCoordinator) -> None:

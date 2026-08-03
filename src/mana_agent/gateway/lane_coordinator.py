@@ -42,7 +42,11 @@ from mana_agent.execution_supervisor import (
     SideEffectClassification,
     RecoveryDecision,
 )
-from mana_agent.execution_supervisor.errors import CompletionVerificationError, ExecutionSupervisorError
+from mana_agent.execution_supervisor.errors import (
+    BudgetExceededError,
+    CompletionVerificationError,
+    ExecutionSupervisorError,
+)
 from mana_agent.execution_supervisor.models import RecoveryAction
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
@@ -1093,15 +1097,26 @@ class LaneCoordinator:
             except CompletionVerificationError as exc:
                 execution.error = str(exc)
                 state = LaneTaskState.VERIFYING
+            except BudgetExceededError as exc:
+                # submit_result has already projected the durable task to its
+                # authoritative terminal budget state. Do not replace it with
+                # a second terminal transition to FAILED.
+                execution.error = str(exc)
+                state = LaneTaskState.BUDGET_EXHAUSTED
             except ExecutionSupervisorError as exc:
                 execution.error = str(exc)
-                state = LaneTaskState.FAILED
                 supervised = self.execution_supervisor.store.get_task(task_id)
+                state = (
+                    LaneTaskState.BUDGET_EXHAUSTED
+                    if supervised.state == SupervisorState.BUDGET_EXHAUSTED
+                    else LaneTaskState.FAILED
+                )
                 if supervised.state not in {
                     SupervisorState.FAILED,
                     SupervisorState.CANCELLED,
                     SupervisorState.COMPLETED,
                     SupervisorState.COMPLETED_PENDING_VERIFICATION,
+                    SupervisorState.BUDGET_EXHAUSTED,
                 }:
                     self.execution_supervisor.transition(
                         task_id,

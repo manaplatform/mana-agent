@@ -5,6 +5,7 @@ All notable repository changes should be recorded here.
 ## 2026-08-04
 
 - Raised the default Operations lane to the configured 32k routing-token and 32-unit cost ceilings, then constrained every execution model-routing budget to its validated specialist-lane contract before reservation. Canvas now has sufficient default budget for its model-selected tool run; narrower custom lanes still fail during model routing when they cannot fund the model estimate, rather than reaching an opaque `lane_budget_exhausted` admission failure.
+  - Preserved the supervisor's authoritative `budget_exhausted` state when result acceptance exceeds a task reservation, preventing a second invalid terminal transition to `failed`.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py`.
 
 - Connected durable lane budgets to the validated routing decision and provider-accounted context usage. Reserved token and cost estimates now use the selected model decision, while completed lanes record actual input/output usage and exact cost only when provider usage and configured pricing are available; estimated usage remains explicitly estimated.
