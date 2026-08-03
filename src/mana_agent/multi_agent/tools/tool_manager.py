@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,6 @@ from mana_agent.multi_agent.core.types import QueueJob, QueueJobType, ToolResult
 from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.documents.service import DocumentService
 from mana_agent.multi_agent.tools import git_tools
-from mana_agent.multi_agent.tools.permissions import assert_shell_allowed
 from mana_agent.tools.apply_patch import safe_apply_patch
 from mana_agent.tools.repository import repo_batch_read, repo_search
 from mana_agent.mcp import McpClient, load_mcp_servers
@@ -125,7 +125,24 @@ class ToolsManager:
             if job.job_type == QueueJobType.GIT:
                 tool_name = str(job.payload.get("tool") or job.payload.get("tool_name") or "git.generic")
                 tool_args = job.payload.get("args") if isinstance(job.payload.get("args"), dict) else dict(job.payload)
-                result = git_tools.execute_tool(tool_name, tool_args, repo_path=root)
+                if tool_name.replace("_", ".") == "git.generic":
+                    argv = [str(item) for item in (tool_args.get("args") or [])]
+                    result = git_tools.run_git(
+                        argv,
+                        repo_path=root,
+                        timeout=tool_args.get("timeout"),
+                        allow_protected=bool(tool_args.get("allow_protected", False)),
+                        action_context={
+                            "kind": "validated_queue_git",
+                            "actor": "tool_worker",
+                            "originating_agent": str(job.requested_by_agent_id or "tool_worker"),
+                            "parent_task_id": job.task_id,
+                            "queue_job_id": job.job_id,
+                            "verification": bool(job.payload.get("verification")),
+                        },
+                    )
+                else:
+                    result = git_tools.execute_tool(tool_name, tool_args, repo_path=root)
                 if isinstance(result, dict):
                     result = {**result, "execution_repo_root": str(root)}
                 return ToolResult(
@@ -147,26 +164,16 @@ class ToolsManager:
                     None if result.get("ok") else str(result.get("error") or "document tool failed"),
                 )
             if job.job_type == QueueJobType.BROWSER:
-                from mana_agent.connectors.browser.runtime_tools import build_browser_langchain_tools
-                tool_name = str(job.payload.get("tool") or job.payload.get("tool_name") or "")
-                args = dict(job.payload.get("args") or {})
-                tools = {tool.name: tool for tool in build_browser_langchain_tools()}
-                selected = tools.get(tool_name)
-                if selected is None:
-                    return ToolResult(new_message_id(), job.task_id, False, error=f"unsupported browser tool: {tool_name}")
-                raw = selected.invoke(args)
-                result = json.loads(raw) if isinstance(raw, str) else raw
-                ok = bool(isinstance(result, dict) and result.get("ok"))
-                return ToolResult(new_message_id(), job.task_id, ok, result, None if ok else str(result.get("message") or result.get("error_code") or "browser tool failed"))
-            if job.job_type == QueueJobType.MCP_TOOL:
-                client = McpClient(load_mcp_servers(overrides=list(job.payload.get("server_overrides") or [])))
-                result = client.call_tool(
-                    str(job.payload.get("tool") or job.payload.get("tool_name") or ""),
-                    dict(job.payload.get("args") or {}),
-                )
                 return ToolResult(
-                    new_message_id(), job.task_id, bool(result.get("ok")), result,
-                    None if result.get("ok") else f"MCP tool failed: {result.get('tool_name') or 'unknown'}",
+                    new_message_id(), job.task_id, False,
+                    {"ok": False, "error_code": "transactional_adapter_required", "tool": str(job.payload.get("tool") or job.payload.get("tool_name") or "")},
+                    "browser side effects are blocked until their adapter is registered with the transactional action gateway",
+                )
+            if job.job_type == QueueJobType.MCP_TOOL:
+                return ToolResult(
+                    new_message_id(), job.task_id, False,
+                    {"ok": False, "error_code": "transactional_adapter_required", "tool": str(job.payload.get("tool") or job.payload.get("tool_name") or "")},
+                    "MCP tool mutability is unclassified; fail-closed policy prevented provider execution",
                 )
             if job.job_type == QueueJobType.MCP_RESOURCE_READ:
                 client = McpClient(load_mcp_servers(overrides=list(job.payload.get("server_overrides") or [])))
@@ -232,7 +239,12 @@ class ToolsManager:
                 )
             if job.job_type == QueueJobType.APPLY_PATCH:
                 patch = str(job.payload.get("patch", ""))
-                result = safe_apply_patch(repo_root=root, patch=patch, check_only=False)
+                result = safe_apply_patch(
+                    repo_root=root,
+                    patch=patch,
+                    check_only=False,
+                    action_approval_id=str(job.payload.get("action_approval_id") or ""),
+                )
                 ok = bool(result.get("ok"))
                 error = None if ok else str(result.get("error") or result.get("message") or "patch failed")
                 if not ok and result.get("error_code") == "patch_context_not_found":
@@ -306,8 +318,12 @@ class ToolsManager:
             return ToolResult(new_message_id(), job.task_id, False, error=str(exc))
 
     def _shell(self, job: QueueJob, command: str, *, root: Path | None = None) -> ToolResult:
-        assert_shell_allowed(command)
         cwd = Path(root or self.execution_root_for_job(job)).resolve()
+        verification_job = bool((job.payload or {}).get("verification")) and job.job_type in {
+            QueueJobType.SHELL,
+            QueueJobType.RUN_TESTS,
+            QueueJobType.RUN_LINT,
+        }
         routing_payload = (job.payload or {}).get("sandbox_routing")
         if isinstance(routing_payload, dict):
             routing = RoutingRequest.model_validate(routing_payload)
@@ -335,33 +351,94 @@ class ToolsManager:
             repository_id=str(getattr(job, "primary_repository_id", "") or ""),
             execution_timeout_seconds=int((job.payload or {}).get("timeout_seconds") or 120),
         )
-        result = self.execution_manager.execute_once_sync(
-            spec,
-            routing,
-            ExecutionRequest(
-                argv=shell_argv,
-                timeout_seconds=spec.execution_timeout_seconds,
-                execution_id=job.job_id,
-                task_id=job.task_id,
-                root_task_id=str(job.root_task_id or job.task_id),
-                session_id=str(getattr(job, "session_id", "") or ""),
-                workspace_id=str(getattr(job, "workspace_id", "") or ""),
-                repository_id=str(getattr(job, "primary_repository_id", "") or ""),
+        def run_in_execution_fabric(argv, **_kwargs):  # noqa: ANN001
+            executed = self.execution_manager.execute_once_sync(
+                spec,
+                routing,
+                ExecutionRequest(
+                    argv=list(argv),
+                    timeout_seconds=spec.execution_timeout_seconds,
+                    execution_id=job.job_id,
+                    task_id=job.task_id,
+                    root_task_id=str(job.root_task_id or job.task_id),
+                    session_id=str(getattr(job, "session_id", "") or ""),
+                    workspace_id=str(getattr(job, "workspace_id", "") or ""),
+                    repository_id=str(getattr(job, "primary_repository_id", "") or ""),
+                ),
+            )
+            return subprocess.CompletedProcess(list(argv), executed.exit_code, executed.stdout, executed.stderr)
+
+        from mana_agent.transactional_actions.adapters import ShellActionAdapter
+        from mana_agent.transactional_actions.gateway import ApprovalRequired
+        from mana_agent.transactional_actions.runtime import default_action_gateway
+
+        adapter = ShellActionAdapter(
+            argv=shell_argv,
+            cwd=cwd,
+            environment=dict((job.payload or {}).get("environment") or {}),
+            expected_outputs=[str(item) for item in ((job.payload or {}).get("expected_outputs") or [])],
+            parent_task_id=job.task_id,
+            actor=(
+                "tool_worker"
+                if verification_job
+                else str(job.requested_by_agent_id or "agent")
             ),
+            originating_agent=str(job.requested_by_agent_id or "agent"),
+            idempotency_key=f"shell:{job.job_id}",
+            transaction_id=str((job.payload or {}).get("transaction_id") or ""),
+            timeout_seconds=spec.execution_timeout_seconds,
+            runner=run_in_execution_fabric,
+            policy_context=(
+                {
+                    "kind": "validated_verification",
+                    "queue_job_id": job.job_id,
+                    "task_id": job.task_id,
+                    "job_type": job.job_type.value,
+                }
+                if verification_job
+                else {}
+            ),
+            allow_command_result_verification=verification_job,
         )
+        action_gateway = default_action_gateway(cwd)
+        try:
+            outcome = action_gateway.execute(
+                adapter,
+                approval_id=str((job.payload or {}).get("action_approval_id") or ""),
+            )
+        except ApprovalRequired as exc:
+            action = exc.action
+            return ToolResult(
+                new_message_id(),
+                job.task_id,
+                False,
+                {
+                    "permission_required": True,
+                    "permission_request_id": action.action_id,
+                    "action_id": action.action_id,
+                    "preview": action.preview.redacted() if action.preview else {},
+                    "preview_digest": action.preview_digest,
+                    "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                    "execution_repo_root": str(cwd),
+                },
+                "shell action requires exact policy approval",
+            )
+        result = outcome.result
+        committed = outcome.action.state.value == "committed"
         return ToolResult(
             new_message_id(),
             job.task_id,
-            result.exit_code == 0,
+            committed,
             {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.exit_code,
+                "stdout": str(result.get("stdout") or ""),
+                "stderr": str(result.get("stderr") or ""),
+                "returncode": int(result.get("returncode") or 0),
                 "execution_repo_root": str(cwd),
-                "sandbox_id": result.sandbox_id,
-                "execution_provider": result.provider,
+                "action_id": outcome.action.action_id,
+                "action_state": outcome.action.state.value,
+                "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
             },
-            None if result.exit_code == 0 else result.stderr,
+            None if committed else outcome.action.error or "shell verification incomplete",
         )
 
     def _resolve_path(self, path: str, *, root: Path | None = None) -> Path:
@@ -452,5 +529,6 @@ class ToolsManager:
                 str(args.get("path") or ""),
                 explicit=bool(args.get("explicit", False)),
                 backup=bool(args.get("backup", True)),
+                action_approval_id=str(args.get("action_approval_id") or ""),
             )
         return {"ok": False, "error": "unsupported_document_tool", "tool": tool_name}

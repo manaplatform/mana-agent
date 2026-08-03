@@ -84,6 +84,26 @@ def _stable_hash(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _completion_verification_failure(manifest: Mapping[str, Any]) -> str:
+    verification = manifest.get("verification")
+    if not isinstance(verification, Mapping):
+        return "Durable completion verification failed without a persisted verification report."
+    checks = verification.get("checks")
+    checks = checks if isinstance(checks, list) else []
+    failures: list[str] = []
+    for raw in checks:
+        if not isinstance(raw, Mapping) or raw.get("passed") is True:
+            continue
+        contract = str(raw.get("contract_type") or raw.get("verifier_type") or "contract")
+        reference = str(raw.get("artifact_reference") or raw.get("path") or "").strip()
+        reason = str(raw.get("failure_reason") or "condition not satisfied").strip()
+        label = f"{contract} ({reference})" if reference else contract
+        failures.append(f"{label}: {reason}")
+    if not failures:
+        return "Durable completion verification failed; the persisted report contains no passing completion projection."
+    return "Durable completion verification failed: " + "; ".join(failures[:5])
+
+
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -848,7 +868,16 @@ class LaneCoordinator:
                         CompletionContract(
                             contract_type=CompletionContractType.FILE_EXISTS,
                             path=str(relative),
-                            minimum_size=1,
+                            minimum_size=0,
+                            require_attempt_change=True,
+                        )
+                    )
+                elif path.is_dir():
+                    contracts.append(
+                        CompletionContract(
+                            contract_type=CompletionContractType.DIRECTORY_EXISTS,
+                            path=str(relative),
+                            expected_kind="directory",
                             require_attempt_change=True,
                         )
                     )
@@ -919,6 +948,9 @@ class LaneCoordinator:
             else:
                 verified = supervised.state == SupervisorState.COMPLETED
                 state = LaneTaskState.COMPLETED if verified else LaneTaskState.VERIFYING
+                if not verified:
+                    manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+                    execution.error = _completion_verification_failure(manifest)
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
         elif state == LaneTaskState.BUDGET_EXHAUSTED:

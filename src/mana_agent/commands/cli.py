@@ -21,6 +21,7 @@ from mana_agent.fleet.cli import fleet_app
 from mana_agent.teach.cli import teach_app
 from mana_agent.execution_supervisor.cli import tasks_app
 from mana_agent.memory.cli import memory_app
+from mana_agent.human_inbox.cli import inbox_app
 
 # Use exactly one canonical Typer app.
 # Do not create a second typer.Typer() here.
@@ -39,6 +40,8 @@ if not any(group.name == "tasks" for group in app.registered_groups):
     app.add_typer(tasks_app, name="tasks", hidden=True)
 if not any(group.name == "memory" for group in app.registered_groups):
     app.add_typer(memory_app, name="memory")
+if not any(group.name == "inbox" for group in app.registered_groups):
+    app.add_typer(inbox_app, name="inbox")
 
 
 def _replace_command(name: str, callback, **kwargs) -> None:

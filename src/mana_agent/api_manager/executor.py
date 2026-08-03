@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import http.client
 import ipaddress
@@ -11,6 +12,7 @@ import socket
 import ssl
 import threading
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -258,13 +260,105 @@ class ApiExecutor:
         approval_reference: str = "",
         cancellation: threading.Event | None = None,
     ) -> ApiExecutionResult:
+        if not request.risk_level.mutating:
+            self.approval_broker.authorize(request, preview, approval_reference)
+            return self._execute_authorized(request, preview=preview, cancellation=cancellation)
+
+        from mana_agent.transactional_actions.adapters import HttpActionAdapter
+        from mana_agent.transactional_actions.runtime import default_action_gateway
+
+        validated_hostname = (urlsplit(request.url).hostname or "").rstrip(".").lower()
+        validation_policy = self.network_policy
+        if request.approved_network_host.rstrip(".").lower() == validated_hostname:
+            validation_policy = validation_policy.model_copy(update={
+                "allowed_hosts": tuple(sorted({*validation_policy.allowed_hosts, validated_hostname})),
+                "allow_http": bool(validation_policy.allow_http or request.allow_insecure_http_once),
+            })
+        validate_network_target(request.url, validation_policy)
+        action_gateway = default_action_gateway(
+            Path.cwd(),
+            allowed_http_hosts=(validated_hostname,),
+            surface_approval_events=False,
+        )
+        captured: dict[str, ApiExecutionResult] = {}
+
+        def execute_controlled_request(_request: urllib.request.Request) -> dict[str, Any]:
+            result = self._execute_authorized(request, preview=preview, cancellation=cancellation)
+            captured["result"] = result
+            persisted = result.model_dump(mode="json")
+            persisted["headers"] = redact_mapping(
+                persisted.get("headers") or {}, secret_values=request.secret_values
+            )
+            persisted["json_body"] = None
+            persisted["text_body"] = ""
+            return persisted
+
+        adapter = HttpActionAdapter(
+            method=request.method,
+            url=request.url,
+            headers=request.headers,
+            body=request.body,
+            parent_task_id=request.routing_task_intent or request.session_id or "api-request",
+            actor="api_manager",
+            originating_agent="api_manager",
+            idempotency_key=f"http:{_request_fingerprint(request)}",
+            expected_statuses=tuple(range(200, 300)),
+            transport=execute_controlled_request,
+        )
+        action = action_gateway.propose(adapter)
+        if action.state.value == "committed" and action.verification and action.verification.complete:
+            return ApiExecutionResult.model_validate(action.execution_result)
+        if action.state.value == "failed":
+            raise UpstreamApiError(
+                "Transactional policy denied the API mutation before execution.",
+                details={
+                    "action_id": action.action_id,
+                    "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                    "action_error": action.error,
+                },
+            )
+        try:
+            self.approval_broker.authorize(request, preview, approval_reference)
+        except PermissionRequiredError as exc:
+            exc.details.update({
+                "action_id": action.action_id,
+                "transaction_id": action.transaction_id,
+                "transactional_preview": action.preview.redacted() if action.preview else {},
+                "preview_digest": action.preview_digest,
+                "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+            })
+            raise
+        transactional_approval_id = action_gateway.approve(
+            action.action_id,
+            approved_by=f"api-approval:{approval_reference}",
+            reviewer_id=getpass.getuser(),
+            ttl_seconds=60,
+        )
+        outcome = action_gateway.execute(adapter, approval_id=transactional_approval_id)
+        if outcome.action.state.value != "committed":
+            raise UpstreamApiError(
+                "The API request executed but did not produce sufficient verification evidence.",
+                details={
+                    "action_id": outcome.action.action_id,
+                    "action_state": outcome.action.state.value,
+                    "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+                },
+            )
+        return captured.get("result") or ApiExecutionResult.model_validate(outcome.result)
+
+    def _execute_authorized(
+        self,
+        request: BuiltApiRequest,
+        *,
+        preview: RequestPreview,
+        cancellation: threading.Event | None = None,
+    ) -> ApiExecutionResult:
         if request.risk_level.mutating or preview.approval_required:
             self._emit(
                 "api.approval.required",
                 request,
                 preview=preview.model_dump(mode="json"),
             )
-        self.approval_broker.authorize(request, preview, approval_reference)
         attempts = max(1, request.retry_maximum_attempts)
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
@@ -461,18 +555,27 @@ class ApiExecutor:
                 "filename": _response_filename(response.headers),
             }
             if self.artifact_directory is not None:
-                self.artifact_directory.mkdir(parents=True, exist_ok=True)
-                try:
-                    self.artifact_directory.chmod(0o700)
-                except OSError:
-                    pass
                 filename = binary_metadata["filename"] or f"api-{digest[:16]}{mimetypes.guess_extension(content_type) or '.bin'}"
                 target = self.artifact_directory / f"{digest[:16]}-{Path(str(filename)).name}"
-                target.write_bytes(response.body)
-                try:
-                    target.chmod(0o600)
-                except OSError:
-                    pass
+                from mana_agent.transactional_actions.runtime import execute_file_action
+                persisted = execute_file_action(
+                    workspace_root=self.artifact_directory,
+                    operation="edit" if target.is_file() else "create",
+                    path=target.name,
+                    content=response.body,
+                    actor="api_manager",
+                    originating_agent="api_manager",
+                    parent_task_id="api-response-artifact",
+                    desired_mode=0o600,
+                )
+                if not persisted.get("ok"):
+                    raise UpstreamApiError(
+                        "The API response was received but its binary artifact could not be committed.",
+                        details={
+                            "artifact_action_id": persisted.get("action_id", ""),
+                            "artifact_error": persisted.get("error") or persisted.get("error_code") or "unknown",
+                        },
+                    )
                 file_reference = str(target)
         body_kind = "json" if json_body is not None else "text" if text_body else "file" if file_reference else "binary_metadata"
         rate_limit = {

@@ -42,6 +42,7 @@ This guarantees tool visibility on *every* turn, not just the first message.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -248,6 +249,7 @@ class ManaChatApp(App):
             "remote_execution.waiting_permission",
             "server.waiting_approval",
             "api.waiting_approval",
+            "action.approval.required",
         }:
             return
         metadata = activity.get("metadata") or {}
@@ -263,10 +265,20 @@ class ManaChatApp(App):
         self.post_message(ComputerPermissionRequested(
             request_id=request_id,
             scope=str(metadata.get("permission_scope") or ""),
-            preview=str(metadata.get("preview") or activity.get("title") or ""),
+            preview=(
+                json.dumps(
+                    metadata.get("approval_display") or metadata.get("preview"),
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                )
+                if metadata.get("approval_display") or isinstance(metadata.get("preview"), dict)
+                else str(metadata.get("preview") or activity.get("title") or "")
+            ),
             remote=bool(metadata.get("remote_permission")),
             server=bool(metadata.get("server_approval")),
             api=bool(metadata.get("api_approval")),
+            transactional=bool(metadata.get("transactional_action_approval")),
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
@@ -280,6 +292,7 @@ class ManaChatApp(App):
                 remote=event.remote,
                 server=event.server,
                 api=event.api,
+                transactional=event.transactional,
             ),
             self._apply_computer_permission,
         )
@@ -299,6 +312,20 @@ class ManaChatApp(App):
         )
 
         try:
+            if choice.transactional:
+                command = (
+                    self.gateway.transactional_action_approval_command
+                    if choice.decision is not None
+                    else self.gateway.deny_transactional_action_command
+                )
+                result = await asyncio.to_thread(
+                    command,
+                    choice.request_id,
+                    session_id=self._gateway_session_id or "",
+                )
+                self.notify(result["message"])
+                self.history.add(AssistantMessageEvent(content=result["message"]))
+                return
             if choice.server:
                 command = (
                     self.gateway.server_approval_command

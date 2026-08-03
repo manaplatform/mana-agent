@@ -263,6 +263,7 @@ class ComputerControlService:
         session_id: str,
         client_type: str,
         locally_confirmed: bool = False,
+        transactional_authorized: bool = False,
     ) -> ComputerActionResult:
         self._ensure_enabled()
         spec = self.policy.validate_action(action)
@@ -282,13 +283,16 @@ class ComputerControlService:
                 )
             self._emit(action, "permission_check", ExecutionState.WAITING_PERMISSION, f"Checking {action.permission_scope} permission", permission_scope=action.permission_scope)
             permission_status = self.permissions.status(action.permission_scope)
-            if permission_status.decision is PermissionDecision.ASK_EVERY_TIME:
+            if permission_status.decision is PermissionDecision.ASK_EVERY_TIME and not transactional_authorized:
                 raise self._request_permission(
                     action,
                     session_id=session_id,
                     client_type=client_type,
                 )
-            mana_permission = self.permissions.require(action.permission_scope)
+            mana_permission = (
+                PermissionDecision.ALLOW_ONCE
+                if transactional_authorized else self.permissions.require(action.permission_scope)
+            )
             os_permission = await self.provider.check_permission(action.capability)
             if not os_permission.granted:
                 raise OperatingSystemPermissionDenied(
@@ -297,7 +301,8 @@ class ComputerControlService:
                 )
             self._emit(action, "permission_check", ExecutionState.COMPLETED, "Computer permission granted", permission_scope=action.permission_scope)
             try:
-                self.policy.require_confirmation(action)
+                if not transactional_authorized:
+                    self.policy.require_confirmation(action)
             except ConfirmationRequired as exc:
                 confirmation_result = "requested"
                 self._pending_confirmation_actions[exc.confirmation_request_id] = (
@@ -309,7 +314,8 @@ class ComputerControlService:
                 raise
             if action.risk.value in {"high", "critical"}:
                 confirmation_result = "confirmed"
-            self.permissions.consume_once(action.permission_scope, mana_permission)
+            if not transactional_authorized:
+                self.permissions.consume_once(action.permission_scope, mana_permission)
             self._emit(action, "action_started", ExecutionState.RUNNING, self.policy.preview(action), capability=action.capability, operation=action.operation, application_id=action.target.application_id or "")
             adapter = await self.adapters.select(
                 action,

@@ -1,5 +1,16 @@
 # Resilient Execution Supervisor
 
+Human input uses the durable inbox described in
+[Durable Human-in-the-Loop Inbox](32-durable-human-inbox.md). A supervised branch
+stores `waiting_inbox_item_id`, an explicit approval/clarification wait reason,
+structured `human_inputs`, and consumed resume-claim IDs. Suspension requires the
+branch's durable checkpoint, clears only that branch's worker lease, and leaves
+siblings runnable. A terminal valid response queues exactly the referenced branch;
+restart reconciliation can finish a response persisted before the resume write
+without executing the continuation twice.
+Task schema version 4 adds these human-wait fields through typed defaults, so
+older task records remain readable and are upgraded on their next write.
+
 Scoped memory capsule revision maps are part of durable task, checkpoint, and result-escrow state. Child execution records identify exactly which delegated capsule revisions they received; restart and retry preserve that map instead of rebuilding broad parent history. Result escrow records returned capsule revisions without treating task completion as shared-memory approval. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md#delegation-and-execution-lifecycle).
 
 The execution supervisor is the durable authority for long-running root tasks,

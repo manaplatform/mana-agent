@@ -372,7 +372,20 @@ class WorkspaceManager:
         if no_ff:
             args.append("--no-ff")
         args.extend(["-m", f"Merge managed task branch {workspace.branch_name} ({task_id})", workspace.branch_name])
-        result = git_tools.run_git(args, repo_path=self.source_repo_root, allow_protected=allow_protected)
+        result = git_tools.run_git(
+            args,
+            repo_path=self.source_repo_root,
+            allow_protected=allow_protected,
+            action_context={
+                "kind": "managed_workspace",
+                "operation": "merge",
+                "actor": "workspace_manager",
+                "originating_agent": workspace.assigned_agent_id or "workspace_manager",
+                "parent_task_id": task_id,
+                "explicit_user_intent": explicit_user_intent,
+                "target_resources": [workspace.worktree_path],
+            },
+        )
         workspace.merge_result = dict(result)
         workspace.updated_at = utc_now()
         if result.get("blocked"):
@@ -438,7 +451,20 @@ class WorkspaceManager:
             if force and explicit_user_intent:
                 args.append("--force")
             args.append(str(path))
-            result = git_tools.run_git(args, repo_path=self.source_repo_root)
+            result = git_tools.run_git(
+                args,
+                repo_path=self.source_repo_root,
+                action_context={
+                    "kind": "managed_workspace",
+                    "operation": "remove",
+                    "actor": "workspace_manager",
+                    "originating_agent": workspace.assigned_agent_id or "workspace_manager",
+                    "parent_task_id": task_id,
+                    "explicit_user_intent": explicit_user_intent,
+                    "workspace_path": str(path),
+                    "target_resources": [str(path)],
+                },
+            )
             cleanup["worktree_remove"] = result
             if not result.get("ok") and not (force and explicit_user_intent):
                 raise WorkspaceError(
@@ -458,6 +484,14 @@ class WorkspaceManager:
             branch_result = git_tools.run_git(
                 ["branch", "-d", workspace.branch_name],
                 repo_path=self.source_repo_root,
+                action_context={
+                    "kind": "managed_workspace",
+                    "operation": "delete_branch",
+                    "actor": "workspace_manager",
+                    "originating_agent": workspace.assigned_agent_id or "workspace_manager",
+                    "parent_task_id": task_id,
+                    "explicit_user_intent": explicit_user_intent,
+                },
             )
             cleanup["branch_delete"] = branch_result
 
@@ -585,7 +619,22 @@ class WorkspaceManager:
             raise WorkspaceError(f"worktree path already exists: {path}")
         # Prefer creating a new branch from the recorded base revision.
         args = ["worktree", "add", "-b", workspace.branch_name, str(path), workspace.base_revision]
-        result = git_tools.run_git(args, repo_path=self.source_repo_root)
+        context = {
+            "kind": "managed_workspace",
+            "operation": "create",
+            "actor": "workspace_manager",
+            "originating_agent": workspace.assigned_agent_id or "workspace_manager",
+            "parent_task_id": workspace.task_id,
+            "workspace_id": workspace.workspace_id,
+            "workspace_path": str(path),
+            "branch_name": workspace.branch_name,
+            "target_resources": [str(path)],
+        }
+        result = git_tools.run_git(
+            args,
+            repo_path=self.source_repo_root,
+            action_context=context,
+        )
         if result.get("ok"):
             return
         stderr = str(result.get("stderr") or result.get("error") or "")
@@ -594,6 +643,7 @@ class WorkspaceManager:
             alt = git_tools.run_git(
                 ["worktree", "add", str(path), workspace.branch_name],
                 repo_path=self.source_repo_root,
+                action_context=context,
             )
             if alt.get("ok"):
                 return

@@ -127,8 +127,11 @@ def safe_edit_file(
     after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
     if after == before:
         return EditFileResult(ok=False, path=rel_posix, error_code="no_change", error="replacement produced no change").to_dict()
-    _atomic_write_bytes(target, after.encode("utf-8"))
-    return EditFileResult(
+    from mana_agent.transactional_actions.runtime import execute_file_action
+    gated = execute_file_action(workspace_root=repo_root, operation="edit", path=rel_posix, content=after)
+    if not gated.get("ok"):
+        return gated
+    result = EditFileResult(
         ok=True,
         path=rel_posix,
         files_changed=[rel_posix],
@@ -137,6 +140,8 @@ def safe_edit_file(
         changed_ranges=[_changed_range(before, after)],
         match_lines=match_lines,
     ).to_dict()
+    result.update({key: gated[key] for key in ("action_id", "action_state", "preview_digest", "verification", "duplicate_suppressed") if key in gated})
+    return result
 
 
 def safe_multi_edit_file(
@@ -186,8 +191,11 @@ def safe_multi_edit_file(
 
     if current == before:
         return EditFileResult(ok=False, path=rel_posix, error_code="no_change", error="edits produced no change").to_dict()
-    _atomic_write_bytes(target, current.encode("utf-8"))
-    return EditFileResult(
+    from mana_agent.transactional_actions.runtime import execute_file_action
+    gated = execute_file_action(workspace_root=repo_root, operation="edit", path=rel_posix, content=current)
+    if not gated.get("ok"):
+        return gated
+    result = EditFileResult(
         ok=True,
         path=rel_posix,
         files_changed=[rel_posix],
@@ -195,6 +203,8 @@ def safe_multi_edit_file(
         after_sha256=_sha(current),
         changed_ranges=ranges,
     ).to_dict()
+    result.update({key: gated[key] for key in ("action_id", "action_state", "preview_digest", "verification", "duplicate_suppressed") if key in gated})
+    return result
 
 
 def build_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES):
@@ -204,14 +214,21 @@ def build_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence
         from langchain.tools import StructuredTool  # type: ignore
 
     def _tool(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict[str, Any]:
-        return safe_edit_file(
-            repo_root=repo_root,
-            path=path,
-            old_string=old_string,
-            new_string=new_string,
-            replace_all=replace_all,
-            allowed_prefixes=allowed_prefixes,
-        )
+        target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
+        if err or target is None or rel_posix is None:
+            return EditFileResult(ok=False, path=path, error_code="invalid_path", error=err or "invalid path").to_dict()
+        if not target.is_file() or not old_string:
+            return safe_edit_file(repo_root=repo_root, path=path, old_string=old_string, new_string=new_string, replace_all=replace_all, allowed_prefixes=allowed_prefixes)
+        before = target.read_text(encoding="utf-8")
+        matches = _all_match_lines(before, old_string)
+        if not matches or (len(matches) > 1 and not replace_all):
+            return safe_edit_file(repo_root=repo_root, path=path, old_string=old_string, new_string=new_string, replace_all=replace_all, allowed_prefixes=allowed_prefixes)
+        after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        result = execute_file_action(workspace_root=repo_root, operation="edit", path=rel_posix, content=after)
+        if result.get("ok"):
+            result.update({"path": rel_posix, "files_changed": [rel_posix], "before_sha256": _sha(before), "after_sha256": _sha(after), "changed_ranges": [_changed_range(before, after)], "match_lines": matches})
+        return result
 
     return StructuredTool.from_function(
         func=_tool,
@@ -227,7 +244,23 @@ def build_multi_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Se
         from langchain.tools import StructuredTool  # type: ignore
 
     def _tool(path: str, edits: list[dict[str, str]]) -> dict[str, Any]:
-        return safe_multi_edit_file(repo_root=repo_root, path=path, edits=edits, allowed_prefixes=allowed_prefixes)
+        target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
+        if err or target is None or rel_posix is None or not target.is_file() or not edits:
+            return safe_multi_edit_file(repo_root=repo_root, path=path, edits=edits, allowed_prefixes=allowed_prefixes)
+        before, current = target.read_text(encoding="utf-8"), target.read_text(encoding="utf-8")
+        ranges: list[dict[str, int]] = []
+        for edit in edits:
+            old, new = str(edit.get("old_string") or ""), str(edit.get("new_string") or "")
+            if not old or current.count(old) != 1:
+                return safe_multi_edit_file(repo_root=repo_root, path=path, edits=edits, allowed_prefixes=allowed_prefixes)
+            next_content = current.replace(old, new, 1)
+            ranges.append(_changed_range(current, next_content))
+            current = next_content
+        from mana_agent.transactional_actions.runtime import execute_file_action
+        result = execute_file_action(workspace_root=repo_root, operation="edit", path=rel_posix, content=current)
+        if result.get("ok"):
+            result.update({"path": rel_posix, "files_changed": [rel_posix], "before_sha256": _sha(before), "after_sha256": _sha(current), "changed_ranges": ranges})
+        return result
 
     return StructuredTool.from_function(
         func=_tool,

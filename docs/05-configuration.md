@@ -1,5 +1,16 @@
 # Configuration
 
+## Durable human inbox
+
+Inbox state lives under `~/.mana/inbox` (or the existing test/managed
+`MANA_HOME`). Reviewer role and group membership is explicit in
+`~/.mana/inbox/identities.json`; missing role/group membership leaves requests
+pending with a configuration error. Per-request typed policies define expiry,
+reminders, escalation targets, and behavior. No repository `.env` or ambient
+administrator fallback changes reviewer routing. The signing key and protected
+context use owner-only local storage. See
+[Durable Human-in-the-Loop Inbox](32-durable-human-inbox.md#reviewer-directory).
+
 ## Scoped memory capsules
 
 Scoped capsules are enabled with conservative review and retention defaults. The persisted `~/.mana/config.toml` keys correspond to these typed settings:

@@ -350,6 +350,17 @@ class ExecutionSupervisor:
         def update(task: TaskRecord) -> None:
             nonlocal prior
             prior = task.state
+            if task.waiting_inbox_item_id and target in {
+                ExecutionState.QUEUED,
+                ExecutionState.LEASED,
+                ExecutionState.RUNNING,
+                ExecutionState.CHECKPOINTING,
+                ExecutionState.RETRY_SCHEDULED,
+                ExecutionState.COMPLETED_PENDING_VERIFICATION,
+            }:
+                raise LeaseConflictError(
+                    "a human-waiting branch may resume only through its durable inbox claim"
+                )
             validate_transition(task.state, target)
             task.state = target
             task.updated_at = self.clock()
@@ -364,11 +375,17 @@ class ExecutionSupervisor:
                 task.lease_token = ""
                 task.lease_expires_at = None
                 task.retry_not_before = None
+                task.waiting_inbox_item_id = ""
+                task.waiting_reason = ""
+                task.human_wait_started_at = None
             elif target == ExecutionState.QUEUED:
                 task.lease_owner = ""
                 task.lease_token = ""
                 task.lease_expires_at = None
                 task.retry_not_before = None
+                task.waiting_inbox_item_id = ""
+                task.waiting_reason = ""
+                task.human_wait_started_at = None
             if reason and target in {ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}:
                 task.failure_reason = reason
             if recovery_reason:
@@ -441,12 +458,17 @@ class ExecutionSupervisor:
                 active_siblings = sum(
                     item.parent_task_id == task.parent_task_id
                     and item.task_id != task.task_id
-                    and item.state in {
-                        ExecutionState.LEASED,
-                        ExecutionState.RUNNING,
-                        ExecutionState.CHECKPOINTING,
-                        ExecutionState.WAITING,
-                    }
+                    and (
+                        item.state in {
+                            ExecutionState.LEASED,
+                            ExecutionState.RUNNING,
+                            ExecutionState.CHECKPOINTING,
+                        }
+                        or (
+                            item.state is ExecutionState.WAITING
+                            and not item.waiting_inbox_item_id
+                        )
+                    )
                     for item in self.store.list_tasks()
                 )
                 if active_siblings >= self.config.max_concurrent_children:
@@ -664,6 +686,155 @@ class ExecutionSupervisor:
             self.store.save_attempt(attempt)
         self._emit("checkpoint_saved", task, checkpoint_id=checkpoint.checkpoint_id)
         return checkpoint
+
+    def suspend_for_human_input(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        request_type: str,
+    ) -> TaskRecord:
+        """Durably suspend exactly one task branch and release its worker lease."""
+        if request_type not in {"approval", "clarification"}:
+            raise ValueError("unsupported human input request type")
+        checkpoint = self.store.get_checkpoint(checkpoint_id) if checkpoint_id else None
+        if checkpoint is None or checkpoint.task_id != task_id:
+            raise RetrySafetyError("human-input suspension requires this branch's durable checkpoint")
+
+        def suspend(task: TaskRecord) -> None:
+            if task.waiting_inbox_item_id == inbox_item_id and task.state is ExecutionState.WAITING:
+                return
+            if task.state not in {
+                ExecutionState.QUEUED,
+                ExecutionState.LEASED,
+                ExecutionState.RUNNING,
+                ExecutionState.CHECKPOINTING,
+                ExecutionState.WAITING,
+                ExecutionState.RETRY_SCHEDULED,
+            }:
+                raise LeaseConflictError(
+                    f"task cannot wait for human input from state {task.state.value}"
+                )
+            if task.checkpoint_id != checkpoint_id:
+                raise RetrySafetyError("human-input checkpoint is no longer the active branch checkpoint")
+            validate_transition(task.state, ExecutionState.WAITING)
+            task.state = ExecutionState.WAITING
+            task.waiting_inbox_item_id = inbox_item_id
+            task.waiting_reason = f"waiting_for_{request_type}"
+            task.human_wait_started_at = task.human_wait_started_at or self.clock()
+            task.lease_owner = ""
+            task.lease_token = ""
+            task.lease_expires_at = None
+            task.assigned_worker = ""
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, suspend)
+        if task.attempt_id:
+            attempt = self.store.get_attempt(task.attempt_id)
+            if attempt is not None:
+                attempt.state = task.waiting_reason
+                attempt.lease_owner = ""
+                attempt.lease_token = ""
+                attempt.lease_expires_at = None
+                self.store.save_attempt(attempt)
+        self._emit(
+            "branch_suspended",
+            task,
+            inbox_item_id=inbox_item_id,
+            waiting_reason=task.waiting_reason,
+            checkpoint_id=checkpoint_id,
+        )
+        return task
+
+    def resume_from_human_input(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> TaskRecord:
+        """Queue one checkpointed branch once for one durable human response."""
+        checkpoint = self.store.get_checkpoint(checkpoint_id) if checkpoint_id else None
+        if checkpoint is None or checkpoint.task_id != task_id:
+            raise RetrySafetyError("human response references a missing or foreign checkpoint")
+        branch_snapshot = self.store.get_task(task_id)
+        ancestor_id = branch_snapshot.parent_task_id
+        while ancestor_id:
+            ancestor = self.store.get_task(ancestor_id)
+            if ancestor.state in TERMINAL_STATES or ancestor.state is ExecutionState.CANCELLING:
+                raise RetrySafetyError(
+                    f"human response cannot resume under non-runnable ancestor {ancestor.task_id}"
+                )
+            ancestor_id = ancestor.parent_task_id
+
+        wait_duration = timedelta(0)
+
+        def resume(task: TaskRecord) -> None:
+            nonlocal wait_duration
+            if resume_claim_id in task.human_resume_claim_ids:
+                return
+            if task.state is not ExecutionState.WAITING or task.waiting_inbox_item_id != inbox_item_id:
+                raise LeaseConflictError("only the branch waiting for this inbox item may resume")
+            if task.checkpoint_id != checkpoint_id:
+                raise RetrySafetyError("human response checkpoint no longer matches the branch")
+            validate_transition(task.state, ExecutionState.QUEUED)
+            task.human_inputs.append({
+                "inbox_item_id": inbox_item_id,
+                "checkpoint_id": checkpoint_id,
+                "resume_claim_id": resume_claim_id,
+                "response": structured_response,
+                "received_at": self.clock().isoformat(),
+            })
+            task.human_resume_claim_ids.append(resume_claim_id)
+            if task.deadline_at is not None and task.human_wait_started_at is not None:
+                wait_duration = self.clock() - task.human_wait_started_at
+                task.deadline_at += wait_duration
+            task.state = ExecutionState.QUEUED
+            task.waiting_inbox_item_id = ""
+            task.waiting_reason = ""
+            task.human_wait_started_at = None
+            task.lease_owner = ""
+            task.lease_token = ""
+            task.lease_expires_at = None
+            task.retry_not_before = None
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, resume)
+        parent_id = task.parent_task_id
+        while parent_id and wait_duration > timedelta(0):
+            def extend_parent(parent: TaskRecord) -> None:
+                if parent.deadline_at is not None:
+                    parent.deadline_at += wait_duration
+                parent.updated_at = self.clock()
+            parent, _ = self.store.update_task(parent_id, extend_parent)
+            parent_id = parent.parent_task_id
+        self._emit(
+            "branch_resumed",
+            task,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            resume_claim_id=resume_claim_id,
+        )
+        return task
+
+    def restore_human_wait(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        request_type: str,
+    ) -> TaskRecord:
+        """Repair a branch projection from an authoritative unresolved inbox item."""
+        return self.suspend_for_human_input(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            request_type=request_type,
+        )
 
     def submit_result(
         self,
@@ -1081,6 +1252,9 @@ class ExecutionSupervisor:
                 task.lease_token = ""
                 task.lease_expires_at = None
                 task.retry_not_before = None
+                task.waiting_inbox_item_id = ""
+                task.waiting_reason = ""
+                task.human_wait_started_at = None
             task, _ = self.store.update_task(current.task_id, finish)
             if task.attempt_id:
                 attempt = self.store.get_attempt(task.attempt_id)
@@ -1254,7 +1428,16 @@ class ExecutionSupervisor:
                     (summary.recovered if recovered.state == ExecutionState.COMPLETED else summary.intervention_required).append(task.task_id)
                     self._emit("task_recovered", recovered, action="completion_reverified")
                 continue
-            if task.deadline_at is not None and task.deadline_at <= now:
+            if task.state == ExecutionState.WAITING and task.waiting_inbox_item_id:
+                summary.unchanged.append(task.task_id)
+                continue
+            human_wait_in_tree = any(
+                candidate.root_task_id == task.root_task_id
+                and candidate.state is ExecutionState.WAITING
+                and bool(candidate.waiting_inbox_item_id)
+                for candidate in self.store.list_tasks(incomplete_only=True)
+            )
+            if task.deadline_at is not None and task.deadline_at <= now and not human_wait_in_tree:
                 if task.state not in TERMINAL_STATES:
                     task = self.transition(
                         task.task_id,

@@ -1,5 +1,26 @@
 # Commands
 
+## Durable human inbox
+
+`mana-agent inbox` reads and responds to the authoritative persisted approval and
+clarification queue:
+
+```bash
+mana-agent inbox list [--status pending] [--reviewer ID] [--role ROLE] [--group GROUP] [--task ID] [--branch ID] [--request-type approval]
+mana-agent inbox show <inbox-item-id>
+mana-agent inbox approve <inbox-item-id> [--comment TEXT]
+mana-agent inbox deny <inbox-item-id> [--comment TEXT]
+mana-agent inbox answer <inbox-item-id> --answer '{"field":"value"}'
+mana-agent inbox maintain
+```
+
+The shared chat/TUI command surface provides `/inbox list`, `/inbox show <id>`,
+`/inbox approve <id>`, `/inbox deny <id>`, and `/inbox answer <id> '<json>'`.
+
+The maintenance command is safe for persistent cron/automation invocation and
+performs idempotent expiry, reminder, and restart reconciliation. See
+[Durable Human-in-the-Loop Inbox](32-durable-human-inbox.md).
+
 ## Scoped memory capsules
 
 Capsule commands call the authenticated Mana API and never read provider storage directly:
@@ -12,7 +33,7 @@ mana-agent memory capsules staged
 mana-agent memory capsules review <staged-id> --strategy append --reason "Evidence reviewed"
 ```
 
-Set `MANA_API_BASE` (or pass `--api-base`) and the existing `MANA_API_TOKEN`. The API host must install its authenticated capsule identity resolver. Principal, project, team, and namespace overrides are intentionally unavailable. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
+Set `MANA_API_BASE` (or pass `--api-base`) and the existing `MANA_API_TOKEN`. `mana-agent api` and the local dashboard install a fixed local process identity for the current OS user and repository, which permits authorized project and user capsule reads. Dashboard chat passes that same identity to its gateway, so successful task results are persisted as task-private capsules for model-selected follow-ups; the dashboard does not expose those task-private records broadly. A deployed host should install its own authenticated capsule identity resolver for broader, task-aware access. Principal, project, team, and namespace overrides are intentionally unavailable. See [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
 
 ## Durable tasks
 

@@ -7,11 +7,11 @@ from mana_agent.execution_supervisor.models import ExecutionState, TERMINAL_STAT
 TRANSITIONS: dict[ExecutionState, frozenset[ExecutionState]] = {
     ExecutionState.CREATED: frozenset({ExecutionState.QUEUED, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}),
     ExecutionState.QUEUED: frozenset({ExecutionState.LEASED, ExecutionState.WAITING, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}),
-    ExecutionState.LEASED: frozenset({ExecutionState.RUNNING, ExecutionState.QUEUED, ExecutionState.RETRY_SCHEDULED, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}),
+    ExecutionState.LEASED: frozenset({ExecutionState.RUNNING, ExecutionState.QUEUED, ExecutionState.WAITING, ExecutionState.RETRY_SCHEDULED, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}),
     ExecutionState.RUNNING: frozenset({ExecutionState.CHECKPOINTING, ExecutionState.WAITING, ExecutionState.RETRY_SCHEDULED, ExecutionState.REPLANNING, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED, ExecutionState.COMPLETED_PENDING_VERIFICATION}),
     ExecutionState.CHECKPOINTING: frozenset({ExecutionState.RUNNING, ExecutionState.WAITING, ExecutionState.RETRY_SCHEDULED, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}),
     ExecutionState.WAITING: frozenset({ExecutionState.QUEUED, ExecutionState.LEASED, ExecutionState.RUNNING, ExecutionState.CHECKPOINTING, ExecutionState.RETRY_SCHEDULED, ExecutionState.REPLANNING, ExecutionState.CANCELLING, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED, ExecutionState.COMPLETED_PENDING_VERIFICATION}),
-    ExecutionState.RETRY_SCHEDULED: frozenset({ExecutionState.QUEUED, ExecutionState.CANCELLING, ExecutionState.FAILED}),
+    ExecutionState.RETRY_SCHEDULED: frozenset({ExecutionState.QUEUED, ExecutionState.WAITING, ExecutionState.CANCELLING, ExecutionState.FAILED}),
     ExecutionState.REPLANNING: frozenset({ExecutionState.QUEUED, ExecutionState.WAITING, ExecutionState.CANCELLING, ExecutionState.FAILED}),
     ExecutionState.CANCELLING: frozenset({ExecutionState.CANCELLED, ExecutionState.FAILED}),
     ExecutionState.COMPLETED_PENDING_VERIFICATION: frozenset({ExecutionState.COMPLETED, ExecutionState.RETRY_SCHEDULED, ExecutionState.REPLANNING, ExecutionState.CANCELLING, ExecutionState.FAILED}),

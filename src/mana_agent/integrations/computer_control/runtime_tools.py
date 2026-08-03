@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.tools import StructuredTool
@@ -143,6 +144,8 @@ def _run(coro: Any) -> Any:
 def _response(call) -> str:
     try:
         value = call()
+        if isinstance(value, dict) and value.get("ok") is False:
+            return json.dumps(value, ensure_ascii=False, default=str)
         if hasattr(value, "model_dump"):
             value = value.model_dump(mode="json")
         return json.dumps({"ok": True, "result": value}, ensure_ascii=False, default=str)
@@ -196,12 +199,31 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
             raise RemoteControlDenied(
                 "The computer action is not bound to the gateway's validated model decision."
             )
-        return _run(control.execute(
-            action,
+        from mana_agent.transactional_actions.computer import ComputerActionAdapter
+        from mana_agent.transactional_actions.gateway import ApprovalRequired
+        from mana_agent.transactional_actions.runtime import default_action_gateway
+
+        adapter = ComputerActionAdapter(
+            action=action,
             session_id=client.session_id,
             client_type=client.client_type,
-            locally_confirmed=client.locally_confirmed,
-        ))
+            service=control,
+        )
+        try:
+            workspace_root = Path(client.workspace_root).resolve() if client.workspace_root else Path.cwd()
+            outcome = default_action_gateway(workspace_root).execute(adapter)
+        except ApprovalRequired as exc:
+            return {
+                "ok": False,
+                "error_code": "transactional_approval_required",
+                "message": "This exact computer action is waiting for approval in the active local TUI or dashboard.",
+                "permission_request_id": exc.action.action_id,
+                "permission_scope": "transactional_action.once",
+                "action_id": exc.action.action_id,
+                "preview": exc.action.preview.redacted() if exc.action.preview else {},
+                "transactional_action_approval": True,
+            }
+        return {"ok": True, "result": outcome.result, "action_id": outcome.action.action_id}
 
     def capabilities() -> str:
         return _response(lambda: (authenticated_client(), _run(control.capabilities()))[1])

@@ -350,6 +350,50 @@ def test_locks_release_after_success_and_failure(coordinator: LaneCoordinator) -
     assert not coordinator._locks
 
 
+def test_completion_accepts_attempt_created_empty_files_and_directories(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="create package")
+    coordinator.start(reservation)
+    package = coordinator.root / "package"
+    package.mkdir()
+    (coordinator.root / "empty.py").write_text("", encoding="utf-8")
+
+    finished = coordinator.finish(
+        reservation.execution.task_id,
+        changed_files=["empty.py", "package"],
+        verification_state={"status": "passed"},
+    )
+
+    assert finished.state == LaneTaskState.COMPLETED
+    manifest = coordinator.execution_supervisor.store.artifact_manifest(
+        reservation.execution.task_id
+    )
+    assert manifest is not None
+    assert [
+        check["contract_type"]
+        for check in manifest["verification"]["checks"]
+    ] == ["file_exists", "directory_exists"]
+
+
+def test_completion_failure_surfaces_the_persisted_contract_reason(
+    coordinator: LaneCoordinator,
+) -> None:
+    pre_existing = coordinator.root / "pre-existing.txt"
+    pre_existing.write_text("unchanged\n", encoding="utf-8")
+    reservation = _reserve(coordinator, LaneId.CODING, intent="claim stale file")
+    coordinator.start(reservation)
+
+    finished = coordinator.finish(
+        reservation.execution.task_id,
+        changed_files=["pre-existing.txt"],
+        verification_state={"status": "passed"},
+    )
+
+    assert finished.state == LaneTaskState.VERIFYING
+    assert "artifact was not produced or modified by this attempt" in finished.error
+
+
 def test_stale_lock_recovery(coordinator: LaneCoordinator) -> None:
     lease = coordinator.lock_manager.acquire(
         task_id="stale", mode=LockMode.REPOSITORY_WRITE,

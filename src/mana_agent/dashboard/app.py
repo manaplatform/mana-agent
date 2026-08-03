@@ -30,6 +30,7 @@ from mana_agent.dashboard.views import (
     computer_control,
     connectors,
     fleet,
+    inbox,
     metrics,
     memory_capsules,
     observability,
@@ -90,6 +91,7 @@ pages = {
         ),
     ],
     "Runtime": [
+        _page(inbox.render, title="Human Inbox", icon="📥", url_path="inbox"),
         _page(
             taskboard.render, title="Taskboard & Traces", icon="🗂️", url_path="taskboard"
         ),

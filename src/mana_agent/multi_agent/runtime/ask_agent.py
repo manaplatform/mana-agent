@@ -47,7 +47,6 @@ from mana_agent.tools.repository import (
     repo_batch_search as repo_batch_text_search,
     list_files as repo_list_files,
     repo_search as repo_text_search,
-    run_script_once as repo_run_script_once,
     verify_project as repo_verify_project,
 )
 from mana_agent.skills.manager import SkillManager
@@ -1310,7 +1309,7 @@ class AskAgent:
                     )
                 )
 
-        def run_command(cmd: str) -> str:
+        def run_command(cmd: str, expected_outputs: list[str] | None = None, action_approval_id: str = "", cwd: str | None = None) -> str:
             started = perf_counter()
             status = "ok"
             output_preview = ""
@@ -1324,28 +1323,26 @@ class AskAgent:
                 if self._is_blocked_command(executed_cmd):
                     raise PermissionError("command blocked by safety policy")
                 shlex.split(executed_cmd)
+                command_cwd = (self.project_root / str(cwd or ".")).resolve()
+                try:
+                    command_cwd.relative_to(self.project_root.resolve())
+                except ValueError as exc:
+                    raise PermissionError("command cwd escapes repository root") from exc
+                if not command_cwd.is_dir():
+                    raise FileNotFoundError("command cwd does not exist")
                 execution_manager = getattr(self, "execution_manager", None)
-                if execution_manager is None:
-                    completed = subprocess.run(
-                        executed_cmd,
-                        cwd=self.project_root,
-                        shell=True,
-                        check=False,
-                        timeout=timeout_seconds,
-                        capture_output=True,
-                        text=True,
-                    )
-                    returncode = completed.returncode
-                    stdout = completed.stdout
-                    stderr = completed.stderr
-                    sandbox_id = ""
-                    provider = "legacy-test-injection"
-                else:
-                    shell_argv = ["cmd.exe", "/d", "/s", "/c", executed_cmd] if os.name == "nt" else ["/bin/sh", "-lc", executed_cmd]
+                shell_argv = ["cmd.exe", "/d", "/s", "/c", executed_cmd] if os.name == "nt" else ["/bin/sh", "-lc", executed_cmd]
+
+                def transactional_runner(argv, **_kwargs):  # noqa: ANN001
+                    if execution_manager is None:
+                        return subprocess.run(
+                            list(argv), cwd=command_cwd, shell=False, check=False,
+                            timeout=timeout_seconds, capture_output=True, text=True,
+                        )
                     execution = execution_manager.execute_once_sync(
                         SandboxSpec(
                             provider_override=execution_manager.config.default_provider,
-                            repository_source=self.project_root,
+                            repository_source=command_cwd,
                             execution_timeout_seconds=timeout_seconds,
                         ),
                         RoutingRequest(
@@ -1354,14 +1351,49 @@ class AskAgent:
                             trust_level="trusted",
                             risk_level="low",
                         ),
-                        ExecutionRequest(argv=shell_argv, timeout_seconds=timeout_seconds),
+                        ExecutionRequest(argv=list(argv), timeout_seconds=timeout_seconds),
                     )
-                    returncode = execution.exit_code
-                    stdout = execution.stdout
-                    stderr = execution.stderr
-                    sandbox_id = execution.sandbox_id
-                    provider = execution.provider
+                    return subprocess.CompletedProcess(list(argv), execution.exit_code, execution.stdout, execution.stderr)
+
+                from mana_agent.transactional_actions.adapters import ShellActionAdapter
+                from mana_agent.transactional_actions.gateway import ApprovalRequired
+                from mana_agent.transactional_actions.runtime import default_action_gateway
+                shell_adapter = ShellActionAdapter(
+                    argv=shell_argv,
+                    cwd=command_cwd,
+                    environment={},
+                    expected_outputs=list(expected_outputs or []),
+                    parent_task_id=str(run_id or "ask-run-command"),
+                    actor="model_tool",
+                    originating_agent="ask_agent",
+                    idempotency_key=f"shell:{hashlib.sha256(json.dumps({'run_id': run_id, 'argv': shell_argv}, sort_keys=True).encode()).hexdigest()}",
+                    timeout_seconds=timeout_seconds,
+                    runner=transactional_runner,
+                )
+                try:
+                    outcome = default_action_gateway(self.project_root).execute(
+                        shell_adapter, approval_id=action_approval_id
+                    )
+                except ApprovalRequired as exc:
+                    action = exc.action
+                    return json.dumps({
+                        "ok": False,
+                        "error_code": "approval_required",
+                        "permission_required": True,
+                        "permission_request_id": action.action_id,
+                        "action_id": action.action_id,
+                        "preview": action.preview.redacted() if action.preview else {},
+                        "preview_digest": action.preview_digest,
+                        "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                    })
+                executed = outcome.result
+                returncode = int(executed.get("returncode") or 0)
+                stdout = str(executed.get("stdout") or "")
+                stderr = str(executed.get("stderr") or "")
+                sandbox_id = ""
+                provider = "transactional_action_gateway"
                 payload = {
+                    "ok": outcome.action.state.value == "committed",
                     "returncode": returncode,
                     "stdout": stdout[:4000],
                     "stderr": stderr[:4000],
@@ -1370,7 +1402,12 @@ class AskAgent:
                     "interpreter_rewritten": bool(rewritten),
                     "sandbox_id": sandbox_id,
                     "execution_provider": provider,
+                    "action_id": outcome.action.action_id,
+                    "action_state": outcome.action.state.value,
+                    "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
                 }
+                if outcome.action.state.value != "committed":
+                    payload["error"] = outcome.action.error or "shell verification incomplete"
                 encoded = json.dumps(payload)
                 output_preview = json.dumps(
                     {
@@ -1427,8 +1464,8 @@ class AskAgent:
         def repo_batch_search(patterns: list[dict[str, Any]]) -> str:
             return dumps_tool_result(repo_batch_text_search(self.project_root, patterns=patterns))
 
-        def run_script_once(script: str, cwd: str | None = None) -> str:
-            return dumps_tool_result(repo_run_script_once(self.project_root, script=script, cwd=cwd, timeout=timeout_seconds))
+        def run_script_once(script: str, cwd: str | None = None, expected_outputs: list[str] | None = None, action_approval_id: str = "") -> str:
+            return run_command(script, cwd=cwd, expected_outputs=expected_outputs, action_approval_id=action_approval_id)
 
         def apply_patch_batch(patches: list[dict[str, Any]]) -> str:
             return dumps_tool_result(repo_apply_patch_batch(self.project_root, patches=patches))
@@ -1544,8 +1581,8 @@ class AskAgent:
         def document_update(path: str, operation: str, payload: dict[str, Any], backup: bool = True) -> str:
             return dumps_tool_result(document_service.update(path, operation=operation, payload=payload, backup=backup))
 
-        def document_delete(path: str, explicit: bool = False, backup: bool = True) -> str:
-            return dumps_tool_result(document_service.delete(path, explicit=explicit, backup=backup))
+        def document_delete(path: str, explicit: bool = False, backup: bool = True, action_approval_id: str = "") -> str:
+            return dumps_tool_result(document_service.delete(path, explicit=explicit, backup=backup, action_approval_id=action_approval_id))
 
         base_tools: list[BaseTool] = [
             StructuredTool.from_function(
@@ -2412,6 +2449,11 @@ class AskAgent:
                             append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     try:
+                        from mana_agent.transactional_actions.enforcement import assert_model_tool_routed
+                        assert_model_tool_routed(
+                            name,
+                            getattr(tool_map[name], "metadata", None),
+                        )
                         trace_count_before = len(traces)
                         tool_started = perf_counter()
                         tool_reservation_id = ""

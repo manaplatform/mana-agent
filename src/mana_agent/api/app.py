@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import getpass
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -20,7 +23,63 @@ from mana_agent.api.routes.teach import router as teach_router
 from mana_agent.api.routes.servers import router as servers_router
 from mana_agent.api.routes.tasks import router as tasks_router
 from mana_agent.api.routes.memory_capsules import router as memory_capsules_router
+from mana_agent.human_inbox.api import router as human_inbox_router
 from mana_agent.config.user_config import load_effective_settings, validate_bool
+
+
+def _local_capsule_identity_resolver(root: Path) -> Any:
+    """Resolve the fixed identity for one trusted local repository host.
+
+    The standalone server has no upstream identity provider.  Its process
+    owner, configured dashboard root, and repository identity are therefore
+    fixed when the app starts; request data never contributes to this binding.
+    Private and parent-child capsules remain unavailable because their durable
+    task identities cannot be established by this local host.
+    """
+    from mana_agent.memory import CapsuleTaskContext, MemoryPrincipal
+    from mana_agent.workspaces.paths import repository_id_for_path
+
+    user_id = getpass.getuser()
+    project_id = repository_id_for_path(root)
+    task_id = f"api-{project_id}"
+    principal = MemoryPrincipal(
+        user_id=user_id,
+        project_id=project_id,
+        task_id=task_id,
+        agent_id="api:local",
+        capabilities=frozenset({
+            "memory.capsule.read.project",
+            "memory.capsule.read.user",
+        }),
+    )
+    context = CapsuleTaskContext(
+        user_id=user_id,
+        organisation_id=None,
+        project_id=project_id,
+        team_ids=frozenset(),
+        task_id=task_id,
+        agent_id="api:local",
+    )
+
+    def resolve_local_identity(_request: Request) -> tuple[MemoryPrincipal, CapsuleTaskContext]:
+        return principal, context
+
+    return resolve_local_identity
+
+
+def _local_capsule_bindings() -> tuple[Any, Any]:
+    """Bind the standalone API to one trusted local repository identity."""
+    from mana_agent.memory import CapsuleService
+    from mana_agent.memory.config import CapsuleConfig
+
+    root = Path(os.getenv("MANA_DASHBOARD_ROOT") or Path.cwd()).expanduser().resolve()
+    settings = load_effective_settings(include_env=True)
+    service = CapsuleService(
+        root,
+        config=CapsuleConfig.load(settings),
+        provider=str(settings.get("MANA_MEMORY_PROVIDER") or "mana"),
+    )
+    return service, _local_capsule_identity_resolver(root)
 
 
 def create_app(
@@ -31,6 +90,7 @@ def create_app(
     github_autopilot: Any | None = None,
     capsule_identity_resolver: Any | None = None,
     capsule_service: Any | None = None,
+    human_inbox_identity_resolver: Any | None = None,
 ) -> FastAPI:
     from mana_agent.remote_execution.gateway import WorkerGateway, WorkerGatewayConfig, build_worker_router
     from mana_agent.config.settings import Settings
@@ -44,18 +104,37 @@ def create_app(
         # so the standalone coordinator must own the same persistent registry.
         fleet_config = FleetConfig.from_settings(Settings())
         fleet_registry = FleetRegistry(FleetStore(fleet_config.root), fleet_config)
-    worker_gateway = WorkerGateway(WorkerGatewayConfig(
-        enabled=validate_bool(gateway_settings["MANA_WORKER_GATEWAY_ENABLED"]),
-        public_url=str(gateway_settings["MANA_WORKER_GATEWAY_PUBLIC_URL"]),
-        allow_insecure_http=validate_bool(
-            gateway_settings["MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP"]
+    shared_remote_execution = getattr(chat_gateway, "remote_execution_service", None)
+    worker_gateway = WorkerGateway(
+        WorkerGatewayConfig(
+            enabled=validate_bool(gateway_settings["MANA_WORKER_GATEWAY_ENABLED"]),
+            public_url=str(gateway_settings["MANA_WORKER_GATEWAY_PUBLIC_URL"]),
+            allow_insecure_http=validate_bool(
+                gateway_settings["MANA_WORKER_GATEWAY_ALLOW_INSECURE_HTTP"]
+            ),
+            allow_insecure_local_development=validate_bool(
+                gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
+            ),
         ),
-        allow_insecure_local_development=validate_bool(
-            gateway_settings["MANA_WORKER_GATEWAY_LOCAL_DEV"]
+        registry=(
+            shared_remote_execution.workers
+            if shared_remote_execution is not None
+            else None
         ),
-    ), fleet_registry=fleet_registry)
+        execution=shared_remote_execution,
+        fleet_registry=fleet_registry,
+    )
     from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
     from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+    gateway_memory_service = getattr(getattr(chat_gateway, "_stack", None), "memory_service", None)
+    gateway_capsule_service = (
+        getattr(gateway_memory_service, "capsules", None)
+        if gateway_memory_service is not None
+        else None
+    )
+    if capsule_service is None and gateway_capsule_service is not None:
+        capsule_service = gateway_capsule_service
 
     def supervisor_event(event_type: str, payload: dict[str, Any]) -> None:
         get_execution_event_hub().publish({
@@ -71,6 +150,9 @@ def create_app(
         ExecutionSupervisorConfig.from_settings(Settings()),
         event_sink=supervisor_event,
     )
+    from mana_agent.human_inbox import default_human_inbox_service
+    human_inbox = default_human_inbox_service(branch_controller=execution_supervisor)
+    worker_gateway.execution.attach_inbox(human_inbox)
     telegram_connector = None
     if telegram_config is None:
         from mana_agent.connectors.telegram.config import load_telegram_config
@@ -85,7 +167,10 @@ def create_app(
         if execution_supervisor.config.startup_recovery:
             execution_supervisor.reconnect_tree()
             execution_supervisor.recover()
+        human_inbox.expire_due()
+        application.state.human_inbox_reconciliation = human_inbox.reconcile()
         application.state.execution_supervisor = execution_supervisor
+        application.state.human_inbox = human_inbox
         if telegram_connector is not None:
             await telegram_connector.initialize()
             assert telegram_connector.task_queue is not None
@@ -102,6 +187,15 @@ def create_app(
                 await telegram_connector.stop(remove_webhook=False)
             if github_autopilot is not None:
                 await github_autopilot.stop()
+
+    if capsule_service is None and capsule_identity_resolver is None:
+        local_capsule_service, local_capsule_identity_resolver = _local_capsule_bindings()
+        capsule_service = local_capsule_service
+        capsule_identity_resolver = local_capsule_identity_resolver
+    elif capsule_identity_resolver is None and capsule_service is gateway_capsule_service:
+        capsule_identity_resolver = _local_capsule_identity_resolver(
+            Path(getattr(chat_gateway, "root", Path.cwd())).expanduser().resolve()
+        )
 
     app = FastAPI(
         title="Mana-Agent API",
@@ -129,6 +223,7 @@ def create_app(
     app.include_router(servers_router)
     app.include_router(tasks_router)
     app.include_router(memory_capsules_router)
+    app.include_router(human_inbox_router)
     app.include_router(build_worker_router(worker_gateway))
     if github_autopilot is not None:
         from mana_agent.github_autopilot.webhook import router as github_autopilot_router
@@ -137,9 +232,6 @@ def create_app(
     # Make the central chat gateway (if provided) available to routes / services
     if chat_gateway is not None:
         app.state.chat_gateway = chat_gateway
-        memory_service = getattr(getattr(chat_gateway, "_stack", None), "memory_service", None)
-        if memory_service is not None:
-            app.state.capsule_service = memory_service.capsules
     if capsule_identity_resolver is not None:
         app.state.capsule_identity_resolver = capsule_identity_resolver
     if capsule_service is not None:
@@ -147,6 +239,9 @@ def create_app(
     app.state.worker_gateway = worker_gateway
     app.state.fleet_registry = fleet_registry
     app.state.execution_supervisor = execution_supervisor
+    app.state.human_inbox = human_inbox
+    if human_inbox_identity_resolver is not None:
+        app.state.human_inbox_identity_resolver = human_inbox_identity_resolver
     if telegram_connector is not None:
         from fastapi import Response
 

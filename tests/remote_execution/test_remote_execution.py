@@ -66,14 +66,14 @@ def test_worker_enrolment_is_one_time_and_credential_is_private(tmp_path: Path) 
     if os.name == "posix":
         assert path.stat().st_mode & 0o077 == 0
 
-def test_sandbox_selects_external_worker_and_deduplicates_events() -> None:
+def test_explicit_external_worker_dispatch_deduplicates_events() -> None:
     seen: list[RemoteExecutionEvent] = []
     registry = WorkerRegistry()
     credential = registry.enrol(registry.issue_enrolment_token("worker-1"), WorkerRegistration(worker_id="worker-1", display_name="host", capabilities={}, operating_system="test", ssh_available=True))
     assigned: list[RemoteExecutionRequest] = []
     registry.connect("worker-1", credential, assigned.append)
     service = RemoteExecutionService(workers=registry, target_policy=TargetPolicy(TargetPolicyMode.UNRESTRICTED), event_sink=seen.append, outbound_tcp_available=False)
-    job = service.submit(request())
+    job = service.submit(request(provider="external_worker"))
     asyncio.run(service.execute(job.request.job_id))
     assert job.state.value == "assigned" and assigned == [job.request]
     event = RemoteExecutionEvent(job_id="job-1", session_id="session-1", kind="stdout", data={"chunk": "same"})
