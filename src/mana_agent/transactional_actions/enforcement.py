@@ -65,6 +65,12 @@ def assert_model_tool_routed(tool_name: str, metadata: dict | None = None) -> No
     if name.startswith("mcp__") and declared.get("transactional_adapter") == "mcp":
         return
     if (
+        name in UNROUTED_SIDE_EFFECT_TOOLS
+        and declared.get("transactional_adapter") == "canvas"
+        and name.startswith("canvas_")
+    ):
+        return
+    if (
         name in ROUTED_SIDE_EFFECT_TOOLS
         or name in READ_ONLY_MODEL_TOOLS
         or name in TRANSACTIONAL_COMPUTER_TOOLS

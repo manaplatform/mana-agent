@@ -4834,6 +4834,7 @@ class AgentChatGateway:
                 text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
+                lane_task_id=lane_task_id,
             )
 
         if decision.route == "computer":
@@ -6261,6 +6262,7 @@ class AgentChatGateway:
         text: str,
         ask_service: Any,
         callbacks: Any,
+        lane_task_id: str = "",
     ) -> ChatTurnResult:
         """Execute only validated Canvas tools selected by the entry decision."""
         ask_agent = getattr(ask_service, "ask_agent", None)
@@ -6324,6 +6326,7 @@ class AgentChatGateway:
                 },
                 flow_id=context.session_id,
                 run_id=context.turn_id,
+                transactional_parent_task_id=lane_task_id or None,
             )
         except Exception as exc:
             return ChatTurnResult(
@@ -6381,6 +6384,7 @@ class AgentChatGateway:
                     },
                     flow_id=context.session_id,
                     run_id=context.turn_id,
+                    transactional_parent_task_id=lane_task_id or None,
                 )
             except Exception as exc:
                 correction_error = str(exc)
@@ -6427,6 +6431,36 @@ class AgentChatGateway:
             for surface_id, snapshot in after.items()
             if before.get(surface_id) != snapshot
         ]
+        if not changed:
+            trace = _serialize_tool_traces(response)
+            failure_detail = next(
+                (
+                    str(redact_secrets(item.get("output_preview") or "")).strip()
+                    for item in trace
+                    if str(item.get("status") or "").casefold() == "error"
+                    and str(item.get("output_preview") or "").strip()
+                ),
+                "",
+            )[:1000]
+            answer = (
+                "Live Canvas did not persist a surface change. The selected Canvas "
+                "executor returned without a confirmed tool mutation; retry the request."
+            )
+            if failure_detail:
+                answer += f" Canvas tool detail: {failure_detail}"
+            return ChatTurnResult(
+                answer=answer,
+                error="canvas_no_persisted_change",
+                mode="route-canvas-error",
+                decision=decision,
+                trace=trace,
+                payload={
+                    "route": "canvas",
+                    "surface_ids": [],
+                    "canvas_url": f"/canvas?conversation_id={context.conversation_id}",
+                    "failure_detail": failure_detail,
+                },
+            )
         if changed:
             from mana_agent.canvas.models import OwnerRef
             from mana_agent.canvas.reducer import CanvasStateError
@@ -6492,6 +6526,7 @@ class AgentChatGateway:
             answer=str(getattr(response, "answer", response) or "").strip(),
             mode="route-canvas",
             decision=decision,
+            trace=_serialize_tool_traces(response),
             payload={
                 "route": "canvas",
                 "surface_ids": changed,

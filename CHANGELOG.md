@@ -8,7 +8,15 @@ All notable repository changes should be recorded here.
   - Preserved the supervisor's authoritative `budget_exhausted` state when result acceptance exceeds a task reservation, preventing a second invalid terminal transition to `failed`.
   - Moved validated Live Canvas work to its own non-repository lane, so stale Operations work cannot block Canvas through a workspace lock or the Operations capacity limit.
   - Reserved the Canvas executor's configured prompt and tool-step envelope instead of only the initial routing estimate, and report a true budget exhaustion without mislabeling it as completion-verification failure.
+  - Made Canvas fail with an actionable error when no surface mutation is persisted, and excluded unleased queued recovery records from runtime capacity accounting.
+  - Emitted lock and lane-capacity waiting events once per wait instead of persisting a duplicate event every polling interval.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py`.
+
+- Registered Canvas create/update/delete tools with a dedicated transactional adapter instead of rejecting every model-selected Canvas mutation before execution. The adapter stores a redacted intent, verifies the returned durable surface snapshot before commit, and binds the action to the active Canvas lane task; Canvas deletion remains exact-approval-gated.
+  - User verification required: `python -m pytest tests/test_canvas.py tests/test_ask_agent.py tests/gateway/test_canvas_route.py`.
+
+- Isolated Canvas-lane routing-budget coverage from local provider credentials by supplying its explicit non-network test credential.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_constrains_model_routing_budgets_to_the_selected_lane`.
 
 - Connected durable lane budgets to the validated routing decision and provider-accounted context usage. Reserved token and cost estimates now use the selected model decision, while completed lanes record actual input/output usage and exact cost only when provider usage and configured pricing are available; estimated usage remains explicitly estimated.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py -q`.

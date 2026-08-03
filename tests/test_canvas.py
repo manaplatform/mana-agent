@@ -14,6 +14,7 @@ from mana_agent.api.app import create_app
 from mana_agent.canvas.catalog import CatalogValidationError, validate_components
 from mana_agent.canvas.config import CanvasConfig, LOCAL_CATALOG_PATH, MANA_CATALOG_ID
 from mana_agent.canvas.generation import CanvasGenerationError, parse_generated_messages
+from mana_agent.canvas.runtime_tools import build_canvas_langchain_tools
 from mana_agent.canvas.models import (
     CanvasEventEnvelope,
     CanvasEventType,
@@ -23,6 +24,7 @@ from mana_agent.canvas.models import (
 from mana_agent.canvas.reducer import CanvasStateError, reduce_canvas_event
 from mana_agent.canvas.service import CanvasService, canvas_service_for_root
 from mana_agent.canvas.store import CanvasStore
+from mana_agent.canvas.transactional import CanvasActionAdapter
 from mana_agent.config.settings import Settings
 from mana_agent.config.user_config import save_effective_user_config
 from mana_agent.services.conversation_service import ConversationService
@@ -30,6 +32,8 @@ from mana_agent.services.execution_event_hub import (
     ExecutionEventHub,
     reset_execution_event_hub_for_tests,
 )
+from mana_agent.transactional_actions.models import ActionState
+from mana_agent.transactional_actions.runtime import default_action_gateway
 
 
 def _components() -> list[dict]:
@@ -94,6 +98,7 @@ def test_create_update_action_recover_delete_lifecycle(
         correlation_id="turn-1",
     )
     assert snapshot.data_model == {"priority": "high"}
+
     delivered: list[str] = []
     canvas.register_action_handler(
         snapshot.owner, lambda action, _surface: delivered.append(action.name)
@@ -138,6 +143,41 @@ def test_create_update_action_recover_delete_lifecycle(
             value={"priority": "low"},
             correlation_id="turn-3",
         )
+
+
+def test_transactional_canvas_create_commits_after_snapshot_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    tools = {tool.name: tool for tool in build_canvas_langchain_tools(tmp_path)}
+    arguments = {
+        "source_decision_id": "decision-pet",
+        "session_id": "session-pet",
+        "conversation_id": "session-pet",
+        "surface_id": "pet",
+        "owner": {"agent_id": "main", "task_id": "task-pet"},
+        "components": [
+            {"id": "root", "component": "Column", "children": ["title"]},
+            {"id": "title", "component": "Heading", "text": "Pixel pet"},
+        ],
+        "data_model": {"mood": "happy"},
+    }
+    adapter = CanvasActionAdapter(
+        tool_name="canvas_create_surface",
+        arguments=arguments,
+        invoke=lambda: tools["canvas_create_surface"].invoke(arguments),
+        parent_task_id="task-pet",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    outcome = default_action_gateway(tmp_path, enable_human_inbox=False).execute(adapter)
+
+    assert outcome.action.state is ActionState.COMMITTED
+    assert outcome.action.verification and outcome.action.verification.complete
+    snapshot = canvas_service_for_root(tmp_path).get_surface("session-pet", "pet")
+    assert snapshot.components[0].id == "root"
 
 
 def test_wait_for_action_resumes_only_matching_surface_and_name(

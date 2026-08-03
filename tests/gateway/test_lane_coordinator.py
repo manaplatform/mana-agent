@@ -331,6 +331,31 @@ def test_lane_capacity_waits_in_queue_until_capacity_is_released(tmp_path: Path,
     assert result and result[0].execution.state == LaneTaskState.QUEUED
 
 
+def test_unleased_queued_record_does_not_consume_lane_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    coordinator = LaneCoordinator(
+        root,
+        contracts={"research": {"max_concurrent_jobs": 1}},
+    )
+
+    unleased = _reserve(coordinator, LaneId.RESEARCH, intent="interrupted before start")
+    next_reservation = _reserve(
+        coordinator,
+        LaneId.RESEARCH,
+        intent="fresh task",
+        session="session-fresh",
+    )
+
+    assert unleased.execution.state is LaneTaskState.QUEUED
+    assert next_reservation.execution.state is LaneTaskState.QUEUED
+    assert not next_reservation.duplicate
+
+
 def test_provider_limit_waits_until_model_capacity_is_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     root = tmp_path / "repo"

@@ -324,6 +324,7 @@ class GatewayLockManager:
             expires_at=_iso(_now() + timedelta(seconds=max(1, lease_seconds))),
         )
         deadline = time.monotonic() + max(0.0, timeout_seconds)
+        waiting_emitted = False
         self.coordinator.emit("lock.requested", task_id=task_id, lane_id=None, mode=mode.value)
         with self.coordinator._condition:
             while True:
@@ -341,7 +342,11 @@ class GatewayLockManager:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise LaneLockTimeout(f"Timed out waiting for {mode.value} lock")
-                self.coordinator.emit("lock.waiting", task_id=task_id, lane_id=None, mode=mode.value)
+                if not waiting_emitted:
+                    self.coordinator.emit(
+                        "lock.waiting", task_id=task_id, lane_id=None, mode=mode.value
+                    )
+                    waiting_emitted = True
                 self.coordinator._condition.wait(timeout=min(remaining, 0.25))
 
     def release_task(self, task_id: str) -> None:
@@ -725,9 +730,15 @@ class LaneCoordinator:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise LaneCapacityError(f"lane {lane_id.value} capacity wait timed out")
-                    self.emit("lane.queued", task_id=waiter["waiter_id"], lane_id=lane_id, reason="capacity")
-                    self._persist_locked()
-                    waiter_persisted = True
+                    if not waiter_persisted:
+                        self.emit(
+                            "lane.queued",
+                            task_id=waiter["waiter_id"],
+                            lane_id=lane_id,
+                            reason="capacity",
+                        )
+                        self._persist_locked()
+                        waiter_persisted = True
                     self._condition.wait(timeout=min(remaining, 0.25))
             finally:
                 self._waiters = [item for item in self._waiters if item["waiter_id"] != waiter["waiter_id"]]
@@ -1682,6 +1693,10 @@ class LaneCoordinator:
             for item in self._executions.values()
             if item.task_id != exclude_task_id
             and item.state in ACTIVE_LANE_STATES
+            # A queued record has not acquired a supervisor lease or started a
+            # worker. It is durable recovery state, not active execution, and
+            # must not permanently consume capacity after a process exit.
+            and item.state != LaneTaskState.QUEUED
             # Completion verification is durable review work after the runtime
             # lease and gateway resource lock have been released. It must
             # prevent final success and equivalent duplicate execution, but it

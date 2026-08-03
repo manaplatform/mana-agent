@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from langchain_core.tools import StructuredTool
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
+from mana_agent.canvas.service import canvas_service_for_root
 from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.services.coding_memory_service import CodingMemoryService
@@ -118,6 +119,64 @@ def test_ask_agent_enforces_max_steps(tmp_path: Path) -> None:
     assert result.trace
     assert any(item.tool_name == "semantic_search" for item in result.trace)
     assert any("returned best-effort final answer" in str(w) for w in result.warnings)
+
+
+def test_ask_agent_executes_canvas_create_through_transactional_adapter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    agent = _build_agent(tmp_path)
+    agent.llm = _FakeLLM(
+        [
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "canvas-1",
+                        "name": "canvas_create_surface",
+                        "args": {
+                            "source_decision_id": "turn-canvas",
+                            "session_id": "session-canvas",
+                            "conversation_id": "session-canvas",
+                            "surface_id": "pet",
+                            "owner": {"agent_id": "main", "task_id": "task-canvas"},
+                            "components": [
+                                {
+                                    "id": "root",
+                                    "component": "Column",
+                                    "children": ["title"],
+                                },
+                                {
+                                    "id": "title",
+                                    "component": "Heading",
+                                    "text": "Pixel pet",
+                                },
+                            ],
+                            "data_model": {"mood": "happy"},
+                        },
+                    }
+                ],
+            ),
+            _FakeAIMessage("Canvas created.", tool_calls=[]),
+        ]
+    )
+
+    result = agent.run(
+        "Create a pixel pet.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=3,
+        timeout_seconds=2,
+        tool_policy={"allowed_tools": ["canvas_create_surface"]},
+        transactional_parent_task_id="task-canvas",
+    )
+
+    assert result.answer == "Canvas created."
+    assert result.trace[0].status == "ok"
+    assert '"action_state": "committed"' in result.trace[0].output_preview
+    snapshot = canvas_service_for_root(tmp_path).get_surface("session-canvas", "pet")
+    assert snapshot.components[0].id == "root"
 
 
 class _CountingTool:

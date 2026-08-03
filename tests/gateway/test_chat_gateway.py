@@ -1055,6 +1055,7 @@ def test_gateway_constrains_model_routing_budgets_to_the_selected_lane(
         tmp_path,
         coding_agent=False,
         settings=Settings(
+            OPENAI_API_KEY="test-key",
             MANA_ROUTING_TASK_TOKEN_BUDGET=40_000,
             MANA_ROUTING_TASK_COST_BUDGET=40.0,
         ),

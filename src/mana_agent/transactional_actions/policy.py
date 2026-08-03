@@ -99,6 +99,8 @@ class ActionPolicy:
             return self._http(action)
         if action.tool_name == "git":
             return self._git(action)
+        if action.tool_name == "canvas":
+            return self._canvas(action)
         if action.tool_name == "computer":
             return (
                 PolicyOutcome.REQUIRE_APPROVAL,
@@ -114,6 +116,26 @@ class ActionPolicy:
                 ["approve_external_mcp_operation"],
             )
         return PolicyOutcome.DENY, ["unclassified_tool"], "No policy rule safely classifies this tool.", ["default_deny"]
+
+    def _canvas(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
+        allowed_operations = {
+            "create_surface",
+            "update_components",
+            "update_data",
+            "delete_surface",
+        }
+        targets = list(action.target_resources)
+        if (
+            action.operation_name not in allowed_operations
+            or len(targets) != 1
+            or not targets[0].startswith("canvas://")
+            or not str(action.normalized_arguments.get("surface_id") or "").strip()
+            or not str(action.normalized_arguments.get("source_decision_id") or "").strip()
+        ):
+            return PolicyOutcome.DENY, ["invalid_canvas_action"], "Canvas mutations require one validated surface target and source decision.", ["canvas_shape"]
+        if action.operation_name == "delete_surface":
+            return PolicyOutcome.REQUIRE_APPROVAL, ["canvas_delete"], "Deleting a durable Canvas surface requires exact approval.", ["approve_canvas_delete"]
+        return PolicyOutcome.ALLOW, ["local_canvas_mutation"], "A validated model-selected Canvas surface mutation is allowed.", ["allow_canvas_mutation"]
 
     def _scoped_policy(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]] | None:
         scopes = (
