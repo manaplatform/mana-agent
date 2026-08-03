@@ -538,12 +538,24 @@ class McpActionAdapter(ActionAdapter):
             raise ValueError("MCP action requires a provider and tool name")
         self.arguments = dict(arguments)
         self.invoke = invoke
-        self.parent_task_id = parent_task_id
+        self.parent_task_id = str(parent_task_id).strip()
+        if not self.parent_task_id:
+            raise ValueError("MCP action requires a durable parent task")
         self.actor = actor
         self.originating_agent = originating_agent
         encoded = json.dumps(self.arguments, sort_keys=True, ensure_ascii=False, default=str)
         self.arguments_sha256 = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-        self.idempotency_key = f"mcp:{self.provider_id}:{self.tool_name}:{self.arguments_sha256}"
+        parent_task_sha256 = hashlib.sha256(
+            self.parent_task_id.encode("utf-8")
+        ).hexdigest()
+        # A new durable task is a model-selected fresh attempt. It must not
+        # reuse an earlier external action just because its requested provider
+        # call has identical arguments. Within one task, the exact call stays
+        # idempotent.
+        self.idempotency_key = (
+            f"mcp:{parent_task_sha256}:{self.provider_id}:"
+            f"{self.tool_name}:{self.arguments_sha256}"
+        )
 
     def build_intent(self) -> ActionIntent:
         target = f"mcp.{self.provider_id}.{self.tool_name}"

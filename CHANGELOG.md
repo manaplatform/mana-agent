@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Scoped MCP transactional idempotency to the durable model-selected task, allowing a fresh external attempt after a failed action while retaining exact-call deduplication within that task.
+  - User verification required: `python -m pytest tests/test_mcp.py tests/gateway/test_entry_routing.py`.
+
 - Made invalid follow-up classifications return their direct model-decision error before lane coordination, and clarified that non-task categories may not select a related task.
   - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py`.
 

@@ -98,6 +98,26 @@ def test_mcp_transactional_adapter_reports_a_provider_failure_without_inventing_
         adapter.execute(adapter.build_intent())
 
 
+def test_mcp_transactional_idempotency_is_scoped_to_the_durable_task():
+    def build(parent_task_id: str) -> McpActionAdapter:
+        return McpActionAdapter(
+            provider_id="kaggle",
+            tool_name="authorize",
+            arguments={"request": {}},
+            invoke=lambda: {"ok": True},
+            parent_task_id=parent_task_id,
+            actor="model_tool",
+            originating_agent="ask_agent",
+        )
+
+    first_attempt = build("task-first")
+    duplicate_in_first_attempt = build("task-first")
+    fresh_attempt = build("task-fresh")
+
+    assert first_attempt.idempotency_key == duplicate_in_first_attempt.idempotency_key
+    assert first_attempt.idempotency_key != fresh_attempt.idempotency_key
+
+
 def test_approved_mcp_action_rehydrates_only_its_exact_provider_tool(monkeypatch):
     adapter = McpActionAdapter(
         provider_id="kaggle",
