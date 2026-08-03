@@ -17,6 +17,7 @@ class _ValueEnum(str, Enum):
 class LaneId(_ValueEnum):
     ARTIFACT = "artifact"
     MEDIA = "media"
+    CANVAS = "canvas"
     CODING = "coding"
     RESEARCH = "research"
     REVIEW = "review"
@@ -194,6 +195,26 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lock_policy=LockMode.NONE,
             timeout_seconds=3600,
         ),
+        LaneId.CANVAS: LaneContract(
+            lane_id=LaneId.CANVAS,
+            display_name="Canvas",
+            description="Creates and updates validated Live Canvas surfaces.",
+            owns=("live canvas surfaces",),
+            handoff_targets=(),
+            allowed_tools=("canvas",),
+            denied_tools=WRITE_CAPABILITIES + ("secrets",),
+            allowed_models=(),
+            max_concurrent_jobs=2,
+            max_subagents=0,
+            token_budget=32_000,
+            cost_budget=32.0,
+            default_priority=LanePriority.INTERACTIVE,
+            can_create_subagents=False,
+            requires_repository=False,
+            requires_write_access=False,
+            lock_policy=LockMode.NONE,
+            timeout_seconds=900,
+        ),
         LaneId.CODING: LaneContract(
             lane_id=LaneId.CODING, display_name="Coding", description="Implements repository changes.",
             owns=("implementation", "repository mutations"),
@@ -316,7 +337,7 @@ ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "computer": LaneId.OPERATIONS,
     "automation": LaneId.OPERATIONS,
     "api": LaneId.OPERATIONS,
-    "canvas": LaneId.OPERATIONS,
+    "canvas": LaneId.CANVAS,
     "remote_execution": LaneId.OPERATIONS,
     "server": LaneId.OPERATIONS,
     "conversation": LaneId.RESEARCH,

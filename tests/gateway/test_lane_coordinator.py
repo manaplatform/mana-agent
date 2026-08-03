@@ -179,6 +179,7 @@ def test_lane_selection_uses_decision_intent_and_invalid_model_lane_uses_valid_r
     assert select_lane(intent="verify") == LaneId.VERIFY
     assert select_lane(entry_route="search", model_lane="not-a-lane") == LaneId.RESEARCH
     assert select_lane(entry_route="remote_execution") == LaneId.OPERATIONS
+    assert select_lane(entry_route="canvas") == LaneId.CANVAS
     with pytest.raises(ValueError, match="No valid specialist lane decision"):
         select_lane(entry_route="missing", model_lane="not-a-lane")
 
@@ -614,6 +615,41 @@ def test_token_and_cost_budget_exhaustion(coordinator: LaneCoordinator) -> None:
             repository_id=coordinator.taskboard.store.repository_id,
             estimated_cost=coding.cost_budget + 0.01,
         )
+
+
+def test_canvas_task_does_not_wait_for_repository_lock(
+    coordinator: LaneCoordinator,
+) -> None:
+    workspace_id = coordinator.taskboard.store.workspace_id
+    repository_id = coordinator.taskboard.store.repository_id
+    operations = coordinator.reserve(
+        normalized_intent="run an infrastructure operation",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-operations",
+        workspace_id=workspace_id,
+        repository_id=repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+        capabilities=("automation",),
+    )
+    coordinator.start(operations)
+    reservation = coordinator.reserve(
+        normalized_intent="create a live canvas",
+        lane_id=LaneId.CANVAS,
+        session_id="session-canvas",
+        workspace_id=workspace_id,
+        repository_id=repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+        capabilities=("canvas",),
+    )
+
+    started = coordinator.start(reservation)
+
+    assert started.state is LaneTaskState.RUNNING
+    assert not [lock for lock in coordinator._locks.values() if lock.task_id == started.task_id]
+    coordinator.finish(started.task_id, state=LaneTaskState.CANCELLED)
+    coordinator.finish(operations.execution.task_id, state=LaneTaskState.CANCELLED)
 
 
 def test_finish_preserves_supervisor_budget_exhaustion(coordinator: LaneCoordinator) -> None:

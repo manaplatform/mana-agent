@@ -47,7 +47,12 @@ from mana_agent.gateway.entry_routing import (
     gmail_route_availability,
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
-from mana_agent.gateway.lane_coordinator import LaneCoordinator, LaneCoordinatorError, LaneReservation
+from mana_agent.gateway.lane_coordinator import (
+    LaneBudgetError,
+    LaneCoordinator,
+    LaneCoordinatorError,
+    LaneReservation,
+)
 from mana_agent.gateway.lanes import LaneId, LaneTaskState, select_lane
 from mana_agent.gateway.artifact_routing import (
     artifact_handler_availability,
@@ -2904,6 +2909,32 @@ class AgentChatGateway:
             ),
         )
 
+    def _execution_reservation_tokens(
+        self,
+        *,
+        entry_route: str,
+        execution_decision: Any,
+    ) -> tuple[int, int]:
+        """Reserve enough tokens for the validated route's configured executor."""
+        requested_input = max(1, int(execution_decision.estimated_input_tokens))
+        requested_output = max(1, int(execution_decision.estimated_output_tokens))
+        if entry_route != "canvas":
+            return requested_input, requested_output
+
+        # Canvas supplies a catalog and surface state, then may execute several
+        # tool steps. Its routing estimate covers only the initial response.
+        requested_input = max(requested_input, 4_096)
+        requested_output = max(
+            requested_output,
+            max(8, int(self.config.agent_max_steps or 6)) * 1_024,
+        )
+        lane_limit = self._lane_coordinator.contracts[LaneId.CANVAS].token_budget
+        if requested_input + requested_output > lane_limit:
+            raise LaneBudgetError(
+                "configured Canvas execution envelope exceeds the Canvas lane token budget"
+            )
+        return requested_input, requested_output
+
     def latest_routing_decision(
         self, *, session_id: str = "", task_id: str = ""
     ) -> dict[str, Any] | None:
@@ -3295,11 +3326,11 @@ class AgentChatGateway:
                     target_files = [
                         str(item) for item in options.pop("target_files", [])
                     ]
-                    requested_input = max(
-                        1, int(execution_decision.estimated_input_tokens)
-                    )
-                    requested_output = max(
-                        1, int(execution_decision.estimated_output_tokens)
+                    requested_input, requested_output = (
+                        self._execution_reservation_tokens(
+                            entry_route=entry_decision.route,
+                            execution_decision=execution_decision,
+                        )
                     )
                     route_capabilities = {
                         "coding": (
@@ -3668,13 +3699,22 @@ class AgentChatGateway:
                                 not result.error
                                 and finished.state is not LaneTaskState.COMPLETED
                             ):
-                                result.error = "completion_verification_failed"
-                                result.mode = "lane-verification-failed"
-                                result.answer = (
-                                    "The selected workflow returned a result, but durable "
-                                    "completion verification did not pass. "
-                                    f"{finished.error or 'The result remains pending review.'}"
-                                )
+                                if finished.state is LaneTaskState.BUDGET_EXHAUSTED:
+                                    result.error = "lane_budget_exhausted"
+                                    result.mode = "lane-budget-exhausted"
+                                    result.answer = (
+                                        "The selected workflow exceeded its reserved execution "
+                                        "budget before its result could be accepted. "
+                                        f"{finished.error or 'No result was accepted.'}"
+                                    )
+                                else:
+                                    result.error = "completion_verification_failed"
+                                    result.mode = "lane-verification-failed"
+                                    result.answer = (
+                                        "The selected workflow returned a result, but durable "
+                                        "completion verification did not pass. "
+                                        f"{finished.error or 'The result remains pending review.'}"
+                                    )
                         result.payload.update(
                             {
                                 "lane_id": lane_id.value,
@@ -4341,6 +4381,10 @@ class AgentChatGateway:
             "remote_execution": ("remote_ssh_execute",),
             "server": ("server",),
         }.get(decision.route, ())
+        requested_input, requested_output = self._execution_reservation_tokens(
+            entry_route=decision.route,
+            execution_decision=execution_decision,
+        )
         reservation = self._lane_coordinator.reserve(
             normalized_intent=item.request,
             lane_id=lane_id,
@@ -4353,12 +4397,8 @@ class AgentChatGateway:
                 root_lane_task_id
             ).root_task_id,
             model=f"{execution_decision.provider}/{execution_decision.selected_model}",
-            requested_input_tokens=max(
-                1, int(execution_decision.estimated_input_tokens)
-            ),
-            requested_output_tokens=max(
-                1, int(execution_decision.estimated_output_tokens)
-            ),
+            requested_input_tokens=requested_input,
+            requested_output_tokens=requested_output,
             estimated_cost=execution_decision.estimated_cost,
             capabilities=capabilities,
             routing_decision_id=execution_decision.decision_id,
