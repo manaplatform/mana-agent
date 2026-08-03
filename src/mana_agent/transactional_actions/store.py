@@ -21,12 +21,18 @@ class ActionStore:
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
-        for child in ("actions", "transactions", "idempotency", "audit"):
+        for child in ("actions", "transactions", "idempotency", "audit", "protected", "logs"):
             (self.root / child).mkdir(parents=True, exist_ok=True)
         (self.root / "audit" / "actions.jsonl").touch(exist_ok=True)
         self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".lock"
         self._lock_path.touch(exist_ok=True)
+        try:
+            self.root.chmod(0o700)
+        except OSError:
+            pass
+        from mana_agent.utils.durable_diagnostics import append_diagnostic
+        append_diagnostic(self.root / "logs" / "runtime.jsonl", component="transactional_actions", event="store_initialized")
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -129,6 +135,16 @@ class ActionStore:
 
     def append_audit(self, action: ActionIntent, event_type: str, details: dict | None = None) -> None:
         from mana_agent.utils.redaction import redact_secrets
+        normalized_arguments = action.normalized_arguments
+        if action.tool_name == "computer" and action.operation_name == "screen_recording.capture":
+            normalized_arguments = dict(normalized_arguments)
+            computer_action = dict(normalized_arguments.get("computer_action") or {})
+            arguments = dict(computer_action.get("arguments") or {})
+            if arguments.get("output_path"):
+                import hashlib
+                arguments["output_path"] = "<redacted:" + hashlib.sha256(str(arguments["output_path"]).encode()).hexdigest()[:24] + ">"
+            computer_action["arguments"] = arguments
+            normalized_arguments["computer_action"] = computer_action
         record = redact_secrets({
             "event_type": event_type,
             "action_id": action.action_id,
@@ -143,7 +159,7 @@ class ActionStore:
             "preview_digest": action.preview_digest,
             "policy_inputs": {
                 "target_resources": action.target_resources,
-                "normalized_arguments": action.normalized_arguments,
+                "normalized_arguments": normalized_arguments,
                 "requested_capabilities": action.requested_capabilities,
                 "expected_side_effects": action.expected_side_effects,
                 "data_disclosure": action.data_disclosure.value,
@@ -164,3 +180,5 @@ class ActionStore:
             stream.write(json.dumps(record, sort_keys=True, ensure_ascii=False, default=str) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+        from mana_agent.utils.durable_diagnostics import append_diagnostic
+        append_diagnostic(self.root / "logs" / "runtime.jsonl", component="transactional_actions", event=event_type, details={"action_id": action.action_id, "inbox_item_id": action.inbox_item_id, "state": action.state.value})

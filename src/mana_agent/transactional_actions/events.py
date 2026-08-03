@@ -28,6 +28,7 @@ def event_payload(event_type: str, action: ActionIntent, **details: Any) -> dict
         "message": action.policy_decision.explanation if action.policy_decision else event_type,
         "metadata": {
             "action_id": action.action_id,
+            "inbox_item_id": action.inbox_item_id,
             "permission_request_id": action.action_id if approval_event else "",
             "permission_scope": "transactional_action.once" if event_type == "action.approval.required" else "",
             "transactional_action_approval": event_type == "action.approval.required",

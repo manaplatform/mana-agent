@@ -89,6 +89,8 @@ class LocalInboxRepository:
         self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".repository.lock"
         self._lock_path.touch(exist_ok=True)
+        from mana_agent.utils.durable_diagnostics import append_diagnostic
+        append_diagnostic(self.root / "logs" / "inbox.jsonl", component="human_inbox", event="repository_initialized")
 
     @contextmanager
     def locked(self) -> Iterator[None]:

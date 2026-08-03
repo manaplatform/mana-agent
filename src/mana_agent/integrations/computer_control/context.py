@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable
+from mana_agent.runtime_context import DurableExecutionContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +17,7 @@ class ComputerClientContext:
     locally_confirmed: bool = False
     allowed_decision_ids: frozenset[str] = frozenset()
     workspace_root: str = ""
+    execution_context: DurableExecutionContext | None = None
 
 
 _context: ContextVar[ComputerClientContext | None] = ContextVar("mana_computer_client", default=None)
@@ -33,6 +35,7 @@ def computer_client_scope(
     locally_confirmed: bool = False,
     allowed_decision_ids: frozenset[str] = frozenset(),
     workspace_root: str = "",
+    execution_context: DurableExecutionContext | None = None,
 ):
     token = _context.set(ComputerClientContext(
         session_id,
@@ -40,6 +43,7 @@ def computer_client_scope(
         locally_confirmed,
         allowed_decision_ids,
         workspace_root,
+        execution_context,
     ))
     try:
         yield
@@ -58,6 +62,22 @@ def computer_decision_scope(source_decision_id: str):
         current.locally_confirmed,
         frozenset({source_decision_id}),
         current.workspace_root,
+        current.execution_context,
+    ))
+    try:
+        yield
+    finally:
+        _context.reset(token)
+
+
+@contextmanager
+def computer_execution_context_scope(context: DurableExecutionContext):
+    current = _context.get()
+    if current is None:
+        raise RuntimeError("Computer execution context requires an authenticated client context.")
+    token = _context.set(ComputerClientContext(
+        current.session_id, current.client_type, current.locally_confirmed,
+        current.allowed_decision_ids, current.workspace_root, context,
     ))
     try:
         yield

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import plistlib
+import hashlib
+import os
 from pathlib import Path
 from mana_agent.config.settings import mana_home
 
@@ -12,6 +14,7 @@ from mana_agent.integrations.computer_control.errors import (
     ApplicationNotResponding,
     CapabilityUnavailable,
     InvalidActionDecision,
+    OperatingSystemPermissionDenied,
 )
 from mana_agent.integrations.computer_control.models import (
     ApplicationDescriptor,
@@ -61,6 +64,7 @@ class MacOSProvider(BaseProvider):
             CapabilityAvailability(name="calendar", available=False, provider=self.provider_id, reason="EventKit bridge is not installed."),
             CapabilityAvailability(name="notes", available=False, provider=self.provider_id, reason="Notes automation adapter is not installed."),
             CapabilityAvailability(name="screenshots", available=command_available("screencapture"), provider=self.provider_id, permission_scopes={"computer.screenshot.capture"}, operations={"screenshots.capture"}),
+            CapabilityAvailability(name="screen_recording", available=command_available("screencapture") and command_available("mdls"), provider=self.provider_id, reason="The native screencapture or metadata utility is unavailable." if not (command_available("screencapture") and command_available("mdls")) else "", permission_scopes={"computer.screen_recording.capture"}, operations={"screen_recording.capture"}),
         ]
         self._report = CapabilityReport(platform=self.platform, provider=self.provider_id, capabilities=capabilities, applications=applications)
         return self._report
@@ -190,4 +194,48 @@ class MacOSProvider(BaseProvider):
             argv.append(str(path))
             await self._run(action, argv)
             return self._result(action, message="Screenshot captured.", data={"artifact_path": str(path)}, sensitive=True)
+        if op == "screen_recording.capture":
+            mode = str(action.arguments.get("mode") or "")
+            display_id = str(action.arguments.get("display_id") or "")
+            raw_output = str(action.arguments.get("output_path") or "")
+            duration = action.arguments.get("maximum_duration_seconds")
+            if mode != "display" or not display_id or not raw_output:
+                raise InvalidActionDecision("Bounded screen recording requires display mode, display ID, and output path.")
+            if not isinstance(duration, int) or not 1 <= duration <= self.settings.max_recording_duration_seconds:
+                raise InvalidActionDecision("Recording duration is outside the configured bounded limit.")
+            if str(action.arguments.get("container") or "mov") != "mov":
+                raise InvalidActionDecision("The native bounded recording provider supports only MOV output.")
+            if bool(action.arguments.get("system_audio")):
+                raise CapabilityUnavailable("System-audio recording is not implemented by the native provider.")
+            output = self._allowed_path(raw_output, must_exist=False)
+            if output.suffix.lower() != ".mov" or not output.parent.is_dir():
+                raise InvalidActionDecision("Recording output must be a .mov file in an existing allowed directory.")
+            temporary = output.with_name(f".{action.execution_id}.partial.mov")
+            argv = ["screencapture", "-x", "-v", f"-V{duration}", f"-D{display_id}"]
+            if bool(action.arguments.get("microphone_audio")):
+                argv.append("-g")
+            argv.append(str(temporary))
+            try:
+                await self._run(action, argv)
+            except Exception as exc:
+                # Native screen privacy denials are provider failures, not missing executable support.
+                message = (str(exc) + " " + str(getattr(exc, "corrective_action", ""))).lower()
+                if "screen recording" in message or "permission" in message or "not authorized" in message:
+                    raise OperatingSystemPermissionDenied(
+                        "Screen Recording permission is required in macOS Privacy & Security before recording.",
+                        corrective_action="Enable Screen Recording for Mana-Agent (or its host terminal) in System Settings > Privacy & Security.",
+                    ) from exc
+                raise
+            if not temporary.is_file() or temporary.stat().st_size <= 0:
+                raise InvalidActionDecision("Native recorder completed without a non-empty artifact.")
+            stdout, _ = await self._run(action, ["mdls", "-raw", "-name", "kMDItemDurationSeconds", str(temporary)])
+            try:
+                observed = float(stdout.strip())
+            except ValueError as exc:
+                raise InvalidActionDecision("Native recording metadata did not contain a readable duration.") from exc
+            if observed < 0 or observed > duration + 1:
+                raise InvalidActionDecision("Recorded duration exceeds the approved bound.")
+            digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+            os.replace(temporary, output)
+            return self._result(action, message="Bounded screen recording captured and verified.", data={"artifact_path": str(output), "artifact_sha256": digest, "artifact_bytes": output.stat().st_size, "duration_seconds": observed, "provider": self.provider_id, "active_indicator": "native_screencapture"}, sensitive=True)
         raise CapabilityUnavailable(f"macOS operation {op!r} is unavailable.")

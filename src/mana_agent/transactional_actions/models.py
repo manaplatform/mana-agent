@@ -207,6 +207,10 @@ class ActionIntent(StrictModel):
     state_version: int = Field(default=0, ge=0)
     preview: ActionPreview | None = None
     preview_digest: str = ""
+    inbox_item_id: str = ""
+    protected_context_ref: str = ""
+    protected_context_digest: str = ""
+    provider_receipt: dict[str, Any] = Field(default_factory=dict)
     policy_decision: PolicyDecision | None = None
     execution_attempts: int = Field(default=0, ge=0)
     execution_result: dict[str, Any] = Field(default_factory=dict)

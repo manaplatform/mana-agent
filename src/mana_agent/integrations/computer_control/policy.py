@@ -25,6 +25,11 @@ class ActionSpec:
     risk: ExecutionRisk
     allowed_arguments: frozenset[str] = frozenset()
     sensitive_result: bool = False
+    data_disclosure: str = "none"
+    reversibility: str = "unknown"
+    blast_radius: str = "single_resource"
+    externally_visible: bool | None = None
+    potentially_billable: bool | None = None
 
 
 ACTION_SPECS: dict[str, ActionSpec] = {
@@ -69,6 +74,11 @@ ACTION_SPECS: dict[str, ActionSpec] = {
     "filesystem.mkdir": ActionSpec("computer.files.write", ExecutionRisk.MEDIUM),
     "filesystem.trash": ActionSpec("computer.files.write", ExecutionRisk.HIGH),
     "screenshots.capture": ActionSpec("computer.screenshot.capture", ExecutionRisk.MEDIUM, frozenset({"mode"}), True),
+    "screen_recording.capture": ActionSpec(
+        "computer.screen_recording.capture", ExecutionRisk.HIGH,
+        frozenset({"mode", "display_id", "output_path", "container", "microphone_audio", "system_audio", "maximum_duration_seconds"}),
+        True, "confidential", "partially_reversible", "multiple_resources", False, False,
+    ),
     "notifications.send": ActionSpec("computer.notifications.send", ExecutionRisk.MEDIUM, frozenset({"title", "body"})),
     "system.status": ActionSpec("computer.system.read", ExecutionRisk.LOW),
     "system.volume": ActionSpec("computer.system.control", ExecutionRisk.MEDIUM, frozenset({"volume", "muted"})),
@@ -83,6 +93,7 @@ REMOTE_CLIENTS = {"telegram", "slack", "teams", "remote_api", "a2a"}
 REMOTE_SENSITIVE_SCOPES = {
     "computer.calendar.read", "computer.notes.read", "computer.browser.tabs.read",
     "computer.browser.page.read", "computer.clipboard.read", "computer.screenshot.capture",
+    "computer.screen_recording.capture",
 }
 
 

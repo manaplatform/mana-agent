@@ -1125,6 +1125,13 @@ class HumanInboxService:
             created_at=self.clock(),
             details=redact_secrets(details),
         ))
+        from mana_agent.utils.durable_diagnostics import append_diagnostic
+        append_diagnostic(
+            self.repository.root / "logs" / "inbox.jsonl",
+            component="human_inbox",
+            event=event_type,
+            details={"inbox_item_id": item.inbox_item_id, "action_id": item.action_intent_id, "status": item.status.value},
+        )
 
     def _emit(self, event_type: str, item: InboxItem) -> None:
         if self.event_sink is not None:

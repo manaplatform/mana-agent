@@ -26,6 +26,7 @@ DEFAULT_PERMISSION_DECISIONS: dict[str, str] = {
     "computer.files.read": "ask",
     "computer.files.write": "ask",
     "computer.screenshot.capture": "ask",
+    "computer.screen_recording.capture": "ask",
     "computer.notifications.send": "ask",
     "computer.system.read": "ask",
     "computer.system.control": "ask",
@@ -43,6 +44,7 @@ class ComputerControlSettings(BaseModel):
     audit_enabled: bool = True
     audit_retention_days: int = Field(default=30, ge=1, le=3650)
     timeout_seconds: float = Field(default=30, ge=1, le=300)
+    max_recording_duration_seconds: int = Field(default=300, ge=1, le=1800)
     allowed_paths: list[Path] = Field(default_factory=list)
     permissions: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_PERMISSION_DECISIONS))
     defaults: dict[str, str] = Field(default_factory=lambda: {

@@ -46,6 +46,7 @@ class LinuxProvider(BaseProvider):
             CapabilityAvailability(name="calendar", available=False, provider=self.provider_id, reason="No calendar D-Bus adapter is configured."),
             CapabilityAvailability(name="notes", available=False, provider=self.provider_id, reason="No notes D-Bus adapter is configured."),
             CapabilityAvailability(name="screenshots", available=False, provider=self.provider_id, reason="No trusted desktop-portal screenshot adapter is configured."),
+            CapabilityAvailability(name="screen_recording", available=False, provider=self.provider_id, reason="No trusted bounded screen-recording provider is configured."),
         ]
         self._report = CapabilityReport(platform=self.platform, provider=self.provider_id, capabilities=capabilities, applications=applications, headless=headless)
         return self._report

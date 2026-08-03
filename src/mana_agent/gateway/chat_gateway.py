@@ -231,8 +231,13 @@ def _transactional_action_requests_from_trace(response: Any) -> list[dict[str, A
             requests[request_id] = {
                 "permission_request_id": request_id,
                 "action_id": request_id,
+                "transaction_id": str(payload.get("transaction_id") or ""),
+                "inbox_item_id": str(payload.get("inbox_item_id") or ""),
                 "permission_scope": "transactional_action.once",
                 "preview": payload.get("preview") or {},
+                "preview_digest": str(payload.get("preview_digest") or ""),
+                "policy_decision": payload.get("policy_decision") or {},
+                "risk_effect_labels": payload.get("risk_effect_labels") or {},
                 "transactional_action_approval": True,
             }
         for nested in payload.values():
@@ -1291,8 +1296,6 @@ class AgentChatGateway:
         """Approve one exact previewed transactional action for a trusted local session."""
         from mana_agent.transactional_actions.runtime import (
             approve_action,
-            default_action_gateway,
-            execute_approved_computer_action,
         )
 
         approval_id = approve_action(
@@ -1300,16 +1303,12 @@ class AgentChatGateway:
             action_id,
             approved_by=f"local-session:{session_id or 'unknown'}",
         )
-        action = default_action_gateway(self.root).store.get_action(action_id)
-        result: dict[str, Any] = {}
-        if action is not None and action.tool_name == "computer":
-            result = execute_approved_computer_action(self.root, action_id, approval_id=approval_id)
         return {
             "status": "approved",
             "action_id": action_id,
             "approval_id": approval_id,
-            "result": result,
-            "message": "Approved computer action executed." if result else "Exact action approved once. The originating tool may now resume the bound action.",
+            "result": {},
+            "message": "Exact action approved once. Only the matching durable branch may resume and execute the stored action.",
         }
 
     def deny_transactional_action_command(
@@ -1465,6 +1464,7 @@ class AgentChatGateway:
                     "clipboard_read",
                     "clipboard_write",
                     "computer_take_screenshot",
+                    "computer_record_screen",
                     "computer_open_path",
                     "computer_reveal_path",
                     "computer_file_metadata",
@@ -4246,6 +4246,7 @@ class AgentChatGateway:
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
                 event_sink=sink,
+                lane_task_id=lane_task_id,
             )
 
         if decision.route == "artifact":
@@ -5934,6 +5935,7 @@ class AgentChatGateway:
         ask_service: Any,
         callbacks: Any,
         event_sink: Any = None,
+        lane_task_id: str = "",
     ) -> ChatTurnResult:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
@@ -5976,13 +5978,30 @@ class AgentChatGateway:
         try:
             from mana_agent.integrations.computer_control.context import (
                 computer_decision_scope,
+                computer_execution_context_scope,
             )
             from mana_agent.integrations.computer_control.events import (
                 computer_event_scope,
             )
 
+            execution_scope = None
+            if lane_task_id:
+                checkpoint_id = self._lane_coordinator.checkpoint(
+                    lane_task_id, boundary="computer_action_approval"
+                )
+                task = self._lane_coordinator.execution_supervisor.store.get_task(lane_task_id)
+                from mana_agent.runtime_context import DurableExecutionContext
+                execution_scope = DurableExecutionContext(
+                    task_id=task.task_id, branch_id=task.task_id,
+                    parent_task_id=task.parent_task_id, checkpoint_id=checkpoint_id,
+                    execution_attempt_id=task.attempt_id, session_id=context.session_id,
+                    conversation_id=context.conversation_id, turn_id=context.turn_id,
+                    source_decision_id=source_decision_id, originating_agent_id="model_tool",
+                )
+            from contextlib import nullcontext
             with (
                 computer_decision_scope(source_decision_id),
+                computer_execution_context_scope(execution_scope) if execution_scope else nullcontext(),
                 computer_event_scope(event_sink),
             ):
                 response = ask_agent.run(

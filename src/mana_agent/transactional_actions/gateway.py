@@ -105,6 +105,11 @@ class ActionGateway:
             action.transition(ActionState.AWAITING_APPROVAL)
             self.store.save_action(action)
             inbox_item_id = self._ensure_inbox(action)
+            # The stores are independently atomic. Persist the durable link before
+            # publishing the approval event so UIs never receive a dangling prompt.
+            if inbox_item_id and action.inbox_item_id != inbox_item_id:
+                action.inbox_item_id = inbox_item_id
+                self.store.save_action(action)
             self._emit("action.approval.required", action, inbox_item_id=inbox_item_id)
             return action
         action.transition(ActionState.APPROVED)
@@ -487,6 +492,9 @@ class ActionGateway:
             return ""
         existing = self.inbox_service.repository.find_for_action(action.action_id)
         if existing:
+            if action.inbox_item_id != existing[0].inbox_item_id:
+                action.inbox_item_id = existing[0].inbox_item_id
+                self.store.save_action(action)
             return existing[0].inbox_item_id
         decision = action.policy_decision
         if decision is None or decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL:
@@ -565,6 +573,9 @@ class ActionGateway:
                 "reviewer": reviewer.model_dump(mode="json"),
             }),
         ))
+        if action.inbox_item_id != item.inbox_item_id:
+            action.inbox_item_id = item.inbox_item_id
+            self.store.save_action(action)
         return item.inbox_item_id
 
     def _assert_branch_runnable(self, item: Any) -> None:

@@ -298,6 +298,8 @@ Route semantics:
 - calendar: calendar account operations through a registered account/cloud calendar connector.
 - computer: permission-aware control of the local desktop, installed applications, native calendar,
   media, notes, clipboard, screenshots, filesystem, notifications, browser application, or system.
+  Bounded screen-recording requests select computer even when material recording parameters need a
+  typed clarification; do not select unsupported merely because duration, display, or destination is absent.
 - browser: direct public-page inspection using browser tools. A supplied public HTTP(S) URL is a
   strong signal for this route; page content, HTML, metadata, links, robots, and sitemap content
   require browser rather than search snippets.

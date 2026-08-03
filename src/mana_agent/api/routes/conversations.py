@@ -464,8 +464,6 @@ def decide_transactional_action_in_chat(
     from mana_agent.transactional_actions.runtime import (
         approve_action,
         deny_action,
-        default_action_gateway,
-        execute_approved_computer_action,
     )
 
     try:
@@ -475,13 +473,7 @@ def decide_transactional_action_in_chat(
                 action_id,
                 approved_by=f"dashboard:{conversation_id}",
             )
-            action = default_action_gateway(service.root).store.get_action(action_id)
-            executed = action is not None and action.tool_name == "computer"
-            result: dict[str, Any] = {"approval_id": approval_id, "executed": executed}
-            if executed:
-                result["result"] = execute_approved_computer_action(
-                    service.root, action_id, approval_id=approval_id,
-                )
+            result: dict[str, Any] = {"approval_id": approval_id, "executed": False, "resume": "queued_for_matching_branch"}
         else:
             result = deny_action(
                 service.root,

@@ -47,6 +47,7 @@ _TOOLS: tuple[tuple[str, str], ...] = (
     ("computer_create_directory", "Create one directory inside an allowed root."),
     ("computer_trash_path", "Move one allowed path to OS Trash/Recycle Bin after exact confirmation."),
     ("computer_take_screenshot", "Capture visible screen content with explicit permission."),
+    ("computer_record_screen", "Capture one bounded macOS display recording after typed clarification and exact approval."),
     ("computer_send_notification", "Display a local notification."),
     ("computer_get_system_status", "Read non-content volume, battery, and display state."),
     ("computer_set_system_volume", "Change system volume or mute state."),
