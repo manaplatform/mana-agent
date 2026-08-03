@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Corrected the transactional inbox approval command's response construction so gateway imports no longer fail during test collection.
+  - User verification required: `python -m pytest tests/test_computer_control.py`.
+
 - Added a durable redacted ledger for model-selected computer requests, terminal inbox notices for blocked or incomplete requests, linked policy-denial evidence, and authoritative inbox-ID approval handling in dashboard and TUI flows. TUI now reloads and queues durable approval cards before displaying its modal; approval responses remain non-executing handoffs to the matching resumed branch.
   - User verification required: `python -m pytest tests/test_computer_control.py tests/transactional_actions/test_policy_gated_actions.py tests/human_inbox/test_durable_inbox.py tests/test_dashboard_live_chat.py`.
   - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.

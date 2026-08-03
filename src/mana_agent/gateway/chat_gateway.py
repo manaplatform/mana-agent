@@ -1313,7 +1313,7 @@ class AgentChatGateway:
             idempotency_key=f"tui-approve:{inbox_item_id}:{item.version}",
             expected_version=item.version,
             current_action_digest=item.action_digest,
-        )
+        ))
         action = self._transactional_runtime.store.get_action(item.action_intent_id)
         if action is None:
             raise LookupError("approved inbox item has no durable transactional action")
