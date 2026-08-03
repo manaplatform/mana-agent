@@ -355,6 +355,7 @@ class DeliveryAttempt(StrictModel):
 
 class InboxAuditEvent(StrictModel):
     audit_event_id: str = Field(default_factory=lambda: f"inbox_event_{uuid4().hex}")
+    sequence: int = Field(default=0, ge=0)
     event_type: str
     inbox_item_id: str
     task_id: str

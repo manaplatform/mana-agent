@@ -47,7 +47,7 @@ from mana_agent.gateway.entry_routing import (
     gmail_route_availability,
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
-from mana_agent.gateway.lane_coordinator import LaneCoordinator, LaneCoordinatorError
+from mana_agent.gateway.lane_coordinator import LaneCoordinator, LaneCoordinatorError, LaneReservation
 from mana_agent.gateway.lanes import LaneTaskState
 from mana_agent.gateway.artifact_routing import (
     artifact_handler_availability,
@@ -701,6 +701,10 @@ class AgentChatGateway:
             self.root,
             inbox_service=self.human_inbox_service,
         )
+        self._lane_coordinator.set_human_resume_dispatcher(
+            self._dispatch_resumed_transactional_action
+        )
+        self._recover_queued_transactional_action_dispatches()
         from mana_agent.connectors.browser.session import default_browser_manager
         from mana_agent.sessions.service import SessionService
 
@@ -740,6 +744,119 @@ class AgentChatGateway:
     @human_inbox_service.setter
     def human_inbox_service(self, service) -> None:
         self._human_inbox_service = service
+
+    def _dispatch_resumed_transactional_action(
+        self,
+        task_id: str,
+        inbox_item_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> None:
+        """Execute only the already-approved computer action from its resumed branch."""
+        from mana_agent.human_inbox.models import InboxStatus, canonical_digest
+        from mana_agent.transactional_actions.computer import adapter_for_stored_action
+        from mana_agent.transactional_actions.models import ActionState
+
+        del structured_response
+        item = self.human_inbox_service.repository.get(inbox_item_id)
+        if (
+            item.task_id != task_id
+            or item.resume_claim_id != resume_claim_id
+            or item.status is not InboxStatus.APPROVED
+            or not item.action_intent_id
+        ):
+            return
+        action = self._transactional_runtime.store.get_action(item.action_intent_id)
+        if (
+            action is None
+            or action.tool_name != "computer"
+            or action.parent_task_id != task_id
+            or action.state is not ActionState.AWAITING_APPROVAL
+        ):
+            return
+        grant = self._transactional_runtime.gateway.approvals.find_valid(action)
+        if grant is None:
+            raise PermissionError("approved transactional action has no valid exact grant")
+
+        execution_claim_id = self.human_inbox_service.claim_action_execution(inbox_item_id)
+        self._lane_coordinator.start(
+            LaneReservation(self._lane_coordinator.inspect_task(task_id))
+        )
+        try:
+            protected_context = (
+                self._transactional_runtime.store.read_protected_action_context(
+                    action.protected_context_ref
+                )
+                if action.protected_context_ref
+                else None
+            )
+            outcome = self._transactional_runtime.gateway.execute(
+                adapter_for_stored_action(action, protected_context=protected_context),
+                approval_id=grant.approval_id,
+            )
+            if outcome.action.state is not ActionState.COMMITTED:
+                raise RuntimeError(
+                    "resumed transactional action did not produce verified completion"
+                )
+            self.human_inbox_service.complete_action_execution(
+                inbox_item_id,
+                execution_claim_id=execution_claim_id,
+                result_digest=canonical_digest(outcome.result),
+            )
+            self._lane_coordinator.finish(
+                task_id,
+                verification_state={
+                    "transactional_action_id": outcome.action.action_id,
+                    "verification": outcome.action.verification.model_dump(mode="json")
+                    if outcome.action.verification
+                    else {},
+                },
+            )
+        except Exception:
+            execution = self._lane_coordinator.inspect_task(task_id)
+            if execution.state not in {
+                LaneTaskState.COMPLETED,
+                LaneTaskState.CANCELLED,
+                LaneTaskState.FAILED,
+            }:
+                self._lane_coordinator.finish(
+                    task_id,
+                    state=LaneTaskState.FAILED,
+                    error="resumed transactional action failed; inspect durable action recovery state",
+                )
+            raise
+
+    def _recover_queued_transactional_action_dispatches(self) -> None:
+        """Resume only approved, unclaimed actions left queued across a process restart."""
+        from mana_agent.human_inbox.models import InboxStatus
+        from mana_agent.transactional_actions.models import ActionState
+
+        for item in self.human_inbox_service.repository.list():
+            if (
+                item.status is not InboxStatus.APPROVED
+                or not item.action_intent_id
+                or not item.resume_claim_id
+                or item.resume_completed_at is None
+                or item.execution_claim_id
+            ):
+                continue
+            action = self._transactional_runtime.store.get_action(item.action_intent_id)
+            if (
+                action is None
+                or action.tool_name != "computer"
+                or action.parent_task_id != item.task_id
+                or action.state is not ActionState.AWAITING_APPROVAL
+                or self._transactional_runtime.gateway.approvals.find_valid(action) is None
+            ):
+                continue
+            self._lane_coordinator.dispatch_queued_human_resume(
+                item.task_id,
+                inbox_item_id=item.inbox_item_id,
+                resume_claim_id=item.resume_claim_id,
+                structured_response=(
+                    item.response.model_dump(mode="json") if item.response is not None else {}
+                ),
+            )
 
     def _attach_human_inbox_to_remote_execution(self) -> None:
         if self.remote_execution_service.inbox_service is not None:

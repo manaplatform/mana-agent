@@ -8,6 +8,7 @@ import threading
 import pytest
 
 from mana_agent.execution_supervisor import SideEffectClassification
+from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.gateway.lane_coordinator import (
     LaneBudget,
     LaneBudgetError,
@@ -66,6 +67,108 @@ def test_default_contracts_define_all_specialist_lanes() -> None:
     assert contracts[LaneId.RESEARCH].max_concurrent_jobs == 4
     assert contracts[LaneId.REVIEW].can_create_subagents is False
     assert contracts[LaneId.RELEASE].lock_policy == LockMode.REPOSITORY_WRITE
+
+
+def test_exposes_supervisor_store_for_human_inbox_branch_controller(
+    coordinator: LaneCoordinator,
+) -> None:
+    assert coordinator.store is coordinator.execution_supervisor.store
+
+
+def test_human_inbox_wait_delegates_to_the_active_supervisor_branch(
+    coordinator: LaneCoordinator,
+) -> None:
+    dispatched = threading.Event()
+    observed: dict[str, object] = {}
+
+    def dispatch(task_id: str, inbox_item_id: str, resume_claim_id: str, response: dict) -> None:
+        observed.update({
+            "task_id": task_id,
+            "inbox_item_id": inbox_item_id,
+            "resume_claim_id": resume_claim_id,
+            "response": response,
+            "lane_state": coordinator.inspect_task(task_id).state,
+        })
+        dispatched.set()
+
+    coordinator.set_human_resume_dispatcher(dispatch)
+    reservation = _reserve(coordinator, LaneId.CODING, intent="approval gated action")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    checkpoint_id = coordinator.checkpoint(task_id, boundary="await-approval")
+
+    waiting = coordinator.suspend_for_human_input(
+        task_id,
+        inbox_item_id="inbox-approval-1",
+        checkpoint_id=checkpoint_id,
+        request_type="approval",
+    )
+
+    assert waiting.waiting_inbox_item_id == "inbox-approval-1"
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.WAITING
+    resumed = coordinator.resume_from_human_input(
+        task_id,
+        inbox_item_id="inbox-approval-1",
+        checkpoint_id=checkpoint_id,
+        resume_claim_id="resume-claim-1",
+        structured_response={"operation": "approve"},
+    )
+    assert resumed.human_resume_claim_ids == ["resume-claim-1"]
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+    assert coordinator.inspect_task(task_id).supervisor_lease_token == ""
+    assert coordinator.taskboard.get_task(task_id).status is TaskStatus.QUEUED
+    assert dispatched.wait(timeout=1)
+    assert observed == {
+        "task_id": task_id,
+        "inbox_item_id": "inbox-approval-1",
+        "resume_claim_id": "resume-claim-1",
+        "response": {"operation": "approve"},
+        "lane_state": LaneTaskState.QUEUED,
+    }
+
+
+def test_recovered_human_resume_dispatches_only_the_matching_queued_branch(
+    coordinator: LaneCoordinator,
+) -> None:
+    dispatched = threading.Event()
+    coordinator.set_human_resume_dispatcher(
+        lambda *_args: dispatched.set()
+    )
+    reservation = _reserve(coordinator, LaneId.CODING, intent="recover approval")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    checkpoint_id = coordinator.checkpoint(task_id, boundary="await-approval")
+    coordinator.suspend_for_human_input(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        checkpoint_id=checkpoint_id,
+        request_type="approval",
+    )
+    coordinator.resume_from_human_input(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        checkpoint_id=checkpoint_id,
+        resume_claim_id="resume-claim-recovery-1",
+        structured_response={"operation": "approve"},
+    )
+    assert dispatched.wait(timeout=1)
+    dispatched.clear()
+
+    assert coordinator.dispatch_queued_human_resume(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        resume_claim_id="resume-claim-recovery-1",
+        structured_response={"operation": "approve"},
+    )
+    assert dispatched.wait(timeout=1)
+    coordinator.start(LaneReservation(coordinator.inspect_task(task_id)))
+    assert not coordinator.dispatch_queued_human_resume(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        resume_claim_id="resume-claim-recovery-1",
+        structured_response={"operation": "approve"},
+    )
+    coordinator.finish(task_id)
 
 
 def test_lane_selection_uses_decision_intent_and_invalid_model_lane_uses_valid_route() -> None:

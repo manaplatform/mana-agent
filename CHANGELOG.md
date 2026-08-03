@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-03
 
+- Registered a background, branch-owned transactional action dispatcher after a durable human-resume claim. Approval handlers now only persist the response and queue the matching branch; the dispatcher reacquires that branch before consuming the exact grant and executing the stored computer action.
+  - Gateway startup also recovers only approved, unclaimed, still-queued branches; claimed executions remain manual-recovery cases and are never retried automatically.
+  - Cleared the released pre-approval supervisor lease from the lane projection so the resumed dispatcher always acquires a fresh valid lease.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/test_computer_control.py`.
+
+- Added durable inbox-audit sequencing so events created at the same timestamp retain their append order instead of being reordered by random audit IDs.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py`.
+
+- Allowed a human-waiting taskboard item to return to `queued` after its matching durable resume claim, keeping the taskboard projection consistent with the execution supervisor without starting work inline.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py`.
+
+- Completed the `LaneCoordinator` human-inbox branch-controller interface, including durable store access plus suspension, recovery, and single-claim resume delegation. Transactional computer proposals can now create their linked authoritative inbox item instead of failing before an approval event is emitted.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/human_inbox/test_durable_inbox.py tests/test_computer_control.py`.
+
 - Added GitHub funding metadata for GitHub Sponsors, Open Collective, and Polar.
   - User verification required: confirm the repository's GitHub funding panel lists the configured links.
 

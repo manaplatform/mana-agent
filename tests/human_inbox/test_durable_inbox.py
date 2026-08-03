@@ -109,10 +109,12 @@ def test_terminal_notice_is_persisted_without_response_or_delivery(tmp_path: Pat
     assert notice.status is InboxStatus.RECORDED
     assert notice.allowed_responses == []
     assert inbox.repository.delivery_attempts(notice.inbox_item_id) == []
-    assert [event.event_type for event in inbox.repository.audit_for_item(notice.inbox_item_id)] == [
+    audit = inbox.repository.audit_for_item(notice.inbox_item_id)
+    assert [event.event_type for event in audit] == [
         "request_created",
         "reviewer_resolved",
     ]
+    assert [event.sequence for event in audit] == [1, 2]
 
 
 def test_cli_rejects_terminal_notice_without_traceback(tmp_path: Path, monkeypatch) -> None:

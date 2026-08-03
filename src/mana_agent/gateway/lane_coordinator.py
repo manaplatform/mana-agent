@@ -408,6 +408,7 @@ class LaneCoordinator:
         )
         self._supervisor_heartbeat_stops: dict[str, threading.Event] = {}
         self._supervisor_heartbeat_threads: dict[str, threading.Thread] = {}
+        self._human_resume_dispatcher: Callable[[str, str, str, dict[str, Any]], None] | None = None
         self.lock_manager = GatewayLockManager(self)
         self.state_path = workspace_dir(self.taskboard.store.workspace_id) / "gateway" / "lane_coordinator.json"
         self.locks_path = self.state_path.with_name("lane_locks.json")
@@ -415,6 +416,161 @@ class LaneCoordinator:
         self._load()
         self._migrate_legacy_supervisor_records()
         self.recover(supervise=self.execution_supervisor.config.startup_recovery)
+
+    @property
+    def store(self) -> Any:
+        """Expose the durable supervisor store required by the inbox controller contract."""
+        return self.execution_supervisor.store
+
+    def set_human_resume_dispatcher(
+        self,
+        dispatcher: Callable[[str, str, str, dict[str, Any]], None] | None,
+    ) -> None:
+        """Register the branch-owned dispatcher for durable human responses."""
+        self._human_resume_dispatcher = dispatcher
+
+    def suspend_for_human_input(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        request_type: str,
+    ) -> Any:
+        """Suspend one gateway branch for its linked durable inbox item."""
+        task = self.execution_supervisor.suspend_for_human_input(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            request_type=request_type,
+        )
+        self.transition(
+            task_id,
+            LaneTaskState.WAITING,
+            reason=f"waiting for {request_type} inbox item {inbox_item_id}",
+        )
+        self._stop_supervisor_heartbeats(task_id)
+        return task
+
+    def resume_from_human_input(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> Any:
+        """Queue only the branch whose durable inbox response holds this claim."""
+        task = self.execution_supervisor.resume_from_human_input(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            resume_claim_id=resume_claim_id,
+            structured_response=structured_response,
+        )
+        with self._condition:
+            execution = self._executions[task_id]
+            execution.worker_id = ""
+            execution.supervisor_attempt_id = ""
+            execution.supervisor_lease_token = ""
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.transition(task_id, LaneTaskState.QUEUED, reason="durable human response received")
+        self._dispatch_human_resume(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            resume_claim_id=resume_claim_id,
+            structured_response=structured_response,
+        )
+        return task
+
+    def restore_human_wait(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        request_type: str,
+    ) -> Any:
+        """Restore an unresolved durable inbox wait without starting new work."""
+        task = self.execution_supervisor.restore_human_wait(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            request_type=request_type,
+        )
+        if self.inspect_task(task_id).state is not LaneTaskState.WAITING:
+            self.transition(
+                task_id,
+                LaneTaskState.WAITING,
+                reason=f"restored {request_type} inbox wait {inbox_item_id}",
+            )
+        self._stop_supervisor_heartbeats(task_id)
+        return task
+
+    def _dispatch_human_resume(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> None:
+        dispatcher = self._human_resume_dispatcher
+        if dispatcher is None:
+            return
+
+        def run() -> None:
+            try:
+                dispatcher(task_id, inbox_item_id, resume_claim_id, structured_response)
+            except Exception as exc:
+                execution = self._executions.get(task_id)
+                if execution is not None:
+                    execution.error = f"human resume dispatch failed: {type(exc).__name__}: {exc}"
+                    execution.updated_at = _iso()
+                    with self._condition:
+                        self._persist_locked()
+                self.emit(
+                    "human_input.dispatch_failed",
+                    task_id=task_id,
+                    inbox_item_id=inbox_item_id,
+                    resume_claim_id=resume_claim_id,
+                    error_type=type(exc).__name__,
+                )
+
+        threading.Thread(
+            target=run,
+            name=f"mana-human-resume-{task_id}",
+            daemon=True,
+        ).start()
+
+    def dispatch_queued_human_resume(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> bool:
+        """Dispatch a recovered response only while its exact branch is still queued."""
+        task = self.execution_supervisor.store.get_task_or_none(task_id)
+        execution = self._executions.get(task_id)
+        if (
+            task is None
+            or task.state is not SupervisorState.QUEUED
+            or task.waiting_inbox_item_id
+            or execution is None
+            or execution.state is not LaneTaskState.QUEUED
+        ):
+            return False
+        self._dispatch_human_resume(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            resume_claim_id=resume_claim_id,
+            structured_response=structured_response,
+        )
+        return True
 
     def _supervisor_event(self, event_type: str, payload: dict[str, Any]) -> None:
         task_id = str(payload.get("task_id") or "")
