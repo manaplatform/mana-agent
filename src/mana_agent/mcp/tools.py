@@ -56,7 +56,19 @@ def discovered_mcp_langchain_tools(
         def call(_tool: str = qualified, **kwargs: Any) -> str:
             return json.dumps(client.call_tool(_tool, {key: value for key, value in kwargs.items() if value is not None}), ensure_ascii=False, default=str)
 
-        tools.append(StructuredTool.from_function(func=call, name=model_name, description=str(descriptor.get("description") or f"MCP tool {qualified}"), args_schema=args_schema))
+        tools.append(
+            StructuredTool.from_function(
+                func=call,
+                name=model_name,
+                description=str(descriptor.get("description") or f"MCP tool {qualified}"),
+                args_schema=args_schema,
+                metadata={
+                    "transactional_adapter": "mcp",
+                    "mcp_provider_id": str(descriptor["server_id"]),
+                    "mcp_tool_name": str(descriptor["name"]),
+                },
+            )
+        )
     return tools, []
 
 

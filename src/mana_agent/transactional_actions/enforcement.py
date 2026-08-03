@@ -62,6 +62,8 @@ def assert_model_tool_routed(tool_name: str, metadata: dict | None = None) -> No
     declared = dict(metadata or {})
     if declared.get("read_only") is True and declared.get("side_effecting") is not True:
         return
+    if name.startswith("mcp__") and declared.get("transactional_adapter") == "mcp":
+        return
     if (
         name in ROUTED_SIDE_EFFECT_TOOLS
         or name in READ_ONLY_MODEL_TOOLS

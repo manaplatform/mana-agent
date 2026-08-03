@@ -106,6 +106,13 @@ class ActionPolicy:
                 "Computer-control actions require exact approval.",
                 ["approve_computer_control"],
             )
+        if action.tool_name == "mcp":
+            return (
+                PolicyOutcome.REQUIRE_APPROVAL,
+                ["external_mcp_operation"],
+                "MCP provider operations require exact approval.",
+                ["approve_external_mcp_operation"],
+            )
         return PolicyOutcome.DENY, ["unclassified_tool"], "No policy rule safely classifies this tool.", ["default_deny"]
 
     def _scoped_policy(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]] | None:

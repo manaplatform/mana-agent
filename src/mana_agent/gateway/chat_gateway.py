@@ -6273,6 +6273,32 @@ class AgentChatGateway:
                 payload={"route": "mcp", "provider_id": provider_id},
             )
         trace = _serialize_tool_traces(response)
+        for item in trace:
+            try:
+                tool_payload = json.loads(str(item.get("output_preview") or ""))
+            except json.JSONDecodeError:
+                continue
+            if tool_payload.get("error_code") != "approval_required":
+                continue
+            approval_request_id = str(
+                tool_payload.get("permission_request_id")
+                or tool_payload.get("action_id")
+                or ""
+            )
+            if approval_request_id:
+                return ChatTurnResult(
+                    answer="The selected MCP action is waiting for approval.",
+                    mode="route-mcp-awaiting-approval",
+                    decision=decision,
+                    trace=trace,
+                    warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
+                    payload={
+                        "route": "mcp",
+                        "provider_id": provider_id,
+                        "confirmation_request_id": approval_request_id,
+                        "action_id": str(tool_payload.get("action_id") or ""),
+                    },
+                )
         failed_tools = [
             item
             for item in trace

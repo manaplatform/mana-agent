@@ -10,6 +10,9 @@ from mana_agent.mcp.client import McpClient
 from mana_agent.mcp.tools import discovered_mcp_langchain_tools, mcp_model_tool_name
 from mana_agent.mcp.config import McpConfigError, McpServerConfig, load_mcp_servers, load_mcp_token, parse_mcp_server_json, save_mcp_server, save_mcp_token
 from mana_agent.mcp.server import protected_http_app
+from mana_agent.transactional_actions.adapters import McpActionAdapter
+from mana_agent.transactional_actions.models import PolicyOutcome
+from mana_agent.transactional_actions.policy import ActionPolicy
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision
@@ -56,6 +59,27 @@ def test_mcp_queue_job_uses_namespaced_tool(monkeypatch, tmp_path):
 
 def test_mcp_model_tool_name_is_openai_compatible():
     assert mcp_model_tool_name("context7", "query-docs") == "mcp__context7__query-docs"
+
+
+def test_mcp_transactional_adapter_requires_provider_success_for_verification():
+    adapter = McpActionAdapter(
+        provider_id="kaggle",
+        tool_name="authorize",
+        arguments={"request": "authorize this session"},
+        invoke=lambda: {"ok": True, "server_id": "kaggle", "tool_name": "authorize"},
+        parent_task_id="task-kaggle",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    action = adapter.build_intent()
+    result = adapter.execute(action)
+    verification = adapter.verify(action, result)
+
+    assert action.tool_name == "mcp"
+    assert action.target_resources == ["mcp.kaggle.authorize"]
+    assert verification.complete is True
+    assert ActionPolicy().evaluate(action).outcome is PolicyOutcome.REQUIRE_APPROVAL
 
 
 def test_explicit_mcp_discovery_uses_only_the_requested_configured_provider(monkeypatch, tmp_path):

@@ -290,6 +290,50 @@ def test_failed_kaggle_mcp_tool_marks_the_route_failed(
     assert result.payload["failed_tool"] == "mcp__kaggle__start_competition_submission_upload"
 
 
+def test_kaggle_mcp_action_approval_keeps_the_route_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    approval_agent = _AskAgent(
+        SimpleNamespace(
+            answer="Approval is required.",
+            sources=[],
+            warnings=[],
+            trace=[
+                {
+                    "tool_name": "mcp__kaggle__authorize",
+                    "status": "error",
+                    "output_preview": json.dumps(
+                        {
+                            "ok": False,
+                            "error_code": "approval_required",
+                            "permission_request_id": "act_kaggle_authorize",
+                            "action_id": "act_kaggle_authorize",
+                        }
+                    ),
+                }
+            ],
+        )
+    )
+    gateway, _chat, _ask_agent = _gateway(
+        tmp_path,
+        _RouteModel("mcp"),
+        mcp=RouteAvailability(
+            True,
+            details={"providers": [{"id": "kaggle", "namespace": "mcp.kaggle"}]},
+        ),
+        ask_agent=approval_agent,
+    )
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Use Kaggle MCP to authorize access.",
+    )
+
+    assert result.mode == "route-mcp-awaiting-approval"
+    assert result.payload["confirmation_request_id"] == "act_kaggle_authorize"
+
+
 def test_unsupported_route_bypasses_checkpoint_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
