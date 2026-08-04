@@ -182,6 +182,12 @@ class LaneBudget:
     consumed_output_tokens: int = 0
     estimated_cost: float = 0.0
     actual_cost: float = 0.0
+    estimated_cost_known: bool = False
+    actual_cost_known: bool = False
+    model_context_window: int = 0
+    model_max_output_tokens: int = 0
+    estimate_confidence: str = ""
+    estimate_source: str = ""
 
     @property
     def reserved_tokens(self) -> int:
@@ -225,6 +231,7 @@ class LaneExecution:
     model: str = ""
     provider: str = ""
     routing_decision_id: str = ""
+    accounting_reservation_ids: list[str] = field(default_factory=list)
     task_type: str = "single"
     capabilities: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
@@ -649,7 +656,11 @@ class LaneCoordinator:
         model: str = "",
         requested_input_tokens: int = 0,
         requested_output_tokens: int = 0,
-        estimated_cost: float = 0.0,
+        estimated_cost: float | None = None,
+        model_context_window: int = 0,
+        model_max_output_tokens: int = 0,
+        estimate_confidence: str = "",
+        estimate_source: str = "",
         capabilities: Sequence[str] = (),
         routing_decision_id: str = "",
         provider: str = "",
@@ -747,7 +758,12 @@ class LaneCoordinator:
             budget = LaneBudget(
                 reserved_input_tokens=max(0, requested_input_tokens),
                 reserved_output_tokens=max(0, requested_output_tokens),
-                estimated_cost=max(0.0, estimated_cost),
+                estimated_cost=max(0.0, float(estimated_cost or 0.0)),
+                estimated_cost_known=estimated_cost is not None,
+                model_context_window=max(0, int(model_context_window)),
+                model_max_output_tokens=max(0, int(model_max_output_tokens)),
+                estimate_confidence=estimate_confidence,
+                estimate_source=estimate_source,
             )
             self._assert_budget(contract, session_id, budget)
             if parent_task_id:
@@ -807,7 +823,11 @@ class LaneCoordinator:
                 side_effect_classification=side_effect,
                 dependency_task_ids=task.depends_on,
                 token_budget=budget.reserved_tokens or None,
-                estimated_cost=budget.estimated_cost,
+                estimated_cost=(budget.estimated_cost if budget.estimated_cost_known else None),
+                model_context_window=budget.model_context_window,
+                model_max_output_tokens=budget.model_max_output_tokens,
+                estimate_confidence=budget.estimate_confidence,
+                estimate_source=budget.estimate_source,
                 monetary_budget=contract.cost_budget,
                 execution_fingerprint=fingerprint,
                 session_id=session_id,
@@ -1009,21 +1029,36 @@ class LaneCoordinator:
         changed_files: Sequence[str] = (),
         consumed_input_tokens: int = 0,
         consumed_output_tokens: int = 0,
-        actual_cost: float = 0.0,
+        actual_cost: float | None = None,
         verification_state: Mapping[str, Any] | None = None,
         error: str = "",
     ) -> LaneExecution:
         with self._condition:
             execution = self._executions[task_id]
             execution.changed_files = self.canonical_paths(changed_files)
+            execution_had_usage = execution.budget.consumed_tokens > 0
+            incremental_usage = consumed_input_tokens > 0 or consumed_output_tokens > 0
             execution.budget.consumed_input_tokens += max(0, consumed_input_tokens)
             execution.budget.consumed_output_tokens += max(0, consumed_output_tokens)
-            execution.budget.actual_cost += max(0.0, actual_cost)
+            execution.budget.actual_cost += max(0.0, float(actual_cost or 0.0))
+            if actual_cost is not None:
+                execution.budget.actual_cost_known = (
+                    not execution_had_usage or execution.budget.actual_cost_known
+                )
+            elif incremental_usage:
+                execution.budget.actual_cost_known = False
             if execution.parent_task_id and execution.parent_task_id in self._executions:
                 parent = self._executions[execution.parent_task_id]
+                parent_had_usage = parent.budget.consumed_tokens > 0
                 parent.budget.consumed_input_tokens += max(0, consumed_input_tokens)
                 parent.budget.consumed_output_tokens += max(0, consumed_output_tokens)
-                parent.budget.actual_cost += max(0.0, actual_cost)
+                parent.budget.actual_cost += max(0.0, float(actual_cost or 0.0))
+                if actual_cost is not None:
+                    parent.budget.actual_cost_known = (
+                        not parent_had_usage or parent.budget.actual_cost_known
+                    )
+                elif incremental_usage:
+                    parent.budget.actual_cost_known = False
                 parent.updated_at = _iso()
             execution.verification_state.update(dict(verification_state or {}))
             execution.error = error
@@ -1103,7 +1138,7 @@ class LaneCoordinator:
                         "actual_cost": accounted_actual_cost,
                     },
                     token_usage=accounted_input_tokens + accounted_output_tokens,
-                    actual_cost=accounted_actual_cost,
+                    actual_cost=(accounted_actual_cost if execution.budget.actual_cost_known else None),
                 )
             except CompletionVerificationError as exc:
                 execution.error = str(exc)
@@ -1207,7 +1242,8 @@ class LaneCoordinator:
         *,
         consumed_input_tokens: int = 0,
         consumed_output_tokens: int = 0,
-        actual_cost: float = 0.0,
+        actual_cost: float | None = None,
+        accounting_reservation_ids: Sequence[str] = (),
     ) -> LaneExecution:
         """Persist cumulative provider usage without double-counting a later finish."""
         with self._condition:
@@ -1222,18 +1258,31 @@ class LaneCoordinator:
                 int(consumed_output_tokens)
                 - execution.budget.consumed_output_tokens,
             )
-            cost_delta = max(0.0, float(actual_cost) - execution.budget.actual_cost)
+            cost_delta = max(0.0, float(actual_cost or 0.0) - execution.budget.actual_cost)
             execution.budget.consumed_input_tokens += input_delta
             execution.budget.consumed_output_tokens += output_delta
             execution.budget.actual_cost += cost_delta
+            execution.budget.actual_cost_known = actual_cost is not None
+            for reservation_id in accounting_reservation_ids:
+                if reservation_id not in execution.accounting_reservation_ids:
+                    execution.accounting_reservation_ids.append(reservation_id)
             if execution.parent_task_id and execution.parent_task_id in self._executions:
                 parent = self._executions[execution.parent_task_id]
+                parent_had_usage = parent.budget.consumed_tokens > 0
                 parent.budget.consumed_input_tokens += input_delta
                 parent.budget.consumed_output_tokens += output_delta
                 parent.budget.actual_cost += cost_delta
+                parent.budget.actual_cost_known = (
+                    (not parent_had_usage or parent.budget.actual_cost_known)
+                    and actual_cost is not None
+                )
                 parent.updated_at = _iso()
             execution.updated_at = _iso()
             self._persist_locked()
+            if accounting_reservation_ids:
+                self.execution_supervisor.record_accounting_reservations(
+                    task_id, accounting_reservation_ids
+                )
             return execution
 
     def transition(
@@ -1532,8 +1581,8 @@ class LaneCoordinator:
         return {
             "reserved_tokens": sum(item.budget.reserved_tokens for item in rows),
             "consumed_tokens": sum(item.budget.consumed_tokens for item in rows),
-            "estimated_cost": sum(item.budget.estimated_cost for item in rows),
-            "actual_cost": sum(item.budget.actual_cost for item in rows),
+            "estimated_cost": (sum(item.budget.estimated_cost for item in rows) if rows and all(item.budget.estimated_cost_known for item in rows) else None),
+            "actual_cost": (sum(item.budget.actual_cost for item in rows) if rows and all(item.budget.actual_cost_known for item in rows) else None),
             "task_count": len(rows),
         }
 
@@ -1547,7 +1596,7 @@ class LaneCoordinator:
                 raise LaneHandoffError(f"handoff {handoff.source_lane.value} -> {handoff.target_lane.value} is not allowed")
             target = self.contracts[handoff.target_lane]
             self._assert_capacity(target, execution.model, exclude_task_id=execution.task_id)
-            if execution.budget.consumed_tokens >= source_contract.token_budget:
+            if source_contract.token_budget is not None and execution.budget.consumed_tokens >= source_contract.token_budget:
                 raise LaneBudgetError("task budget is exhausted; handoff was not started")
             execution.state = LaneTaskState.HANDOFF
             execution.handoffs.append(handoff)
@@ -1590,8 +1639,9 @@ class LaneCoordinator:
         ):
             self.emit("lane.permission_denied", task_id=task_id, lane_id=execution.owning_lane, tool_name=tool_name, reason="required read lock is not held")
             raise LaneCoordinatorError(f"Tool {tool_name} requires a gateway repository lock")
+        lane_limit = self.contracts[execution.owning_lane].token_budget
         if (
-            execution.budget.consumed_tokens >= self.contracts[execution.owning_lane].token_budget
+            (lane_limit is not None and execution.budget.consumed_tokens >= lane_limit)
             or execution.budget.consumed_tokens >= execution.budget.reserved_tokens
         ):
             self.emit("lane.budget_exhausted", task_id=task_id, lane_id=execution.owning_lane)
@@ -1722,7 +1772,13 @@ class LaneCoordinator:
         return str(min(self._waiters, key=score)["waiter_id"]) if self._waiters else ""
 
     def _assert_budget(self, contract: LaneContract, session_id: str, requested: LaneBudget) -> None:
-        if requested.reserved_tokens > contract.token_budget or requested.estimated_cost > contract.cost_budget:
+        if (
+            (contract.token_budget is not None and requested.reserved_tokens > contract.token_budget)
+            or (
+                contract.cost_budget is not None
+                and (not requested.estimated_cost_known or requested.estimated_cost > contract.cost_budget)
+            )
+        ):
             raise LaneBudgetError(f"requested budget exceeds {contract.lane_id.value} lane limit")
         active = [
             item
@@ -1822,7 +1878,11 @@ class LaneCoordinator:
                         else ()
                     ),
                     token_budget=execution.budget.reserved_tokens or None,
-                    estimated_cost=execution.budget.estimated_cost,
+                    estimated_cost=(execution.budget.estimated_cost if execution.budget.estimated_cost_known else None),
+                    model_context_window=execution.budget.model_context_window,
+                    model_max_output_tokens=execution.budget.model_max_output_tokens,
+                    estimate_confidence=execution.budget.estimate_confidence,
+                    estimate_source=execution.budget.estimate_source,
                     monetary_budget=contract.cost_budget,
                 )
                 if classification == SideEffectClassification.READ_ONLY:
@@ -1856,7 +1916,7 @@ class LaneCoordinator:
             serialized["supervisor_lease_token"] = ""
             executions.append(serialized)
         payload = {
-            "schema_version": 1, "updated_at": _iso(),
+            "schema_version": 2, "updated_at": _iso(),
             "executions": executions,
             "waiters": list(self._waiters),
             "locks": [],

@@ -31,6 +31,7 @@ def profile(
 ) -> ModelProfile:
     return ModelProfile(
         provider="fixture", model_id=model, supported_roles=roles,
+        context_window=1_000_000, max_output_tokens=500_000,
         reasoning_settings=frozenset({"high"}) if reliability > 0.9 else frozenset({"none"}),
         logical_cost_per_1k_tokens=cost, reliability_score=reliability,
         supported_languages=languages, benchmark_scores=benchmarks or {},
@@ -140,10 +141,12 @@ def test_identical_inputs_and_evidence_produce_identical_decisions() -> None:
 
 
 def test_configured_and_legacy_profiles_migrate_without_role_lock(monkeypatch) -> None:
-    explicit = configured_profiles([{"provider": "custom", "model_id": "m", "supported_roles": ["coding"], "context_window": 4096}])
+    explicit = configured_profiles([{"provider": "custom", "model_id": "m", "supported_roles": ["coding"], "context_window": 4096, "max_output_tokens": 1024}])
     assert explicit[0].key == "custom/m"
     monkeypatch.setattr("mana_agent.model_routing.profiles.get_setting", lambda name, default="": {"MODEL_LEVEL_1_FAST_TOOL": "openai/fast"}.get(name, default))
-    migrated = profiles_from_legacy_configuration(global_model="openai/current")
+    migrated = profiles_from_legacy_configuration(
+        global_model="openai/current", context_window=16_384, max_output_tokens=4_096
+    )
     assert {item.key for item in migrated} == {"openai/fast", "openai/current"}
     assert "coding" in migrated[0].supported_roles
 

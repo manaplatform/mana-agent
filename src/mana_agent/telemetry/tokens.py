@@ -75,71 +75,29 @@ class TokenUsage:
 
 
 def estimate_tokens(text: Any) -> int:
-    raw = str(text or "")
-    if not raw:
-        return 0
-    try:
-        import tiktoken
+    # Import lazily because context_cost's public package exports include the
+    # governor, which consumes TokenUsage during package initialization.
+    from mana_agent.context_cost.tokenizers import TokenizerRegistry
 
-        encoder = tiktoken.get_encoding("cl100k_base")
-        return len(encoder.encode(raw, disallowed_special=()))
-    except Exception:
-        return max(1, (len(raw) + 3) // 4)
-
-
-def _get_usage_value(usage: Any, *names: str) -> Any:
-    for name in names:
-        if isinstance(usage, dict) and name in usage:
-            return usage.get(name)
-        if hasattr(usage, name):
-            return getattr(usage, name)
-    return None
-
-
-def _nested_dict(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if value is None:
-        return {}
-    data: dict[str, Any] = {}
-    for name in dir(value):
-        if name.startswith("_"):
-            continue
-        try:
-            item = getattr(value, name)
-        except Exception:
-            continue
-        if isinstance(item, (str, int, float, bool, type(None), dict, list)):
-            data[name] = item
-    return data
+    tokenizer, _ = TokenizerRegistry().resolve(None)
+    return tokenizer.count(text)
 
 
 def token_usage_from_provider(usage: Any) -> TokenUsage:
     """Normalize provider usage without inventing exact numbers."""
-    if usage is None:
+    from mana_agent.context_cost.usage import normalize_provider_usage
+
+    normalized = normalize_provider_usage(usage)
+    if normalized is None:
         return TokenUsage()
-    raw = _nested_dict(usage)
-    input_tokens = int(_get_usage_value(usage, "input_tokens", "prompt_tokens") or 0)
-    output_tokens = int(_get_usage_value(usage, "output_tokens", "completion_tokens") or 0)
-    total_tokens = int(_get_usage_value(usage, "total_tokens") or 0)
-
-    input_details = _nested_dict(_get_usage_value(usage, "input_token_details", "prompt_tokens_details"))
-    output_details = _nested_dict(_get_usage_value(usage, "output_token_details", "completion_tokens_details"))
-    cached = int(input_details.get("cached_tokens") or input_details.get("cached_input_tokens") or 0)
-    cache_creation = int(input_details.get("cache_creation_tokens") or 0)
-    reasoning = int(output_details.get("reasoning_tokens") or raw.get("reasoning_tokens") or 0)
-
     return TokenUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=total_tokens,
-        cached_input_tokens=cached,
-        cache_creation_tokens=cache_creation,
-        reasoning_tokens=reasoning,
-        estimated=bool(raw.get("estimated", False)),
-        provider=str(raw.get("provider") or "") or None,
-        model=str(raw.get("model") or "") or None,
-        provider_raw_usage=raw,
+        input_tokens=normalized.input_tokens,
+        output_tokens=normalized.output_tokens,
+        total_tokens=normalized.total_tokens,
+        cached_input_tokens=normalized.cached_input_tokens,
+        reasoning_tokens=normalized.reasoning_tokens,
+        estimated=normalized.status != "reported",
+        provider_raw_usage=dict(normalized.provider_fields),
     )
 
 

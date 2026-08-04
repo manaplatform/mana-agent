@@ -16,6 +16,8 @@ def model_routing(context: DoctorContext) -> list[DoctorFinding]:
         profiles = explicit or profiles_from_legacy_configuration(
             global_model=settings.openai_chat_model,
             default_provider=settings.mana_ai_provider,
+            context_window=settings.mana_context_unknown_model_context_window,
+            max_output_tokens=settings.mana_context_unknown_model_max_output_tokens,
         )
     except (ValueError, ProfileValidationError) as exc:
         return [DoctorFinding(

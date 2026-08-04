@@ -23,7 +23,7 @@ import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from mana_agent.config.settings import Settings, mana_home
 from mana_agent.gateway.config import ChatGatewayConfig
@@ -54,6 +54,7 @@ from mana_agent.gateway.lane_coordinator import (
     LaneReservation,
 )
 from mana_agent.gateway.lanes import LaneId, LaneTaskState, select_lane
+from mana_agent.gateway.routing import GatewayRoutingError
 from mana_agent.gateway.artifact_routing import (
     artifact_handler_availability,
     artifact_routing_evidence,
@@ -2397,7 +2398,7 @@ class AgentChatGateway:
         context = "\n\n".join(
             record.content.text for record in records if record.content.text.strip()
         )
-        return context[-12000:], ""
+        return context, ""
 
     def _record_followup_memory(
         self,
@@ -2456,7 +2457,7 @@ class AgentChatGateway:
                 logger.warning("Chat capsule memory write failed closed: %s", exc)
                 return f"Chat capsule memory write unavailable: {exc}"
             return ""
-        content = f"User: {user_text[:8000]}\nAssistant: {str(result.answer)[:12000]}"
+        content = f"User: {user_text}\nAssistant: {result.answer}"
         try:
             self._stack.memory_service.add_blocking(
                 MemoryWriteRequest(
@@ -2515,7 +2516,7 @@ class AgentChatGateway:
                 query=query,
                 allowed_scopes=frozenset({CapsuleScope.PRIVATE}),
                 max_capsules=3,
-                max_tokens=1200,
+                max_tokens=self.settings.mana_memory_capsules_default_max_tokens,
             )
         )
         return "\n\n".join(
@@ -2698,21 +2699,21 @@ class AgentChatGateway:
                 self._chat_service, "ask_service", None
             )
             self._apply_selected_model(
-                getattr(minimal_ask, "qna_chain", None), minimal_decision.selected_model
+                getattr(minimal_ask, "qna_chain", None), minimal_decision.selected_model, minimal_decision.provider
             )
             self._apply_selected_model(
-                getattr(minimal_ask, "ask_agent", None), minimal_decision.selected_model
+                getattr(minimal_ask, "ask_agent", None), minimal_decision.selected_model, minimal_decision.provider
             )
             state["latest_routing_decision"] = minimal_decision.concise()
             self._append_session_message(
                 session_id, role="user", content=text, turn_id=turn_id
             )
-            hist = state.get("history", [])[-20:]
+            hist = state.get("history", [])
             question = text
             if hist:
                 transcript = "\n\n".join(f"User: {q}\nMana-Agent: {a}" for q, a in hist)
                 question = (
-                    f"Conversation history for continuity:\n{transcript[-20000:]}\n\n"
+                    f"Conversation history for continuity:\n{transcript}\n\n"
                     f"Current user message:\n{text}"
                 )
             try:
@@ -2733,7 +2734,6 @@ class AgentChatGateway:
                 answer = str(answer or "").strip()
             result = (answer or "").strip() or "(No response from agent)"
             state.setdefault("history", []).append((text, result))
-            state["history"] = state["history"][-40:]
             self._append_session_message(
                 session_id, role="assistant", content=result, turn_id=turn_id
             )
@@ -2891,49 +2891,80 @@ class AgentChatGateway:
         contract = self._lane_coordinator.contracts[lane_id]
 
         def most_restrictive(
-            configured_limit: int | float | None, lane_limit: int | float
-        ) -> int | float:
+            configured_limit: int | float | None, lane_limit: int | float | None
+        ) -> int | float | None:
             return (
-                lane_limit
-                if configured_limit is None
+                lane_limit if configured_limit is None
+                else configured_limit if lane_limit is None
                 else min(configured_limit, lane_limit)
             )
 
         return replace(
             configured,
-            task_token_limit=int(
+            task_token_limit=(lambda value: None if value is None else int(value))(
                 most_restrictive(configured.task_token_limit, contract.token_budget)
             ),
-            task_cost_limit=float(
+            task_cost_limit=(lambda value: None if value is None else float(value))(
                 most_restrictive(configured.task_cost_limit, contract.cost_budget)
             ),
         )
 
-    def _execution_reservation_tokens(
+    def _execution_token_estimate(
         self,
         *,
         entry_route: str,
         execution_decision: Any,
-    ) -> tuple[int, int]:
-        """Reserve enough tokens for the validated route's configured executor."""
-        requested_input = max(1, int(execution_decision.estimated_input_tokens))
-        requested_output = max(1, int(execution_decision.estimated_output_tokens))
-        if entry_route != "canvas":
-            return requested_input, requested_output
+        request_text: str,
+        session_id: str = "",
+        context_components: Mapping[str, Any] | None = None,
+    ):
+        """Estimate the final selected model against the route's serialized payload."""
+        lane_id = self._lane_coordinator.select_lane(entry_route=entry_route)
+        components: dict[str, Any] = {
+            "user_request": request_text,
+            **dict(context_components or {}),
+        }
+        decision_calls = max(1, int(getattr(execution_decision, "expected_model_calls", 1) or 1))
+        expected_calls = decision_calls
+        total_output = max(1, int(execution_decision.estimated_output_tokens))
+        per_call_output = max(1, (total_output + decision_calls - 1) // decision_calls)
+        tool_count = 0
+        if entry_route == "canvas":
+            from mana_agent.canvas.catalog import catalog_metadata
+            from mana_agent.canvas.runtime_tools import build_canvas_langchain_tools
+            from mana_agent.canvas.service import canvas_service_for_root
 
-        # Canvas supplies a catalog and surface state, then may execute several
-        # tool steps. Its routing estimate covers only the initial response.
-        requested_input = max(requested_input, 4_096)
-        requested_output = max(
-            requested_output,
-            max(8, int(self.config.agent_max_steps or 6)) * 1_024,
+            tools = build_canvas_langchain_tools(self.root)
+            components.update({
+                "canvas_catalog": catalog_metadata(),
+                "canvas_surface_state": [
+                    item.model_dump(mode="json")
+                    for item in canvas_service_for_root(self.root).list_surfaces(session_id, include_deleted=True)
+                ] if session_id else [],
+                "tool_schemas": [
+                    {
+                        "name": getattr(tool, "name", ""),
+                        "description": getattr(tool, "description", ""),
+                        "args_schema": getattr(tool, "args_schema", None),
+                    }
+                    for tool in tools
+                ],
+            })
+            tool_count = len(tools)
+            expected_calls = max(1, int(self.config.agent_max_steps))
+        return self._stack.context_cost_governor.estimate_execution(
+            provider=execution_decision.provider,
+            model=execution_decision.selected_model,
+            components=components,
+            route=entry_route,
+            lane=lane_id.value,
+            expected_tool_steps=max(0, expected_calls - 1),
+            expected_model_calls=expected_calls,
+            requested_output_tokens=per_call_output,
+            execution_kind="gateway_route",
+            tool_count=tool_count,
+            lane_policy_limit=self._lane_coordinator.contracts[lane_id].token_budget,
         )
-        lane_limit = self._lane_coordinator.contracts[LaneId.CANVAS].token_budget
-        if requested_input + requested_output > lane_limit:
-            raise LaneBudgetError(
-                "configured Canvas execution envelope exceeds the Canvas lane token budget"
-            )
-        return requested_input, requested_output
 
     def latest_routing_decision(
         self, *, session_id: str = "", task_id: str = ""
@@ -3019,6 +3050,7 @@ class AgentChatGateway:
             else:
                 state["followup_memory_context"] = ""
                 state["followup_memory_kind"] = ""
+            memory_context = str(state.get("followup_memory_context") or "")
             sink = event_sink or self._event_sink
             state["_turn_event_sink"] = sink
             if callable(sink):
@@ -3037,7 +3069,7 @@ class AgentChatGateway:
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 previous_route=str(state.get("active_route") or ""),
-                conversation_summary=_conversation_prompt(state, text)[-12000:],
+                conversation_summary=_conversation_prompt(state, text),
                 artifact_evidence=artifact_routing_evidence(
                     root=self.root,
                     user_prompt=text,
@@ -3066,6 +3098,7 @@ class AgentChatGateway:
             self._apply_selected_model(
                 getattr(self._entry_router, "llm", None),
                 entry_model_decision.selected_model,
+                entry_model_decision.provider,
             )
             try:
                 entry_decision = self._entry_router.route(
@@ -3255,6 +3288,22 @@ class AgentChatGateway:
                             else RiskLevel.LOW
                         ),
                         required_tools=frozenset(route_tools),
+                        estimation_components={
+                            "conversation_history": list(state.get("messages") or [])[:-1],
+                            "attachments": list(options.get("attachments") or ()),
+                            "required_tools": list(route_tools),
+                            "retrieved_memory": memory_context,
+                        },
+                        expected_tool_calls=(
+                            max(0, int(self.config.agent_max_steps) - 1)
+                            if entry_decision.route == "canvas"
+                            else 0
+                        ),
+                        expected_model_calls=(
+                            max(1, int(self.config.agent_max_steps))
+                            if entry_decision.route == "canvas"
+                            else 1
+                        ),
                         latency_requirement=LatencyClass.STANDARD,
                         budgets=self._routing_budgets_for_lane(lane_id),
                         task_id=turn_id,
@@ -3301,6 +3350,7 @@ class AgentChatGateway:
                 self._apply_selected_model(
                     getattr(ask_service, "ask_agent", None),
                     execution_decision.selected_model,
+                    execution_decision.provider,
                 )
                 try:
                     if (
@@ -3326,10 +3376,18 @@ class AgentChatGateway:
                     target_files = [
                         str(item) for item in options.pop("target_files", [])
                     ]
-                    requested_input, requested_output = (
-                        self._execution_reservation_tokens(
+                    execution_estimate = (
+                        self._execution_token_estimate(
                             entry_route=entry_decision.route,
                             execution_decision=execution_decision,
+                            request_text=text,
+                            session_id=session_id,
+                            context_components={
+                                "conversation_history": list(state.get("messages") or [])[:-1],
+                                "attachments": list(options.get("attachments") or ()),
+                                "retrieved_memory": memory_context,
+                                "required_tools": list(route_tools),
+                            },
                         )
                     )
                     route_capabilities = {
@@ -3546,9 +3604,13 @@ class AgentChatGateway:
                             repository_id=self._lane_coordinator.taskboard.store.repository_id,
                             target_files=target_files,
                             model=f"{execution_decision.provider}/{execution_decision.selected_model}",
-                            requested_input_tokens=requested_input,
-                            requested_output_tokens=requested_output,
-                            estimated_cost=execution_decision.estimated_cost,
+                            requested_input_tokens=execution_estimate.input_tokens,
+                            requested_output_tokens=execution_estimate.output_tokens,
+                            estimated_cost=(None if execution_estimate.estimated_cost is None else float(execution_estimate.estimated_cost)),
+                            model_context_window=execution_estimate.profile.context_window,
+                            model_max_output_tokens=execution_estimate.profile.max_output_tokens,
+                            estimate_confidence=execution_estimate.confidence,
+                            estimate_source=execution_estimate.profile.source,
                             capabilities=route_capabilities,
                             routing_decision_id=execution_decision.decision_id,
                             provider=execution_decision.provider,
@@ -3608,6 +3670,9 @@ class AgentChatGateway:
                             checkpoint_id=reservation.execution.checkpoint_id,
                             agent_id="main",
                             step_id="after_routing",
+                            route=entry_decision.route,
+                            lane=lane_id.value,
+                            execution_kind="gateway_route",
                         )
                         routed_checkpoint_id = self._lane_coordinator.checkpoint(
                             reservation.execution.task_id,
@@ -3854,7 +3919,7 @@ class AgentChatGateway:
             self._append_session_message(
                 session_id,
                 role="tool",
-                content=summary[:4000],
+                content=summary,
                 turn_id=turn_id,
                 metadata={
                     "tool_name": str(trace.get("tool_name") or "tool"),
@@ -3946,7 +4011,8 @@ class AgentChatGateway:
             task_id,
             consumed_input_tokens=int(usage["consumed_input_tokens"]),
             consumed_output_tokens=int(usage["consumed_output_tokens"]),
-            actual_cost=float(usage["actual_cost"]),
+            actual_cost=(float(usage["actual_cost"]) if usage.get("actual_cost_known") else None),
+            accounting_reservation_ids=tuple(usage.get("accounting_reservation_ids") or ()),
         )
         return usage
 
@@ -4028,6 +4094,9 @@ class AgentChatGateway:
             root_task_id=root_task.task_id,
             agent_id="main",
             step_id="multi_task_planning",
+            route="multi_task",
+            lane="research",
+            execution_kind="planner",
         )
         orchestrator = MultiTaskOrchestrator(
             llm=self._entry_router.llm,
@@ -4081,6 +4150,12 @@ class AgentChatGateway:
                 maximum_concurrency=orchestrator.maximum_concurrency,
             )
         )
+        root_estimate = self._execution_token_estimate(
+            entry_route="multi_task",
+            execution_decision=root_model_decision,
+            request_text=plan.goal,
+            session_id=context.session_id,
+        )
         root_reservation = self._lane_coordinator.reserve(
             normalized_intent=plan.goal,
             lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
@@ -4088,13 +4163,13 @@ class AgentChatGateway:
             workspace_id=board.store.workspace_id,
             repository_id=board.store.repository_id,
             model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
-            requested_input_tokens=max(
-                1, int(root_model_decision.estimated_input_tokens)
-            ),
-            requested_output_tokens=max(
-                1, int(root_model_decision.estimated_output_tokens)
-            ),
-            estimated_cost=root_model_decision.estimated_cost,
+            requested_input_tokens=root_estimate.input_tokens,
+            requested_output_tokens=root_estimate.output_tokens,
+            estimated_cost=(None if root_estimate.estimated_cost is None else float(root_estimate.estimated_cost)),
+            model_context_window=root_estimate.profile.context_window,
+            model_max_output_tokens=root_estimate.profile.max_output_tokens,
+            estimate_confidence=root_estimate.confidence,
+            estimate_source=root_estimate.profile.source,
             capabilities=(),
             routing_decision_id=root_model_decision.decision_id,
             provider=root_model_decision.provider,
@@ -4353,7 +4428,7 @@ class AgentChatGateway:
             )
         )
         self._apply_selected_model(
-            getattr(ask_service, "ask_agent", None), execution_decision.selected_model
+            getattr(ask_service, "ask_agent", None), execution_decision.selected_model, execution_decision.provider
         )
         lane_id = self._lane_coordinator.select_lane(entry_route=decision.route)
         capabilities = {
@@ -4381,9 +4456,11 @@ class AgentChatGateway:
             "remote_execution": ("remote_ssh_execute",),
             "server": ("server",),
         }.get(decision.route, ())
-        requested_input, requested_output = self._execution_reservation_tokens(
+        execution_estimate = self._execution_token_estimate(
             entry_route=decision.route,
             execution_decision=execution_decision,
+            request_text=item.request,
+            session_id=context.session_id,
         )
         reservation = self._lane_coordinator.reserve(
             normalized_intent=item.request,
@@ -4397,9 +4474,13 @@ class AgentChatGateway:
                 root_lane_task_id
             ).root_task_id,
             model=f"{execution_decision.provider}/{execution_decision.selected_model}",
-            requested_input_tokens=requested_input,
-            requested_output_tokens=requested_output,
-            estimated_cost=execution_decision.estimated_cost,
+            requested_input_tokens=execution_estimate.input_tokens,
+            requested_output_tokens=execution_estimate.output_tokens,
+            estimated_cost=(None if execution_estimate.estimated_cost is None else float(execution_estimate.estimated_cost)),
+            model_context_window=execution_estimate.profile.context_window,
+            model_max_output_tokens=execution_estimate.profile.max_output_tokens,
+            estimate_confidence=execution_estimate.confidence,
+            estimate_source=execution_estimate.profile.source,
             capabilities=capabilities,
             routing_decision_id=execution_decision.decision_id,
             provider=execution_decision.provider,
@@ -4421,6 +4502,9 @@ class AgentChatGateway:
             checkpoint_id=reservation.execution.checkpoint_id,
             agent_id="main",
             step_id="after_child_routing",
+            route=decision.route,
+            lane=lane_id.value,
+            execution_kind="multi_task_child",
         )
         if (
             decision.route not in {"capability_error", "unsupported"}
@@ -4575,10 +4659,20 @@ class AgentChatGateway:
         visit(payload)
         return found
 
-    @staticmethod
-    def _apply_selected_model(target: Any, model: str) -> None:
+    def _apply_selected_model(self, target: Any, model: str, provider: str) -> None:
         if target is None:
             return
+        if hasattr(target, "update_model_assignment"):
+            target.update_model_assignment(provider, model, settings=self.settings)
+            return
+        model_client = getattr(target, "llm", target)
+        current_provider = str(getattr(model_client, "selected_provider", "") or "")
+        if current_provider not in {"", "unknown", provider}:
+            raise GatewayRoutingError(
+                f"Selected provider {provider!r} differs from the bound runtime provider {current_provider!r}. No model call was executed."
+            )
+        if hasattr(model_client, "selected_provider"):
+            model_client.selected_provider = provider
         if hasattr(target, "update_model"):
             target.update_model(model)
             return
@@ -6315,7 +6409,7 @@ class AgentChatGateway:
                 question=text,
                 index_dir=self._index_dir or default_index_dir(self.root),
                 k=self._resolved_k,
-                max_steps=max(8, int(self.config.agent_max_steps or 6)),
+                max_steps=max(1, int(self.config.agent_max_steps)),
                 timeout_seconds=max(30, self._agent_timeout_seconds),
                 callbacks=callbacks,
                 system_prompt=system_prompt,

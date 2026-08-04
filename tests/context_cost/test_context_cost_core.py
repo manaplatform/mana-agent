@@ -50,6 +50,7 @@ def test_token_estimation_and_exact_configured_pricing() -> None:
     assert cost.estimated is False
     fallback = calculate_cost(100, 100)
     assert fallback.estimated is True
+    assert fallback.total_cost is None
 
 
 def test_parent_child_budget_allocation_and_consumption() -> None:
@@ -71,6 +72,8 @@ def test_task_usage_keeps_actual_and_estimated_costs_separate() -> None:
             model_id="test-model",
             input_cost_per_million=2.0,
             output_cost_per_million=4.0,
+            context_window=16_384,
+            max_output_tokens=4_096,
             configuration={},
         ),
     ))
@@ -101,7 +104,11 @@ def test_task_usage_keeps_actual_and_estimated_costs_separate() -> None:
 def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_path: Path) -> None:
     governor = ContextCostGovernor(
         session_id="s", repository_id="r", workspace_id="w",
-        settings=settings(mana_context_governor_mode="enforce"),
+        settings=settings(
+            mana_context_governor_mode="enforce",
+            mana_context_unknown_model_context_window=10_000,
+            mana_context_unknown_model_max_output_tokens=1_000,
+        ),
     )
     governor.logger = ContextCostLogger(enabled=False, root=tmp_path / "logs")
     protected = ContextSegment("system", "safety", 10, protected=True, source_id="system")
@@ -113,7 +120,7 @@ def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_
         model="test", context_window=10_000, apply_compaction=True,
     )
     assert [segment.source_id for segment in decision.segments] == ["system", "system-copy", "old"]
-    huge = ContextSegment("user", "x", 9_000, protected=True, source_id="current-user")
+    huge = ContextSegment("user", "x" * 30_000, 9_000, protected=True, source_id="current-user")
     with pytest.raises(ContextBudgetExceeded) as raised:
         governor.before_model_call([protected, huge], model="test", context_window=10_000)
     assert raised.value.decision.allowed is False
@@ -204,8 +211,10 @@ def test_parallel_model_reservations_cannot_spend_the_same_budget(
         workspace_id="w",
         settings=settings(
             mana_context_governor_mode="enforce",
-            mana_routing_task_token_budget=1_300,
+            mana_routing_task_token_budget=130,
             mana_context_response_reserve_ratio=0.12,
+            mana_context_unknown_model_context_window=1_000,
+            mana_context_unknown_model_max_output_tokens=200,
         ),
     )
     segment = ContextSegment("user", "constraint", 1, protected=True, source_id="user:1")

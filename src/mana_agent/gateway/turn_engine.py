@@ -40,7 +40,7 @@ def _conversation_prompt(session_state: dict[str, Any], current_message: str) ->
     """Build one chronological conversation prompt with the current message once."""
     messages = list(session_state.get("messages") or [])
     prior = messages[:-1] if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == current_message else messages
-    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}][-40:]
+    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}]
     if not prior:
         return current_message
     lines = ["Active conversation history (chronological):"]
@@ -58,7 +58,7 @@ def _conversation_prompt(session_state: dict[str, Any], current_message: str) ->
         else:
             lines.extend(["", "Relevant shared memory:", followup_memory])
     lines.extend(["", "Current user message:", current_message])
-    return "\n".join(lines)[-40000:]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -747,7 +747,7 @@ def process_chat_turn(
         )
         hist = session_state.setdefault("history", [])
         hist.append((original_question, answer))
-        session_state["history"] = hist[-12:]
+        session_state["history"] = hist
         return ChatTurnResult(
             answer=answer or "(No response from agent)",
             sources=sources,
@@ -930,7 +930,7 @@ def process_chat_turn(
         )
         hist = session_state.setdefault("history", [])
         hist.append((original_question, answer))
-        session_state["history"] = hist[-12:]
+        session_state["history"] = hist
 
         return ChatTurnResult(
             answer=answer or "(No response from coding agent)",

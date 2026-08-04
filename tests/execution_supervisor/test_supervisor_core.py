@@ -585,7 +585,13 @@ def test_parent_wait_timeout_and_minimum_success(runtime):
 
 def test_token_and_cost_budgets_block_result(runtime):
     supervisor, _clock, tmp_path = runtime
-    task = create(supervisor, tmp_path, token_budget=1, monetary_budget=0.1)
+    task = create(
+        supervisor,
+        tmp_path,
+        token_budget=1,
+        estimated_cost=0.05,
+        monetary_budget=0.1,
+    )
     attempt_id, token = running(supervisor, task)
     with pytest.raises(BudgetExceededError):
         supervisor.submit_result(

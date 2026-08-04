@@ -16,6 +16,8 @@ import uuid
 from typing import Any, Callable, Iterable
 
 from mana_agent.config.settings import Settings, mana_home
+from mana_agent.config.catalog_service import ModelCatalogService
+from mana_agent.config.inference_provider import resolve_inference_connection
 from mana_agent.model_routing.history import JsonlRoutingHistory
 from mana_agent.model_routing.models import (
     Complexity,
@@ -208,10 +210,15 @@ class GatewayRoutingAuthority:
         }
 
     def _persist(self, request: RoutingRequest, decision: RoutingDecision) -> None:
+        request_payload = asdict(request)
+        request_payload["estimation_components"] = {
+            str(key): "[accounted-without-content]"
+            for key in request.estimation_components
+        }
         payload = {
             "schema_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "request": sanitize_configuration(asdict(request)),
+            "request": sanitize_configuration(request_payload),
             "decision": sanitize_configuration(asdict(decision)),
         }
         self.decision_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,10 +233,54 @@ class GatewayRoutingAuthority:
 
     def _configured_profiles(self) -> tuple[ModelProfile, ...]:
         explicit = configured_profiles(getattr(self.settings, "mana_model_profiles", []))
-        return explicit or profiles_from_legacy_configuration(
+        if explicit:
+            return explicit
+        legacy = profiles_from_legacy_configuration(
             global_model=str(getattr(self.settings, "openai_chat_model", "gpt-4.1-mini") or "gpt-4.1-mini"),
             default_provider=str(getattr(self.settings, "mana_ai_provider", "openai") or "openai"),
+            context_window=int(getattr(self.settings, "mana_context_unknown_model_context_window", 16_384)),
+            max_output_tokens=int(getattr(self.settings, "mana_context_unknown_model_max_output_tokens", 4_096)),
         )
+        try:
+            connection = resolve_inference_connection(self.settings, require_api_key=False)
+            descriptors = {
+                item.id: item
+                for item in ModelCatalogService().cached(provider=connection.provider, base_url=connection.base_url)
+            }
+        except (KeyError, ValueError):
+            descriptors = {}
+        resolved: list[ModelProfile] = []
+        for profile in legacy:
+            descriptor = descriptors.get(profile.model_id)
+            if descriptor is None:
+                resolved.append(profile)
+                continue
+            metadata = dict(descriptor.metadata)
+            context_window = descriptor.context_window or profile.context_window
+            max_output_tokens = min(
+                context_window,
+                descriptor.max_output_tokens or profile.max_output_tokens,
+            )
+            complete_capabilities = (
+                descriptor.context_window is not None
+                and descriptor.max_output_tokens is not None
+            )
+            resolved.append(replace(
+                profile,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                tokenizer=descriptor.tokenizer,
+                input_cost_per_million=float(metadata.get("input_price_per_million") or 0),
+                output_cost_per_million=float(metadata.get("output_price_per_million") or 0),
+                cached_input_cost_per_million=(float(metadata["cached_input_price_per_million"]) if metadata.get("cached_input_price_per_million") is not None else None),
+                source_level=("provider-catalog" if complete_capabilities else "provider-catalog-with-configured-unknown-limit"),
+                configuration={
+                    **profile.configuration,
+                    **metadata,
+                    "token_profile_confidence": "high" if complete_capabilities else "low",
+                },
+            ))
+        return tuple(resolved)
 
     def _policy(self) -> RoutingPolicy:
         weights = getattr(self.settings, "mana_routing_benchmark_weights", {})

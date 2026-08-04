@@ -21,6 +21,7 @@ class BudgetReservation:
     operation_id: str
     tokens: int
     cost: float
+    cost_known: bool = True
     verification: bool = False
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()

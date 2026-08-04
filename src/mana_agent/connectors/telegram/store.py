@@ -208,12 +208,18 @@ class TelegramUpdateStore:
         with self._connect() as db:
             db.execute("DELETE FROM telegram_sessions WHERE conversation_key=?", (conversation_key,))
 
-    def history(self, session_id: str, *, limit: int = 12) -> list[tuple[str, str]]:
+    def history(self, session_id: str, *, limit: int | None = None) -> list[tuple[str, str]]:
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT question,answer FROM telegram_history WHERE session_id=? ORDER BY id DESC LIMIT ?",
-                (session_id, max(1, min(100, int(limit)))),
-            ).fetchall()
+            if limit is None:
+                rows = db.execute(
+                    "SELECT question,answer FROM telegram_history WHERE session_id=? ORDER BY id DESC",
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT question,answer FROM telegram_history WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                    (session_id, max(1, int(limit))),
+                ).fetchall()
         return [(str(row["question"]), str(row["answer"])) for row in reversed(rows)]
 
     def append_history(self, session_id: str, question: str, answer: str) -> None:

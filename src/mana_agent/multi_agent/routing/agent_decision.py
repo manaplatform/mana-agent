@@ -288,8 +288,8 @@ class AgentDecisionEngine:
         payload = {
             "user_request": request,
             "command_hint": command_hint,
-            "repo_context": repo_context[:1200],
-            "memory_context": memory_context[:1200],
+            "repo_context": repo_context,
+            "memory_context": memory_context,
             "tools": self.tool_descriptions,
         }
         try:
@@ -313,7 +313,7 @@ class AgentDecisionEngine:
                             {
                                 "user_request": request,
                                 "proposed_decision": proposed.to_dict(),
-                                "memory_context": memory_context[:1200],
+                                "memory_context": memory_context,
                                 "available_tools": self.tool_descriptions,
                             },
                             ensure_ascii=False,

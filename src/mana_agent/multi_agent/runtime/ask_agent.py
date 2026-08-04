@@ -264,6 +264,7 @@ class AskAgent:
         execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
+        self.provider = str(getattr(self.llm, "selected_provider", "") or "unknown")
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
@@ -276,6 +277,7 @@ class AskAgent:
         self.run_logger = LlmRunLogger()
         self.search_config = SearchConfig.from_env()
         self.context_cost_governor = context_cost_governor
+        self.llm.context_cost_governor = context_cost_governor
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
@@ -286,8 +288,29 @@ class AskAgent:
         if not resolved or resolved == self.model:
             return
         governor = self.context_cost_governor
-        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url)
+        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url, provider=self.provider)
         self.llm.context_cost_governor = governor
+        self.model = resolved
+
+    def update_model_assignment(self, provider: str, model_name: str, *, settings: Any | None = None) -> None:
+        from mana_agent.config.inference_provider import resolve_inference_connection
+        from mana_agent.config.settings import Settings
+
+        connection = resolve_inference_connection(settings or Settings(), provider=provider)
+        resolved = str(model_name or "").strip()
+        if not resolved:
+            raise ValueError("model assignment requires a model")
+        self.api_key = connection.api_key
+        self.base_url = connection.base_url
+        self.provider = connection.provider
+        self.llm = create_chat_model(
+            api_key=connection.api_key,
+            model=resolved,
+            base_url=connection.base_url,
+            provider=connection.provider,
+            default_headers=connection.headers,
+        )
+        self.llm.context_cost_governor = self.context_cost_governor
         self.model = resolved
 
     def _is_blocked_command(self, cmd: str) -> bool:

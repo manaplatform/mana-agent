@@ -63,10 +63,15 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
                 supported_roles=roles,
                 supported_tools=frozenset(str(item) for item in raw.get("supported_tools") or []),
                 reasoning_settings=frozenset(str(item) for item in raw.get("reasoning_settings") or ["none"]),
-                context_window=int(raw.get("context_window", 128_000)),
+                context_window=int(raw.get("context_window") or 0),
+                max_output_tokens=int(raw.get("max_output_tokens") or raw.get("max_completion_tokens") or 0),
+                tokenizer=str(raw.get("tokenizer") or "") or None,
                 latency_class=LatencyClass(str(raw.get("latency_class") or "standard")),
                 input_cost_per_million=float(raw.get("input_cost_per_million") or 0.0),
                 output_cost_per_million=float(raw.get("output_cost_per_million") or 0.0),
+                cached_input_cost_per_million=(float(raw["cached_input_cost_per_million"]) if raw.get("cached_input_cost_per_million") is not None else None),
+                reasoning_cost_per_million=(float(raw["reasoning_cost_per_million"]) if raw.get("reasoning_cost_per_million") is not None else None),
+                supports_usage_reporting=bool(raw.get("supports_usage_reporting", True)),
                 logical_cost_per_1k_tokens=float(raw.get("logical_cost_per_1k_tokens", 1.0)),
                 reliability_score=float(raw.get("reliability_score", 0.8)),
                 supported_languages=frozenset(str(item).lower() for item in raw.get("supported_languages") or []),
@@ -89,7 +94,13 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
     return tuple(profiles)
 
 
-def profiles_from_legacy_configuration(*, global_model: str = "", default_provider: str = "openai") -> tuple[ModelProfile, ...]:
+def profiles_from_legacy_configuration(
+    *,
+    global_model: str = "",
+    default_provider: str = "openai",
+    context_window: int | None = None,
+    max_output_tokens: int | None = None,
+) -> tuple[ModelProfile, ...]:
     """Migrate logical levels into candidate hints without preserving role locks."""
     configured: list[tuple[str, str]] = []
     for level, _default in _LEVELS:
@@ -124,12 +135,18 @@ def profiles_from_legacy_configuration(*, global_model: str = "", default_provid
             supported_roles=_ALL_ROLES,
             supported_tools=frozenset({"*"}),
             reasoning_settings=reasoning,
+            context_window=int(context_window or 0),
+            max_output_tokens=int(max_output_tokens or 0),
             latency_class=latency,
             logical_cost_per_1k_tokens=logical_cost,
             reliability_score=reliability,
             benchmark_scores=dict(_LEVEL_BENCHMARKS[strongest]),
             source_level=strongest,
-            configuration={"source_levels": tuple(sorted(levels))},
+            configuration={
+                "source_levels": tuple(sorted(levels)),
+                "token_profile_confidence": "low",
+                "capability_source": "configured-unknown-model-policy",
+            },
         ))
     return tuple(profiles)
 

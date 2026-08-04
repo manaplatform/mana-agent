@@ -201,16 +201,6 @@ class MainAgent:
             primary_repository_id=scope.primary_repository_id,
             repository_ids=scope.repository_ids,
         )
-        self.taskboard.record_budget(
-            task.task_id,
-            {
-                "agent_id": main_node.agent_id,
-                "approved_by_agent_id": main_node.agent_id,
-                "budget_reserved_tokens": self._budget_for_size("simple"),
-                "budget_reserved_ms": 120_000,
-                "action": "root_task_budget",
-            },
-        )
         duplicate_of = str(task.memory_status.get("duplicate_of") or "")
         if duplicate_of:
             self.memory_service.update_task(
@@ -237,16 +227,6 @@ class MainAgent:
             task.risk_level = RiskLevel.HIGH
             task.required_capabilities = list(route.required_capabilities)
             self.taskboard.add_evidence(task.task_id, f"GitIntent contract established: {git_intent}")
-        self.taskboard.record_budget(
-            task.task_id,
-            {
-                "agent_id": main_node.agent_id,
-                "approved_by_agent_id": main_node.agent_id,
-                "budget_reserved_tokens": self._budget_for_size(route.task_size),
-                "budget_reserved_ms": 120_000,
-                "action": "route_budget_estimate",
-            },
-        )
         self.memory.remember_task(
             "Route selected: "
             f"{route.route_name}; size={route.task_size}; "
@@ -874,14 +854,6 @@ class MainAgent:
             if node.role.value == normalized:
                 return node
         return None
-
-    def _budget_for_size(self, task_size: str) -> int:
-        return {
-            "simple": 4000,
-            "small": 8000,
-            "medium": 20_000,
-            "large": 40_000,
-        }.get(str(task_size or "medium"), 20_000)
 
     def _verification_commands(self, commands: list[str]) -> list[str]:
         if (self.root / "src").exists():

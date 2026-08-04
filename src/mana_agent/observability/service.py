@@ -255,6 +255,7 @@ class ObservabilityStore:
     def _context_cost_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         context_rows = [row for row in rows if str(row.get("event_type") or "").startswith(("context.", "cost.", "budget."))]
         attributes = [row.get("attributes") or {} for row in context_rows]
+        unknown_pricing = sum(item.get("pricing_status") == "unknown" for item in attributes)
         estimated_cost = sum(float(item.get("input_cost") or 0) + float(item.get("output_cost") or 0) for item in attributes if item.get("estimated") is True)
         actual_cost = sum(float(item.get("input_cost") or 0) + float(item.get("output_cost") or 0) for item in attributes if item.get("estimated") is False)
         return {
@@ -264,7 +265,10 @@ class ObservabilityStore:
             "context_compactions": sum(item.get("action") == "compress_tool_result" for item in attributes),
             "overflow_prevention_count": sum(item.get("outcome") == "blocked" for item in attributes),
             "calls_blocked_by_budget": sum(item.get("outcome") == "blocked" for item in attributes),
-            "estimated_actual_cost_variance": estimated_cost - actual_cost,
+            "estimated_actual_cost_variance": (
+                None if unknown_pricing else estimated_cost - actual_cost
+            ),
+            "unknown_pricing_calls": unknown_pricing,
         }
 
     @staticmethod

@@ -194,6 +194,9 @@ class AttemptRecord(StrictModel):
     token_usage: int = Field(default=0, ge=0)
     estimated_cost: float = Field(default=0.0, ge=0)
     actual_cost: float = Field(default=0.0, ge=0)
+    estimated_cost_known: bool = False
+    actual_cost_known: bool = False
+    accounting_reservation_ids: list[str] = Field(default_factory=list)
 
 
 class CheckpointRecord(StrictModel):
@@ -256,7 +259,7 @@ class ExecutionEvent(StrictModel):
 
 
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=4, ge=1)
+    schema_version: int = Field(default=5, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
@@ -301,6 +304,13 @@ class TaskRecord(StrictModel):
     token_budget: int | None = Field(default=None, ge=0)
     estimated_cost: float = Field(default=0.0, ge=0)
     actual_cost: float = Field(default=0.0, ge=0)
+    estimated_cost_known: bool = False
+    actual_cost_known: bool = False
+    model_context_window: int = Field(default=0, ge=0)
+    model_max_output_tokens: int = Field(default=0, ge=0)
+    token_estimate_confidence: str = ""
+    token_estimate_source: str = ""
+    accounting_reservation_ids: list[str] = Field(default_factory=list)
     monetary_budget: float | None = Field(default=None, ge=0)
     deadline_at: datetime | None = None
     wait_policy: WaitPolicy = WaitPolicy.WAIT_ALL

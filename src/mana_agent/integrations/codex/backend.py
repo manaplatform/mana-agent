@@ -255,7 +255,7 @@ class CodexCodingBackend:
                             last_usage,
                             provider=self.settings.provider,
                             model=self.settings.model or "app-server-default",
-                            context_window=int(last_usage.get("context_window") or 128_000),
+                            context_window=(int(last_usage["context_window"]) if last_usage.get("context_window") is not None else None),
                         ) if self.context_cost_governor is not None else None
                         if hard_reason:
                             await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)

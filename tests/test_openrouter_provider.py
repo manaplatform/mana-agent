@@ -85,7 +85,9 @@ def test_shared_openrouter_fast_assignment_remains_eligible_for_tool_lane(
         },
         merge=False,
     )
-    profile = profiles_from_legacy_configuration(default_provider="openrouter")[0]
+    profile = profiles_from_legacy_configuration(
+        default_provider="openrouter", context_window=16_384, max_output_tokens=4_096
+    )[0]
     assert profile.latency_class is LatencyClass.INTERACTIVE
     decision = ModelRouter([profile]).route(
         RoutingRequest(

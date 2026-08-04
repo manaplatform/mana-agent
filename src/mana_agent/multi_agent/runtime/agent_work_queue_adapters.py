@@ -636,7 +636,7 @@ class CodingAgentSniffer:
             unresolved_questions=list(scope.unresolved_questions if scope else []),
             allowed_tools=["apply_patch", "edit_file", "multi_edit_file", "create_file", "write_file"],
             max_tool_calls=1 if scope and scope.scope_level == ScopeLevel.DIRECT else 3,
-            max_tokens=4000 if scope and scope.scope_level == ScopeLevel.DIRECT else 8000,
+            max_tokens=None,
             out_of_bounds=list(scope.out_of_bounds if scope else []),
             expected_result="One structured mutation command and a concise changed-file summary.",
             success_conditions=list(scope.stop_conditions if scope else ["requested mutation completed"]),

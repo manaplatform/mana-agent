@@ -119,8 +119,8 @@ class LaneContract:
     allowed_models: tuple[str, ...]
     max_concurrent_jobs: int
     max_subagents: int
-    token_budget: int
-    cost_budget: float
+    token_budget: int | None
+    cost_budget: float | None
     default_priority: LanePriority
     can_create_subagents: bool
     requires_repository: bool
@@ -138,7 +138,7 @@ class LaneContract:
             raise ValueError(f"lane {self.lane_id.value} requires a name, description, and ownership")
         if self.max_concurrent_jobs < 1:
             raise ValueError(f"lane {self.lane_id.value} max_concurrent_jobs must be >= 1")
-        if self.max_subagents < 0 or self.token_budget < 1 or self.cost_budget < 0:
+        if self.max_subagents < 0 or (self.token_budget is not None and self.token_budget < 1) or (self.cost_budget is not None and self.cost_budget < 0):
             raise ValueError(f"lane {self.lane_id.value} contains an invalid budget or subagent limit")
         if self.timeout_seconds < 1:
             raise ValueError(f"lane {self.lane_id.value} timeout_seconds must be >= 1")
@@ -164,7 +164,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.ARTIFACT, display_name="Artifact", description="Creates and updates user artifacts outside repository workflows.",
             owns=("document artifacts", "spreadsheet artifacts", "PDF artifacts"), handoff_targets=(),
             allowed_tools=("artifact_read", "artifact_write"), denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
-            max_concurrent_jobs=2, max_subagents=0, token_budget=30_000, cost_budget=10.0,
+            max_concurrent_jobs=2, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.INTERACTIVE, can_create_subagents=False, requires_repository=False,
             requires_write_access=False, lock_policy=LockMode.NONE, timeout_seconds=900,
         ),
@@ -186,8 +186,8 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             allowed_models=(),
             max_concurrent_jobs=2,
             max_subagents=0,
-            token_budget=10_000,
-            cost_budget=100.0,
+            token_budget=None,
+            cost_budget=None,
             default_priority=LanePriority.INTERACTIVE,
             can_create_subagents=False,
             requires_repository=False,
@@ -206,8 +206,8 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             allowed_models=(),
             max_concurrent_jobs=2,
             max_subagents=0,
-            token_budget=32_000,
-            cost_budget=32.0,
+            token_budget=None,
+            cost_budget=None,
             default_priority=LanePriority.INTERACTIVE,
             can_create_subagents=False,
             requires_repository=False,
@@ -222,7 +222,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             allowed_tools=READ_CAPABILITIES + ("repository_write", "shell_write", "git_read"),
             denied_tools=("deployment", "release", "secrets", "email", "calendar"),
             allowed_models=(), max_concurrent_jobs=2, max_subagents=2,
-            token_budget=80_000, cost_budget=25.0, default_priority=LanePriority.INTERACTIVE,
+            token_budget=None, cost_budget=None, default_priority=LanePriority.INTERACTIVE,
             can_create_subagents=True, requires_repository=True, requires_write_access=True,
             lock_policy=LockMode.FILE_WRITE, timeout_seconds=1800,
         ),
@@ -232,7 +232,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             handoff_targets=(LaneId.CODING,),
             allowed_tools=("repository_read", "shell_read", "web_search", "browser", "git_read", "email", "calendar", "api"),
             denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
-            max_concurrent_jobs=4, max_subagents=4, token_budget=50_000, cost_budget=20.0,
+            max_concurrent_jobs=4, max_subagents=4, token_budget=None, cost_budget=None,
             default_priority=LanePriority.INTERACTIVE, can_create_subagents=True,
             requires_repository=False, requires_write_access=False, lock_policy=LockMode.NONE,
             timeout_seconds=900,
@@ -242,7 +242,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             owns=("correctness review", "security review", "architectural review"),
             handoff_targets=(LaneId.CODING, LaneId.VERIFY),
             allowed_tools=("repository_read", "shell_read", "git_read"), denied_tools=WRITE_CAPABILITIES + ("secrets",),
-            allowed_models=(), max_concurrent_jobs=2, max_subagents=0, token_budget=35_000, cost_budget=15.0,
+            allowed_models=(), max_concurrent_jobs=2, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.HIGH, can_create_subagents=False, requires_repository=True,
             requires_write_access=False, lock_policy=LockMode.REPOSITORY_READ, timeout_seconds=900,
         ),
@@ -252,7 +252,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             handoff_targets=(LaneId.CODING,),
             allowed_tools=("repository_read", "shell_read", "test_execution", "git_read"),
             denied_tools=("repository_write", "git_write", "deployment", "release", "secrets"),
-            allowed_models=(), max_concurrent_jobs=2, max_subagents=0, token_budget=25_000, cost_budget=10.0,
+            allowed_models=(), max_concurrent_jobs=2, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.HIGH, can_create_subagents=False, requires_repository=True,
             requires_write_access=False, lock_policy=LockMode.REPOSITORY_READ, timeout_seconds=1200,
         ),
@@ -262,7 +262,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             handoff_targets=(LaneId.OPERATIONS,),
             allowed_tools=("repository_read", "repository_write", "shell_read", "shell_write", "git_read", "release", "test_execution"),
             denied_tools=("deployment", "secrets", "email", "calendar"), allowed_models=(),
-            max_concurrent_jobs=1, max_subagents=0, token_budget=30_000, cost_budget=12.0,
+            max_concurrent_jobs=1, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=True,
             requires_write_access=True, lock_policy=LockMode.REPOSITORY_WRITE, timeout_seconds=1800,
         ),
@@ -272,7 +272,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             handoff_targets=(LaneId.CODING,),
             allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server", "api", "mcp"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
-            max_concurrent_jobs=1, max_subagents=0, token_budget=32_000, cost_budget=32.0,
+            max_concurrent_jobs=1, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
             requires_write_access=True, lock_policy=LockMode.WORKSPACE_WRITE, timeout_seconds=1800,
         ),

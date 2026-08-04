@@ -8,6 +8,9 @@ import json
 import math
 from typing import Iterable
 
+from mana_agent.context_cost.accounting import ModelContextLimitError, ModelTokenAccountingService, TokenEstimationRequest
+from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver, UnknownModelProfileError
+
 from mana_agent.model_routing.history import InMemoryRoutingHistory, RoutingHistory
 from mana_agent.model_routing.models import (
     CandidateRejection,
@@ -32,7 +35,10 @@ class _Scored:
     confidence: float
     estimated_input: int
     estimated_output: int
-    estimated_cost: float
+    estimated_cost: float | None
+    estimate_confidence: str
+    estimate_components: dict[str, int]
+    estimate_assumptions: tuple[str, ...]
     reasons: tuple[str, ...]
 
 
@@ -49,6 +55,9 @@ class ModelRouter:
             raise ValueError("model profile registry contains duplicate provider/model IDs")
         self.history = history or InMemoryRoutingHistory()
         self.policy = policy or RoutingPolicy()
+        self.accounting = ModelTokenAccountingService(
+            ModelTokenProfileResolver(self.profiles, unknown_policy="require_metadata")
+        )
 
     def record_outcome(self, outcome: RoutingOutcome) -> None:
         if f"{outcome.provider}/{outcome.model_id}" not in {item.key for item in self.profiles}:
@@ -72,7 +81,7 @@ class ModelRouter:
             scored.append(item)
         if not scored:
             raise RoutingFailure("No configured model satisfies the routing capability, reliability, latency, and budget constraints. No fallback action was executed.", rejected=tuple(rejected))
-        scored.sort(key=lambda item: (-item.score, item.estimated_cost, item.profile.key))
+        scored.sort(key=lambda item: (-item.score, item.estimated_cost is None, item.estimated_cost or 0.0, item.profile.key))
         winner = scored[0]
         verifier, independent = self._select_verifier(request, author=winner.profile, candidates=scored)
         competition, competition_reasons = self._competition_allowed(
@@ -107,7 +116,13 @@ class ModelRouter:
             confidence=round(winner.confidence, 6),
             estimated_input_tokens=winner.estimated_input,
             estimated_output_tokens=winner.estimated_output,
-            estimated_cost=round(winner.estimated_cost, 8),
+            estimated_cost=(None if winner.estimated_cost is None else round(winner.estimated_cost, 8)),
+            estimate_confidence=winner.estimate_confidence,
+            estimate_components=dict(winner.estimate_components),
+            estimate_assumptions=winner.estimate_assumptions,
+            model_context_window=winner.profile.context_window,
+            model_max_output_tokens=winner.profile.max_output_tokens,
+            expected_model_calls=request.expected_model_calls,
             expected_latency_class=winner.profile.latency_class,
             selection_reasons=winner.reasons,
             rejected_candidates=tuple(all_rejected),
@@ -158,22 +173,26 @@ class ModelRouter:
         missing = sorted(item for item in request.required_capabilities if not capability_flags.get(item, False))
         if missing:
             reasons.append("required capabilities are unsupported: " + ", ".join(missing))
-        required_context = request.expected_prompt_tokens + request.retrieved_context_tokens + request.expected_response_tokens
-        if required_context > profile.context_window:
-            reasons.append(f"required context {required_context} exceeds {profile.context_window}")
+        try:
+            estimate = self._token_estimate(profile, request)
+        except (ModelContextLimitError, UnknownModelProfileError) as exc:
+            reasons.append(str(exc))
+            estimate = None
         if _LATENCY[profile.latency_class] > _LATENCY[request.latency_requirement]:
             reasons.append(f"latency class {profile.latency_class.value} exceeds {request.latency_requirement.value}")
         if self._circuit_open(profile):
             reasons.append("provider/model circuit breaker is open")
-        estimated = self._estimate_cost(profile, request)
+        estimated = None if estimate is None else estimate.estimated_cost
         reserve = self._verification_reserve(request)
         limits = [value for value in (request.budgets.task_cost_limit, request.budgets.session_cost_remaining) if value is not None]
-        if limits and estimated > max(0.0, min(limits) - reserve) and not request.budgets.allow_controlled_override:
+        if limits and estimated is None and not request.budgets.allow_controlled_override:
+            reasons.append("model pricing is unknown for a cost-constrained request")
+        elif limits and float(estimated) > max(0.0, min(limits) - reserve) and not request.budgets.allow_controlled_override:
             reasons.append(f"estimated implementation cost {estimated:.6f} exceeds budget after verification reserve {reserve:.6f}")
-        estimated_input, estimated_output = self._estimated_tokens(profile, request)
-        total_tokens = estimated_input + estimated_output
-        if request.budgets.task_token_limit is not None and total_tokens > request.budgets.task_token_limit:
-            reasons.append(f"estimated tokens {total_tokens} exceed task limit {request.budgets.task_token_limit}")
+        if estimate is not None:
+            total_tokens = estimate.total_tokens
+            if request.budgets.task_token_limit is not None and total_tokens > request.budgets.task_token_limit:
+                reasons.append(f"estimated tokens {total_tokens} exceed task limit {request.budgets.task_token_limit}")
         return reasons
 
     def _score(self, profile: ModelProfile, request: RoutingRequest) -> _Scored:
@@ -192,10 +211,11 @@ class ModelRouter:
         quality = (profile.reliability_score + benchmark + reasoning * demand) / (2 + demand)
         languages = set(request.repository.languages)
         language = 1.0 if not languages or not profile.supported_languages else len(languages & profile.supported_languages) / len(languages)
-        estimated_cost = self._estimate_cost(profile, request)
+        estimate = self._token_estimate(profile, request)
+        estimated_cost = float(estimate.estimated_cost) if estimate.estimated_cost is not None else None
         cost_scale = request.budgets.task_cost_limit or request.budgets.session_cost_remaining
         if cost_scale is not None:
-            cost_score = max(0.0, 1.0 - estimated_cost / max(cost_scale, 1e-9))
+            cost_score = 0.0 if estimated_cost is None else max(0.0, 1.0 - estimated_cost / max(cost_scale, 1e-9))
         else:
             unit_cost = (
                 (profile.input_cost_per_million + profile.output_cost_per_million) / 2
@@ -221,24 +241,38 @@ class ModelRouter:
             f"capabilities satisfy {request.role}/{request.task_type}",
             f"quality evidence={quality:.3f}, historical reliability={historical:.3f}",
             f"repository language fit={language:.3f}",
-            f"estimated cost={estimated_cost:.6f}, latency={profile.latency_class.value}",
+            f"estimated cost={'unknown' if estimated_cost is None else f'{estimated_cost:.6f}'}, latency={profile.latency_class.value}",
         )
         estimated_input, estimated_output = self._estimated_tokens(profile, request)
-        return _Scored(profile, score, confidence, estimated_input, estimated_output, estimated_cost, reasons)
-
-    @staticmethod
-    def _base_estimated_input(request: RoutingRequest) -> int:
-        historical_overhead = request.expected_tool_calls * 350
-        return request.expected_prompt_tokens + request.retrieved_context_tokens + historical_overhead
+        return _Scored(
+            profile, score, confidence, estimated_input, estimated_output, estimated_cost,
+            estimate.confidence, dict(estimate.components), estimate.assumptions, reasons,
+        )
 
     def _estimated_tokens(self, profile: ModelProfile, request: RoutingRequest) -> tuple[int, int]:
-        rows = self._similar_history(profile, request)
-        input_rows = [item.input_tokens for item in rows if item.input_tokens > 0]
-        output_rows = [item.output_tokens for item in rows if item.output_tokens > 0]
-        base_input = self._base_estimated_input(request)
-        estimated_input = round((base_input + (sum(input_rows) / len(input_rows))) / 2) if input_rows else base_input
-        estimated_output = round((request.expected_response_tokens + (sum(output_rows) / len(output_rows))) / 2) if output_rows else request.expected_response_tokens
-        return max(1, estimated_input), max(1, estimated_output)
+        estimate = self._token_estimate(profile, request)
+        return estimate.input_tokens, estimate.output_tokens
+
+    def _token_estimate(self, profile: ModelProfile, request: RoutingRequest):
+        return self.accounting.estimate(TokenEstimationRequest(
+            model_identity=ModelIdentity(profile.provider, profile.model_id),
+            components={
+                "task_description": request.task_description,
+                **dict(request.estimation_components),
+            },
+            component_token_overrides={
+                "declared_prompt_context": request.expected_prompt_tokens,
+                "retrieved_context": request.retrieved_context_tokens,
+            },
+            route=request.task_type,
+            lane=request.execution_lane,
+            expected_tool_steps=request.expected_tool_calls,
+            expected_model_calls=request.expected_model_calls,
+            requested_output_tokens=request.expected_response_tokens or None,
+            execution_kind=request.role,
+            tool_count=request.expected_tool_calls,
+            task_token_remaining=request.budgets.task_token_limit,
+        ))
 
     def _similar_history(self, profile: ModelProfile, request: RoutingRequest):
         rows = self.history.query(provider=profile.provider, model_id=profile.model_id, task_category=request.task_type)
@@ -251,12 +285,9 @@ class ModelRouter:
         )
         return matching or rows
 
-    def _estimate_cost(self, profile: ModelProfile, request: RoutingRequest) -> float:
-        input_tokens, output_tokens = self._estimated_tokens(profile, request)
-        monetary = (input_tokens * profile.input_cost_per_million + output_tokens * profile.output_cost_per_million) / 1_000_000
-        if monetary > 0:
-            return monetary
-        return ((input_tokens + output_tokens) / 1_000) * profile.logical_cost_per_1k_tokens
+    def _estimate_cost(self, profile: ModelProfile, request: RoutingRequest) -> float | None:
+        cost = self._token_estimate(profile, request).estimated_cost
+        return None if cost is None else float(cost)
 
     @staticmethod
     def _effective_demand(request: RoutingRequest) -> float:
@@ -341,7 +372,10 @@ class ModelRouter:
         if task_aware and evidence < self.policy.minimum_parallel_evidence:
             return False, (f"parallel evidence {evidence:.3f} is below {self.policy.minimum_parallel_evidence:.3f}",)
         limit = request.budgets.competition_cost_limit
-        projected = sum(item.estimated_cost for item in candidates[: self.policy.maximum_candidate_count]) + self._verification_reserve(request)
+        selected_costs = [item.estimated_cost for item in candidates[: self.policy.maximum_candidate_count]]
+        projected = sum(item for item in selected_costs if item is not None) + self._verification_reserve(request)
+        if limit is not None and any(item is None for item in selected_costs) and not request.budgets.allow_controlled_override:
+            return False, ("candidate pricing is unknown for a cost-constrained competition",)
         if limit is not None and projected > limit and not request.budgets.allow_controlled_override:
             return False, (f"projected candidate and verification cost {projected:.6f} exceeds {limit:.6f}",)
         reasons.extend((
@@ -384,20 +418,26 @@ class ModelRouter:
         return True, ("main-model decomposition request passed gateway policy",)
 
     def _select_verifier(self, request: RoutingRequest, *, author: ModelProfile, candidates: list[_Scored]) -> tuple[ModelProfile | None, bool]:
-        required_context = request.expected_prompt_tokens + request.retrieved_context_tokens + request.expected_response_tokens
+        def fits(profile: ModelProfile) -> bool:
+            try:
+                estimate = self._token_estimate(profile, request)
+            except (ModelContextLimitError, UnknownModelProfileError):
+                return False
+            cost = None if estimate.estimated_cost is None else float(estimate.estimated_cost)
+            return (
+                request.budgets.verification_cost_limit is None
+                or (cost is not None and cost <= request.budgets.verification_cost_limit)
+                or request.budgets.allow_controlled_override
+            )
+
         qualified = [
             profile for profile in self.profiles
             if profile.available
             and profile.can_verify
             and profile.can_structured_output
             and ("verifier" in profile.supported_roles or "*" in profile.supported_roles)
-            and profile.context_window >= required_context
             and not self._circuit_open(profile)
-            and (
-                request.budgets.verification_cost_limit is None
-                or self._estimate_cost(profile, request) <= request.budgets.verification_cost_limit
-                or request.budgets.allow_controlled_override
-            )
+            and fits(profile)
         ]
         languages = set(request.repository.languages)
         qualified.sort(key=lambda profile: (profile.key == author.key, -(profile.reliability_score + profile.benchmark_scores.get("verification", 0.0)), -(len(languages & profile.supported_languages) if profile.supported_languages else len(languages)), profile.key))

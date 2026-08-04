@@ -164,7 +164,11 @@ class ExecutionSupervisor:
         idempotency_key: str = "",
         compensation_strategy: str = "",
         token_budget: int | None = None,
-        estimated_cost: float = 0.0,
+        estimated_cost: float | None = None,
+        model_context_window: int = 0,
+        model_max_output_tokens: int = 0,
+        estimate_confidence: str = "",
+        estimate_source: str = "",
         monetary_budget: float | None = None,
         deadline_at: datetime | None = None,
         wait_policy: WaitPolicy = WaitPolicy.WAIT_ALL,
@@ -203,6 +207,8 @@ class ExecutionSupervisor:
             if (
                 existing.parent_task_id != parent_task_id
                 or existing.task_type != task_type
+                or existing.assigned_model != assigned_model
+                or existing.runtime_provider != runtime_provider
                 or existing.routing_decision_id != routing_decision_id
                 or existing.side_effect_classification != side_effect_classification
                 or existing.idempotency_key != idempotency_hash
@@ -225,6 +231,17 @@ class ExecutionSupervisor:
                 or existing.relation_type != relation_type
                 or existing.previous_task_id != previous_task_id
                 or existing.delegated_capsule_revisions != dict(delegated_capsule_revisions or {})
+                or existing.token_budget != token_budget
+                or existing.estimated_cost_known != (estimated_cost is not None)
+                or (
+                    estimated_cost is not None
+                    and existing.estimated_cost != max(0.0, float(estimated_cost))
+                )
+                or existing.monetary_budget != monetary_budget
+                or existing.model_context_window != max(0, model_context_window)
+                or existing.model_max_output_tokens != max(0, model_max_output_tokens)
+                or existing.token_estimate_confidence != estimate_confidence
+                or existing.token_estimate_source != estimate_source
             ):
                 raise ConcurrentUpdateError(
                     f"task identity {identifier} already exists with a different immutable contract"
@@ -245,7 +262,11 @@ class ExecutionSupervisor:
             return existing
         if not routing_decision_id.strip():
             raise ValueError("a validated routing decision ID is required")
-        if monetary_budget is not None and estimated_cost > monetary_budget:
+        if monetary_budget is not None and estimated_cost is None:
+            raise BudgetExceededError(
+                "model pricing is unknown for a task with an explicit monetary budget"
+            )
+        if monetary_budget is not None and estimated_cost is not None and estimated_cost > monetary_budget:
             raise BudgetExceededError(
                 "model-selected estimated task cost exceeds the task monetary budget"
             )
@@ -298,7 +319,12 @@ class ExecutionSupervisor:
             completion_contract=contracts,
             dependency_task_ids=dependencies,
             token_budget=token_budget,
-            estimated_cost=max(0.0, estimated_cost),
+            estimated_cost=max(0.0, float(estimated_cost or 0.0)),
+            estimated_cost_known=estimated_cost is not None,
+            model_context_window=max(0, model_context_window),
+            model_max_output_tokens=max(0, model_max_output_tokens),
+            token_estimate_confidence=estimate_confidence,
+            token_estimate_source=estimate_source,
             monetary_budget=monetary_budget,
             deadline_at=selected_deadline,
             wait_policy=wait_policy,
@@ -432,6 +458,30 @@ class ExecutionSupervisor:
             return task
         return self.transition(task_id, ExecutionState.QUEUED)
 
+    def record_accounting_reservations(
+        self, task_id: str, reservation_ids: Iterable[str]
+    ) -> TaskRecord:
+        """Link privacy-safe accounting records to durable task and attempt state."""
+        identifiers = tuple(dict.fromkeys(str(item) for item in reservation_ids if str(item)))
+        if any(not item.startswith("reservation_") for item in identifiers):
+            raise ValueError("invalid accounting reservation identifier")
+
+        def update(task: TaskRecord) -> None:
+            for identifier in identifiers:
+                if identifier not in task.accounting_reservation_ids:
+                    task.accounting_reservation_ids.append(identifier)
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, update)
+        if task.attempt_id:
+            attempt = self.store.get_attempt(task.attempt_id)
+            if attempt is not None:
+                for identifier in identifiers:
+                    if identifier not in attempt.accounting_reservation_ids:
+                        attempt.accounting_reservation_ids.append(identifier)
+                self.store.save_attempt(attempt)
+        return task
+
     def acquire_lease(self, task_id: str, *, owner: str, worker: str = "") -> tuple[TaskRecord, str]:
         if not owner.strip():
             raise ValueError("lease owner is required")
@@ -482,6 +532,7 @@ class ExecutionSupervisor:
                 lease_token=_token_hash(lease_token),
                 lease_expires_at=now + timedelta(seconds=self.config.lease_seconds),
                 estimated_cost=task.estimated_cost,
+                estimated_cost_known=task.estimated_cost_known,
             )
             task.state = ExecutionState.LEASED
             task.attempt_id = attempt.attempt_id
@@ -844,12 +895,12 @@ class ExecutionSupervisor:
         lease_token: str,
         payload: dict[str, Any],
         token_usage: int = 0,
-        actual_cost: float = 0.0,
+        actual_cost: float | None = None,
         capsule_revisions: dict[str, int] | None = None,
     ) -> TaskRecord:
         current = self.store.get_task(task_id)
         projected_tokens = current.token_usage + max(0, token_usage)
-        projected_cost = current.actual_cost + max(0.0, actual_cost)
+        projected_cost = current.actual_cost + max(0.0, float(actual_cost or 0.0))
         over_tokens = current.token_budget is not None and projected_tokens > current.token_budget
         over_cost = current.monetary_budget is not None and projected_cost > current.monetary_budget
         if over_tokens or over_cost:
@@ -864,7 +915,7 @@ class ExecutionSupervisor:
             parent_id = ancestor.parent_task_id
         for ancestor in ancestors:
             ancestor_tokens = ancestor.token_usage + max(0, token_usage)
-            ancestor_cost = ancestor.actual_cost + max(0.0, actual_cost)
+            ancestor_cost = ancestor.actual_cost + max(0.0, float(actual_cost or 0.0))
             if (
                 ancestor.token_budget is not None
                 and ancestor_tokens > ancestor.token_budget
@@ -892,8 +943,13 @@ class ExecutionSupervisor:
                 status=EscrowStatus.PRODUCED,
             )
             task.result_id = result.result_id
+            task_had_usage = task.token_usage > 0
             task.token_usage += max(0, token_usage)
-            task.actual_cost += max(0.0, actual_cost)
+            task.actual_cost += max(0.0, float(actual_cost or 0.0))
+            task.actual_cost_known = (
+                (not task_had_usage or task.actual_cost_known)
+                and actual_cost is not None
+            )
             task.result_capsule_revisions = dict(capsule_revisions or {})
             task.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
             task.updated_at = self.clock()
@@ -920,12 +976,18 @@ class ExecutionSupervisor:
         attempt = self.store.get_attempt(attempt_id)
         if attempt is not None:
             attempt.token_usage += max(0, token_usage)
-            attempt.actual_cost += max(0.0, actual_cost)
+            attempt.actual_cost += max(0.0, float(actual_cost or 0.0))
+            attempt.actual_cost_known = actual_cost is not None
             self.store.save_attempt(attempt)
         for ancestor in ancestors:
             def aggregate(parent: TaskRecord) -> None:
+                parent_had_usage = parent.token_usage > 0
                 parent.token_usage += max(0, token_usage)
-                parent.actual_cost += max(0.0, actual_cost)
+                parent.actual_cost += max(0.0, float(actual_cost or 0.0))
+                parent.actual_cost_known = (
+                    (not parent_had_usage or parent.actual_cost_known)
+                    and actual_cost is not None
+                )
                 parent.updated_at = self.clock()
             self.store.update_task(ancestor.task_id, aggregate)
         self._emit("result_escrowed", task, result_id=result.result_id)
