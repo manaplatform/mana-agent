@@ -10,6 +10,7 @@ from langchain_core.tools import StructuredTool
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.canvas.service import canvas_service_for_root
 from mana_agent.context_cost.governor import ContextCostGovernor
+from mana_agent.context_cost.models import GovernorMode
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.search.config import SearchConfig
@@ -75,6 +76,27 @@ class _FakeLLM:
 
     def bind_tools(self, _tools: list[object]) -> _FakeBoundModel:
         return _FakeBoundModel(self._responses)
+
+
+class _CapabilityBindingLLM:
+    """Captures each active capability set while replaying model decisions."""
+
+    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+        self._responses = list(responses)
+        self.bound_tool_names: list[set[str]] = []
+
+    def bind_tools(
+        self, tools: list[object], tool_choice: str | None = None
+    ) -> "_CapabilityBindingLLM":
+        del tool_choice
+        self.bound_tool_names.append({str(getattr(tool, "name", "")) for tool in tools})
+        return self
+
+    def invoke(
+        self, _messages: list[object], config: object | None = None
+    ) -> _FakeAIMessage:
+        del config
+        return self._responses.pop(0)
 
 
 def _build_agent(tmp_path: Path) -> AskAgent:
@@ -259,6 +281,58 @@ def test_ask_agent_email_only_turn_does_not_initialize_run_evidence(
 
     assert result.answer == "No new messages."
     assert len(calls.calls) == 1
+
+
+def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Path) -> None:
+    """A connector's full tool surface must not block its first model call."""
+    agent = _build_agent(tmp_path)
+    agent.context_cost_governor.enabled = True
+    agent.context_cost_governor.mode = GovernorMode.SOFT
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "discover",
+                        "name": "capability_search",
+                        "args": {"query": "search"},
+                    }
+                ],
+            ),
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "load-search",
+                        "name": "capability_load",
+                        "args": {"names": ["email_search"]},
+                    }
+                ],
+            ),
+            _FakeAIMessage("No new messages."),
+        ]
+    )
+    agent.llm = llm  # type: ignore[assignment]
+
+    result = agent.run(
+        "Check my latest Gmail",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=4,
+        timeout_seconds=2,
+        system_prompt="Discover and load the selected email capability first.",
+        tool_policy={
+            "allowed_tools": ["email_search"],
+            "capability_discovery_required": True,
+            "require_initial_tool_call": True,
+        },
+        run_id="gmail-capability-turn",
+    )
+
+    assert result.answer == "No new messages."
+    assert "email_search" not in llm.bound_tool_names[0]
+    assert any("email_search" in names for names in llm.bound_tool_names[2:])
 
 
 def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:

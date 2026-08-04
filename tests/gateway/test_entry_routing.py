@@ -223,6 +223,8 @@ def test_latest_gmail_routes_to_connector_and_preserves_identifiers(tmp_path: Pa
     assert not chat.conversation_calls
     assert ask_agent.calls[0]["flow_id"] == session_id
     assert ask_agent.calls[0]["run_id"] == "turn_exact"
+    assert ask_agent.calls[0]["tool_policy"]["capability_discovery_required"] is True
+    assert "capability_search" in ask_agent.calls[0]["system_prompt"]
     assert result.payload["session_id"] == session_id
     assert result.payload["conversation_id"] == session_id
     assert result.payload["turn_id"] == "turn_exact"

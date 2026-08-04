@@ -6640,6 +6640,10 @@ class AgentChatGateway:
 
         system_prompt = (
             "You are Mana-Agent's Gmail connector executor. Use only the provided email tools. "
+            "Start by calling capability_search with the requested email action, then call "
+            "capability_load for the exact capability selected from that manifest before invoking "
+            "an email tool. This is required so tool selection remains model-driven and the "
+            "connector context stays bounded. "
             "Inspect the configured account and complete the mailbox request. Never claim the "
             "connector is unavailable without an observed tool error. Preserve provider error "
             "codes, provider status, reconnect_required, and actionable details verbatim in the "
@@ -6658,6 +6662,7 @@ class AgentChatGateway:
                     "allowed_tools": [
                         contract.name for contract in email_tool_contracts()
                     ],
+                    "capability_discovery_required": True,
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },

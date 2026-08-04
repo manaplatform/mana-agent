@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Changed Gmail connector execution to begin with lightweight, model-controlled capability discovery instead of binding every email action schema before the first provider call. The executor now selects and loads its exact Gmail capability from the manifest, avoiding context-budget admission failures while preserving the allowlist and fail-closed tool policy. Capability controls are explicitly read-only for transactional enforcement, and capability activation now refreshes the bound tool set even when a tool's estimated schema size is unchanged.
+  - User verification required: `python -m pytest tests/test_ask_agent.py tests/gateway/test_entry_routing.py -q`.
+
 - Updated multi-agent queue accounting coverage so tool-result payloads remain uncharged until they are included in a provider model call; reservation and worker-execution evidence remain durable.
   - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
 

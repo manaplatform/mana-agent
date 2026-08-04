@@ -2063,7 +2063,17 @@ class AskAgent:
                 event_callback=lambda event_type, payload: governor._record_capability_event(event_type, payload),
             )
             holder["registry"] = capability_registry
-            initial_names = set(allowed_tools)
+            # A route may require the executor model to choose a narrow tool
+            # capability before its first provider call.  In that case, bind
+            # only the lightweight manifest controls; the model must search
+            # and load the exact permitted capability itself.  This prevents a
+            # broad connector surface from consuming the entire context window
+            # before that model decision can be made.
+            initial_names = (
+                set()
+                if bool(policy.get("capability_discovery_required"))
+                else set(allowed_tools)
+            )
             bound_tools = capability_registry.initial(initial_names)
             tool_map.update({tool.name: tool for tool in core_tools})
             allowed_tools.update(tool.name for tool in core_tools)
