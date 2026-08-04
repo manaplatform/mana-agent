@@ -4166,7 +4166,7 @@ class AgentChatGateway:
         task_id = forecast.task_id
         try:
             execution = self._lane_coordinator.inspect_task(task_id)
-        except KeyError:
+        except LaneCoordinatorError:
             return
         if execution.state not in {
             LaneTaskState.QUEUED, LaneTaskState.RUNNING, LaneTaskState.WAITING,
@@ -5593,6 +5593,7 @@ class AgentChatGateway:
             callbacks=options.get("callbacks"),
             agent_decision=mapped,
             coding_workspace_preparer=self._prepare_coding_workspace,
+            gateway_task_id=lane_task_id,
         )
         result.payload.setdefault("route", decision.route)
         return result

@@ -35,6 +35,8 @@ WorkspaceManagerFactory = Callable[[], WorkspaceManager]
 class CodexCodingAgentShim:
     """Preserve the frontend coding-agent API with Codex as sole executor."""
 
+    supports_gateway_task_identity = True
+
     def __init__(
         self,
         *,
@@ -111,6 +113,7 @@ class CodexCodingAgentShim:
             request,
             requires_repository_write=requires_write,
             flow_id=kwargs.get("flow_id"),
+            gateway_task_id=kwargs.get("gateway_task_id"),
         )
 
     def generate_dir_mode(self, request: str, **kwargs: Any) -> dict[str, Any]:
@@ -122,6 +125,7 @@ class CodexCodingAgentShim:
             request,
             requires_repository_write=mode not in {"plan", "plan_only"},
             flow_id=kwargs.get("flow_id"),
+            gateway_task_id=kwargs.get("gateway_task_id"),
         )
 
     def flow_summary(self, flow_id: str | None = None) -> dict[str, Any] | None:
@@ -170,12 +174,20 @@ class CodexCodingAgentShim:
         *,
         requires_repository_write: bool,
         flow_id: Any = None,
+        gateway_task_id: Any = None,
     ) -> dict[str, Any]:
         goal = str(request or "").strip()
         if not goal:
             raise ValueError("Codex coding request is required")
         validate_prepared_repository(self.repo_root, self.working_directory)
-        task_id = f"codex_task_{uuid.uuid4().hex[:16]}"
+        # A gateway lane is the durable execution and accounting owner. The
+        # connector must not manufacture a second task identity after routing:
+        # context-cost admission, transactional ownership, live events, and
+        # lane completion must all refer to the registered gateway task.
+        task_id = (
+            str(gateway_task_id or "").strip()
+            or f"codex_task_{uuid.uuid4().hex[:16]}"
+        )
         routing_budgets = routing_budgets_from_settings(self.routing_authority.settings)
         if self.context_cost_governor is not None:
             routing_budgets = self.context_cost_governor.remaining_routing_budgets(routing_budgets)

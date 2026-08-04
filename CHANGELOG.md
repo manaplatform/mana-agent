@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Bound Codex coding turns to the durable gateway lane task selected before execution. Context-cost admission, transactional ownership, Codex live events, workspace tracking, and final lane reconciliation now use the same task ID instead of a connector-local `codex_task_*` ID that the lane coordinator cannot resolve.
+  - User verification required: `python -m pytest tests/test_codex_integration.py tests/gateway/test_chat_gateway.py -q`.
+
 - Added model-authorized adaptive execution budgets. Provider-call admission now recalculates active lane reservations from the exact accounting forecast within immutable policy caps, and durable result overruns enter `pending_budget_decision` rather than being discarded. A fresh validated overrun decision can accept a verified flagged result, require review, or request normally validated bounded recovery. Added `/budget recalculate <task-id>` and durable budget revision evidence.
   - Pending decision, review, and scheduled-recovery outcomes are reported as successful chat handoffs with warnings instead of failed chat execution.
   - Finalization-decision model calls receive a fresh accounting step identity, preventing collisions with the already reconciled execution call.

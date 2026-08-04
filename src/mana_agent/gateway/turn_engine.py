@@ -555,6 +555,7 @@ def process_chat_turn(
     callbacks: list[Any] | None = None,
     agent_decision: AgentDecision | None = None,
     coding_workspace_preparer: Callable[[], Any] | None = None,
+    gateway_task_id: str = "",
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -867,6 +868,12 @@ def process_chat_turn(
     pending_prechecklist = session_state.get("pending_prechecklist")
     pending_source = str(session_state.get("pending_prechecklist_source") or "")
     pending_warning = str(session_state.get("pending_prechecklist_warning") or "")
+    gateway_task_kwargs = (
+        {"gateway_task_id": gateway_task_id}
+        if gateway_task_id
+        and bool(getattr(coding_agent, "supports_gateway_task_identity", False))
+        else {}
+    )
 
     try:
         if dir_mode:
@@ -890,6 +897,7 @@ def process_chat_turn(
                         pass_cap=auto_execute_max_passes,
                         flow_id=active_flow_id,
                         auto_chat_mode=auto_chat_mode.value,
+                        **gateway_task_kwargs,
                         prechecklist_payload=(
                             {
                                 "flow_id": active_flow_id,
@@ -909,6 +917,7 @@ def process_chat_turn(
                     timeout_seconds=timeout,
                     flow_id=active_flow_id,
                     auto_chat_mode=auto_chat_mode.value,
+                    **gateway_task_kwargs,
                 )
         else:
             target_index = index_dir
@@ -929,6 +938,7 @@ def process_chat_turn(
                         pass_cap=auto_execute_max_passes,
                         flow_id=active_flow_id,
                         auto_chat_mode=auto_chat_mode.value,
+                        **gateway_task_kwargs,
                         prechecklist_payload=(
                             {
                                 "flow_id": active_flow_id,
@@ -948,6 +958,7 @@ def process_chat_turn(
                     timeout_seconds=timeout,
                     flow_id=active_flow_id,
                     auto_chat_mode=auto_chat_mode.value,
+                    **gateway_task_kwargs,
                 )
 
         result: dict[str, Any] = {}
