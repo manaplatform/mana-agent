@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Updated multi-agent queue accounting coverage so tool-result payloads remain uncharged until they are included in a provider model call; reservation and worker-execution evidence remain durable.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
+
+- Aligned context-cost and lane tests with model-aware accounting: enforce-mode admissions now register exact test-model pricing, and lane exhaustion coverage supplies explicit configured limits because default lane contracts deliberately have no synthetic token or cost cap.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_lane_coordinator.py -q`.
+
+- Made native coding-planner initialization tolerate injected AskAgent-compatible implementations that do not provide optional context-cost accounting, while retaining governor propagation for configured production agents.
+  - User verification required: `python -m pytest tests/test_coding_agent.py -q`.
+
 - Replaced the unconstrained second routing pass for an already selected public-web or GitHub search source with a dedicated, model-constrained search-operation decision. The operation decision now exposes only the selected search tool and requires its compact query, while invalid decisions still stop without an alternate source. Search-source failures now preserve the fail-closed message without a duplicated trailing period.
   - User verification required: `python -m pytest tests/gateway/test_turn_engine_search.py tests/gateway/test_entry_routing.py -q`.
 

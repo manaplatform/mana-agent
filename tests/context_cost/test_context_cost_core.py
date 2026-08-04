@@ -42,6 +42,25 @@ def settings(**overrides):
     return SimpleNamespace(**values)
 
 
+def register_priced_test_model(
+    governor: ContextCostGovernor,
+    *,
+    context_window: int,
+    max_output_tokens: int,
+) -> None:
+    governor.register_model_profiles((
+        SimpleNamespace(
+            provider="unknown",
+            model_id="test",
+            input_cost_per_million=1.0,
+            output_cost_per_million=1.0,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            configuration={},
+        ),
+    ))
+
+
 def test_token_estimation_and_exact_configured_pricing() -> None:
     assert estimate_value_tokens("hello") > 0
     profile = SimpleNamespace(input_cost_per_million=2.0, output_cost_per_million=4.0)
@@ -111,6 +130,11 @@ def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_
         ),
     )
     governor.logger = ContextCostLogger(enabled=False, root=tmp_path / "logs")
+    register_priced_test_model(
+        governor,
+        context_window=10_000,
+        max_output_tokens=1_000,
+    )
     protected = ContextSegment("system", "safety", 10, protected=True, source_id="system")
     duplicate_protected = ContextSegment("system", "safety", 10, protected=True, source_id="system-copy")
     history = ContextSegment("history", "old", 10, source_id="old")
@@ -120,7 +144,7 @@ def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_
         model="test", context_window=10_000, apply_compaction=True,
     )
     assert [segment.source_id for segment in decision.segments] == ["system", "system-copy", "old"]
-    huge = ContextSegment("user", "x" * 30_000, 9_000, protected=True, source_id="current-user")
+    huge = ContextSegment("user", "context " * 12_000, 12_000, protected=True, source_id="current-user")
     with pytest.raises(ContextBudgetExceeded) as raised:
         governor.before_model_call([protected, huge], model="test", context_window=10_000)
     assert raised.value.decision.allowed is False
@@ -216,6 +240,11 @@ def test_parallel_model_reservations_cannot_spend_the_same_budget(
             mana_context_unknown_model_context_window=1_000,
             mana_context_unknown_model_max_output_tokens=200,
         ),
+    )
+    register_priced_test_model(
+        governor,
+        context_window=1_000,
+        max_output_tokens=200,
     )
     segment = ContextSegment("user", "constraint", 1, protected=True, source_id="user:1")
     first, _ = governor.before_model_call([segment], model="test", context_window=1_000)

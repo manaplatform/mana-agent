@@ -625,7 +625,12 @@ def test_lock_leases_are_shared_across_gateway_process_state(coordinator: LaneCo
 
 
 def test_token_and_cost_budget_exhaustion(coordinator: LaneCoordinator) -> None:
+    coordinator.contracts = configured_lane_contracts({
+        "coding": {"token_budget": 100, "cost_budget": 0.10},
+    })
     coding = coordinator.contracts[LaneId.CODING]
+    assert coding.token_budget is not None
+    assert coding.cost_budget is not None
     with pytest.raises(LaneBudgetError):
         coordinator.reserve(
             normalized_intent="too many tokens", lane_id=LaneId.CODING, session_id="s",

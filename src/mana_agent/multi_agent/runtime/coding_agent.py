@@ -446,7 +446,9 @@ class CodingAgent:
                 model=current_model,
                 base_url=self.base_url if hasattr(self, "base_url") else None,
             )
-            self.planner_llm.context_cost_governor = self.ask_agent.context_cost_governor
+            governor = getattr(self.ask_agent, "context_cost_governor", None)
+            if governor is not None:
+                self.planner_llm.context_cost_governor = governor
             
             # یک تست کوچک برای اطمینان از صحت مدل (اختیاری)
             # self.planner_llm.predict("health check") 
