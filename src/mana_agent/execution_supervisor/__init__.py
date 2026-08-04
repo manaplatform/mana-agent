@@ -8,6 +8,7 @@ from mana_agent.execution_supervisor.budget_decision import (
 from mana_agent.execution_supervisor.models import (
     ActionRecord,
     ActionRequestState,
+    BudgetOverrunAction,
     BudgetOverrunFinalizationDecision,
     BudgetForecast,
     BudgetRevision,
@@ -33,6 +34,7 @@ __all__ = [
     "TaskRecord",
     "ActionRecord",
     "ActionRequestState",
+    "BudgetOverrunAction",
     "BudgetOverrunFinalizationDecision",
     "BudgetForecast",
     "BudgetRevision",

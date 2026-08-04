@@ -8,6 +8,8 @@ import threading
 import pytest
 
 from mana_agent.execution_supervisor import (
+    BudgetOverrunAction,
+    BudgetOverrunFinalizationDecision,
     ExecutionState as SupervisorState,
     SideEffectClassification,
 )
@@ -705,6 +707,84 @@ def test_finish_preserves_a_pending_model_budget_overrun_decision(coordinator: L
     assert "budget-overrun decision" in finished.error
     supervised = coordinator.execution_supervisor.store.get_task(finished.task_id)
     assert supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+
+
+def test_accepted_budget_overrun_projects_authoritative_supervisor_completion(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="complete with a model-authorized budget overrun",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-finalization",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+    pending = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+    supervised = coordinator.execution_supervisor.verify_completion(pending.task_id)
+
+    finalized = coordinator.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_accept_budget_overrun",
+        task_id=pending.task_id,
+        attempt_id=supervised.attempt_id,
+        result_id=supervised.result_id,
+        result_evidence_hash=supervised.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.ACCEPT_WITH_OVERRUN,
+        reason="verified result is authorized despite immutable-cap overrun",
+        safe_to_continue=True,
+    ))
+
+    assert finalized.state is LaneTaskState.COMPLETED
+    taskboard_task = coordinator.taskboard.get_task(finalized.taskboard_task_id)
+    assert taskboard_task.status is TaskStatus.DONE
+    assert taskboard_task.supervisor_execution_id == pending.task_id
+    assert taskboard_task.verification_status == "passed"
+
+
+def test_reconciles_completed_overrun_when_the_prior_taskboard_projection_failed(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="repair a completed model-authorized budget overrun",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-projection-repair",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+    pending = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+    supervised = coordinator.execution_supervisor.verify_completion(pending.task_id)
+    coordinator.execution_supervisor.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_repair_budget_overrun_projection",
+        task_id=pending.task_id,
+        attempt_id=supervised.attempt_id,
+        result_id=supervised.result_id,
+        result_evidence_hash=supervised.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.ACCEPT_WITH_OVERRUN,
+        reason="verified result was already accepted before projection retry",
+        safe_to_continue=True,
+    ))
+
+    reconciled = coordinator.reconcile_authoritative_completion(pending.task_id)
+
+    assert reconciled.state is LaneTaskState.COMPLETED
+    taskboard_task = coordinator.taskboard.get_task(reconciled.taskboard_task_id)
+    assert taskboard_task.status is TaskStatus.DONE
+    assert taskboard_task.supervisor_execution_id == pending.task_id
 
 
 def test_recalculate_budget_expands_a_live_reservation_within_lane_policy(

@@ -1590,13 +1590,11 @@ class LaneCoordinator:
     ) -> LaneExecution:
         """Project only the validated supervisor finalization decision into the lane."""
         supervised = self.execution_supervisor.finalize_budget_overrun(decision)
+        if supervised.state is ExecutionState.COMPLETED:
+            return self.reconcile_authoritative_completion(decision.task_id)
         with self._condition:
             execution = self._executions[decision.task_id]
-            if supervised.state is ExecutionState.COMPLETED:
-                execution.state = LaneTaskState.COMPLETED
-                execution.error = ""
-                self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.DONE)
-            elif supervised.state is ExecutionState.PENDING_BUDGET_DECISION:
+            if supervised.state is ExecutionState.PENDING_BUDGET_DECISION:
                 execution.state = LaneTaskState.PENDING_BUDGET_DECISION
                 self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.NEEDS_REVIEW)
             else:
@@ -1609,6 +1607,42 @@ class LaneCoordinator:
             "budget.overrun_finalized", task_id=decision.task_id,
             lane_id=execution.owning_lane, decision_id=decision.decision_id,
             action=decision.action.value,
+        )
+        return execution
+
+    def reconcile_authoritative_completion(self, task_id: str) -> LaneExecution:
+        """Repair the lane projection from an already completed supervisor record.
+
+        This is deliberately deterministic: it does not make a provider call or
+        authorize a result. It only exposes the supervisor completion that was
+        already durably finalized by a validated decision.
+        """
+        supervised = self.execution_supervisor.store.get_task(task_id)
+        if supervised.state is not ExecutionState.COMPLETED:
+            raise LaneCoordinatorError(
+                "authoritative completion reconciliation requires a completed supervisor task"
+            )
+        manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+        with self._condition:
+            execution = self._executions[task_id]
+            self.taskboard.project_supervisor_completion(
+                execution.taskboard_task_id,
+                supervisor_task=supervised,
+                verification_evidence={
+                    "result_id": supervised.result_id,
+                    "verification": manifest.get("verification"),
+                    "artefacts": manifest.get("artefacts", []),
+                },
+            )
+            execution.state = LaneTaskState.COMPLETED
+            execution.error = ""
+            execution.verification_state["budget_overrun"] = dict(supervised.budget_overrun)
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.emit(
+            "lane.supervisor_completion_reconciled",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
         )
         return execution
 

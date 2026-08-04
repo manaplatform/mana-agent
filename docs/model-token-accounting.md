@@ -73,7 +73,9 @@ evidence hash. It may accept a verified result with an explicit overrun flag,
 require human review, or request normal bounded retry/replan recovery. Missing,
 invalid, stale, or unsafe decisions leave the result pending and block further
 provider or tool execution. Use `/budget recalculate <task-id>` to inspect the
-current forecast and durable revision history without invoking a provider.
+current forecast and durable revision history without invoking a provider. Use
+`/budget finalize <task-id>` to request the fresh model finalization decision
+for an existing durable overrun result.
 
 Retries, fallback models, parallel candidates, agents, verifier calls, and tool
 continuations receive distinct operation/attempt identities. Changing the model

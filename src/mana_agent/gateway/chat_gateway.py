@@ -100,6 +100,7 @@ from mana_agent.model_routing.models import (
 )
 from mana_agent.execution_supervisor.models import (
     BudgetForecast,
+    ExecutionState,
     RecoveryAction,
     RecoveryDecision,
     RetryCategory,
@@ -2641,6 +2642,14 @@ class AgentChatGateway:
             if len(parts) != 3:
                 return "Usage: /budget recalculate <task-id>"
             return json.dumps(self.recalculate_task_budget(parts[2]), indent=2, default=str)
+        if command == "/budget" and len(parts) > 1 and parts[1].lower() == "finalize":
+            if len(parts) != 3:
+                return "Usage: /budget finalize <task-id>"
+            return json.dumps(
+                self.finalize_budget_overrun_with_model(parts[2]),
+                indent=2,
+                default=str,
+            )
         if command == "/budget":
             return json.dumps(self.budget_usage(session_id=session_id), indent=2)
         if command == "/candidates":
@@ -2930,12 +2939,38 @@ class AgentChatGateway:
     def finalize_budget_overrun_with_model(self, task_id: str) -> dict[str, Any]:
         """Request and apply the required fresh model decision for one escrowed result."""
         supervisor = self._lane_coordinator.execution_supervisor
+        current = supervisor.store.get_task(task_id)
+        if current.state is ExecutionState.COMPLETED:
+            execution = self._lane_coordinator.reconcile_authoritative_completion(task_id)
+            return {
+                "task_id": task_id,
+                "decision": {
+                    "decision_id": current.budget_finalization_decision_id,
+                    "status": "already_finalized",
+                },
+                "lane": asdict(execution),
+            }
+        if current.state is not ExecutionState.PENDING_BUDGET_DECISION:
+            raise ExecutionSupervisorError(
+                "budget-overrun finalization requires a task awaiting a model decision"
+            )
         # Verification creates durable evidence but deliberately leaves the task
         # pending; only the next validated model decision may finalize it.
         task = supervisor.verify_completion(task_id)
         result = supervisor.store.get_result(task.result_id)
         if result is None:
             raise ExecutionSupervisorError("budget-overrun task has no durable result escrow")
+        # The decision is a new provider operation, not a replay of the model
+        # call that produced the overrun result. Give it a fresh accounting
+        # identity so its reservation cannot collide with a finalized call.
+        self._stack.context_cost_governor.set_execution_identity(
+            task_id=task.task_id,
+            root_task_id=task.root_task_id,
+            attempt_id=task.attempt_id,
+            agent_id="main",
+            step_id=f"budget-overrun-finalization:{uuid.uuid4().hex}",
+            execution_kind="budget_overrun_finalization",
+        )
         decision = BudgetOverrunDecider(self._entry_router.llm).decide(
             task, result_payload=redact_secrets(dict(result.payload))
         )
@@ -3826,6 +3861,7 @@ class AgentChatGateway:
                                 and finished.state is not LaneTaskState.COMPLETED
                             ):
                                 if finished.state is LaneTaskState.PENDING_BUDGET_DECISION:
+                                    decision_unavailable = False
                                     try:
                                         self.finalize_budget_overrun_with_model(
                                             reservation.execution.task_id
@@ -3834,27 +3870,46 @@ class AgentChatGateway:
                                             reservation.execution.task_id
                                         )
                                     except Exception as exc:
-                                        result.error = "budget_overrun_decision_required"
+                                        decision_unavailable = True
+                                        # A pending decision is a durable, safe handoff rather
+                                        # than a failed chat turn. The result remains available
+                                        # for a later validated decision.
+                                        result.error = None
                                         result.mode = "lane-budget-decision-pending"
                                         result.answer = (
                                             "A durable result exceeded an immutable budget and is "
                                             "awaiting a validated model finalization decision. "
                                             f"No further execution was allowed. Reason: {exc}"
                                         )
-                                    if finished.state is LaneTaskState.PENDING_BUDGET_DECISION:
-                                        result.error = "budget_overrun_review_required"
+                                        result.warnings.append(
+                                            "budget-overrun finalization decision is pending"
+                                        )
+                                        result.payload["budget_overrun_status"] = "decision_pending"
+                                    if (
+                                        finished.state is LaneTaskState.PENDING_BUDGET_DECISION
+                                        and not decision_unavailable
+                                    ):
+                                        result.error = None
                                         result.mode = "lane-budget-review-pending"
                                         result.answer = (
                                             "The budget-overrun finalization decision retained the "
                                             "durable result for review. No further execution is allowed."
                                         )
+                                        result.warnings.append(
+                                            "budget-overrun result requires review"
+                                        )
+                                        result.payload["budget_overrun_status"] = "review_pending"
                                     elif finished.state is LaneTaskState.QUEUED:
-                                        result.error = "budget_overrun_recovery_scheduled"
+                                        result.error = None
                                         result.mode = "lane-budget-recovery-scheduled"
                                         result.answer = (
                                             "The validated budget-overrun decision scheduled bounded "
                                             "recovery under the normal retry policy."
                                         )
+                                        result.warnings.append(
+                                            "budget-overrun recovery is scheduled"
+                                        )
+                                        result.payload["budget_overrun_status"] = "recovery_scheduled"
                                 if (
                                     not result.error
                                     and finished.state is LaneTaskState.BUDGET_EXHAUSTED
@@ -3866,7 +3921,14 @@ class AgentChatGateway:
                                         "budget before its result could be accepted. "
                                         f"{finished.error or 'No result was accepted.'}"
                                     )
-                                elif not result.error and finished.state is not LaneTaskState.COMPLETED:
+                                elif (
+                                    not result.error
+                                    and finished.state not in {
+                                        LaneTaskState.COMPLETED,
+                                        LaneTaskState.PENDING_BUDGET_DECISION,
+                                        LaneTaskState.QUEUED,
+                                    }
+                                ):
                                     result.error = "completion_verification_failed"
                                     result.mode = "lane-verification-failed"
                                     result.answer = (

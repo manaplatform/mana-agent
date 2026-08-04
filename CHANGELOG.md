@@ -5,6 +5,12 @@ All notable repository changes should be recorded here.
 ## 2026-08-04
 
 - Added model-authorized adaptive execution budgets. Provider-call admission now recalculates active lane reservations from the exact accounting forecast within immutable policy caps, and durable result overruns enter `pending_budget_decision` rather than being discarded. A fresh validated overrun decision can accept a verified flagged result, require review, or request normally validated bounded recovery. Added `/budget recalculate <task-id>` and durable budget revision evidence.
+  - Pending decision, review, and scheduled-recovery outcomes are reported as successful chat handoffs with warnings instead of failed chat execution.
+  - Finalization-decision model calls receive a fresh accounting step identity, preventing collisions with the already reconciled execution call.
+  - Added `/budget finalize <task-id>` to resume a durable pending-overrun result through its required model decision.
+  - Accepted overruns now project the authoritative completed supervisor record and verification evidence before marking the taskboard item done.
+  - `/budget finalize <task-id>` now repairs a previously completed overrun whose taskboard projection was interrupted, without requesting another provider decision.
+  - Exported `BudgetOverrunAction` with the other public execution-supervisor budget decision types.
   - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -q`.
 
 - Changed Gmail connector execution to begin with lightweight, model-controlled capability discovery instead of binding every email action schema before the first provider call. The executor now selects and loads its exact Gmail capability from the manifest, avoiding context-budget admission failures while preserving the allowlist and fail-closed tool policy. Capability controls are explicitly read-only for transactional enforcement, and capability activation now refreshes the bound tool set even when a tool's estimated schema size is unchanged.
