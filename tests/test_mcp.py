@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mana_agent.analysis.models import AskResponseWithTrace
-from mana_agent.mcp.client import McpClient
+from mana_agent.mcp.client import ExceptionGroup, McpClient
 from mana_agent.mcp.tools import discovered_mcp_langchain_tools, mcp_model_tool_name
 from mana_agent.mcp.config import McpConfigError, McpServerConfig, load_mcp_servers, load_mcp_token, parse_mcp_server_json, save_mcp_server, save_mcp_token
 from mana_agent.mcp.server import protected_http_app

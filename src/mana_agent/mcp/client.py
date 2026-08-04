@@ -6,6 +6,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+try:
+    from builtins import BaseExceptionGroup, ExceptionGroup
+except ImportError:  # Python 3.10
+    from exceptiongroup import BaseExceptionGroup, ExceptionGroup
+
 from mana_agent.utils.redaction import redact_secrets
 
 from .config import McpServerConfig

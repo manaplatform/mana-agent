@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Restored Python 3.10 compatibility for MCP transport failure handling by using the conditional `exceptiongroup` backport where built-in exception groups are unavailable. The MCP regression test now uses that same compatibility type.
+  - User verification required: `python -m pytest tests/test_mcp.py::test_mcp_client_reports_the_concrete_task_group_failure` and `python -m pytest -q`.
+
 - Raised the default Operations lane to the configured 32k routing-token and 32-unit cost ceilings, then constrained every execution model-routing budget to its validated specialist-lane contract before reservation. Canvas now has sufficient default budget for its model-selected tool run; narrower custom lanes still fail during model routing when they cannot fund the model estimate, rather than reaching an opaque `lane_budget_exhausted` admission failure.
   - Preserved the supervisor's authoritative `budget_exhausted` state when result acceptance exceeds a task reservation, preventing a second invalid terminal transition to `failed`.
   - Moved validated Live Canvas work to its own non-repository lane, so stale Operations work cannot block Canvas through a workspace lock or the Operations capacity limit.
