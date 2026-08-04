@@ -11,6 +11,7 @@ All notable repository changes should be recorded here.
   - Accepted overruns now project the authoritative completed supervisor record and verification evidence before marking the taskboard item done.
   - `/budget finalize <task-id>` now repairs a previously completed overrun whose taskboard projection was interrupted, without requesting another provider decision.
   - Exported `BudgetOverrunAction` with the other public execution-supervisor budget decision types.
+  - Pending overrun decisions now emit a waiting budget-decision event instead of a false `lane.failed` event, so accepted Gmail and other connector responses remain visibly successful.
   - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -q`.
 
 - Changed Gmail connector execution to begin with lightweight, model-controlled capability discovery instead of binding every email action schema before the first provider call. The executor now selects and loads its exact Gmail capability from the manifest, avoiding context-budget admission failures while preserving the allowlist and fail-closed tool policy. Capability controls are explicitly read-only for transactional enforcement, and capability activation now refreshes the bound tool set even when a tool's estimated schema size is unchanged.

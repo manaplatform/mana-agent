@@ -1240,11 +1240,20 @@ class LaneCoordinator:
                 )
             self._persist_locked()
         self.lock_manager.release_task(task_id)
-        event = {
-            LaneTaskState.COMPLETED: "lane.completed", LaneTaskState.CANCELLED: "lane.cancelled",
-            LaneTaskState.BUDGET_EXHAUSTED: "lane.budget_exhausted",
-        }.get(state, "lane.failed" if state != LaneTaskState.VERIFYING else "verification.failed")
-        self.emit(event, task_id=task_id, lane_id=execution.owning_lane, status="success" if verified else "error")
+        if state is LaneTaskState.PENDING_BUDGET_DECISION:
+            # The result is durable and valid, but requires its separate
+            # finalization decision. Never publish it as a lane failure: a
+            # later accepted decision would otherwise leave the UI showing a
+            # false execution error beside a successful response.
+            event = "budget.overrun.decision.required"
+            event_status = "waiting"
+        else:
+            event = {
+                LaneTaskState.COMPLETED: "lane.completed", LaneTaskState.CANCELLED: "lane.cancelled",
+                LaneTaskState.BUDGET_EXHAUSTED: "lane.budget_exhausted",
+            }.get(state, "lane.failed" if state != LaneTaskState.VERIFYING else "verification.failed")
+            event_status = "success" if verified else "error"
+        self.emit(event, task_id=task_id, lane_id=execution.owning_lane, status=event_status)
         self.emit("resource.released", task_id=task_id, lane_id=execution.owning_lane)
         with self._condition:
             self._condition.notify_all()

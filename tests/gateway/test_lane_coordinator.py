@@ -685,6 +685,12 @@ def test_canvas_task_does_not_wait_for_repository_lock(
 
 
 def test_finish_preserves_a_pending_model_budget_overrun_decision(coordinator: LaneCoordinator) -> None:
+    events: list[dict[str, object]] = []
+    coordinator.event_sink = lambda event_type, title, **kwargs: events.append({
+        "event_type": event_type,
+        "title": title,
+        **kwargs,
+    })
     reservation = coordinator.reserve(
         normalized_intent="complete within the reserved budget",
         lane_id=LaneId.OPERATIONS,
@@ -707,6 +713,8 @@ def test_finish_preserves_a_pending_model_budget_overrun_decision(coordinator: L
     assert "budget-overrun decision" in finished.error
     supervised = coordinator.execution_supervisor.store.get_task(finished.task_id)
     assert supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+    assert events[-2]["event_type"] == "budget.overrun.decision.required"
+    assert events[-2]["status"] == "waiting"
 
 
 def test_accepted_budget_overrun_projects_authoritative_supervisor_completion(

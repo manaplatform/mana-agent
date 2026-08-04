@@ -75,7 +75,9 @@ invalid, stale, or unsafe decisions leave the result pending and block further
 provider or tool execution. Use `/budget recalculate <task-id>` to inspect the
 current forecast and durable revision history without invoking a provider. Use
 `/budget finalize <task-id>` to request the fresh model finalization decision
-for an existing durable overrun result.
+for an existing durable overrun result. Pending decisions are reported to chat
+surfaces as waiting work, never as a failed execution; a later accepted decision
+projects the same durable result as completed.
 
 Retries, fallback models, parallel candidates, agents, verifier calls, and tool
 continuations receive distinct operation/attempt identities. Changing the model
