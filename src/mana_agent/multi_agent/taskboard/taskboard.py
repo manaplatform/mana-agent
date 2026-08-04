@@ -18,6 +18,7 @@ from mana_agent.memory import MultiAgentMemoryService, task_fingerprint
 from mana_agent.memory import CapsuleTaskContext, MemoryPrincipal
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.context_cost.compression import compress_tool_result, render_envelope
+from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
 from mana_agent.multi_agent.taskboard.validators import validate_transition
 
@@ -142,8 +143,8 @@ class TaskBoard:
             supervisor_agent_id=owner_agent_id,
             delegated_by_agent_id=owner_agent_id,
             approved_by_agent_id=owner_agent_id,
-            budget_reserved_tokens=20_000,
-            budget_remaining_tokens=20_000,
+            budget_reserved_tokens=0,
+            budget_remaining_tokens=0,
             budget_reserved_ms=120_000,
             blockers=[],
             memory_status={
@@ -475,7 +476,7 @@ class TaskBoard:
                 lines.append(f"{label}:")
                 lines.extend(f"- {item}" for item in values)
         text = "\n".join(lines)
-        if len(text) <= max(200, int(token_budget) * 4):
+        if estimate_value_tokens(text) <= max(1, int(token_budget)):
             return text
         store = ContextArtifactStore()
         envelope = compress_tool_result(

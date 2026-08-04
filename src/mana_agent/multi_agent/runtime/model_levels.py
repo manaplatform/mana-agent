@@ -85,7 +85,12 @@ def route_model(request: RoutingRequest, *, global_model: str, profiles=None) ->
 
         settings = Settings()
         explicit = configured_profiles(settings.mana_model_profiles)
-        candidates = explicit or profiles_from_legacy_configuration(global_model=global_model, default_provider=settings.mana_ai_provider)
+        candidates = explicit or profiles_from_legacy_configuration(
+            global_model=global_model,
+            default_provider=settings.mana_ai_provider,
+            context_window=settings.mana_context_unknown_model_context_window,
+            max_output_tokens=settings.mana_context_unknown_model_max_output_tokens,
+        )
         language_preferences = settings.mana_routing_language_preferences if isinstance(settings.mana_routing_language_preferences, dict) else {}
         candidates = tuple(
             replace(candidate, supported_languages=_language_preference(language_preferences.get(candidate.key, candidate.supported_languages)))

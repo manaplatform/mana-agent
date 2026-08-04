@@ -1,9 +1,17 @@
 """Resilient execution supervision public API."""
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+from mana_agent.execution_supervisor.budget_decision import (
+    BudgetOverrunDecider,
+    BudgetOverrunDecisionError,
+)
 from mana_agent.execution_supervisor.models import (
     ActionRecord,
     ActionRequestState,
+    BudgetOverrunAction,
+    BudgetOverrunFinalizationDecision,
+    BudgetForecast,
+    BudgetRevision,
     CompletionContract,
     CompletionContractType,
     ExecutionState,
@@ -26,4 +34,10 @@ __all__ = [
     "TaskRecord",
     "ActionRecord",
     "ActionRequestState",
+    "BudgetOverrunAction",
+    "BudgetOverrunFinalizationDecision",
+    "BudgetForecast",
+    "BudgetRevision",
+    "BudgetOverrunDecider",
+    "BudgetOverrunDecisionError",
 ]

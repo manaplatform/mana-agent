@@ -23,6 +23,7 @@ from mana_agent.gateway.entry_routing import (
 )
 from mana_agent.gateway.entry_routing import gmail_route_availability
 from mana_agent.gateway.checkpoint_resume import CHECKPOINT_RESUME_PROMPT
+from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.workspaces.service import WorkspaceService
 
 
@@ -222,6 +223,8 @@ def test_latest_gmail_routes_to_connector_and_preserves_identifiers(tmp_path: Pa
     assert not chat.conversation_calls
     assert ask_agent.calls[0]["flow_id"] == session_id
     assert ask_agent.calls[0]["run_id"] == "turn_exact"
+    assert ask_agent.calls[0]["tool_policy"]["capability_discovery_required"] is True
+    assert "capability_search" in ask_agent.calls[0]["system_prompt"]
     assert result.payload["session_id"] == session_id
     assert result.payload["conversation_id"] == session_id
     assert result.payload["turn_id"] == "turn_exact"
@@ -1119,7 +1122,56 @@ def test_failed_required_browser_source_stops_multi_source_plan(tmp_path: Path, 
     assert result.payload["executions"] == {
         "browser": {"status": "failed", "error": "browser returned no evidence"}
     }
+    assert result.answer.endswith("browser returned no evidence. No alternative source was used.")
     assert len(failing_browser.calls) == 1
+
+
+def test_required_search_source_uses_constrained_operation_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _RouteModel("conversation"))
+    captured: dict[str, Any] = {}
+    operation = AgentDecision(
+        intent="web_research",
+        confidence=0.9,
+        selected_tools=["web_search"],
+        tool_inputs={"web_search": {"query": "latest Mana-Agent release"}},
+        web_search_needed=True,
+        verifier_passed=True,
+    )
+
+    def decide_search_operation(**kwargs: Any) -> AgentDecision:
+        captured.update(kwargs)
+        return operation
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.decide_search_operation",
+        decide_search_operation,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.run_web_research_answer",
+        lambda **_kwargs: ("current search evidence", [], []),
+    )
+    decision = EntryRoutingDecision(
+        route="search",
+        confidence=0.9,
+        reason="Current information is required.",
+        required_sources=("search",),
+        requires_live_data=True,
+    )
+
+    result = gateway._execute_required_sources(
+        decision=decision,
+        text="What is the latest Mana-Agent release?",
+        ask_service=gateway.get_ask_service(),
+        callbacks=None,
+    )
+
+    assert result.answer == "current search evidence"
+    assert captured["required_tool"] == "web_search"
+    assert captured["question"] == "What is the latest Mana-Agent release?"
 
 
 def test_compound_child_search_uses_only_its_validated_child_prompt(

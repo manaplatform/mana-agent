@@ -114,6 +114,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
     # metadata: the provider has already rejected the previous payload.
     compatibility_force_reasoning_none: bool = False
     context_cost_governor: ContextCostGovernor | None = None
+    selected_provider: str = ""
 
     def _use_responses_api(self, payload: dict) -> bool:
         if self.compatibility_api_mode == "responses":
@@ -184,6 +185,10 @@ class CompatibleChatOpenAI(ChatOpenAI):
         try:
             result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as exc:
+            if self.context_cost_governor is not None and governor_call_id:
+                self.context_cost_governor.release_reservation(
+                    governor_call_id, reason=f"provider call failed: {type(exc).__name__}"
+                )
             record_current(
                 "model.call.failed",
                 {
@@ -240,6 +245,10 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 usage = getattr(chunk, "usage_metadata", None) or usage
                 yield chunk
         except Exception as exc:
+            if self.context_cost_governor is not None and governor_call_id:
+                self.context_cost_governor.release_reservation(
+                    governor_call_id, reason=f"streaming provider call failed: {type(exc).__name__}"
+                )
             record_current(
                 "model.call.failed",
                 {
@@ -291,10 +300,9 @@ class CompatibleChatOpenAI(ChatOpenAI):
             if isinstance(item, dict):
                 function = item.get("function") if isinstance(item.get("function"), dict) else item
                 tools.append(str(function.get("name") or ""))
-        base_url = str(getattr(self, "openai_api_base", "") or "").lower()
         return {
             "boundary": "compatible_chat_model",
-            "provider": "openai" if not base_url or "api.openai.com" in base_url else "openai-compatible",
+            "provider": self.selected_provider or "unknown",
             "model": self.model_name,
             "prompt_hash": stable_hash(prompt_material),
             "safe_request_metadata": {
@@ -338,14 +346,21 @@ class CompatibleChatOpenAI(ChatOpenAI):
         for index, schema in enumerate(kwargs.get("tools") or []):
             segments.append(ContextSegment(
                 kind="schema",
-                content=str((schema.get("function") or schema).get("name") if isinstance(schema, dict) else index),
+                content=schema,
                 token_estimate=estimate_value_tokens(schema),
+                protected=True,
                 source_id=f"schema:{index}",
             ))
         call_id, _decision = governor.before_model_call(
             segments,
             model=self.model_name,
             provider=str(metadata.get("provider") or ""),
+            step_id="compatibility-retry" if self.compatibility_retry_attempted else "",
+            expected_output_tokens=(
+                int(kwargs.get("max_output_tokens") or kwargs.get("max_completion_tokens") or kwargs.get("max_tokens"))
+                if any(kwargs.get(name) is not None for name in ("max_output_tokens", "max_completion_tokens", "max_tokens"))
+                else None
+            ),
         )
         return call_id
 
@@ -360,6 +375,7 @@ def create_chat_model(*, api_key: str, model: str, base_url: str | None = None, 
         "model": model,
         "compatibility_api_mode": api_mode,
         "compatibility_capabilities": capabilities,
+        "selected_provider": str(provider or "unknown"),
         **kwargs,
     }
     if base_url:

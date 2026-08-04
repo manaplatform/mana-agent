@@ -88,10 +88,11 @@ class CapabilityRegistry:
         denied = sorted((requested & set(self.manifest)) - self._allowed)
         accepted = sorted(requested & self._allowed)
         before = self.active.schema_tokens
+        previous_loaded = set(self.active.loaded)
         self.active.loaded.update(accepted)
         for name in accepted:
             self.active.last_used_step[name] = int(step)
-        self._refresh_revision(before)
+        self._refresh_revision(before, previous_loaded)
         payload = {
             "loaded": accepted, "denied": denied, "unknown": unknown,
             "schema_token_delta": self.active.schema_tokens - before,
@@ -106,11 +107,12 @@ class CapabilityRegistry:
     def unload(self, names: Iterable[str], *, reason: str = "model_requested") -> dict[str, Any]:
         removable = {str(name) for name in names if str(name)} - CORE_CAPABILITIES
         before = self.active.schema_tokens
+        previous_loaded = set(self.active.loaded)
         removed = sorted(removable & self.active.loaded)
         self.active.loaded.difference_update(removed)
         for name in removed:
             self.active.last_used_step.pop(name, None)
-        self._refresh_revision(before)
+        self._refresh_revision(before, previous_loaded)
         payload = {"unloaded": removed, "schema_token_delta": self.active.schema_tokens - before, "schema_tokens": self.active.schema_tokens, "schema_tokens_avoided": self.avoided_schema_tokens, "active_capabilities": sorted(self.active.loaded), "reason": reason, "active_revision": self.active.revision}
         self._emit("context.capabilities_unloaded", payload)
         return payload
@@ -135,14 +137,20 @@ class CapabilityRegistry:
 
     def _set_loaded(self, names: set[str], *, event_type: str, reason: str) -> None:
         before = self.active.schema_tokens
+        previous_loaded = set(self.active.loaded)
         self.active.loaded = names & set(self._tools)
         self.active.last_used_step = {name: 0 for name in self.active.loaded}
-        self._refresh_revision(before)
+        self._refresh_revision(before, previous_loaded)
         self._emit(event_type, {"loaded": sorted(self.active.loaded), "schema_token_delta": self.active.schema_tokens - before, "schema_tokens": self.active.schema_tokens, "schema_tokens_avoided": self.avoided_schema_tokens, "active_capabilities": sorted(self.active.loaded), "reason": reason, "active_revision": self.active.revision})
 
-    def _refresh_revision(self, previous_schema_tokens: int) -> None:
+    def _refresh_revision(
+        self, previous_schema_tokens: int, previous_loaded: set[str]
+    ) -> None:
         new_tokens = self.schema_tokens_for(self.active.loaded)
-        if new_tokens != previous_schema_tokens:
+        if (
+            new_tokens != previous_schema_tokens
+            or self.active.loaded != previous_loaded
+        ):
             self.active.revision += 1
         self.active.schema_tokens = new_tokens
 
@@ -157,6 +165,7 @@ def build_core_tools(
 ) -> list[Any]:
     """Create four lightweight controls without binding optional capabilities."""
     from langchain_core.tools import StructuredTool
+    read_only_metadata = {"read_only": True, "side_effecting": False}
 
     def capability_search(query: str, limit: int = 20) -> str:
         return json.dumps(registry_provider().search(query, limit=limit), ensure_ascii=False, sort_keys=True)
@@ -183,10 +192,10 @@ def build_core_tools(
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
     return [
-        StructuredTool.from_function(capability_search, name="capability_search", description="Search the authorized lightweight capability manifest. Does not load a tool."),
-        StructuredTool.from_function(capability_load, name="capability_load", description="Load named authorized capabilities for the next model step. Never widens permissions."),
-        StructuredTool.from_function(capability_unload, name="capability_unload", description="Unload named non-core capabilities to reclaim context."),
-        StructuredTool.from_function(context_read_artifact, name="context_read_artifact", description="Read an exact scoped tool-result artifact by offset, line range, JSON path, or bounded search."),
+        StructuredTool.from_function(capability_search, name="capability_search", description="Search the authorized lightweight capability manifest. Does not load a tool.", metadata=read_only_metadata),
+        StructuredTool.from_function(capability_load, name="capability_load", description="Load named authorized capabilities for the next model step. Never widens permissions.", metadata=read_only_metadata),
+        StructuredTool.from_function(capability_unload, name="capability_unload", description="Unload named non-core capabilities to reclaim context.", metadata=read_only_metadata),
+        StructuredTool.from_function(context_read_artifact, name="context_read_artifact", description="Read an exact scoped tool-result artifact by offset, line range, JSON path, or bounded search.", metadata=read_only_metadata),
     ]
 
 

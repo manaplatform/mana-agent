@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from mana_agent.config.user_config import load_model_cache, save_model_cache
@@ -50,6 +51,20 @@ def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
             capabilities.add(ModelCapability.REASONING.value)
         item["capabilities"] = sorted(capabilities)
         item["input_modalities"] = modalities
+        top_provider = item.get("top_provider") if isinstance(item.get("top_provider"), dict) else {}
+        if item.get("max_output_tokens") is None and top_provider.get("max_completion_tokens") is not None:
+            item["max_output_tokens"] = top_provider["max_completion_tokens"]
+        pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
+        for source_key, target_key in (
+            ("prompt", "input_price_per_million"),
+            ("completion", "output_price_per_million"),
+            ("input_cache_read", "cached_input_price_per_million"),
+        ):
+            if pricing.get(source_key) not in (None, ""):
+                try:
+                    item[target_key] = str(Decimal(str(pricing[source_key])) * Decimal(1_000_000))
+                except (InvalidOperation, ValueError):
+                    pass
         records[model_id] = item
     return [records[key] for key in sorted(records)]
 

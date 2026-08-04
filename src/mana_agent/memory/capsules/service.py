@@ -226,7 +226,9 @@ class CapsuleService:
         used_tokens = 0
         for _, capsule in candidates:
             projection = self._projection(capsule)
-            estimated = max(1, len(json.dumps(projection.content)) // 4) + max(1, len(projection.summary) // 4)
+            from mana_agent.context_cost.estimator import estimate_value_tokens
+
+            estimated = estimate_value_tokens({"content": projection.content, "summary": projection.summary})
             if used_tokens + estimated > max_tokens:
                 continue
             result.append(projection)

@@ -264,6 +264,7 @@ class AskAgent:
         execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
+        self.provider = str(getattr(self.llm, "selected_provider", "") or "unknown")
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
@@ -276,6 +277,7 @@ class AskAgent:
         self.run_logger = LlmRunLogger()
         self.search_config = SearchConfig.from_env()
         self.context_cost_governor = context_cost_governor
+        self.llm.context_cost_governor = context_cost_governor
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
@@ -286,8 +288,29 @@ class AskAgent:
         if not resolved or resolved == self.model:
             return
         governor = self.context_cost_governor
-        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url)
+        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url, provider=self.provider)
         self.llm.context_cost_governor = governor
+        self.model = resolved
+
+    def update_model_assignment(self, provider: str, model_name: str, *, settings: Any | None = None) -> None:
+        from mana_agent.config.inference_provider import resolve_inference_connection
+        from mana_agent.config.settings import Settings
+
+        connection = resolve_inference_connection(settings or Settings(), provider=provider)
+        resolved = str(model_name or "").strip()
+        if not resolved:
+            raise ValueError("model assignment requires a model")
+        self.api_key = connection.api_key
+        self.base_url = connection.base_url
+        self.provider = connection.provider
+        self.llm = create_chat_model(
+            api_key=connection.api_key,
+            model=resolved,
+            base_url=connection.base_url,
+            provider=connection.provider,
+            default_headers=connection.headers,
+        )
+        self.llm.context_cost_governor = self.context_cost_governor
         self.model = resolved
 
     def _is_blocked_command(self, cmd: str) -> bool:
@@ -2040,7 +2063,17 @@ class AskAgent:
                 event_callback=lambda event_type, payload: governor._record_capability_event(event_type, payload),
             )
             holder["registry"] = capability_registry
-            initial_names = set(allowed_tools)
+            # A route may require the executor model to choose a narrow tool
+            # capability before its first provider call.  In that case, bind
+            # only the lightweight manifest controls; the model must search
+            # and load the exact permitted capability itself.  This prevents a
+            # broad connector surface from consuming the entire context window
+            # before that model decision can be made.
+            initial_names = (
+                set()
+                if bool(policy.get("capability_discovery_required"))
+                else set(allowed_tools)
+            )
             bound_tools = capability_registry.initial(initial_names)
             tool_map.update({tool.name: tool for tool in core_tools})
             allowed_tools.update(tool.name for tool in core_tools)

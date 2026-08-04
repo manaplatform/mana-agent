@@ -80,8 +80,8 @@ class SearchDecisionEngine:
             return None
         payload = {
             "user_query": user_query,
-            "repo_context": repo_context[:1200],
-            "memory_context": memory_context[:1200],
+            "repo_context": repo_context,
+            "memory_context": memory_context,
             "max_results": max_results or self.config.max_results,
         }
         try:

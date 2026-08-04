@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from time import perf_counter
+from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -25,6 +26,22 @@ class QnAChain:
         self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
         self.model = model
         self.run_logger = LlmRunLogger()
+
+    def update_model_assignment(self, provider: str, model: str, *, settings: Any | None = None) -> None:
+        from mana_agent.config.inference_provider import resolve_inference_connection
+        from mana_agent.config.settings import Settings
+
+        governor = getattr(self.llm, "context_cost_governor", None)
+        connection = resolve_inference_connection(settings or Settings(), provider=provider)
+        self.llm = create_chat_model(
+            api_key=connection.api_key,
+            model=model,
+            base_url=connection.base_url,
+            provider=connection.provider,
+            default_headers=connection.headers,
+        )
+        self.llm.context_cost_governor = governor
+        self.model = model
 
     def run(self, question: str, context: str) -> str:
         logger.info("Invoking QnA chain")

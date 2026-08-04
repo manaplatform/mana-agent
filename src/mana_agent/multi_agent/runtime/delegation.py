@@ -17,7 +17,7 @@ class DelegationRequest(BaseModel):
     unresolved_questions: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     max_tool_calls: int = Field(ge=1, le=32)
-    max_tokens: int = Field(ge=128, le=32000)
+    max_tokens: int | None = Field(default=None, ge=1)
     out_of_bounds: list[str] = Field(default_factory=list)
     expected_result: str
     success_conditions: list[str] = Field(min_length=1)

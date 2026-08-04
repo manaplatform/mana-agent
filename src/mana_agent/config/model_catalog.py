@@ -37,6 +37,8 @@ class ModelDescriptor:
     id: str
     capabilities: frozenset[ModelCapability]
     context_window: int | None = None
+    max_output_tokens: int | None = None
+    tokenizer: str | None = None
     source: str = "discovered"
     available: bool = True
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
@@ -147,11 +149,25 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
             continue
         capabilities = normalize_capabilities(provider, model_id, metadata.get("capabilities"))
         context_window = metadata.get("context_length") or metadata.get("context_window")
+        max_output_tokens = metadata.get("max_output_tokens") or metadata.get("max_completion_tokens")
         try:
             context_window = int(context_window) if context_window is not None else None
         except (TypeError, ValueError):
             context_window = None
-        result.append(ModelDescriptor(provider=provider, id=model_id, capabilities=capabilities, context_window=context_window, source=source, metadata=metadata))
+        try:
+            max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else None
+        except (TypeError, ValueError):
+            max_output_tokens = None
+        result.append(ModelDescriptor(
+            provider=provider,
+            id=model_id,
+            capabilities=capabilities,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            tokenizer=str(metadata.get("tokenizer") or "") or None,
+            source=source,
+            metadata=metadata,
+        ))
     # Catalog endpoints can contain duplicate IDs while an upstream changes.
     deduplicated = {item.id: item for item in result}
     return sorted(deduplicated.values(), key=lambda item: item.qualified_id)

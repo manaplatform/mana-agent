@@ -183,7 +183,9 @@ class QueueManager:
             job.result_summary = "ok" if result.ok else str(result.error or "failed")
             job.status = QueueJobStatus.DONE if result.ok else QueueJobStatus.FAILED
             job.ended_at = utc_now()
-            job.token_usage = max(1, len(str(result.result or result.error or "")) // 4)
+            # Tool payload size is context evidence, not provider model usage.
+            # The context-cost service accounts for it if it is fed back into a model call.
+            job.token_usage = 0
             if isinstance(job.result, dict):
                 changed = job.result.get("changed_files") or job.result.get("files_changed") or []
                 if isinstance(changed, list):

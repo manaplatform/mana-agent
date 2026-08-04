@@ -4,6 +4,42 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Added model-authorized adaptive execution budgets. Provider-call admission now recalculates active lane reservations from the exact accounting forecast within immutable policy caps, and durable result overruns enter `pending_budget_decision` rather than being discarded. A fresh validated overrun decision can accept a verified flagged result, require review, or request normally validated bounded recovery. Added `/budget recalculate <task-id>` and durable budget revision evidence.
+  - Pending decision, review, and scheduled-recovery outcomes are reported as successful chat handoffs with warnings instead of failed chat execution.
+  - Finalization-decision model calls receive a fresh accounting step identity, preventing collisions with the already reconciled execution call.
+  - Added `/budget finalize <task-id>` to resume a durable pending-overrun result through its required model decision.
+  - Accepted overruns now project the authoritative completed supervisor record and verification evidence before marking the taskboard item done.
+  - `/budget finalize <task-id>` now repairs a previously completed overrun whose taskboard projection was interrupted, without requesting another provider decision.
+  - Exported `BudgetOverrunAction` with the other public execution-supervisor budget decision types.
+  - Pending overrun decisions now emit a waiting budget-decision event instead of a false `lane.failed` event, so accepted Gmail and other connector responses remain visibly successful.
+  - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -q`.
+
+- Changed Gmail connector execution to begin with lightweight, model-controlled capability discovery instead of binding every email action schema before the first provider call. The executor now selects and loads its exact Gmail capability from the manifest, avoiding context-budget admission failures while preserving the allowlist and fail-closed tool policy. Capability controls are explicitly read-only for transactional enforcement, and capability activation now refreshes the bound tool set even when a tool's estimated schema size is unchanged.
+  - User verification required: `python -m pytest tests/test_ask_agent.py tests/gateway/test_entry_routing.py -q`.
+
+- Updated multi-agent queue accounting coverage so tool-result payloads remain uncharged until they are included in a provider model call; reservation and worker-execution evidence remain durable.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
+
+- Aligned context-cost and lane tests with model-aware accounting: enforce-mode admissions now register exact test-model pricing, and lane exhaustion coverage supplies explicit configured limits because default lane contracts deliberately have no synthetic token or cost cap.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_lane_coordinator.py -q`.
+
+- Made native coding-planner initialization tolerate injected AskAgent-compatible implementations that do not provide optional context-cost accounting, while retaining governor propagation for configured production agents.
+  - User verification required: `python -m pytest tests/test_coding_agent.py -q`.
+
+- Replaced the unconstrained second routing pass for an already selected public-web or GitHub search source with a dedicated, model-constrained search-operation decision. The operation decision now exposes only the selected search tool and requires its compact query, while invalid decisions still stop without an alternate source. Search-source failures now preserve the fail-closed message without a duplicated trailing period.
+  - User verification required: `python -m pytest tests/gateway/test_turn_engine_search.py tests/gateway/test_entry_routing.py -q`.
+
+- Deferred telemetry's context-cost tokenizer and usage-normalizer imports until their functions execute, breaking the `telemetry.tokens` ↔ `context_cost` package-initialization cycle that prevented gateway tests and CLI imports from being collected.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_gmail_uses_dedicated_connector_not_coding_or_conversation tests/gateway/test_chat_gateway.py -q`.
+
+- Initialized the retrieved-memory accounting component for first-turn and other no-prior-assistant gateway routes, preventing an `UnboundLocalError` before Gmail and other supervised connector execution.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_gmail_uses_dedicated_connector_not_coding_or_conversation tests/gateway/test_chat_gateway.py -q`.
+
+- Replaced scattered runtime token envelopes with model-aware accounting owned by `context_cost`. Routing and gateway execution now carry the final provider/model, context/output capabilities, expected calls, explainable payload components, confidence, and Decimal cost into durable lane and supervisor records; Canvas estimates its serialized catalog, surface state, and tool schemas without fixed 4,096/1,024 assumptions.
+  - Added provider-usage normalization, tokenizer/profile resolution, conservative marked unknown-model policy, exact cached/output/reasoning pricing, historical p80 prediction, atomic idempotent reservations, reconciliation/release auditing, and reversible context fitting. Unknown pricing remains unknown and cost-constrained execution fails safely.
+  - Removed default lane token/cost caps as synthetic model limits, removed fixed prompt/taskboard/delegation character-token assumptions from active model paths, and documented capacity-versus-policy configuration and private accounting persistence.
+  - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/test_model_routing.py tests/gateway/test_routing_authority.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py tests/test_openrouter_provider.py -q` and `python -m pytest -q`.
+
 - Restored Python 3.10 compatibility for MCP transport failure handling by using the conditional `exceptiongroup` backport where built-in exception groups are unavailable. The MCP regression test now uses that same compatibility type.
   - User verification required: `python -m pytest tests/test_mcp.py::test_mcp_client_reports_the_concrete_task_group_failure` and `python -m pytest -q`.
 

@@ -132,6 +132,15 @@ All inference lanes resolve through the gateway-owned instance of `mana_agent.mo
 
 Simple single-model execution is the default. The main model may request decomposition or candidate competition, but the router can reject or reduce that request. Parallel candidates require positive evidence, two materially qualified models, isolation, an independent verifier, ownership safety, concurrency, latency, and reserved budget. Candidate executors use separate managed worktrees or patch roots; normalized diffs and executed check evidence go to the independently routed verifier. The winner alone may be promoted. See [Evidence-based model routing](model-routing.md).
 
+After routing selects the final provider/model, the shared
+`mana_agent.context_cost` service resolves its capability and Decimal pricing
+profile, estimates the serialized payload and expected calls, validates context
+and output capacity, and creates a durable reservation. Provider usage then
+reconciles that reservation; missing usage is explicitly estimated. Gateway
+lanes and the execution supervisor persist policy limits and estimate metadata
+without treating a lane cap as model capacity. See
+[Model-aware token accounting](model-token-accounting.md).
+
 ### Prompting and flow context
 
 - **`src/mana_agent/agent/flow.py`** builds an `AgentFlow` (goal + phase + verification

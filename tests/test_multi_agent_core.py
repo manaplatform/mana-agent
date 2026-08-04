@@ -559,7 +559,9 @@ def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
     assert task_after.actual_tool_events
     assert all(event["agent_id"] != "main" for event in task_after.actual_tool_events)
     assert task_after.budget_records
-    assert task_after.cost_by_queue_job_id[job.job_id] >= 1
+    assert task_after.cost_by_queue_job_id[job.job_id] == 0
+    assert task_after.budget_reserved_tokens >= job.budget_reserved
+    assert task_after.budget_used_tokens == 0
 
 
 def test_hierarchy_policy_rejects_main_agent_tool_execution(tmp_path):

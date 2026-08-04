@@ -1044,7 +1044,7 @@ def test_gateway_config_normalized_full_auto() -> None:
     assert cfg.auto_execute_max_passes == 10
 
 
-def test_gateway_constrains_model_routing_budgets_to_the_selected_lane(
+def test_gateway_keeps_task_policy_when_lane_has_no_explicit_cap(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
@@ -1063,27 +1063,38 @@ def test_gateway_constrains_model_routing_budgets_to_the_selected_lane(
 
     budgets = gateway._routing_budgets_for_lane(LaneId.CANVAS)
 
-    assert budgets.task_token_limit == 32_000
-    assert budgets.task_cost_limit == 32.0
+    assert budgets.task_token_limit == 40_000
+    assert budgets.task_cost_limit == 40.0
 
 
-def test_gateway_reserves_canvas_executor_envelope(tmp_path: Path, monkeypatch) -> None:
+def test_gateway_estimates_canvas_payload_without_fixed_minimums(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "mana_agent.commands.cli_internal.build_ask_service",
         lambda *args, **kwargs: _DummyAskService(),
     )
-    gateway = AgentChatGateway(tmp_path, coding_agent=False)
-
-    requested_input, requested_output = gateway._execution_reservation_tokens(
-        entry_route="canvas",
-        execution_decision=SimpleNamespace(
-            estimated_input_tokens=2_000,
-            estimated_output_tokens=2_000,
-        ),
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_max_steps=2,
+        settings=Settings(MANA_ROUTING_TASK_TOKEN_BUDGET=1_000_000),
     )
 
-    assert requested_input == 4_096
-    assert requested_output == 8_192
+    estimate = gateway._execution_token_estimate(
+        entry_route="canvas",
+        execution_decision=SimpleNamespace(
+            provider="openai",
+            selected_model=gateway.settings.openai_chat_model,
+            estimated_output_tokens=100,
+            expected_model_calls=1,
+        ),
+        request_text="draw a small rectangle",
+        session_id="",
+    )
+
+    assert estimate.components["user_request"] > 0
+    assert estimate.output_tokens == gateway.config.agent_max_steps * 100
+    assert "canvas_catalog" in estimate.components
+    assert "tool_schemas" in estimate.components
 
 
 def test_gateway_decision_failure_no_fallback(tmp_path: Path, monkeypatch) -> None:

@@ -8,6 +8,8 @@ import threading
 import pytest
 
 from mana_agent.execution_supervisor import (
+    BudgetOverrunAction,
+    BudgetOverrunFinalizationDecision,
     ExecutionState as SupervisorState,
     SideEffectClassification,
 )
@@ -625,7 +627,12 @@ def test_lock_leases_are_shared_across_gateway_process_state(coordinator: LaneCo
 
 
 def test_token_and_cost_budget_exhaustion(coordinator: LaneCoordinator) -> None:
+    coordinator.contracts = configured_lane_contracts({
+        "coding": {"token_budget": 100, "cost_budget": 0.10},
+    })
     coding = coordinator.contracts[LaneId.CODING]
+    assert coding.token_budget is not None
+    assert coding.cost_budget is not None
     with pytest.raises(LaneBudgetError):
         coordinator.reserve(
             normalized_intent="too many tokens", lane_id=LaneId.CODING, session_id="s",
@@ -677,7 +684,13 @@ def test_canvas_task_does_not_wait_for_repository_lock(
     coordinator.finish(operations.execution.task_id, state=LaneTaskState.CANCELLED)
 
 
-def test_finish_preserves_supervisor_budget_exhaustion(coordinator: LaneCoordinator) -> None:
+def test_finish_preserves_a_pending_model_budget_overrun_decision(coordinator: LaneCoordinator) -> None:
+    events: list[dict[str, object]] = []
+    coordinator.event_sink = lambda event_type, title, **kwargs: events.append({
+        "event_type": event_type,
+        "title": title,
+        **kwargs,
+    })
     reservation = coordinator.reserve(
         normalized_intent="complete within the reserved budget",
         lane_id=LaneId.OPERATIONS,
@@ -696,10 +709,115 @@ def test_finish_preserves_supervisor_budget_exhaustion(coordinator: LaneCoordina
         verification_state={"result": "present"},
     )
 
-    assert finished.state is LaneTaskState.BUDGET_EXHAUSTED
-    assert "execution budget exceeded before result acceptance" in finished.error
+    assert finished.state is LaneTaskState.PENDING_BUDGET_DECISION
+    assert "budget-overrun decision" in finished.error
     supervised = coordinator.execution_supervisor.store.get_task(finished.task_id)
-    assert supervised.state is SupervisorState.BUDGET_EXHAUSTED
+    assert supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+    assert events[-2]["event_type"] == "budget.overrun.decision.required"
+    assert events[-2]["status"] == "waiting"
+
+
+def test_accepted_budget_overrun_projects_authoritative_supervisor_completion(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="complete with a model-authorized budget overrun",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-finalization",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+    pending = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+    supervised = coordinator.execution_supervisor.verify_completion(pending.task_id)
+
+    finalized = coordinator.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_accept_budget_overrun",
+        task_id=pending.task_id,
+        attempt_id=supervised.attempt_id,
+        result_id=supervised.result_id,
+        result_evidence_hash=supervised.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.ACCEPT_WITH_OVERRUN,
+        reason="verified result is authorized despite immutable-cap overrun",
+        safe_to_continue=True,
+    ))
+
+    assert finalized.state is LaneTaskState.COMPLETED
+    taskboard_task = coordinator.taskboard.get_task(finalized.taskboard_task_id)
+    assert taskboard_task.status is TaskStatus.DONE
+    assert taskboard_task.supervisor_execution_id == pending.task_id
+    assert taskboard_task.verification_status == "passed"
+
+
+def test_reconciles_completed_overrun_when_the_prior_taskboard_projection_failed(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="repair a completed model-authorized budget overrun",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-projection-repair",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+    pending = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+    supervised = coordinator.execution_supervisor.verify_completion(pending.task_id)
+    coordinator.execution_supervisor.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_repair_budget_overrun_projection",
+        task_id=pending.task_id,
+        attempt_id=supervised.attempt_id,
+        result_id=supervised.result_id,
+        result_evidence_hash=supervised.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.ACCEPT_WITH_OVERRUN,
+        reason="verified result was already accepted before projection retry",
+        safe_to_continue=True,
+    ))
+
+    reconciled = coordinator.reconcile_authoritative_completion(pending.task_id)
+
+    assert reconciled.state is LaneTaskState.COMPLETED
+    taskboard_task = coordinator.taskboard.get_task(reconciled.taskboard_task_id)
+    assert taskboard_task.status is TaskStatus.DONE
+    assert taskboard_task.supervisor_execution_id == pending.task_id
+
+
+def test_recalculate_budget_expands_a_live_reservation_within_lane_policy(
+    coordinator: LaneCoordinator,
+) -> None:
+    coordinator.contracts = configured_lane_contracts({"operations": {"token_budget": 1000}})
+    reservation = coordinator.reserve(
+        normalized_intent="forecasted provider call", lane_id=LaneId.OPERATIONS,
+        session_id="session-recalculate",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10, requested_output_tokens=10,
+    )
+    coordinator.start(reservation)
+
+    revised = coordinator.recalculate_budget(
+        reservation.execution.task_id,
+        forecast_input_tokens=50,
+        forecast_output_tokens=75,
+        forecast_cost=0.01,
+        accounting_reservation_id="reservation_forecast",
+    )
+
+    assert revised.budget.reserved_tokens == 125
+    assert revised.budget.revisions[-1]["accounting_reservation_id"] == "reservation_forecast"
 
 
 def test_child_agent_reserves_and_consumes_parent_budget(coordinator: LaneCoordinator) -> None:

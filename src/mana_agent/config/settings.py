@@ -169,6 +169,24 @@ class Settings(BaseSettings):
     mana_context_cost_log_retention_days: int = Field(
         default=30, ge=1, alias="MANA_CONTEXT_COST_LOG_RETENTION_DAYS"
     )
+    mana_context_estimation_safety_margin_ratio: float = Field(
+        default=0.05, ge=0.0, le=0.5, alias="MANA_CONTEXT_ESTIMATION_SAFETY_MARGIN_RATIO"
+    )
+    mana_context_default_output_ratio: float = Field(
+        default=0.20, gt=0.0, le=1.0, alias="MANA_CONTEXT_DEFAULT_OUTPUT_RATIO"
+    )
+    mana_context_historical_prediction_enabled: bool = Field(
+        default=True, alias="MANA_CONTEXT_HISTORICAL_PREDICTION_ENABLED"
+    )
+    mana_context_unknown_model_policy: Literal["require_metadata", "conservative"] = Field(
+        default="conservative", alias="MANA_CONTEXT_UNKNOWN_MODEL_POLICY"
+    )
+    mana_context_unknown_model_context_window: int = Field(
+        default=16_384, ge=1, alias="MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW"
+    )
+    mana_context_unknown_model_max_output_tokens: int = Field(
+        default=4_096, ge=1, alias="MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS"
+    )
     mana_routing_benchmark_weights: dict[str, float] | str = Field(
         default_factory=dict, alias="MANA_ROUTING_BENCHMARK_WEIGHTS"
     )
@@ -709,6 +727,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "context ratios must increase in warning, compact, maximum-utilization, hard-limit order"
             )
+        if self.mana_context_unknown_model_max_output_tokens > self.mana_context_unknown_model_context_window:
+            raise ValueError("unknown-model max output cannot exceed its configured context window")
         from mana_agent.canvas.config import CanvasConfig
 
         CanvasConfig.from_settings(self)
