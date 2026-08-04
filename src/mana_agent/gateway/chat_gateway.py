@@ -65,6 +65,8 @@ from mana_agent.gateway.turn_engine import (
     _conversation_prompt,
     agent_decision_llm,
     decide_chat_route,
+    decide_search_operation,
+    is_valid_search_operation_decision,
     load_analysis_context,
     process_chat_turn,
     run_web_research_answer,
@@ -5333,10 +5335,11 @@ class AgentChatGateway:
                 "github_search" if decision.route == "github" else "web_search"
             )
             try:
-                search_operation = decide_chat_route(
+                search_operation = decide_search_operation(
                     ask_service=ask_service,
                     question=text,
                     root=self.root,
+                    required_tool=required_tool,
                     memory_context=_conversation_prompt(state, text),
                 )
             except Exception as exc:
@@ -5350,16 +5353,9 @@ class AgentChatGateway:
                     decision=decision,
                     payload={"route": decision.route},
                 )
-            selected = set(search_operation.selected_tools)
-            query = str(
-                (search_operation.tool_inputs.get(required_tool) or {}).get("query")
-                or ""
-            ).strip()
-            if (
-                not search_operation.verifier_passed
-                or selected != {required_tool}
-                or not query
-                or len(query) > 400
+            if not is_valid_search_operation_decision(
+                search_operation,
+                required_tool=required_tool,
             ):
                 return ChatTurnResult(
                     answer=(
@@ -5740,23 +5736,15 @@ class AgentChatGateway:
                     required_tool = (
                         "github_search" if source == "github" else "web_search"
                     )
-                    source_decision = decide_chat_route(
+                    source_decision = decide_search_operation(
                         ask_service=ask_service,
                         question=text,
                         root=self.root,
+                        required_tool=required_tool,
                     )
-                    selected = set(source_decision.selected_tools)
-                    query = str(
-                        (source_decision.tool_inputs.get(required_tool) or {}).get(
-                            "query"
-                        )
-                        or ""
-                    ).strip()
-                    if (
-                        not source_decision.verifier_passed
-                        or selected != {required_tool}
-                        or not query
-                        or len(query) > 400
+                    if not is_valid_search_operation_decision(
+                        source_decision,
+                        required_tool=required_tool,
                     ):
                         raise RuntimeError(
                             f"Model decision failed: {required_tool}.query. "
@@ -5786,17 +5774,18 @@ class AgentChatGateway:
                     )
                 executions[source] = {"status": "success"}
             except Exception as exc:
+                failure = str(exc).rstrip().rstrip(".")
                 trace.append(
                     {
                         "tool_name": source,
                         "status": "failed",
-                        "result_summary": str(exc),
+                        "result_summary": failure,
                     }
                 )
-                executions[source] = {"status": "failed", "error": str(exc)}
+                executions[source] = {"status": "failed", "error": failure}
                 return ChatTurnResult(
                     answer=(
-                        f"The routing model selected {source} for this request, but its required operation failed: {exc}. "
+                        f"The routing model selected {source} for this request, but its required operation failed: {failure}. "
                         "No alternative source was used."
                     ),
                     error=f"{source}_execution_failed",

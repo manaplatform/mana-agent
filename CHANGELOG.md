@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Replaced the unconstrained second routing pass for an already selected public-web or GitHub search source with a dedicated, model-constrained search-operation decision. The operation decision now exposes only the selected search tool and requires its compact query, while invalid decisions still stop without an alternate source. Search-source failures now preserve the fail-closed message without a duplicated trailing period.
+  - User verification required: `python -m pytest tests/gateway/test_turn_engine_search.py tests/gateway/test_entry_routing.py -q`.
+
 - Deferred telemetry's context-cost tokenizer and usage-normalizer imports until their functions execute, breaking the `telemetry.tokens` ↔ `context_cost` package-initialization cycle that prevented gateway tests and CLI imports from being collected.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_gmail_uses_dedicated_connector_not_coding_or_conversation tests/gateway/test_chat_gateway.py -q`.
 
