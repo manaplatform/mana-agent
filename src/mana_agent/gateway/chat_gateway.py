@@ -99,10 +99,12 @@ from mana_agent.model_routing.models import (
     RoutingRequest,
 )
 from mana_agent.execution_supervisor.models import (
+    BudgetForecast,
     RecoveryAction,
     RecoveryDecision,
     RetryCategory,
 )
+from mana_agent.execution_supervisor.budget_decision import BudgetOverrunDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
 from mana_agent.human_inbox.models import (
     AgentInboxObservation,
@@ -702,6 +704,9 @@ class AgentChatGateway:
             provider_limits=self.config.lane_provider_limits,
             session_token_budget=self.config.lane_session_token_budget,
             global_token_budget=self.config.lane_global_token_budget,
+        )
+        self._stack.context_cost_governor.set_task_budget_reconciler(
+            self._recalculate_active_lane_budget
         )
         from mana_agent.transactional_actions.runtime import create_transactional_runtime
 
@@ -2632,6 +2637,10 @@ class AgentChatGateway:
                 indent=2,
                 default=str,
             )
+        if command == "/budget" and len(parts) > 1 and parts[1].lower() == "recalculate":
+            if len(parts) != 3:
+                return "Usage: /budget recalculate <task-id>"
+            return json.dumps(self.recalculate_task_budget(parts[2]), indent=2, default=str)
         if command == "/budget":
             return json.dumps(self.budget_usage(session_id=session_id), indent=2)
         if command == "/candidates":
@@ -2886,6 +2895,56 @@ class AgentChatGateway:
         return self._lane_coordinator.budget_usage(
             task_id=task_id, session_id=session_id
         )
+
+    def recalculate_task_budget(self, task_id: str) -> dict[str, Any]:
+        """Re-run the stored provider-call forecast without invoking a provider."""
+        usage = self._stack.context_cost_governor.task_usage(task_id)
+        pending_input = int(usage.get("pending_reserved_input_tokens", 0))
+        pending_output = int(usage.get("pending_reserved_output_tokens", 0))
+        if pending_input or pending_output:
+            self._lane_coordinator.recalculate_budget(
+                task_id,
+                forecast_input_tokens=pending_input,
+                forecast_output_tokens=pending_output,
+                forecast_cost=None,
+                reason="manual budget recalculation",
+            )
+        execution = self._lane_coordinator.inspect_task(task_id)
+        durable = self._lane_coordinator.execution_supervisor.store.get_task(task_id)
+        return {
+            "task_id": task_id,
+            "usage": usage,
+            "lane_budget": asdict(execution.budget),
+            "supervisor_budget": {
+                "token_budget": durable.token_budget,
+                "token_usage": durable.token_usage,
+                "estimated_cost": durable.estimated_cost,
+                "actual_cost": durable.actual_cost,
+                "monetary_budget": durable.monetary_budget,
+                "budget_revisions": [item.model_dump(mode="json") for item in durable.budget_revisions],
+                "budget_overrun": durable.budget_overrun,
+                "budget_finalization_decision_id": durable.budget_finalization_decision_id,
+            },
+        }
+
+    def finalize_budget_overrun_with_model(self, task_id: str) -> dict[str, Any]:
+        """Request and apply the required fresh model decision for one escrowed result."""
+        supervisor = self._lane_coordinator.execution_supervisor
+        # Verification creates durable evidence but deliberately leaves the task
+        # pending; only the next validated model decision may finalize it.
+        task = supervisor.verify_completion(task_id)
+        result = supervisor.store.get_result(task.result_id)
+        if result is None:
+            raise ExecutionSupervisorError("budget-overrun task has no durable result escrow")
+        decision = BudgetOverrunDecider(self._entry_router.llm).decide(
+            task, result_payload=redact_secrets(dict(result.payload))
+        )
+        execution = self._lane_coordinator.finalize_budget_overrun(decision)
+        return {
+            "task_id": task_id,
+            "decision": decision.model_dump(mode="json"),
+            "lane": asdict(execution),
+        }
 
     def _routing_budgets_for_lane(self, lane_id: LaneId):
         """Constrain model estimates to the already selected lane contract."""
@@ -3766,7 +3825,40 @@ class AgentChatGateway:
                                 not result.error
                                 and finished.state is not LaneTaskState.COMPLETED
                             ):
-                                if finished.state is LaneTaskState.BUDGET_EXHAUSTED:
+                                if finished.state is LaneTaskState.PENDING_BUDGET_DECISION:
+                                    try:
+                                        self.finalize_budget_overrun_with_model(
+                                            reservation.execution.task_id
+                                        )
+                                        finished = self._lane_coordinator.inspect_task(
+                                            reservation.execution.task_id
+                                        )
+                                    except Exception as exc:
+                                        result.error = "budget_overrun_decision_required"
+                                        result.mode = "lane-budget-decision-pending"
+                                        result.answer = (
+                                            "A durable result exceeded an immutable budget and is "
+                                            "awaiting a validated model finalization decision. "
+                                            f"No further execution was allowed. Reason: {exc}"
+                                        )
+                                    if finished.state is LaneTaskState.PENDING_BUDGET_DECISION:
+                                        result.error = "budget_overrun_review_required"
+                                        result.mode = "lane-budget-review-pending"
+                                        result.answer = (
+                                            "The budget-overrun finalization decision retained the "
+                                            "durable result for review. No further execution is allowed."
+                                        )
+                                    elif finished.state is LaneTaskState.QUEUED:
+                                        result.error = "budget_overrun_recovery_scheduled"
+                                        result.mode = "lane-budget-recovery-scheduled"
+                                        result.answer = (
+                                            "The validated budget-overrun decision scheduled bounded "
+                                            "recovery under the normal retry policy."
+                                        )
+                                if (
+                                    not result.error
+                                    and finished.state is LaneTaskState.BUDGET_EXHAUSTED
+                                ):
                                     result.error = "lane_budget_exhausted"
                                     result.mode = "lane-budget-exhausted"
                                     result.answer = (
@@ -3774,7 +3866,7 @@ class AgentChatGateway:
                                         "budget before its result could be accepted. "
                                         f"{finished.error or 'No result was accepted.'}"
                                     )
-                                else:
+                                elif not result.error and finished.state is not LaneTaskState.COMPLETED:
                                     result.error = "completion_verification_failed"
                                     result.mode = "lane-verification-failed"
                                     result.answer = (
@@ -4006,6 +4098,27 @@ class AgentChatGateway:
         verification_state.setdefault("context_cost_usage", usage)
         kwargs["verification_state"] = verification_state
         return self._lane_coordinator.finish(task_id, **kwargs)
+
+    def _recalculate_active_lane_budget(self, forecast: BudgetForecast) -> None:
+        """Apply a provider-call forecast only while its exact lane task is active."""
+        task_id = forecast.task_id
+        try:
+            execution = self._lane_coordinator.inspect_task(task_id)
+        except KeyError:
+            return
+        if execution.state not in {
+            LaneTaskState.QUEUED, LaneTaskState.RUNNING, LaneTaskState.WAITING,
+            LaneTaskState.HANDOFF, LaneTaskState.VERIFYING,
+        }:
+            return
+        self._lane_coordinator.recalculate_budget(
+            task_id=forecast.task_id,
+            forecast_input_tokens=forecast.forecast_input_tokens,
+            forecast_output_tokens=forecast.forecast_output_tokens,
+            forecast_cost=forecast.forecast_cost,
+            accounting_reservation_id=forecast.accounting_reservation_id,
+            reason=forecast.reason,
+        )
 
     def _synchronize_lane_usage(self, task_id: str) -> dict[str, int | float]:
         usage = self._stack.context_cost_governor.task_usage(task_id)

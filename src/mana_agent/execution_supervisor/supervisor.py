@@ -24,6 +24,9 @@ from mana_agent.execution_supervisor.models import (
     AttemptRecord,
     ActionRecord,
     ActionRequestState,
+    BudgetOverrunAction,
+    BudgetOverrunFinalizationDecision,
+    BudgetRevision,
     CancellationStatus,
     CheckpointRecord,
     CompletionContract,
@@ -901,18 +904,17 @@ class ExecutionSupervisor:
         current = self.store.get_task(task_id)
         projected_tokens = current.token_usage + max(0, token_usage)
         projected_cost = current.actual_cost + max(0.0, float(actual_cost or 0.0))
-        over_tokens = current.token_budget is not None and projected_tokens > current.token_budget
-        over_cost = current.monetary_budget is not None and projected_cost > current.monetary_budget
-        if over_tokens or over_cost:
-            reason = "execution budget exceeded before result acceptance"
-            self.transition(task_id, ExecutionState.BUDGET_EXHAUSTED, reason=reason)
-            raise BudgetExceededError(reason)
         ancestors: list[TaskRecord] = []
         parent_id = current.parent_task_id
         while parent_id:
             ancestor = self.store.get_task(parent_id)
             ancestors.append(ancestor)
             parent_id = ancestor.parent_task_id
+        overrun_scopes: list[dict[str, Any]] = []
+        if current.token_budget is not None and projected_tokens > current.token_budget:
+            overrun_scopes.append({"scope": "task", "task_id": current.task_id, "kind": "tokens", "limit": current.token_budget, "actual": projected_tokens})
+        if current.monetary_budget is not None and projected_cost > current.monetary_budget:
+            overrun_scopes.append({"scope": "task", "task_id": current.task_id, "kind": "cost", "limit": current.monetary_budget, "actual": projected_cost})
         for ancestor in ancestors:
             ancestor_tokens = ancestor.token_usage + max(0, token_usage)
             ancestor_cost = ancestor.actual_cost + max(0.0, float(actual_cost or 0.0))
@@ -923,15 +925,22 @@ class ExecutionSupervisor:
                 ancestor.monetary_budget is not None
                 and ancestor_cost > ancestor.monetary_budget
             ):
-                reason = f"ancestor task budget exceeded: {ancestor.task_id}"
-                self.transition(task_id, ExecutionState.BUDGET_EXHAUSTED, reason=reason)
-                raise BudgetExceededError(reason)
+                overrun_scopes.append({
+                    "scope": "ancestor", "task_id": ancestor.task_id,
+                    "kind": "tokens" if ancestor.token_budget is not None and ancestor_tokens > ancestor.token_budget else "cost",
+                    "limit": ancestor.token_budget if ancestor.token_budget is not None and ancestor_tokens > ancestor.token_budget else ancestor.monetary_budget,
+                    "actual": ancestor_tokens if ancestor.token_budget is not None and ancestor_tokens > ancestor.token_budget else ancestor_cost,
+                })
 
         def escrow(task: TaskRecord) -> EscrowResult:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
                 raise LeaseConflictError(f"task cannot publish a result from state {task.state.value}")
-            validate_transition(task.state, ExecutionState.COMPLETED_PENDING_VERIFICATION)
+            target_state = (
+                ExecutionState.PENDING_BUDGET_DECISION
+                if overrun_scopes else ExecutionState.COMPLETED_PENDING_VERIFICATION
+            )
+            validate_transition(task.state, target_state)
             result = EscrowResult(
                 task_id=task.task_id,
                 parent_task_id=task.parent_task_id,
@@ -951,7 +960,20 @@ class ExecutionSupervisor:
                 and actual_cost is not None
             )
             task.result_capsule_revisions = dict(capsule_revisions or {})
-            task.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
+            if overrun_scopes:
+                evidence_payload = {
+                    "task_id": task.task_id, "attempt_id": attempt_id,
+                    "result_id": result.result_id, "token_usage": projected_tokens,
+                    "actual_cost": projected_cost, "overruns": overrun_scopes,
+                }
+                task.budget_overrun = {
+                    **evidence_payload,
+                    "evidence_hash": "sha256:" + hashlib.sha256(
+                        repr(evidence_payload).encode("utf-8")
+                    ).hexdigest(),
+                    "status": "pending_model_decision",
+                }
+            task.state = target_state
             task.updated_at = self.clock()
             return result
         try:
@@ -991,8 +1013,110 @@ class ExecutionSupervisor:
                 parent.updated_at = self.clock()
             self.store.update_task(ancestor.task_id, aggregate)
         self._emit("result_escrowed", task, result_id=result.result_id)
+        if overrun_scopes:
+            self._emit(
+                "budget_overrun_decision_required", task,
+                result_id=result.result_id,
+                evidence_hash=task.budget_overrun["evidence_hash"],
+                overruns=overrun_scopes,
+            )
+            return task
         self._emit("verification_started", task)
         return self.verify_completion(task_id)
+
+    def revise_budget(
+        self,
+        task_id: str,
+        *,
+        token_budget: int,
+        estimated_cost: float | None,
+        reason: str,
+        evidence: dict[str, Any],
+    ) -> TaskRecord:
+        """Persist a policy-validated reservation revision before more work runs."""
+        requested = max(0, int(token_budget))
+
+        def revise(task: TaskRecord) -> None:
+            if task.state not in {
+                ExecutionState.QUEUED, ExecutionState.LEASED, ExecutionState.RUNNING,
+                ExecutionState.WAITING, ExecutionState.RETRY_SCHEDULED, ExecutionState.REPLANNING,
+            }:
+                raise BudgetExceededError("task cannot revise its budget from the current state")
+            if requested < task.token_usage:
+                raise BudgetExceededError("revised token budget is below recorded usage")
+            next_cost = max(task.estimated_cost, float(estimated_cost or 0.0))
+            if task.monetary_budget is not None and (
+                estimated_cost is None or next_cost > task.monetary_budget
+            ):
+                raise BudgetExceededError("revised estimated cost exceeds the immutable monetary budget")
+            previous = task.token_budget
+            previous_cost = task.estimated_cost
+            if previous is not None and requested <= previous and next_cost <= previous_cost:
+                return
+            task.token_budget = max(previous or 0, requested) or None
+            task.estimated_cost = next_cost
+            task.estimated_cost_known = estimated_cost is not None
+            task.budget_revisions.append(BudgetRevision(
+                reason=reason,
+                previous_token_budget=previous,
+                revised_token_budget=task.token_budget,
+                previous_estimated_cost=previous_cost,
+                revised_estimated_cost=next_cost,
+                evidence=dict(evidence),
+            ))
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, revise)
+        self._emit("budget_revised", task, reason=reason, evidence=evidence)
+        return task
+
+    def finalize_budget_overrun(
+        self,
+        decision: BudgetOverrunFinalizationDecision,
+    ) -> TaskRecord:
+        """Apply only a fresh model decision tied to the immutable overrun evidence."""
+        task = self.store.get_task(decision.task_id)
+        overrun = dict(task.budget_overrun or {})
+        if task.state is not ExecutionState.PENDING_BUDGET_DECISION:
+            raise BudgetExceededError("task is not awaiting a budget-overrun decision")
+        if (
+            task.attempt_id != decision.attempt_id or task.result_id != decision.result_id
+            or overrun.get("evidence_hash") != decision.result_evidence_hash
+        ):
+            raise BudgetExceededError("budget-overrun decision does not match durable result evidence")
+        if decision.action is BudgetOverrunAction.RETRY_OR_REPLAN:
+            recovery = decision.recovery_decision
+            if recovery is None:
+                raise BudgetExceededError("budget-overrun recovery decision is missing")
+            if task.token_budget is not None and task.token_usage >= task.token_budget:
+                raise BudgetExceededError("no separately funded token allocation is available for recovery")
+            if task.monetary_budget is not None and task.actual_cost >= task.monetary_budget:
+                raise BudgetExceededError("no separately funded cost allocation is available for recovery")
+            self.retry(task.task_id, recovery)
+            return self.store.get_task(task.task_id)
+
+        def finalize(current: TaskRecord) -> None:
+            if current.state is not ExecutionState.PENDING_BUDGET_DECISION:
+                raise BudgetExceededError("budget-overrun decision is stale")
+            current.budget_finalization_decision_id = decision.decision_id
+            current.budget_overrun["decision"] = decision.action.value
+            current.budget_overrun["decision_reason"] = decision.reason
+            current.updated_at = self.clock()
+            if decision.action is BudgetOverrunAction.ACCEPT_WITH_OVERRUN:
+                if current.verification_status is not VerificationStatus.PASSED:
+                    raise CompletionVerificationError("budget-overrun result must pass completion verification before acceptance")
+                validate_transition(current.state, ExecutionState.COMPLETED)
+                current.state = ExecutionState.COMPLETED
+                current.finished_at = current.updated_at
+                current.budget_overrun["status"] = "accepted_with_overrun"
+            else:
+                current.budget_overrun["status"] = "requires_human_review"
+
+        if decision.action is BudgetOverrunAction.ACCEPT_WITH_OVERRUN:
+            self.verify_completion(task.task_id)
+        task, _ = self.store.update_task(task.task_id, finalize)
+        self._emit("budget_overrun_finalized", task, decision_id=decision.decision_id, action=decision.action.value)
+        return task
 
     def set_completion_contract(
         self,
@@ -1015,7 +1139,10 @@ class ExecutionSupervisor:
 
     def verify_completion(self, task_id: str) -> TaskRecord:
         task = self.store.get_task(task_id)
-        if task.state != ExecutionState.COMPLETED_PENDING_VERIFICATION:
+        if task.state not in {
+            ExecutionState.COMPLETED_PENDING_VERIFICATION,
+            ExecutionState.PENDING_BUDGET_DECISION,
+        }:
             raise CompletionVerificationError("task is not awaiting completion verification")
         result = self.store.get_result(task.result_id)
         if result is None:
@@ -1099,7 +1226,10 @@ class ExecutionSupervisor:
             current.completion_artefacts = list(report.artifacts)
             current.verification_status = report.status
             current.updated_at = self.clock()
-            if report.status == VerificationStatus.PASSED:
+            if (
+                report.status == VerificationStatus.PASSED
+                and current.state is ExecutionState.COMPLETED_PENDING_VERIFICATION
+            ):
                 validate_transition(current.state, ExecutionState.COMPLETED)
                 current.state = ExecutionState.COMPLETED
                 current.finished_at = current.updated_at
@@ -1116,7 +1246,7 @@ class ExecutionSupervisor:
                 "verification": report.model_dump(mode="json"),
             },
         )
-        if report.status == VerificationStatus.PASSED:
+        if report.status == VerificationStatus.PASSED and task.state is ExecutionState.COMPLETED:
             for artifact in report.artifacts:
                 self._emit("artefact_verified", task, artifact=artifact.model_dump(mode="json"))
             self._emit("task_completed", task, result_id=result.result_id)

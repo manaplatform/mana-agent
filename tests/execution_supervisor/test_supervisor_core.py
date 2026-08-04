@@ -23,6 +23,8 @@ from mana_agent.execution_supervisor.errors import (
 )
 from mana_agent.execution_supervisor.models import (
     ActionRequestState,
+    BudgetOverrunAction,
+    BudgetOverrunFinalizationDecision,
     CheckpointRecord,
     CompletionContract,
     CompletionContractType,
@@ -583,7 +585,7 @@ def test_parent_wait_timeout_and_minimum_success(runtime):
     assert supervisor.parent_progress(parent.task_id).timed_out
 
 
-def test_token_and_cost_budgets_block_result(runtime):
+def test_token_and_cost_overrun_requires_a_fresh_model_finalization_decision(runtime):
     supervisor, _clock, tmp_path = runtime
     task = create(
         supervisor,
@@ -593,15 +595,52 @@ def test_token_and_cost_budgets_block_result(runtime):
         monetary_budget=0.1,
     )
     attempt_id, token = running(supervisor, task)
-    with pytest.raises(BudgetExceededError):
-        supervisor.submit_result(
-            task.task_id,
+    pending = supervisor.submit_result(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        payload={"ok": True},
+        token_usage=2,
+    )
+    assert pending.state == ExecutionState.PENDING_BUDGET_DECISION
+    assert pending.result_id
+    assert pending.budget_overrun["status"] == "pending_model_decision"
+
+    finalized = supervisor.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_budget_review",
+        task_id=task.task_id,
+        attempt_id=attempt_id,
+        result_id=pending.result_id,
+        result_evidence_hash=pending.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.REQUIRE_REVIEW,
+        reason="model requires operator review",
+        safe_to_continue=True,
+    ))
+    assert finalized.state == ExecutionState.PENDING_BUDGET_DECISION
+    assert finalized.budget_overrun["status"] == "requires_human_review"
+
+
+def test_budget_overrun_rejects_stale_model_decision_evidence(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, token_budget=1)
+    attempt_id, token = running(supervisor, task)
+    pending = supervisor.submit_result(
+        task.task_id, attempt_id=attempt_id, lease_token=token,
+        payload={"ok": True}, token_usage=2,
+    )
+
+    with pytest.raises(BudgetExceededError, match="does not match durable result evidence"):
+        supervisor.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+            decision_id="decision_stale_budget_evidence",
+            task_id=task.task_id,
             attempt_id=attempt_id,
-            lease_token=token,
-            payload={"ok": True},
-            token_usage=2,
-        )
-    assert supervisor.store.get_task(task.task_id).state == ExecutionState.BUDGET_EXHAUSTED
+            result_id=pending.result_id,
+            result_evidence_hash="sha256:stale",
+            action=BudgetOverrunAction.REQUIRE_REVIEW,
+            reason="stale evidence",
+            safe_to_continue=True,
+        ))
+    assert supervisor.store.get_task(task.task_id).state == ExecutionState.PENDING_BUDGET_DECISION
 
 
 def test_duplicate_create_does_not_duplicate_event(runtime):

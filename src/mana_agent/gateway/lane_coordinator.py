@@ -47,7 +47,11 @@ from mana_agent.execution_supervisor.errors import (
     CompletionVerificationError,
     ExecutionSupervisorError,
 )
-from mana_agent.execution_supervisor.models import RecoveryAction
+from mana_agent.execution_supervisor.models import (
+    BudgetOverrunFinalizationDecision,
+    ExecutionState,
+    RecoveryAction,
+)
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
     import msvcrt
@@ -156,7 +160,7 @@ _CONTROL_TRANSITIONS: dict[LaneTaskState, frozenset[LaneTaskState]] = {
     LaneTaskState.CREATED: frozenset({LaneTaskState.ROUTING, LaneTaskState.REJECTED, LaneTaskState.FAILED}),
     LaneTaskState.ROUTING: frozenset({LaneTaskState.QUEUED, LaneTaskState.REJECTED, LaneTaskState.FAILED}),
     LaneTaskState.QUEUED: frozenset({LaneTaskState.RUNNING, LaneTaskState.PAUSED, LaneTaskState.CANCELLING, LaneTaskState.BLOCKED, LaneTaskState.REJECTED}),
-    LaneTaskState.RUNNING: frozenset({LaneTaskState.WAITING, LaneTaskState.BLOCKED, LaneTaskState.CANCELLING, LaneTaskState.VERIFYING, LaneTaskState.COMPLETED, LaneTaskState.FAILED}),
+    LaneTaskState.RUNNING: frozenset({LaneTaskState.WAITING, LaneTaskState.BLOCKED, LaneTaskState.CANCELLING, LaneTaskState.VERIFYING, LaneTaskState.PENDING_BUDGET_DECISION, LaneTaskState.COMPLETED, LaneTaskState.FAILED}),
     LaneTaskState.WAITING: frozenset({LaneTaskState.QUEUED, LaneTaskState.RUNNING, LaneTaskState.PAUSED, LaneTaskState.BLOCKED, LaneTaskState.CANCELLING}),
     LaneTaskState.BLOCKED: frozenset({LaneTaskState.QUEUED, LaneTaskState.CANCELLING, LaneTaskState.FAILED, LaneTaskState.REJECTED}),
     LaneTaskState.PAUSED: frozenset({LaneTaskState.QUEUED, LaneTaskState.CANCELLING}),
@@ -188,6 +192,7 @@ class LaneBudget:
     model_max_output_tokens: int = 0
     estimate_confidence: str = ""
     estimate_source: str = ""
+    revisions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def reserved_tokens(self) -> int:
@@ -1171,10 +1176,18 @@ class LaneCoordinator:
                     )
             else:
                 verified = supervised.state == SupervisorState.COMPLETED
-                state = LaneTaskState.COMPLETED if verified else LaneTaskState.VERIFYING
+                state = (
+                    LaneTaskState.COMPLETED if verified
+                    else LaneTaskState.PENDING_BUDGET_DECISION
+                    if supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+                    else LaneTaskState.VERIFYING
+                )
                 if not verified:
-                    manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
-                    execution.error = _completion_verification_failure(manifest)
+                    if state is LaneTaskState.PENDING_BUDGET_DECISION:
+                        execution.error = "A validated model budget-overrun decision is required before finalization."
+                    else:
+                        manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+                        execution.error = _completion_verification_failure(manifest)
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
         elif state == LaneTaskState.BUDGET_EXHAUSTED:
@@ -1204,6 +1217,7 @@ class LaneCoordinator:
                 LaneTaskState.COMPLETED: TaskStatus.DONE,
                 LaneTaskState.VERIFYING: TaskStatus.NEEDS_REVIEW,
                 LaneTaskState.CANCELLED: TaskStatus.CANCELLED,
+                LaneTaskState.PENDING_BUDGET_DECISION: TaskStatus.NEEDS_REVIEW,
             }.get(state, TaskStatus.FAILED)
             reason = error or execution.error or f"lane execution ended as {state.value}"
             if mapped_status == TaskStatus.DONE:
@@ -1283,6 +1297,74 @@ class LaneCoordinator:
                 self.execution_supervisor.record_accounting_reservations(
                     task_id, accounting_reservation_ids
                 )
+            return execution
+
+    def recalculate_budget(
+        self,
+        task_id: str,
+        *,
+        forecast_input_tokens: int,
+        forecast_output_tokens: int,
+        forecast_cost: float | None,
+        accounting_reservation_id: str = "",
+        reason: str = "provider-call forecast",
+    ) -> LaneExecution:
+        """Atomically grow a reservation only when every immutable cap admits it."""
+        with self._condition:
+            execution = self._executions[task_id]
+            if execution.state not in ACTIVE_LANE_STATES:
+                raise LaneBudgetError("task is not eligible for budget recalculation")
+            budget = execution.budget
+            next_input = max(budget.reserved_input_tokens, budget.consumed_input_tokens + max(0, int(forecast_input_tokens)))
+            next_output = max(budget.reserved_output_tokens, budget.consumed_output_tokens + max(0, int(forecast_output_tokens)))
+            next_total = next_input + next_output
+            next_cost = max(budget.estimated_cost, budget.actual_cost + max(0.0, float(forecast_cost or 0.0)))
+            contract = self.contracts[execution.owning_lane]
+            if contract.token_budget is not None and next_total > contract.token_budget:
+                raise LaneBudgetError("recalculated budget exceeds the lane token limit")
+            if contract.cost_budget is not None and (forecast_cost is None or next_cost > contract.cost_budget):
+                raise LaneBudgetError("recalculated budget exceeds the lane cost limit")
+            active = [item for item in self._executions.values() if item.state in ACTIVE_LANE_STATES and item.task_id != task_id]
+            if self.session_token_budget is not None and sum(item.budget.reserved_tokens for item in active if item.session_id == execution.session_id) + next_total > self.session_token_budget:
+                raise LaneBudgetError("recalculated budget exceeds the session token limit")
+            if self.global_token_budget is not None and sum(item.budget.reserved_tokens for item in active) + next_total > self.global_token_budget:
+                raise LaneBudgetError("recalculated budget exceeds the global token limit")
+            if execution.parent_task_id and execution.parent_task_id in self._executions:
+                parent = self._executions[execution.parent_task_id]
+                if next_total > max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens):
+                    raise LaneBudgetError("recalculated child budget exceeds the parent remaining budget")
+            if next_total <= budget.reserved_tokens and next_cost <= budget.estimated_cost:
+                return execution
+            previous_total = budget.reserved_tokens
+            self.execution_supervisor.revise_budget(
+                task_id,
+                token_budget=next_total,
+                estimated_cost=(next_cost if forecast_cost is not None else None),
+                reason=reason,
+                evidence={
+                    "forecast_input_tokens": max(0, int(forecast_input_tokens)),
+                    "forecast_output_tokens": max(0, int(forecast_output_tokens)),
+                    "forecast_cost": forecast_cost,
+                    "accounting_reservation_id": accounting_reservation_id,
+                },
+            )
+            budget.reserved_input_tokens = next_input
+            budget.reserved_output_tokens = next_output
+            budget.estimated_cost = next_cost
+            budget.estimated_cost_known = forecast_cost is not None
+            budget.revisions.append({
+                "reason": reason,
+                "previous_reserved_tokens": previous_total,
+                "revised_reserved_tokens": next_total,
+                "forecast_input_tokens": max(0, int(forecast_input_tokens)),
+                "forecast_output_tokens": max(0, int(forecast_output_tokens)),
+                "forecast_cost": forecast_cost,
+                "accounting_reservation_id": accounting_reservation_id,
+                "at": _iso(),
+            })
+            execution.updated_at = _iso()
+            self._persist_locked()
+            self.emit("budget.recalculated", task_id=task_id, lane_id=execution.owning_lane, budget=asdict(budget))
             return execution
 
     def transition(
@@ -1502,6 +1584,33 @@ class LaneCoordinator:
 
     def pause(self, task_id: str, *, reason: str = "paused by coordinator") -> LaneExecution:
         return self.transition(task_id, LaneTaskState.PAUSED, reason=reason)
+
+    def finalize_budget_overrun(
+        self, decision: BudgetOverrunFinalizationDecision,
+    ) -> LaneExecution:
+        """Project only the validated supervisor finalization decision into the lane."""
+        supervised = self.execution_supervisor.finalize_budget_overrun(decision)
+        with self._condition:
+            execution = self._executions[decision.task_id]
+            if supervised.state is ExecutionState.COMPLETED:
+                execution.state = LaneTaskState.COMPLETED
+                execution.error = ""
+                self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.DONE)
+            elif supervised.state is ExecutionState.PENDING_BUDGET_DECISION:
+                execution.state = LaneTaskState.PENDING_BUDGET_DECISION
+                self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.NEEDS_REVIEW)
+            else:
+                execution.state = LaneTaskState.QUEUED
+                self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.QUEUED)
+            execution.verification_state["budget_overrun"] = dict(supervised.budget_overrun)
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.emit(
+            "budget.overrun_finalized", task_id=decision.task_id,
+            lane_id=execution.owning_lane, decision_id=decision.decision_id,
+            action=decision.action.value,
+        )
+        return execution
 
     def resume(self, task_id: str) -> LaneExecution:
         return self.transition(task_id, LaneTaskState.QUEUED, reason="resumed by coordinator")

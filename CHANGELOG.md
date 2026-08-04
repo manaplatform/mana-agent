@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-04
 
+- Added model-authorized adaptive execution budgets. Provider-call admission now recalculates active lane reservations from the exact accounting forecast within immutable policy caps, and durable result overruns enter `pending_budget_decision` rather than being discarded. A fresh validated overrun decision can accept a verified flagged result, require review, or request normally validated bounded recovery. Added `/budget recalculate <task-id>` and durable budget revision evidence.
+  - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -q`.
+
 - Changed Gmail connector execution to begin with lightweight, model-controlled capability discovery instead of binding every email action schema before the first provider call. The executor now selects and loads its exact Gmail capability from the manifest, avoiding context-budget admission failures while preserving the allowlist and fail-closed tool policy. Capability controls are explicitly read-only for transactional enforcement, and capability activation now refreshes the bound tool set even when a tool's estimated schema size is unchanged.
   - User verification required: `python -m pytest tests/test_ask_agent.py tests/gateway/test_entry_routing.py -q`.
 

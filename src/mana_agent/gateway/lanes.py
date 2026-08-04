@@ -74,6 +74,7 @@ class LaneTaskState(_ValueEnum):
     TIMED_OUT = "timed_out"
     INTERRUPTED = "interrupted"
     BUDGET_EXHAUSTED = "budget_exhausted"
+    PENDING_BUDGET_DECISION = "pending_budget_decision"
 
 
 ACTIVE_LANE_STATES = frozenset(

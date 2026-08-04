@@ -57,6 +57,24 @@ final provider/model decision
 → idempotent reconciliation or release
 ```
 
+## Adaptive task reservations and overrun finalization
+
+The gateway recalculates an active lane reservation from the exact provider-call
+forecast before that call is made. A revision is accepted only when the revised
+token and cost forecast fits the existing task, lane, parent, session, global,
+and monetary limits. Recalculation never chooses another model, tool, workflow,
+or policy cap.
+
+If a provider has already returned a durable result that exceeds an immutable
+limit, Mana stores the result and moves the task to
+`pending_budget_decision`. A fresh validated
+`BudgetOverrunFinalizationDecision` must match the task, attempt, result, and
+evidence hash. It may accept a verified result with an explicit overrun flag,
+require human review, or request normal bounded retry/replan recovery. Missing,
+invalid, stale, or unsafe decisions leave the result pending and block further
+provider or tool execution. Use `/budget recalculate <task-id>` to inspect the
+current forecast and durable revision history without invoking a provider.
+
 Retries, fallback models, parallel candidates, agents, verifier calls, and tool
 continuations receive distinct operation/attempt identities. Changing the model
 therefore creates a fresh estimate and reservation. Failed and cancelled calls

@@ -23,6 +23,7 @@ from mana_agent.context_cost.pricing import calculate_cost
 from mana_agent.context_cost.accounting import AccountingReservation, ModelContextLimitError, ModelTokenAccountingService, TokenEstimationRequest
 from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver
 from mana_agent.context_cost.store import AccountingStore
+from mana_agent.execution_supervisor.models import BudgetForecast
 from mana_agent.telemetry.tokens import TokenUsage, TokenUsageTracker, token_usage_from_provider
 
 
@@ -97,6 +98,11 @@ class ContextCostGovernor:
             pass
         self._accounting_reservations: dict[str, AccountingReservation] = {}
         self._reconciled_call_ids: set[str] = set()
+        self._task_budget_reconciler: Any | None = None
+
+    def set_task_budget_reconciler(self, reconciler: Any | None) -> None:
+        """Register the gateway-owned, policy-validating budget revision boundary."""
+        self._task_budget_reconciler = reconciler
 
     def register_model_profiles(self, profiles: Iterable[Any]) -> None:
         self._profiles = tuple(profiles)
@@ -526,6 +532,25 @@ class ContextCostGovernor:
                     cost_known=token_estimate.estimated_cost is not None,
                     verification=verification_call,
                 )
+        if task_id and self._task_budget_reconciler is not None:
+            try:
+                self._task_budget_reconciler(BudgetForecast(
+                    task_id=task_id,
+                    forecast_input_tokens=token_estimate.input_tokens,
+                    forecast_output_tokens=token_estimate.output_tokens,
+                    forecast_cost=(
+                        None if token_estimate.estimated_cost is None
+                        else float(token_estimate.estimated_cost)
+                    ),
+                    accounting_reservation_id=accounting_reservation.reservation_id,
+                    reason="provider-call admission forecast",
+                ))
+            except Exception:
+                self.release_reservation(
+                    call_id,
+                    reason="budget revision was denied before provider execution",
+                )
+                raise
         self._persist_context_manifest(call_id, compacted, identity=identity)
         self._record_decision(call_id, decision, provider=provider, model=model, turn_id=turn_id, task_id=task_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         if blocked:
@@ -661,6 +686,10 @@ class ContextCostGovernor:
         """Return provider-accounted model usage attributed to one durable task."""
         with self._lock:
             usage = self._task_usage.get(str(task_id), {})
+            pending = [
+                reservation for reservation in self._accounting_reservations.values()
+                if reservation.task_id == str(task_id)
+            ]
             return {
                 "consumed_input_tokens": int(usage.get("consumed_input_tokens", 0)),
                 "consumed_output_tokens": int(usage.get("consumed_output_tokens", 0)),
@@ -668,6 +697,9 @@ class ContextCostGovernor:
                 "actual_cost": float(usage.get("actual_cost", 0.0)),
                 "actual_cost_known": bool(usage.get("actual_cost_known", False)),
                 "accounting_reservation_ids": list(usage.get("accounting_reservation_ids", [])),
+                "pending_reserved_input_tokens": sum(item.estimate.input_tokens for item in pending),
+                "pending_reserved_output_tokens": sum(item.estimate.output_tokens for item in pending),
+                "pending_accounting_reservation_ids": [item.reservation_id for item in pending],
             }
 
     def release_reservation(self, reservation_id: str, *, reason: str) -> None:

@@ -682,7 +682,7 @@ def test_canvas_task_does_not_wait_for_repository_lock(
     coordinator.finish(operations.execution.task_id, state=LaneTaskState.CANCELLED)
 
 
-def test_finish_preserves_supervisor_budget_exhaustion(coordinator: LaneCoordinator) -> None:
+def test_finish_preserves_a_pending_model_budget_overrun_decision(coordinator: LaneCoordinator) -> None:
     reservation = coordinator.reserve(
         normalized_intent="complete within the reserved budget",
         lane_id=LaneId.OPERATIONS,
@@ -701,10 +701,35 @@ def test_finish_preserves_supervisor_budget_exhaustion(coordinator: LaneCoordina
         verification_state={"result": "present"},
     )
 
-    assert finished.state is LaneTaskState.BUDGET_EXHAUSTED
-    assert "execution budget exceeded before result acceptance" in finished.error
+    assert finished.state is LaneTaskState.PENDING_BUDGET_DECISION
+    assert "budget-overrun decision" in finished.error
     supervised = coordinator.execution_supervisor.store.get_task(finished.task_id)
-    assert supervised.state is SupervisorState.BUDGET_EXHAUSTED
+    assert supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+
+
+def test_recalculate_budget_expands_a_live_reservation_within_lane_policy(
+    coordinator: LaneCoordinator,
+) -> None:
+    coordinator.contracts = configured_lane_contracts({"operations": {"token_budget": 1000}})
+    reservation = coordinator.reserve(
+        normalized_intent="forecasted provider call", lane_id=LaneId.OPERATIONS,
+        session_id="session-recalculate",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10, requested_output_tokens=10,
+    )
+    coordinator.start(reservation)
+
+    revised = coordinator.recalculate_budget(
+        reservation.execution.task_id,
+        forecast_input_tokens=50,
+        forecast_output_tokens=75,
+        forecast_cost=0.01,
+        accounting_reservation_id="reservation_forecast",
+    )
+
+    assert revised.budget.reserved_tokens == 125
+    assert revised.budget.revisions[-1]["accounting_reservation_id"] == "reservation_forecast"
 
 
 def test_child_agent_reserves_and_consumes_parent_budget(coordinator: LaneCoordinator) -> None:

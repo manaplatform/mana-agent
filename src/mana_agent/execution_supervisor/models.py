@@ -35,6 +35,7 @@ class ExecutionState(str, Enum):
     CANCELLED = "cancelled"
     FAILED = "failed"
     BUDGET_EXHAUSTED = "budget_exhausted"
+    PENDING_BUDGET_DECISION = "pending_budget_decision"
     COMPLETED_PENDING_VERIFICATION = "completed_pending_verification"
     COMPLETED = "completed"
 
@@ -259,7 +260,7 @@ class ExecutionEvent(StrictModel):
 
 
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=5, ge=1)
+    schema_version: int = Field(default=6, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
@@ -312,6 +313,9 @@ class TaskRecord(StrictModel):
     token_estimate_source: str = ""
     accounting_reservation_ids: list[str] = Field(default_factory=list)
     monetary_budget: float | None = Field(default=None, ge=0)
+    budget_revisions: list[BudgetRevision] = Field(default_factory=list)
+    budget_overrun: dict[str, Any] = Field(default_factory=dict)
+    budget_finalization_decision_id: str = ""
     deadline_at: datetime | None = None
     wait_policy: WaitPolicy = WaitPolicy.WAIT_ALL
     minimum_success_count: int | None = Field(default=None, ge=1)
@@ -379,6 +383,63 @@ class RecoveryAction(str, Enum):
     REQUIRE_INTERVENTION = "require_intervention"
 
 
+class BudgetOverrunAction(str, Enum):
+    ACCEPT_WITH_OVERRUN = "accept_with_overrun"
+    REQUIRE_REVIEW = "require_review"
+    RETRY_OR_REPLAN = "retry_or_replan"
+
+
+class BudgetRevision(StrictModel):
+    revision_id: str = Field(default_factory=lambda: stable_id("budget_revision"))
+    reason: str = Field(min_length=1)
+    previous_token_budget: int | None = Field(default=None, ge=0)
+    revised_token_budget: int | None = Field(default=None, ge=0)
+    previous_estimated_cost: float = Field(default=0.0, ge=0)
+    revised_estimated_cost: float = Field(default=0.0, ge=0)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BudgetForecast(StrictModel):
+    task_id: str = Field(min_length=1)
+    forecast_input_tokens: int = Field(ge=0)
+    forecast_output_tokens: int = Field(ge=0)
+    forecast_cost: float | None = Field(default=None, ge=0)
+    accounting_reservation_id: str = ""
+    reason: str = Field(min_length=1)
+
+
+class BudgetOverrunFinalizationDecision(StrictModel):
+    """Fresh model decision required before an over-budget result can progress."""
+
+    decision_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    result_id: str = Field(min_length=1)
+    result_evidence_hash: str = Field(min_length=1)
+    action: BudgetOverrunAction
+    reason: str = Field(min_length=1)
+    safe_to_continue: bool
+    recovery_decision: RecoveryDecision | None = None
+
+    @model_validator(mode="after")
+    def validate_recovery(self) -> "BudgetOverrunFinalizationDecision":
+        if not self.safe_to_continue:
+            raise ValueError("budget-overrun finalization decision is not safe to continue")
+        if self.action is BudgetOverrunAction.RETRY_OR_REPLAN:
+            if self.recovery_decision is None:
+                raise ValueError("retry_or_replan requires a recovery decision")
+            if self.recovery_decision.task_id != self.task_id:
+                raise ValueError("recovery decision task does not match budget-overrun task")
+            if self.recovery_decision.action not in {RecoveryAction.RETRY, RecoveryAction.REPLAN}:
+                raise ValueError("budget-overrun recovery must select retry or replan")
+            if not self.recovery_decision.safe_to_continue:
+                raise ValueError("budget-overrun recovery decision is not safe to continue")
+        elif self.recovery_decision is not None:
+            raise ValueError("only retry_or_replan may include a recovery decision")
+        return self
+
+
 class RecoveryDecision(StrictModel):
     decision_id: str = Field(min_length=1)
     task_id: str
@@ -391,6 +452,10 @@ class RecoveryDecision(StrictModel):
     resume_checkpoint_id: str = ""
     same_task_retry_authorized: bool = False
     safe_to_continue: bool
+
+
+BudgetOverrunFinalizationDecision.model_rebuild()
+TaskRecord.model_rebuild()
 
 
 class RecoverySummary(StrictModel):
