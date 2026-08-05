@@ -53,6 +53,8 @@ All notable repository changes should be recorded here.
   of waiting solely for a later WebSocket event.
   TUI API approvals now add the validated completion evidence as a terminal assistant message
   bound to the exact approval ID, with a concise completion or denial notification.
+  Approved API JSON responses now render as a generic nested, human-readable result instead of a
+  raw JSON dump, while preserving bounded redacted request metadata.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_api_conversations.py tests/test_tui_auto_chat_tool_events.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now

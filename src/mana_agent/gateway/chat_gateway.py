@@ -1788,39 +1788,83 @@ class AgentChatGateway:
         execution: dict[str, Any],
         status_code: int,
     ) -> str:
-        """Render bounded redacted evidence after the exact approved request finishes."""
-        evidence = {
-            key: execution.get(key)
-            for key in (
-                "method",
-                "redacted_url",
-                "status_code",
-                "content_type",
-                "body_kind",
-                "json_body",
-                "file_reference",
-                "latency_ms",
-            )
-            if execution.get(key) not in (None, "")
-        }
-        text_body = execution.get("text_body")
-        if text_body:
-            evidence["text_body"] = str(text_body)[:4000]
-        encoded = json.dumps(
-            redact_secrets(evidence),
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-        if len(encoded) > 16_000:
-            encoded = encoded[:16_000] + "\n[Execution evidence truncated]"
-        return (
+        """Render bounded redacted API evidence as readable terminal output."""
+        lines = [
             "Approved API request executed through the controlled API runtime"
-            + (f" with HTTP status {status_code}." if status_code else ".")
-            + "\n\nValidated API execution evidence:\n"
-            + encoded
-        )
+            + (f" with HTTP status {status_code}." if status_code else "."),
+            "",
+            "Validated API result",
+        ]
+        for label, key in (
+            ("Method", "method"),
+            ("Endpoint", "redacted_url"),
+            ("Content type", "content_type"),
+            ("Response type", "body_kind"),
+            ("Response file", "file_reference"),
+        ):
+            if execution.get(key) not in (None, ""):
+                lines.append(f"- **{label}:** {execution[key]}")
+        if execution.get("latency_ms") not in (None, ""):
+            try:
+                latency = f"{float(execution['latency_ms']):.0f} ms"
+            except (TypeError, ValueError):
+                latency = str(execution["latency_ms"])
+            lines.append(f"- **Latency:** {latency}")
+
+        json_body = execution.get("json_body")
+        if json_body not in (None, ""):
+            lines.extend(("", "Response details"))
+            lines.extend(AgentChatGateway._format_api_response_value(
+                redact_secrets(json_body),
+            ))
+        elif execution.get("text_body"):
+            lines.extend(("", "Response details", str(execution["text_body"])[:4000]))
+
+        message = "\n".join(lines)
+        if len(message) > 16_000:
+            return message[:16_000] + "\n[API result truncated]"
+        return message
+
+    @staticmethod
+    def _format_api_response_value(
+        value: Any,
+        *,
+        depth: int = 0,
+    ) -> list[str]:
+        """Format a bounded JSON-compatible response without API-specific field rules."""
+        prefix = "  " * depth
+        if depth >= 5:
+            return [f"{prefix}- [Nested response truncated]"]
+        if isinstance(value, dict):
+            lines: list[str] = []
+            for key, nested in value.items():
+                label = AgentChatGateway._api_response_label(str(key))
+                if isinstance(nested, (dict, list)):
+                    lines.append(f"{prefix}- **{label}:**")
+                    lines.extend(AgentChatGateway._format_api_response_value(
+                        nested,
+                        depth=depth + 1,
+                    ))
+                elif nested is not None:
+                    lines.append(f"{prefix}- **{label}:** {nested}")
+            return lines or [f"{prefix}- No response fields returned."]
+        if isinstance(value, list):
+            lines = []
+            for index, nested in enumerate(value, start=1):
+                if isinstance(nested, (dict, list)):
+                    lines.append(f"{prefix}- Item {index}:")
+                    lines.extend(AgentChatGateway._format_api_response_value(
+                        nested,
+                        depth=depth + 1,
+                    ))
+                elif nested is not None:
+                    lines.append(f"{prefix}- {nested}")
+            return lines or [f"{prefix}- No response items returned."]
+        return [f"{prefix}- {value}"]
+
+    @staticmethod
+    def _api_response_label(value: str) -> str:
+        return value.replace("_", " ").replace("-", " ").strip().title()
 
     def transactional_action_approval_command(
         self,

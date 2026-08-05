@@ -298,8 +298,10 @@ def test_api_approval_completion_includes_validated_response_evidence() -> None:
     )
 
     assert "HTTP status 200" in message
-    assert "Validated API execution evidence" in message
-    assert '"city": "Tehran"' in message
+    assert "Validated API result" in message
+    assert "**City:** Tehran" in message
+    assert "**Country Name:** Iran" in message
+    assert "**Endpoint:** http://api.example.test/5.216.25.186?access_key=[REDACTED]" in message
     assert "[REDACTED]" in message
 
 
