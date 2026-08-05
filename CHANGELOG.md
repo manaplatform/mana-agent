@@ -13,8 +13,8 @@ All notable repository changes should be recorded here.
   API Manager execution now loads only its workflow-decision capability initially, then requires
   the model to load each subsequent authorized API or browser capability; this applies in observe
   mode as well, preventing the complete API schema surface from exhausting context before a call.
-  API workflow model calls now use a bounded 384-token response allowance so prior workflow
-  evidence can remain in context for the next selected capability without exceeding the task budget.
+  API workflow model calls now use a bounded 1,024-token response allowance, providing enough
+  room to emit a cited semantic import definition while keeping workflow evidence bounded.
   Explicit output limits now override historical output predictions during accounting, preventing
   a small bounded decision from being inflated by unrelated earlier responses.
   Non-enforcing governor modes now record task or session budget overruns without blocking provider
