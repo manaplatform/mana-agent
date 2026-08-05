@@ -118,11 +118,13 @@ class ResponseTokenSigner:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-                try:
-                    os.link(candidate_path, self.secret_path)
-                except FileExistsError:
-                    return self._read_secret()
-                return value
+                # The creation lock guarantees that no sibling signer can publish
+                # a key between the existence check above and this replacement.
+                # ``os.replace`` is atomic on Windows and avoids relying on a
+                # hard-link publication step there. Reload the published file so
+                # every signer caches the exact durable secret.
+                os.replace(candidate_path, self.secret_path)
+                return self._read_secret()
             finally:
                 candidate_path.unlink(missing_ok=True)
 

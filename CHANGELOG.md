@@ -2,6 +2,15 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-06
+
+- Corrected Windows human-inbox signing-key publication. After the existing
+  per-key thread and process lock writes and syncs a complete candidate, it now
+  atomically replaces the destination and reloads the durable key before caching
+  it. This prevents concurrent signers from deriving different HMACs in the
+  Windows release test.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py -q`.
+
 ## 2026-08-05
 
 - Fixed checkpoint-resume context-budget failures being reported as generic lane-coordination
