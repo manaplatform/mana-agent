@@ -82,6 +82,8 @@ class EntryRouteContext:
     previous_route: str = ""
     conversation_summary: str = ""
     artifact_evidence: dict[str, Any] = field(default_factory=dict)
+    memory_task_candidates: tuple[dict[str, str], ...] = ()
+    memory_capsules_enabled: bool = False
     atomic_child: bool = False
     orchestration_parent_task_id: str = ""
 
@@ -105,6 +107,7 @@ class EntryRoutingDecision:
     remote_request: dict[str, Any] = field(default_factory=dict)
     server_request: dict[str, Any] = field(default_factory=dict)
     mcp_request: dict[str, Any] = field(default_factory=dict)
+    memory_task_id: str = ""
     artifact_family: str = ""
     media_request: dict[str, Any] = field(default_factory=dict)
     automation_operation: AutomationOperation | str = ""
@@ -194,6 +197,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
     server_request: EntryRoutingServerRequest | None = None
     mcp_request: EntryRoutingMcpRequest | None = None
+    memory_task_id: str = ""
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
     media_request: MediaOperationDecision | None = None
     automation_operation: Literal[
@@ -320,7 +324,10 @@ Route semantics:
   information. Search snippets never substitute for browser page inspection.
 - github: connected/public GitHub information.
 - repository: read-only local repository questions or inspection.
-- memory: explicitly requested persisted memory retrieval.
+- memory: explicitly requested persisted memory retrieval. When
+  memory_capsules_enabled is true, select exactly one task ID from
+  memory_task_candidates and return it as memory_task_id; private capsule reads
+  never search across tasks. Leave memory_task_id empty for legacy memory.
 - automation: create, inspect, or manage an automation, including a one-time or recurring future
   connector action. A request to perform another route's action later or at a specified time
   selects automation for the whole turn; the referenced connector becomes the persisted job and
@@ -384,6 +391,7 @@ Return JSON only:
   "reason": "short routing reason",
   "required_sources": ["browser"],
   "target_urls": ["https://example.com"],
+  "memory_task_id": "",
   "requires_live_data": true,
   "reason_code": "DIRECT_PAGE_INSPECTION",
   "error_code": "",
@@ -728,6 +736,33 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: mcp_request is only valid for the mcp route."
             )
+        memory_task_id = str(payload.get("memory_task_id") or "").strip()
+        if route == "memory":
+            if context is not None and context.memory_capsules_enabled:
+                offered_memory_tasks = {
+                    str(item.get("task_id") or "").strip()
+                    for item in context.memory_task_candidates
+                }
+                if not memory_task_id:
+                    raise EntryRoutingError(
+                        "Model decision failed: entry_route. No response was generated. "
+                        "Reason: private memory retrieval requires a selected task ID."
+                    )
+                if memory_task_id not in offered_memory_tasks:
+                    raise EntryRoutingError(
+                        "Model decision failed: entry_route. No response was generated. "
+                        "Reason: memory route selected a task that was not offered."
+                    )
+            elif memory_task_id:
+                raise EntryRoutingError(
+                    "Model decision failed: entry_route. No response was generated. "
+                    "Reason: memory_task_id is only valid for private capsule retrieval."
+                )
+        elif memory_task_id:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: memory_task_id is only valid for the memory route."
+            )
         if route == "media":
             try:
                 media_request = MediaOperationDecision.model_validate(media_request).model_dump(
@@ -882,6 +917,7 @@ class EntryRouter:
             remote_request=dict(remote_request) if isinstance(remote_request, dict) else {},
             server_request=dict(server_request) if isinstance(server_request, dict) else {},
             mcp_request=dict(mcp_request) if isinstance(mcp_request, dict) else {},
+            memory_task_id=memory_task_id,
             artifact_family=artifact_family,
             media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,

@@ -2,7 +2,19 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-05
+
+- Corrected gateway recovery coverage to import non-public recovery enums from their typed models module.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py -q`.
+
 ## 2026-08-04
+
+- Repaired gateway lifecycle gaps: follow-up classification is mandatory whenever durable task candidates exist, explicit memory retrieval now uses a model-selected task scope for private capsules, and every currently available registered route has an audited executor contract. Calendar remains truthfully registered-but-unavailable until a calendar connector exists.
+  - Removed unused gateway imports while retaining the typed checkpoint-resume and execution-supervisor retry chain.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/test_codex_integration.py -q`.
+
+- Bumped the package and documented version to `v0.1.5`.
+  - User verification required: `python -m pytest -q`.
 
 - Bound Codex coding turns to the durable gateway lane task selected before execution. Context-cost admission, transactional ownership, Codex live events, workspace tracking, and final lane reconciliation now use the same task ID instead of a connector-local `codex_task_*` ID that the lane coordinator cannot resolve.
   - User verification required: `python -m pytest tests/test_codex_integration.py tests/gateway/test_chat_gateway.py -q`.

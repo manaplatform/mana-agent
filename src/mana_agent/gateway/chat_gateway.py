@@ -48,7 +48,6 @@ from mana_agent.gateway.entry_routing import (
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.lane_coordinator import (
-    LaneBudgetError,
     LaneCoordinator,
     LaneCoordinatorError,
     LaneReservation,
@@ -64,7 +63,6 @@ from mana_agent.gateway.turn_engine import (
     _serialize_tool_traces,
     _conversation_prompt,
     agent_decision_llm,
-    decide_chat_route,
     decide_search_operation,
     is_valid_search_operation_decision,
     load_analysis_context,
@@ -3160,6 +3158,19 @@ class AgentChatGateway:
                     },
                 )
             ask_service = self.get_ask_service()
+            memory_task_candidates = tuple(
+                {
+                    "task_id": str(item.get("task_id") or ""),
+                    "normalized_intent": str(item.get("normalized_intent") or ""),
+                    "state": str(item.get("state") or ""),
+                }
+                for item in self._recovery_candidates(
+                    lane_id=None,
+                    session_id=session_id,
+                    workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                    repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                )
+            )
             route_context = EntryRouteContext(
                 session_id=session_id,
                 conversation_id=conversation_id,
@@ -3171,6 +3182,14 @@ class AgentChatGateway:
                     user_prompt=text,
                     attachments=options.get("attachments", ()),
                     target_files=options.get("target_files", ()),
+                ),
+                memory_task_candidates=memory_task_candidates,
+                memory_capsules_enabled=bool(
+                    getattr(
+                        getattr(self._stack.memory_service.config, "capsules", None),
+                        "enabled",
+                        False,
+                    )
                 ),
             )
             entry_model_decision = self.routing_authority.route(
@@ -3533,9 +3552,7 @@ class AgentChatGateway:
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
-                    if all_recovery_candidates and callable(
-                        getattr(followup_model, "with_structured_output", None)
-                    ):
+                    if all_recovery_candidates:
                         followup = FollowupClassifier(followup_model).decide(
                             message=text,
                             recent_history=list(state.get("history") or []),
@@ -5053,6 +5070,12 @@ class AgentChatGateway:
                 decision=decision,
                 payload={"route": decision.route},
             )
+        if decision.route == "memory":
+            return self._execute_memory_route(
+                decision=decision,
+                context=context,
+                query=text,
+            )
         if decision.route == "gmail":
             if lane_task_id:
                 from mana_agent.connectors.email.tools import email_tool_contracts
@@ -5879,6 +5902,158 @@ class AgentChatGateway:
                     }
                 ),
             },
+        )
+
+    def _execute_memory_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        query: str,
+    ) -> ChatTurnResult:
+        """Read only the exact memory scope authorized by entry routing."""
+        memory_service = self._stack.memory_service
+        capsules_enabled = bool(
+            getattr(getattr(memory_service.config, "capsules", None), "enabled", False)
+        )
+        if capsules_enabled:
+            task_id = str(decision.memory_task_id or "").strip()
+            offered_task_ids = {
+                str(item.get("task_id") or "").strip()
+                for item in context.memory_task_candidates
+            }
+            if not task_id or task_id not in offered_task_ids:
+                return ChatTurnResult(
+                    answer=(
+                        "Model decision failed: memory_task_id. No private memory was read "
+                        "because the selected task was not offered to the router."
+                    ),
+                    error="memory_task_id_invalid",
+                    mode="route-memory-error",
+                    decision=decision,
+                    payload={"route": "memory"},
+                )
+            user_id = str(getattr(memory_service, "user_id", "") or "").strip()
+            if not user_id:
+                return ChatTurnResult(
+                    answer=(
+                        "Private memory retrieval requires an authenticated user identity. "
+                        "No memory was read."
+                    ),
+                    error="memory_principal_unavailable",
+                    mode="route-memory-error",
+                    decision=decision,
+                    payload={"route": "memory", "memory_task_id": task_id},
+                )
+            from mana_agent.memory import CapsuleReadRequest
+
+            principal = MemoryPrincipal(
+                user_id=user_id,
+                project_id=str(self._stack.repository_id or "") or None,
+                task_id=task_id,
+                agent_id="gateway:memory",
+                capabilities=frozenset({"memory.capsule.read.private"}),
+            )
+            task_context = CapsuleTaskContext(
+                user_id=user_id,
+                organisation_id=None,
+                project_id=str(self._stack.repository_id or "") or None,
+                team_ids=frozenset(),
+                task_id=task_id,
+                agent_id="gateway:memory",
+                session_id=context.session_id,
+            )
+            try:
+                projections = memory_service.capsules.query_capsules(
+                    CapsuleReadRequest(
+                        principal=principal,
+                        task_context=task_context,
+                        query=query,
+                        allowed_scopes=frozenset({CapsuleScope.PRIVATE}),
+                        max_capsules=3,
+                        max_tokens=self.settings.mana_memory_capsules_default_max_tokens,
+                    ),
+                    correlation_id=context.turn_id,
+                )
+            except (MemoryError, PermissionError, ValueError) as exc:
+                return ChatTurnResult(
+                    answer=f"Private memory retrieval failed safely: {exc}",
+                    error="memory_retrieval_failed",
+                    mode="route-memory-error",
+                    decision=decision,
+                    payload={"route": "memory", "memory_task_id": task_id},
+                )
+            evidence = [
+                redact_secrets(
+                    {
+                        "capsule_id": item.capsule_id,
+                        "revision": item.revision,
+                        "summary": item.summary,
+                        "content": item.content,
+                    }
+                )
+                for item in projections
+            ]
+            answer = (
+                "No authorized private memory matched the selected task."
+                if not evidence
+                else "\n\n".join(
+                    json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                    for item in evidence
+                )
+            )
+            return ChatTurnResult(
+                answer=answer,
+                mode="route-memory",
+                decision=decision,
+                payload={
+                    "route": "memory",
+                    "memory_task_id": task_id,
+                    "memory_record_count": len(evidence),
+                },
+            )
+
+        if decision.memory_task_id:
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: memory_task_id. Legacy memory does not select a "
+                    "private task scope, so no memory was read."
+                ),
+                error="memory_task_id_invalid",
+                mode="route-memory-error",
+                decision=decision,
+                payload={"route": "memory"},
+            )
+        try:
+            records = memory_service.search_blocking(
+                MemorySearchRequest(
+                    query=query,
+                    scope=self._followup_memory_scope(
+                        session_id=context.session_id,
+                        conversation_id=context.conversation_id,
+                    ),
+                    limit=3,
+                    metadata={"mana_kind": "explicit_memory_route"},
+                )
+            )
+        except MemoryError as exc:
+            return ChatTurnResult(
+                answer=f"Memory retrieval failed safely: {exc}",
+                error="memory_retrieval_failed",
+                mode="route-memory-error",
+                decision=decision,
+                payload={"route": "memory"},
+            )
+        answer = "\n\n".join(
+            str(record.content.text or "").strip()
+            for record in records
+            if str(record.content.text or "").strip()
+        ) or "No scoped memory matched this request."
+        return ChatTurnResult(
+            answer=answer,
+            mode="route-memory",
+            decision=decision,
+            payload={"route": "memory", "memory_record_count": len(records)},
         )
 
     def _execute_required_sources(

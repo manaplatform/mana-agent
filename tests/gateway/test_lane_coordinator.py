@@ -11,8 +11,10 @@ from mana_agent.execution_supervisor import (
     BudgetOverrunAction,
     BudgetOverrunFinalizationDecision,
     ExecutionState as SupervisorState,
+    RecoveryDecision,
     SideEffectClassification,
 )
+from mana_agent.execution_supervisor.models import RecoveryAction, RetryCategory
 from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.gateway.lane_coordinator import (
     LaneBudget,
@@ -240,6 +242,84 @@ def test_task_id_allocation_skips_supervisor_only_record(
         ).routing_decision_id
         == "existing-decision"
     )
+
+
+def test_checkpoint_resume_uses_validated_recovery_decision_and_supervisor_retry(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="resume gateway task")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    checkpoint_id = coordinator.checkpoint(
+        task_id,
+        boundary="before-retry",
+        completed_steps=("inspect",),
+        pending_steps=("patch",),
+    )
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="worker interrupted")
+    retry_calls: list[tuple[str, RecoveryDecision]] = []
+    original_retry = coordinator.execution_supervisor.retry
+
+    def record_retry(task_id: str, decision: RecoveryDecision):
+        retry_calls.append((task_id, decision))
+        return original_retry(task_id, decision)
+
+    monkeypatch.setattr(coordinator.execution_supervisor, "retry", record_retry)
+    decision = RecoveryDecision(
+        decision_id="checkpoint-resume-decision",
+        task_id=task_id,
+        action=RecoveryAction.RESUME_CHECKPOINT,
+        retry_category=RetryCategory.MODEL,
+        reason="The validated checkpoint is safe to resume.",
+        resume_checkpoint_id=checkpoint_id,
+        safe_to_continue=True,
+    )
+
+    resumed = coordinator.resume_checkpoint(
+        task_id,
+        decision=decision,
+        session_id="session-1",
+    )
+
+    assert resumed.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+    assert retry_calls == [(task_id, decision)]
+
+
+def test_same_task_retry_uses_validated_recovery_decision_and_supervisor_retry(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="retry gateway task")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="model response failed")
+    retry_calls: list[tuple[str, RecoveryDecision]] = []
+    original_retry = coordinator.execution_supervisor.retry
+
+    def record_retry(task_id: str, decision: RecoveryDecision):
+        retry_calls.append((task_id, decision))
+        return original_retry(task_id, decision)
+
+    monkeypatch.setattr(coordinator.execution_supervisor, "retry", record_retry)
+    decision = RecoveryDecision(
+        decision_id="same-task-retry-decision",
+        task_id=task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="The model authorized a safe same-task retry.",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+
+    retried = coordinator.retry_task(
+        task_id,
+        decision=decision,
+        session_id="session-1",
+    )
+
+    assert retried.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+    assert retry_calls == [(task_id, decision)]
 
 
 def test_explicit_taskboard_root_and_child_keep_their_persisted_lineage(

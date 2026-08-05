@@ -22,7 +22,16 @@ from mana_agent.gateway.entry_routing import (
     EntryRoutingOutput,
 )
 from mana_agent.gateway.entry_routing import gmail_route_availability
-from mana_agent.gateway.checkpoint_resume import CHECKPOINT_RESUME_PROMPT
+from mana_agent.gateway.checkpoint_resume import (
+    CHECKPOINT_RESUME_PROMPT,
+    CheckpointResumeDecision,
+)
+from mana_agent.gateway.followup_classifier import (
+    FollowupClassification,
+    FollowupClassificationError,
+)
+from mana_agent.gateway.lanes import LaneId, LaneTaskState
+from mana_agent.memory import MemoryContent
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -364,6 +373,133 @@ def test_unsupported_route_bypasses_checkpoint_recovery(
     assert result.error == "unsupported_route"
 
 
+def test_failed_followup_classification_stops_before_recovery_or_new_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="previous gateway task",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior worker failed",
+    )
+
+    def fail_classification(*_args: Any, **_kwargs: Any) -> Any:
+        raise FollowupClassificationError(
+            "Model decision failed: followup_classification. No recovery or new task was started."
+        )
+
+    new_reservations: list[Any] = []
+    original_reserve = gateway._lane_coordinator.reserve
+
+    def record_reserve(*args: Any, **kwargs: Any) -> Any:
+        new_reservations.append((args, kwargs))
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        fail_classification,
+    )
+    monkeypatch.setattr(gateway._lane_coordinator, "reserve", record_reserve)
+
+    result = gateway.process_turn(session_id, "Continue the previous gateway task.")
+
+    assert result.mode == "followup-classification-error"
+    assert result.error == "followup_classification_invalid"
+    assert new_reservations == []
+
+
+@pytest.mark.parametrize(
+    ("action", "with_checkpoint"),
+    (("resume_checkpoint", True), ("retry_task", False)),
+)
+def test_gateway_recovery_handoff_uses_validated_recovery_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    with_checkpoint: bool,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="previous gateway task",
+        lane_id=LaneId.RESEARCH,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    checkpoint_id = (
+        gateway._lane_coordinator.checkpoint(prior.execution.task_id, boundary="before-retry")
+        if with_checkpoint
+        else ""
+    )
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior worker failed",
+    )
+    monkeypatch.setattr(gateway, "_recall_task_capsules", lambda **_kwargs: "")
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *_args, **_kwargs: FollowupClassification(
+            decision_id="followup-decision",
+            category="resume_request" if with_checkpoint else "retry_request",
+            related_task_id=prior.execution.task_id,
+            safe_to_continue=True,
+            reason="The same durable task was selected.",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        lambda *_args, **_kwargs: CheckpointResumeDecision(
+            decision_id=f"{action}-decision",
+            action=action,  # type: ignore[arg-type]
+            task_id=prior.execution.task_id,
+            checkpoint_id=checkpoint_id,
+            same_work=True,
+            fresh_data_required=False,
+            checkpoint_still_valid=with_checkpoint,
+            side_effects_safe_to_repeat=True,
+            safe_to_continue=True,
+            reason="The validated recovery decision is safe.",
+        ),
+    )
+    recovery_calls: list[Any] = []
+    method_name = "resume_checkpoint" if with_checkpoint else "retry_task"
+    original_recovery = getattr(gateway._lane_coordinator, method_name)
+
+    def record_recovery(task_id: str, *, decision: Any, session_id: str) -> Any:
+        recovery_calls.append((task_id, decision, session_id))
+        return original_recovery(task_id, decision=decision, session_id=session_id)
+
+    monkeypatch.setattr(gateway._lane_coordinator, method_name, record_recovery)
+
+    result = gateway.process_turn(session_id, "Continue the previous gateway task.")
+
+    assert result.error == ""
+    assert recovery_calls[0][0] == prior.execution.task_id
+    assert recovery_calls[0][1].decision_id == f"{action}-decision"
+    assert recovery_calls[0][1].action.value == (
+        "resume_checkpoint" if with_checkpoint else "retry"
+    )
+    assert recovery_calls[0][2] == session_id
+
+
 def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     upload = tmp_path / "uploads" / "test.xls"
@@ -435,6 +571,50 @@ def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path
     assert "gmail" in result.answer.lower()
     assert not chat.conversation_calls
     assert not ask_agent.calls
+
+
+def test_gateway_route_registry_has_executors_for_every_available_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    ask_service = _AskService()
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        chat_service=_ChatService(ask_service),
+    )
+    executor_contracts = {
+        "conversation": "_execute_entry_route",
+        "multi_task": "process_turn",
+        "coding": "_execute_entry_route",
+        "mcp": "_execute_mcp_route",
+        "remote_execution": "_execute_entry_route",
+        "server": "_execute_entry_route",
+        "artifact": "_execute_artifact_route",
+        "media": "_execute_media_route",
+        "command": "process_turn",
+        "gmail": "_execute_gmail_route",
+        "computer": "_execute_computer_route",
+        "browser": "_execute_required_sources",
+        "search": "_execute_required_sources",
+        "github": "_execute_required_sources",
+        "repository": "_execute_entry_route",
+        "memory": "_execute_memory_route",
+        "automation": "_execute_automation_route",
+        "api": "_execute_api_route",
+        "canvas": "_execute_canvas_route",
+        "unsupported": "_execute_entry_route",
+        "capability_error": "_execute_entry_route",
+    }
+    snapshot = {row["name"]: row["availability"] for row in gateway._entry_route_registry.snapshot()}
+
+    assert {name for name, availability in snapshot.items() if availability["available"]} <= set(
+        executor_contracts
+    )
+    assert all(callable(getattr(gateway, executor)) for executor in executor_contracts.values())
+    assert snapshot["calendar"]["available"] is False
+    assert snapshot["calendar"]["reason"] == "No calendar connector is registered."
 
 
 def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
@@ -590,6 +770,242 @@ def test_entry_router_validates_api_as_an_explicit_model_route() -> None:
     assert decision.route == "api"
     assert decision.required_sources == ("api",)
     assert "never expose a raw unrestricted HTTP tool" in ENTRY_ROUTER_PROMPT
+
+
+def test_entry_router_validates_private_memory_task_selection() -> None:
+    router = EntryRouter(llm=_RouteModel("memory"), registry=_registry())
+    context = EntryRouteContext(
+        session_id="session",
+        conversation_id="session",
+        turn_id="turn",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {
+                "task_id": "task-offered",
+                "normalized_intent": "inspect the gateway",
+                "state": "completed",
+            },
+        ),
+    )
+    payload = {
+        "route": "memory",
+        "confidence": 0.99,
+        "reason": "Retrieve the selected task's private result.",
+        "required_sources": ["memory"],
+        "memory_task_id": "task-offered",
+    }
+
+    decision = router._validate(payload, context=context)
+
+    assert decision.memory_task_id == "task-offered"
+    with pytest.raises(EntryRoutingError, match="not offered"):
+        router._validate({**payload, "memory_task_id": "task-foreign"}, context=context)
+    with pytest.raises(EntryRoutingError, match="requires a selected task ID"):
+        router._validate({**payload, "memory_task_id": ""}, context=context)
+
+
+def test_gateway_memory_route_reads_only_the_selected_private_capsules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    calls: list[Any] = []
+
+    class CapsuleMemory:
+        user_id = "authenticated-user"
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
+
+        def __init__(self) -> None:
+            self.capsules = self
+
+        def query_capsules(self, request: Any, *, correlation_id: str = "") -> list[Any]:
+            calls.append((request, correlation_id))
+            return [
+                SimpleNamespace(
+                    capsule_id="capsule-1",
+                    revision=2,
+                    summary="Gateway audit evidence",
+                    content={"note": "private task result"},
+                )
+            ]
+
+    gateway._stack.memory_service = CapsuleMemory()
+    context = EntryRouteContext(
+        session_id="session",
+        conversation_id="session",
+        turn_id="turn-memory",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+        ),
+    )
+    decision = EntryRoutingDecision(
+        route="memory",
+        confidence=0.99,
+        reason="Read the selected task memory.",
+        required_sources=("memory",),
+        memory_task_id="task-offered",
+    )
+
+    result = gateway._execute_memory_route(decision=decision, context=context, query="gateway")
+
+    assert result.mode == "route-memory"
+    assert result.payload["memory_task_id"] == "task-offered"
+    assert result.payload["memory_record_count"] == 1
+    assert "capsule-1" in result.answer
+    assert calls[0][0].principal.task_id == "task-offered"
+    assert calls[0][0].task_context.session_id == "session"
+    assert calls[0][1] == "turn-memory"
+
+
+def test_gateway_memory_route_rejects_unoffered_task_before_private_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+
+    class CapsuleMemory:
+        user_id = "authenticated-user"
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
+
+        def __init__(self) -> None:
+            self.capsules = self
+            self.reads = 0
+
+        def query_capsules(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            self.reads += 1
+            return []
+
+    memory = CapsuleMemory()
+    gateway._stack.memory_service = memory
+    result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read a task memory.",
+            required_sources=("memory",),
+            memory_task_id="task-foreign",
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="session",
+            turn_id="turn-memory",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+            ),
+        ),
+        query="gateway",
+    )
+
+    assert result.error == "memory_task_id_invalid"
+    assert memory.reads == 0
+    missing_task_result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read a task memory.",
+            required_sources=("memory",),
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="session",
+            turn_id="turn-memory-missing",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+            ),
+        ),
+        query="gateway",
+    )
+
+    assert missing_task_result.error == "memory_task_id_invalid"
+    assert memory.reads == 0
+
+
+def test_gateway_memory_route_requires_an_authenticated_capsule_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+
+    class CapsuleMemory:
+        user_id = ""
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
+
+        def __init__(self) -> None:
+            self.capsules = self
+            self.reads = 0
+
+        def query_capsules(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            self.reads += 1
+            return []
+
+    memory = CapsuleMemory()
+    gateway._stack.memory_service = memory
+    result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read a task memory.",
+            required_sources=("memory",),
+            memory_task_id="task-offered",
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="session",
+            turn_id="turn-memory",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+            ),
+        ),
+        query="gateway",
+    )
+
+    assert result.error == "memory_principal_unavailable"
+    assert memory.reads == 0
+
+
+def test_gateway_memory_route_uses_legacy_scoped_search_when_capsules_are_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+
+    class LegacyMemory:
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=False))
+
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def search_blocking(self, request: Any) -> list[Any]:
+            self.requests.append(request)
+            return [
+                SimpleNamespace(content=MemoryContent("Scoped legacy evidence")),
+            ]
+
+    memory = LegacyMemory()
+    gateway._stack.memory_service = memory
+    result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read scoped legacy memory.",
+            required_sources=("memory",),
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="conversation",
+            turn_id="turn-memory",
+        ),
+        query="gateway",
+    )
+
+    assert result.mode == "route-memory"
+    assert result.answer == "Scoped legacy evidence"
+    assert memory.requests[0].scope.session_id == "session"
+    assert memory.requests[0].scope.conversation_id == "conversation"
 
 
 def test_entry_router_requires_a_typed_automation_operation() -> None:
