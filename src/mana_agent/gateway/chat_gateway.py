@@ -4117,7 +4117,21 @@ class AgentChatGateway:
                         mode="followup-classification-error",
                         payload={"route": entry_decision.route},
                     )
-                except (LaneCoordinatorError, CheckpointResumeError) as exc:
+                except CheckpointResumeError as exc:
+                    result = ChatTurnResult(
+                        answer=str(exc),
+                        error=exc.code,
+                        mode=(
+                            "checkpoint-resume-budget-blocked"
+                            if exc.code == "context_budget_blocked"
+                            else "checkpoint-resume-error"
+                        ),
+                        payload={
+                            "route": entry_decision.route,
+                            "checkpoint_resume": "blocked",
+                        },
+                    )
+                except LaneCoordinatorError as exc:
                     result = ChatTurnResult(
                         answer=f"Gateway lane coordination failed: {exc}. No agent action was executed.",
                         error=getattr(exc, "code", "lane_coordinator_error"),

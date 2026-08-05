@@ -25,6 +25,7 @@ from mana_agent.gateway.entry_routing import gmail_route_availability
 from mana_agent.gateway.checkpoint_resume import (
     CHECKPOINT_RESUME_PROMPT,
     CheckpointResumeDecision,
+    CheckpointResumeError,
 )
 from mana_agent.gateway.followup_classifier import (
     FollowupClassification,
@@ -417,6 +418,68 @@ def test_failed_followup_classification_stops_before_recovery_or_new_work(
 
     assert result.mode == "followup-classification-error"
     assert result.error == "followup_classification_invalid"
+    assert new_reservations == []
+
+
+def test_checkpoint_resume_context_budget_block_stops_without_lane_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="previous gateway task",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior worker failed",
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *_args, **_kwargs: FollowupClassification(
+            decision_id="followup-decision",
+            category="resume_request",
+            related_task_id=prior.execution.task_id,
+            safe_to_continue=True,
+            reason="The same durable task was selected.",
+        ),
+    )
+
+    def block_checkpoint_resume(*_args: Any, **_kwargs: Any) -> Any:
+        raise CheckpointResumeError(
+            "Model decision failed: checkpoint_resume. No task was resumed or started. "
+            "Reason: Context budget blocked: context_limit_deficit:510. "
+            "No provider call was executed.",
+            code="context_budget_blocked",
+        )
+
+    new_reservations: list[Any] = []
+    original_reserve = gateway._lane_coordinator.reserve
+
+    def record_reserve(*args: Any, **kwargs: Any) -> Any:
+        new_reservations.append((args, kwargs))
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        block_checkpoint_resume,
+    )
+    monkeypatch.setattr(gateway._lane_coordinator, "reserve", record_reserve)
+
+    result = gateway.process_turn(session_id, "Continue the previous gateway task.")
+
+    assert result.mode == "checkpoint-resume-budget-blocked"
+    assert result.error == "context_budget_blocked"
+    assert "Gateway lane coordination failed" not in result.answer
+    assert "No task was resumed or started" in result.answer
     assert new_reservations == []
 
 

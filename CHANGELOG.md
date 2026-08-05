@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-05
 
+- Fixed checkpoint-resume context-budget failures being reported as generic lane-coordination
+  errors. The typed budget block now retains its original admission reason, returns a dedicated
+  safe gateway result, and creates no recovery or new task.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py -q`.
+
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
   coordinate key creation with a per-key thread and process lock before loading
   the published secret, preventing concurrent signers from caching different keys.

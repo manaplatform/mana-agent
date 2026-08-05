@@ -10,12 +10,17 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
+from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 
 
 class CheckpointResumeError(RuntimeError):
     """Raised when no valid stopped-task recovery decision is available."""
+
+    def __init__(self, message: str, *, code: str = "checkpoint_resume_invalid") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class CheckpointResumeOutput(BaseModel):
@@ -122,6 +127,12 @@ class CheckpointResumeDecider:
                 response = self.llm.invoke(messages)
                 content = getattr(response, "content", response)
                 output = CheckpointResumeOutput.model_validate_json(str(content))
+        except ContextBudgetExceeded as exc:
+            raise CheckpointResumeError(
+                "Model decision failed: checkpoint_resume. No task was resumed or started. "
+                f"Reason: {exc}",
+                code="context_budget_blocked",
+            ) from exc
         except Exception as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "

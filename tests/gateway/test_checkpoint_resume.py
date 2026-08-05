@@ -6,6 +6,13 @@ from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
     CheckpointResumeError,
 )
+from mana_agent.context_cost.models import (
+    BudgetSnapshot,
+    ContextBreakdown,
+    ContextBudget,
+    ContextBudgetExceeded,
+    GovernorDecision,
+)
 
 
 class StructuredDecisionModel:
@@ -19,6 +26,36 @@ class StructuredDecisionModel:
 
     def invoke(self, _messages):
         return self.payload
+
+
+class ContextBlockedDecisionModel:
+    def with_structured_output(self, _schema, *, method: str, strict: bool):
+        assert method == "json_schema"
+        assert strict is True
+        return self
+
+    def invoke(self, _messages):
+        snapshot = BudgetSnapshot(
+            breakdown=ContextBreakdown(),
+            budget=ContextBudget(context_window=1_000),
+            used_tokens=1_510,
+            remaining_tokens=0,
+            utilization_ratio=1.51,
+            cumulative_tokens=1_510,
+            remaining_task_tokens=None,
+            cumulative_cost=0.0,
+            remaining_cost=None,
+            estimated=True,
+            status="blocked",
+        )
+        raise ContextBudgetExceeded(
+            GovernorDecision(
+                action="block",
+                reason="context_limit_deficit:510",
+                allowed=False,
+                snapshot=snapshot,
+            )
+        )
 
 
 def candidate() -> dict[str, object]:
@@ -120,6 +157,20 @@ def test_empty_candidate_set_still_requires_a_model_decision() -> None:
         requires_live_data=False,
         candidates=[],
     ).decision_id == "fresh-decision-1"
+
+
+def test_context_budget_block_is_reported_as_a_typed_checkpoint_decision_error() -> None:
+    decider = CheckpointResumeDecider(ContextBlockedDecisionModel())
+
+    with pytest.raises(CheckpointResumeError, match="context_limit_deficit:510") as raised:
+        decider.decide(
+            current_request="a new repository task",
+            route="coding",
+            requires_live_data=False,
+            candidates=[],
+        )
+
+    assert raised.value.code == "context_budget_blocked"
 
 
 def test_live_data_route_cannot_reuse_checkpoint_even_if_model_requests_it() -> None:
