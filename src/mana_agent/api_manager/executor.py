@@ -261,7 +261,11 @@ class ApiExecutor:
         cancellation: threading.Event | None = None,
     ) -> ApiExecutionResult:
         if not request.risk_level.mutating:
-            self.approval_broker.authorize(request, preview, approval_reference)
+            try:
+                self.approval_broker.authorize(request, preview, approval_reference)
+            except PermissionRequiredError as exc:
+                self._emit_waiting_approval(request, exc)
+                raise
             return self._execute_authorized(request, preview=preview, cancellation=cancellation)
 
         from mana_agent.transactional_actions.adapters import HttpActionAdapter
@@ -327,6 +331,7 @@ class ApiExecutor:
                 "preview_digest": action.preview_digest,
                 "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
             })
+            self._emit_waiting_approval(request, exc)
             raise
         transactional_approval_id = action_gateway.approve(
             action.action_id,
@@ -633,6 +638,26 @@ class ApiExecutor:
                     **redact_mapping(payload, secret_values=request.secret_values),
                 },
             )
+
+    def _emit_waiting_approval(
+        self,
+        request: BuiltApiRequest,
+        error: PermissionRequiredError,
+    ) -> None:
+        """Publish an exact redacted API approval request to trusted local clients."""
+        details = dict(error.details or {})
+        request_id = str(details.get("permission_request_id") or "").strip()
+        if not request_id:
+            return
+        self._emit(
+            "api.waiting_approval",
+            request,
+            permission_request_id=request_id,
+            permission_scope=str(details.get("permission_scope") or "api.request.execute"),
+            preview=details.get("preview") or {},
+            expires_at=str(details.get("expires_at") or ""),
+            api_approval=True,
+        )
 
 
 @dataclass

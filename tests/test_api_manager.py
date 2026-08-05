@@ -410,9 +410,11 @@ def test_read_only_http_request_requires_exact_ui_approval(
         {"authentication": (AuthenticationConfig(),)},
     )
     broker = PendingApiApprovalBroker()
+    approval_events: list[tuple[str, dict[str, Any]]] = []
     executor = ApiExecutor(
         network_policy=NetworkAccessPolicy(allow_http=False),
         approval_broker=broker,
+        event_sink=lambda kind, payload: approval_events.append((kind, payload)),
         transport=_Transport(
             [_RawResponse(200, {"content-type": "application/json"}, b'{"ok":true}')]
         ),
@@ -446,6 +448,18 @@ def test_read_only_http_request_requires_exact_ui_approval(
     details = raised.value.details
     assert details["preview"]["approval_required"] is True
     assert "unencrypted HTTP" in details["preview"]["expected_side_effects"]
+    assert len(approval_events) == 1
+    event_type, event_payload = approval_events[0]
+    assert event_type == "api.waiting_approval"
+    assert event_payload["integration_id"] == integration.integration_id
+    assert event_payload["operation_id"] == "getContact"
+    assert event_payload["method"] == "GET"
+    assert event_payload["redacted_host_path"].endswith("/contacts/123")
+    assert event_payload["permission_request_id"] == details["permission_request_id"]
+    assert event_payload["permission_scope"] == "api.request.execute"
+    assert event_payload["preview"] == details["preview"]
+    assert event_payload["expires_at"] == details["expires_at"]
+    assert event_payload["api_approval"] is True
     approved = service.decide_approval(
         details["permission_request_id"],
         session_id="http-session",

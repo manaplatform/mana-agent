@@ -32,6 +32,9 @@ All notable repository changes should be recorded here.
   The browser runtime coverage now imports its JSON assertion helper.
   API documentation imports and integration updates now use a durable API-integration action
   adapter and narrow policy rule; deletion still requires an exact approval.
+  Pending API network approvals now publish a redacted session-bound `api.waiting_approval` event,
+  allowing the trusted TUI and dashboard to present the same approve-once or deny controls used for
+  other transactional requests.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
