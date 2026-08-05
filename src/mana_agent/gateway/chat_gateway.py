@@ -3295,12 +3295,18 @@ class AgentChatGateway:
                         state=state,
                         memory_warning=memory_warning,
                     )
-                # Conversation is a turn-level response, not supervised work.
-                # Keeping it outside lane recovery prevents a completed task in
-                # the same session from being considered for an unrelated
-                # question, while preserving the existing shared-history and
-                # follow-up-memory behavior.
-                if entry_decision.route == "conversation":
+                # Conversation ordinarily remains a turn-level response. A stopped
+                # task is the exception: its follow-up classification must be
+                # validated before the gateway can decide whether to recover it or
+                # safely answer as an unrelated conversation.
+                has_stopped_task_candidate = any(
+                    candidate["state"] != LaneTaskState.COMPLETED.value
+                    for candidate in route_context.memory_task_candidates
+                )
+                if (
+                    entry_decision.route == "conversation"
+                    and not has_stopped_task_candidate
+                ):
                     conversation_lane = self._lane_coordinator.select_lane(
                         entry_route=entry_decision.route,
                         model_lane=options.get("lane_id"),
@@ -3541,6 +3547,12 @@ class AgentChatGateway:
                         workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                         repository_id=self._lane_coordinator.taskboard.store.repository_id,
                     )
+                    recoverable_task_candidates = [
+                        item
+                        for item in all_recovery_candidates
+                        if str(item.get("state") or "")
+                        != LaneTaskState.COMPLETED.value
+                    ]
                     relation_type = "independent"
                     parent_task_id: str | None = None
                     previous_task_id = ""
@@ -3552,11 +3564,11 @@ class AgentChatGateway:
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
-                    if all_recovery_candidates:
+                    if recoverable_task_candidates:
                         followup = FollowupClassifier(followup_model).decide(
                             message=text,
                             recent_history=list(state.get("history") or []),
-                            candidates=all_recovery_candidates,
+                            candidates=recoverable_task_candidates,
                         )
                         turn_record.normalized_intent = followup.category
                         turn_record.routing_decision_id = followup.decision_id
@@ -3628,7 +3640,7 @@ class AgentChatGateway:
                             recovery_candidates = []
                         elif followup.category in {"retry_request", "resume_request"}:
                             recovery_candidates = [
-                                item for item in all_recovery_candidates
+                                item for item in recoverable_task_candidates
                                 if str(item.get("task_id") or "") == followup.related_task_id
                             ]
                             relation_type = "retry" if followup.category == "retry_request" else "resume"
@@ -3648,6 +3660,7 @@ class AgentChatGateway:
                             "Model decision stopped checkpoint recovery. No task was resumed or "
                             f"started. Reason: {resume_decision.reason}"
                         )
+                    recovered_task = False
                     if resume_decision.action == "resume_checkpoint":
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
@@ -3684,6 +3697,7 @@ class AgentChatGateway:
                                 "generated_files": checkpoint.generated_files,
                             }
                         )
+                        recovered_task = True
                     elif resume_decision.action == "retry_task":
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
@@ -3703,6 +3717,7 @@ class AgentChatGateway:
                             decision=recovery_decision,
                             session_id=session_id,
                         )
+                        recovered_task = True
                     else:
                         previous_execution_id = (
                             str(recovery_candidates[0]["task_id"])
@@ -3809,6 +3824,8 @@ class AgentChatGateway:
                                 sink=sink,
                                 options=options,
                             )
+                            if recovered_task and result.error is None:
+                                result.error = ""
                         except BaseException as exc:
                             self._finish_lane(
                                 reservation.execution.task_id,

@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-05
 
+- Corrected gateway follow-up handling so stopped tasks are classified before conversation execution, validated retry and checkpoint recovery retain an explicit successful error value, and completed tasks do not block a fresh Gmail turn.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`.
+
 - Corrected gateway recovery coverage to import non-public recovery enums from their typed models module.
   - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py -q`.
 
