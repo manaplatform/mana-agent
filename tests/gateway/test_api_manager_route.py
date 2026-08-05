@@ -26,7 +26,10 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                 "browser_close",
             ]
             assert tool_policy["disable_external_search"] is True
+            assert tool_policy["capability_discovery_required"] is True
+            assert tool_policy["initial_tools"] == ["api_workflow_decide"]
             assert "api_operations_search first" in system_prompt
+            assert "capability_search and capability_load" in system_prompt
             assert "api_docs_import_semantic" in system_prompt
             assert "retry the same import" in system_prompt
             assert "refresh_integration_id" in system_prompt

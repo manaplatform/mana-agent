@@ -6709,6 +6709,8 @@ class AgentChatGateway:
             "integration_configuration when the model determines it is also required. Every workflow "
             "containing request_execution must declare and successfully "
             "perform operation_search and request_preview first, including read-only requests. "
+            "After api_workflow_decide, use capability_search and capability_load to load only the "
+            "next authorized API or browser capability needed by that workflow before calling it. "
             "The following is the current redacted saved-integration snapshot, collected before "
             "your workflow decision: "
             + json.dumps(saved_integration_snapshot, ensure_ascii=False, sort_keys=True)
@@ -6794,6 +6796,8 @@ class AgentChatGateway:
                 system_prompt=system_prompt,
                 tool_policy={
                     "allowed_tools": allowed_tools,
+                    "capability_discovery_required": True,
+                    "initial_tools": ["api_workflow_decide"],
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },

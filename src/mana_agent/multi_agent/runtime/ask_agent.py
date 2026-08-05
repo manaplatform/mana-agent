@@ -2050,7 +2050,6 @@ class AskAgent:
         governor = self.context_cost_governor
         lazy_capabilities = bool(
             governor.enabled
-            and governor.mode is not GovernorMode.OBSERVE
             and getattr(governor.settings, "mana_context_lazy_capabilities", True)
         )
         if lazy_capabilities:
@@ -2069,11 +2068,20 @@ class AskAgent:
             # and load the exact permitted capability itself.  This prevents a
             # broad connector surface from consuming the entire context window
             # before that model decision can be made.
-            initial_names = (
-                set()
-                if bool(policy.get("capability_discovery_required"))
-                else set(allowed_tools)
-            )
+            if bool(policy.get("capability_discovery_required")):
+                initial_names = {
+                    str(name)
+                    for name in (policy.get("initial_tools") or ())
+                    if str(name).strip()
+                }
+                unauthorized_initial = initial_names - allowed_tools
+                if unauthorized_initial:
+                    raise RuntimeError(
+                        "Capability discovery initial tools must be explicitly allowed: "
+                        + ", ".join(sorted(unauthorized_initial))
+                    )
+            else:
+                initial_names = set(allowed_tools)
             bound_tools = capability_registry.initial(initial_names)
             tool_map.update({tool.name: tool for tool in core_tools})
             allowed_tools.update(tool.name for tool in core_tools)

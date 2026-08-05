@@ -335,6 +335,47 @@ def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Pa
     assert any("email_search" in names for names in llm.bound_tool_names[2:])
 
 
+def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    agent.context_cost_governor.enabled = True
+    agent.context_cost_governor.mode = GovernorMode.OBSERVE
+    _register_tool(agent, "api_workflow_decide", lambda: {"ok": True})
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "workflow",
+                        "name": "api_workflow_decide",
+                        "args": {},
+                    }
+                ],
+            ),
+            _FakeAIMessage("Workflow decision recorded."),
+        ]
+    )
+    agent.llm = llm  # type: ignore[assignment]
+
+    result = agent.run(
+        "Plan the API workflow.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=3,
+        timeout_seconds=2,
+        tool_policy={
+            "allowed_tools": ["api_workflow_decide"],
+            "capability_discovery_required": True,
+            "initial_tools": ["api_workflow_decide"],
+            "require_initial_tool_call": True,
+        },
+        run_id="api-capability-turn",
+    )
+
+    assert result.answer == "Workflow decision recorded."
+    assert "api_workflow_decide" in llm.bound_tool_names[0]
+
+
 def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:
     counter = _CountingTool({"ok": True, "result": "readme-hit"}, "repo_search")
     agent = _build_agent(tmp_path)

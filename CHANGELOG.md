@@ -10,7 +10,10 @@ All notable repository changes should be recorded here.
   Checkpoint-resume decisions now use a scoped accounting identity and a 512-token structured
   response cap, preventing unrelated long-running task history from inflating their admission
   forecast. The cap uses the runtime's Chat Completions-compatible `max_tokens` argument.
-  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py -q`.
+  API Manager execution now loads only its workflow-decision capability initially, then requires
+  the model to load each subsequent authorized API or browser capability; this applies in observe
+  mode as well, preventing the complete API schema surface from exhausting context before a call.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
   coordinate key creation with a per-key thread and process lock before loading
