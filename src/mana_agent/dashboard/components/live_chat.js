@@ -237,9 +237,11 @@
       state.contextBudget = { ...state.contextBudget, ...metadata, event_type: type, status: eventStatus(event) };
     }
     const permissionRequestId = text(metadata.permission_request_id);
+    const inboxItemId = text(metadata.inbox_item_id);
     if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
-      state.permissionRequests.set(permissionRequestId, {
-        requestId: permissionRequestId,
+      const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
+      const request = {
+        requestId: authorityId,
         scope: text(metadata.permission_scope),
         preview: typeof (metadata.approval_display || metadata.preview) === "object"
           ? JSON.stringify(metadata.approval_display || metadata.preview, null, 2)
@@ -247,7 +249,11 @@
         kind: type === "server.waiting_approval" ? "server" : type === "api.waiting_approval" ? "api" : type === "action.approval.required" ? "transactional" : "computer",
         status: "pending",
         decision: "",
-      });
+      };
+      if (type === "action.approval.required") {
+        request.actionId = text(metadata.action_id);
+      }
+      state.permissionRequests.set(authorityId, request);
     } else if ((type === "computer.permission_decided" || type === "server.approval_decided" || type === "api.approval_decided" || type === "action.approval.granted" || type === "action.approval.denied") && permissionRequestId) {
       const previous = state.permissionRequests.get(permissionRequestId) || {
         requestId: permissionRequestId,
@@ -412,9 +418,11 @@
           const type = eventType(event);
           const metadata = metaOf(event);
           const permissionRequestId = text(metadata.permission_request_id);
+          const inboxItemId = text(metadata.inbox_item_id);
           if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
             node.className = "activity permission";
-            const request = state.permissionRequests.get(permissionRequestId) || {};
+            const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
+            const request = state.permissionRequests.get(authorityId) || {};
             const serverApproval = type === "server.waiting_approval" || request.kind === "server";
             const apiApproval = type === "api.waiting_approval" || request.kind === "api";
             const transactionalApproval = type === "action.approval.required" || request.kind === "transactional";
@@ -440,15 +448,16 @@
                 decisionButton.type = "button";
                 decisionButton.textContent = label;
                 decisionButton.className = className;
-                decisionButton.disabled = permissionBusy.has(permissionRequestId);
+                decisionButton.disabled = permissionBusy.has(authorityId);
                 decisionButton.addEventListener("click", async () => {
-                  permissionBusy.add(permissionRequestId);
-                  permissionErrors.delete(permissionRequestId);
+                  permissionBusy.add(authorityId);
+                  permissionErrors.delete(authorityId);
                   render();
                   try {
                     const permissionPath = serverApproval ? "server-approvals" : apiApproval ? "api-approvals" : transactionalApproval ? "transactional-actions" : "computer-permissions";
+                    const requestTarget = transactionalApproval ? authorityId : permissionRequestId;
                     const response = await fetch(
-                      `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(permissionRequestId)}`,
+                      `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(requestTarget)}`,
                       {
                         method: "POST",
                         headers: { "Content-Type": "application/json", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
@@ -458,25 +467,26 @@
                     const payload = await response.json();
                     if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
                     const resultMessage = text(payload.result && payload.result.message);
-                    state.permissionRequests.set(permissionRequestId, {
+                    if (payload.assistant_message) applyMessage(state, payload.assistant_message);
+                    state.permissionRequests.set(authorityId, {
                       ...request,
-                      requestId: permissionRequestId,
+                      requestId: authorityId,
                       status: "decided",
                       decision,
                       result: resultMessage,
                     });
                   } catch (error) {
-                    permissionErrors.set(permissionRequestId, error.message || String(error));
+                    permissionErrors.set(authorityId, error.message || String(error));
                   } finally {
-                    permissionBusy.delete(permissionRequestId);
+                    permissionBusy.delete(authorityId);
                     render();
                   }
                 });
                 actions.appendChild(decisionButton);
               }
               node.appendChild(actions);
-              if (permissionErrors.has(permissionRequestId)) {
-                addText(node, "div", permissionErrors.get(permissionRequestId), "permission-error");
+              if (permissionErrors.has(authorityId)) {
+                addText(node, "div", permissionErrors.get(authorityId), "permission-error");
               }
             }
           } else {

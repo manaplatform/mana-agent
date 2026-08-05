@@ -34,6 +34,7 @@ class WindowsProvider(BaseProvider):
             CapabilityAvailability(name="system", available=False, provider=self.provider_id, reason="Windows system-control adapter is not configured."),
             CapabilityAvailability(name="notifications", available=False, provider=self.provider_id, reason="Windows notification adapter is not configured."),
             CapabilityAvailability(name="screenshots", available=False, provider=self.provider_id, reason="Windows Graphics Capture adapter is not configured."),
+            CapabilityAvailability(name="screen_recording", available=False, provider=self.provider_id, reason="No bounded Windows screen-recording provider is configured."),
         ]
         self._report = CapabilityReport(platform=self.platform, provider=self.provider_id, capabilities=capabilities, headless=headless)
         return self._report

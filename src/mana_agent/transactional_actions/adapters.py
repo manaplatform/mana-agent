@@ -518,6 +518,139 @@ class HttpActionAdapter(ActionAdapter):
         return redact_secrets(allowed)
 
 
+class McpActionAdapter(ActionAdapter):
+    """Policy-gated execution for one already-discovered MCP tool invocation."""
+
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        invoke: Callable[[], Any],
+        parent_task_id: str,
+        actor: str,
+        originating_agent: str,
+    ) -> None:
+        self.provider_id = str(provider_id).strip()
+        self.tool_name = str(tool_name).strip()
+        if not self.provider_id or not self.tool_name:
+            raise ValueError("MCP action requires a provider and tool name")
+        self.arguments = dict(arguments)
+        self.invoke = invoke
+        self.parent_task_id = str(parent_task_id).strip()
+        if not self.parent_task_id:
+            raise ValueError("MCP action requires a durable parent task")
+        self.actor = actor
+        self.originating_agent = originating_agent
+        encoded = json.dumps(self.arguments, sort_keys=True, ensure_ascii=False, default=str)
+        self.arguments_sha256 = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        parent_task_sha256 = hashlib.sha256(
+            self.parent_task_id.encode("utf-8")
+        ).hexdigest()
+        # A new durable task is a model-selected fresh attempt. It must not
+        # reuse an earlier external action just because its requested provider
+        # call has identical arguments. Within one task, the exact call stays
+        # idempotent.
+        self.idempotency_key = (
+            f"mcp:{parent_task_sha256}:{self.provider_id}:"
+            f"{self.tool_name}:{self.arguments_sha256}"
+        )
+
+    def build_intent(self) -> ActionIntent:
+        target = f"mcp.{self.provider_id}.{self.tool_name}"
+        return ActionIntent(
+            parent_task_id=self.parent_task_id,
+            actor=self.actor,
+            originating_agent=self.originating_agent,
+            tool_name="mcp",
+            operation_name=self.tool_name,
+            target_resources=[target],
+            normalized_arguments={
+                "provider_id": self.provider_id,
+                "tool_name": self.tool_name,
+                "arguments_sha256": self.arguments_sha256,
+                "arguments": redact_secrets(self.arguments),
+            },
+            requested_capabilities=["mcp.execute", "external.account.mutate"],
+            expected_side_effects=[f"execute MCP tool {target}"],
+            data_disclosure=DataDisclosure.EXTERNAL_PRIVATE,
+            blast_radius=BlastRadius.EXTERNAL_ACCOUNT,
+            reversibility=Reversibility.UNKNOWN,
+            idempotency_key=self.idempotency_key,
+            verification_plan=["verify the MCP provider returned an explicit successful result"],
+            compensation_strategy="No generic MCP compensation exists; provider-specific reversal requires a new approved action.",
+        )
+
+    def preview(self, action: ActionIntent) -> ActionPreview:
+        return ActionPreview(
+            summary=f"Execute MCP provider action mcp.{self.provider_id}.{self.tool_name}",
+            resources=[{"provider": self.provider_id, "tool": self.tool_name, "change": "external MCP operation"}],
+            exact_invocation=action.normalized_arguments,
+            expected_side_effects=action.expected_side_effects,
+            risks=["external provider state may change", "generic MCP operations have no automatic compensation"],
+            externally_visible=True,
+            potentially_billable=None,
+            supports_native_idempotency=False,
+        )
+
+    def protected_action_context(self) -> dict[str, Any]:
+        """Keep exact arguments out of the redacted durable action record.
+
+        A resumed action must bind to the same provider, tool, and arguments
+        that were previewed. The store protects this context separately from
+        the user-visible, redacted action intent.
+        """
+        return {
+            "provider_id": self.provider_id,
+            "tool_name": self.tool_name,
+            "arguments": self.arguments,
+        }
+
+    def execute(self, action: ActionIntent) -> dict[str, Any]:
+        raw = self.invoke()
+        if isinstance(raw, str):
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                result = {"ok": False, "error": "MCP tool returned non-JSON output"}
+        elif isinstance(raw, dict):
+            result = dict(raw)
+        else:
+            result = {"ok": False, "error": "MCP tool returned an unsupported result type"}
+        if not bool(result.get("ok")):
+            detail = str(
+                result.get("error")
+                or result.get("error_code")
+                or result.get("message")
+                or "MCP provider returned ok=false without a diagnostic detail"
+            )
+            raise RuntimeError(redact_secrets(detail)[:1000])
+        return result
+
+    def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:
+        accepted = bool(result.get("ok")) and not bool(result.get("is_error"))
+        return VerificationEvidence(
+            complete=accepted,
+            summary=(
+                "The MCP provider returned an explicit successful tool result."
+                if accepted
+                else "The MCP provider did not return a successful tool result."
+            ),
+            checks=[
+                {
+                    "check": "mcp_provider_result",
+                    "provider": self.provider_id,
+                    "tool": self.tool_name,
+                    "accepted": accepted,
+                }
+            ],
+        )
+
+    def persistable_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        return redact_secrets(result)
+
+
 def _sha(value: bytes | None) -> str:
     return hashlib.sha256(value or b"").hexdigest()
 

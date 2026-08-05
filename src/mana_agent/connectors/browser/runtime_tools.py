@@ -3,12 +3,13 @@ import json
 from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
+from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
 from mana_agent.connectors.browser.session import BrowserConnectorError, default_browser_manager
 
 class _Session(BaseModel): session_id: str
 class _Open(_Session): url: str; profile_name: str | None = None
 class _Inspect(_Session): tab_id: str | None = None
-class _Act(_Inspect): target: str = ""; value: Any = None; observed_page_version: int | None = None; expected_origin: str | None = None; risk: str = "reversible"; confirmation_required: bool = False; approval_token: str | None = None; timeout_ms: int | None = None
+class _Act(_Inspect): target: str = ""; value: Any = None; observed_page_version: int | None = None; expected_origin: str | None = None; risk: BrowserRisk; reason: str = Field(min_length=1, max_length=600); confirmation_required: bool = False; approval_token: str | None = None; timeout_ms: int | None = None
 class _Screenshot(_Inspect): full_page: bool = True
 class _Upload(_Session): ref: str; path: str; observed_page_version: int; tab_id: str | None = None
 class _Switch(_Session): tab_id: str
@@ -19,19 +20,76 @@ def _result(call):
     except BrowserConnectorError as exc: return json.dumps({"ok": False, "error_code": exc.code, "message": str(exc)})
     except Exception as exc: return json.dumps({"ok": False, "error_code": "browser_error", "message": str(exc)})
 
+
+def action_metadata(tool_name: str, arguments: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Classify only a validated model-declared read-only browser action."""
+    action = str(tool_name).removeprefix("browser_")
+    try:
+        decision = BrowserActionDecision(
+            session_id=str(arguments["session_id"]),
+            action=action,
+            tab_id=arguments.get("tab_id"),
+            target=arguments.get("target"),
+            arguments={"value": arguments.get("value")},
+            observed_page_version=arguments.get("observed_page_version"),
+            expected_origin=arguments.get("expected_origin"),
+            risk=arguments["risk"],
+            confirmation_required=bool(arguments.get("confirmation_required", False)),
+            reason=str(arguments["reason"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Browser action requires a valid explicit BrowserActionDecision."
+        ) from exc
+    if decision.action == "click" and decision.risk is BrowserRisk.READ_ONLY:
+        return {**(metadata or {}), "read_only": True, "side_effecting": False}
+    return metadata
+
 def build_browser_langchain_tools() -> list[Any]:
     manager = default_browser_manager()
     def open_page(**kw): return _result(lambda: manager.open(**_Open.model_validate(kw).model_dump()))
     def inspect(**kw): return _result(lambda: manager.inspect(**_Inspect.model_validate(kw).model_dump()))
-    def action(name, kw): return _result(lambda: manager.act(action=name, **_Act.model_validate(kw).model_dump()))
+    def action(name, kw):
+        payload = _Act.model_validate(kw).model_dump()
+        payload.pop("reason")
+        return _result(lambda: manager.act(action=name, **payload))
     def screenshot(**kw): return _result(lambda: manager.screenshot(**_Screenshot.model_validate(kw).model_dump()))
     def upload(**kw): return _result(lambda: manager.upload(**_Upload.model_validate(kw).model_dump()))
     def tabs(**kw): return _result(lambda: manager.tabs(**_Session.model_validate(kw).model_dump()))
     def switch(**kw): return _result(lambda: manager.switch_tab(**_Switch.model_validate(kw).model_dump()))
     def check_links(**kw): return _result(lambda: manager.check_links(**_CheckLinks.model_validate(kw).model_dump()))
     def close(**kw): return _result(lambda: manager.close(**_Session.model_validate(kw).model_dump()))
-    tools = [StructuredTool.from_function(func=open_page,name="browser_open",description="Open an absolute HTTP(S) URL in an isolated model-selected browser session.",args_schema=_Open),StructuredTool.from_function(func=inspect,name="browser_inspect",description="Inspect page text, semantic accessibility snapshot, forms and interactive element refs.",args_schema=_Inspect)]
-    for name in ("click","type","select","scroll","wait","back","download"):
-        tools.append(StructuredTool.from_function(func=lambda _name=name, **kw: action(_name, kw),name=f"browser_{name}",description=f"Perform validated browser {name}; sensitive terminal actions return confirmation_required.",args_schema=_Act))
-    tools += [StructuredTool.from_function(func=screenshot,name="browser_screenshot",description="Save a screenshot in the private session artifact directory.",args_schema=_Screenshot),StructuredTool.from_function(func=upload,name="browser_upload",description="Upload an allowed local file through a current file-input ref.",args_schema=_Upload),StructuredTool.from_function(func=check_links,name="browser_check_links",description="Validate rendered HTTP(S) links without navigating away; return status and broken-link results.",args_schema=_CheckLinks),StructuredTool.from_function(func=tabs,name="browser_tabs",description="List browser tabs and popups.",args_schema=_Session),StructuredTool.from_function(func=switch,name="browser_switch_tab",description="Switch to a model-selected tab id.",args_schema=_Switch),StructuredTool.from_function(func=close,name="browser_close",description="Close and clean an isolated browser session.",args_schema=_Session)]
+    # These operations cannot submit a form, type data, or invoke a page
+    # control.  Declare that narrow property to the shared transactional gate
+    # so public documentation inspection can reach the browser connector.
+    # Browser controls that can change remote state remain unclassified and
+    # therefore fail closed until they have a transactional adapter.
+    read_only_metadata = {"read_only": True, "side_effecting": False}
+    tools = [
+        StructuredTool.from_function(
+            func=open_page,
+            name="browser_open",
+            description="Open an absolute HTTP(S) URL in an isolated model-selected browser session.",
+            args_schema=_Open,
+            metadata=read_only_metadata,
+        ),
+        StructuredTool.from_function(
+            func=inspect,
+            name="browser_inspect",
+            description="Inspect page text, semantic accessibility snapshot, forms and interactive element refs.",
+            args_schema=_Inspect,
+            metadata=read_only_metadata,
+        ),
+    ]
+    for name in ("click", "type", "select", "scroll", "wait", "back", "download"):
+        tools.append(
+            StructuredTool.from_function(
+                func=lambda _name=name, **kw: action(_name, kw),
+                name=f"browser_{name}",
+                description=f"Perform validated browser {name}; sensitive terminal actions return confirmation_required.",
+                args_schema=_Act,
+                metadata=(read_only_metadata if name in {"scroll", "wait"} else None),
+            )
+        )
+    tools += [StructuredTool.from_function(func=screenshot,name="browser_screenshot",description="Save a screenshot in the private session artifact directory.",args_schema=_Screenshot),StructuredTool.from_function(func=upload,name="browser_upload",description="Upload an allowed local file through a current file-input ref.",args_schema=_Upload),StructuredTool.from_function(func=check_links,name="browser_check_links",description="Validate rendered HTTP(S) links without navigating away; return status and broken-link results.",args_schema=_CheckLinks),StructuredTool.from_function(func=tabs,name="browser_tabs",description="List browser tabs and popups.",args_schema=_Session,metadata=read_only_metadata),StructuredTool.from_function(func=switch,name="browser_switch_tab",description="Switch to a model-selected tab id.",args_schema=_Switch,metadata=read_only_metadata),StructuredTool.from_function(func=close,name="browser_close",description="Close and clean an isolated browser session.",args_schema=_Session,metadata=read_only_metadata)]
     return tools

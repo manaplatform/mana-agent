@@ -122,7 +122,7 @@ class ChatUIState:
                 {"role": item.role, "content": item.content}
                 for item in self.conversation_history_store.list(self.session_id)
                 if item.role in {"user", "assistant", "tool"}
-            ][-40:]
+            ]
         self.ui_mode = EventRenderer.normalize_mode(self.ui_mode)
         self.trace_mode = EventRenderer.normalize_trace_mode(self.trace_mode)
         if self.trace_path is None:
@@ -385,8 +385,6 @@ class ChatUIState:
                 turn_id=turn_id,
                 metadata={"model": self.model, "provider": self.provider},
             )
-        if len(self.conversation) > 40:
-            self.conversation = self.conversation[-40:]
 
     def agents_used(self, *, turn_id: str | None = None) -> list[str]:
         agents: list[str] = []

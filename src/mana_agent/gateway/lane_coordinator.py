@@ -42,8 +42,16 @@ from mana_agent.execution_supervisor import (
     SideEffectClassification,
     RecoveryDecision,
 )
-from mana_agent.execution_supervisor.errors import CompletionVerificationError, ExecutionSupervisorError
-from mana_agent.execution_supervisor.models import RecoveryAction
+from mana_agent.execution_supervisor.errors import (
+    BudgetExceededError,
+    CompletionVerificationError,
+    ExecutionSupervisorError,
+)
+from mana_agent.execution_supervisor.models import (
+    BudgetOverrunFinalizationDecision,
+    ExecutionState,
+    RecoveryAction,
+)
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
     import msvcrt
@@ -152,7 +160,7 @@ _CONTROL_TRANSITIONS: dict[LaneTaskState, frozenset[LaneTaskState]] = {
     LaneTaskState.CREATED: frozenset({LaneTaskState.ROUTING, LaneTaskState.REJECTED, LaneTaskState.FAILED}),
     LaneTaskState.ROUTING: frozenset({LaneTaskState.QUEUED, LaneTaskState.REJECTED, LaneTaskState.FAILED}),
     LaneTaskState.QUEUED: frozenset({LaneTaskState.RUNNING, LaneTaskState.PAUSED, LaneTaskState.CANCELLING, LaneTaskState.BLOCKED, LaneTaskState.REJECTED}),
-    LaneTaskState.RUNNING: frozenset({LaneTaskState.WAITING, LaneTaskState.BLOCKED, LaneTaskState.CANCELLING, LaneTaskState.VERIFYING, LaneTaskState.COMPLETED, LaneTaskState.FAILED}),
+    LaneTaskState.RUNNING: frozenset({LaneTaskState.WAITING, LaneTaskState.BLOCKED, LaneTaskState.CANCELLING, LaneTaskState.VERIFYING, LaneTaskState.PENDING_BUDGET_DECISION, LaneTaskState.COMPLETED, LaneTaskState.FAILED}),
     LaneTaskState.WAITING: frozenset({LaneTaskState.QUEUED, LaneTaskState.RUNNING, LaneTaskState.PAUSED, LaneTaskState.BLOCKED, LaneTaskState.CANCELLING}),
     LaneTaskState.BLOCKED: frozenset({LaneTaskState.QUEUED, LaneTaskState.CANCELLING, LaneTaskState.FAILED, LaneTaskState.REJECTED}),
     LaneTaskState.PAUSED: frozenset({LaneTaskState.QUEUED, LaneTaskState.CANCELLING}),
@@ -178,6 +186,13 @@ class LaneBudget:
     consumed_output_tokens: int = 0
     estimated_cost: float = 0.0
     actual_cost: float = 0.0
+    estimated_cost_known: bool = False
+    actual_cost_known: bool = False
+    model_context_window: int = 0
+    model_max_output_tokens: int = 0
+    estimate_confidence: str = ""
+    estimate_source: str = ""
+    revisions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def reserved_tokens(self) -> int:
@@ -221,6 +236,7 @@ class LaneExecution:
     model: str = ""
     provider: str = ""
     routing_decision_id: str = ""
+    accounting_reservation_ids: list[str] = field(default_factory=list)
     task_type: str = "single"
     capabilities: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
@@ -320,6 +336,7 @@ class GatewayLockManager:
             expires_at=_iso(_now() + timedelta(seconds=max(1, lease_seconds))),
         )
         deadline = time.monotonic() + max(0.0, timeout_seconds)
+        waiting_emitted = False
         self.coordinator.emit("lock.requested", task_id=task_id, lane_id=None, mode=mode.value)
         with self.coordinator._condition:
             while True:
@@ -337,7 +354,11 @@ class GatewayLockManager:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise LaneLockTimeout(f"Timed out waiting for {mode.value} lock")
-                self.coordinator.emit("lock.waiting", task_id=task_id, lane_id=None, mode=mode.value)
+                if not waiting_emitted:
+                    self.coordinator.emit(
+                        "lock.waiting", task_id=task_id, lane_id=None, mode=mode.value
+                    )
+                    waiting_emitted = True
                 self.coordinator._condition.wait(timeout=min(remaining, 0.25))
 
     def release_task(self, task_id: str) -> None:
@@ -402,8 +423,13 @@ class LaneCoordinator:
             supervisor_config,
             event_sink=self._supervisor_event,
         )
+        self.taskboard.set_task_id_reservation_checker(
+            lambda task_id: self.execution_supervisor.store.get_task_or_none(task_id)
+            is not None
+        )
         self._supervisor_heartbeat_stops: dict[str, threading.Event] = {}
         self._supervisor_heartbeat_threads: dict[str, threading.Thread] = {}
+        self._human_resume_dispatcher: Callable[[str, str, str, dict[str, Any]], None] | None = None
         self.lock_manager = GatewayLockManager(self)
         self.state_path = workspace_dir(self.taskboard.store.workspace_id) / "gateway" / "lane_coordinator.json"
         self.locks_path = self.state_path.with_name("lane_locks.json")
@@ -411,6 +437,161 @@ class LaneCoordinator:
         self._load()
         self._migrate_legacy_supervisor_records()
         self.recover(supervise=self.execution_supervisor.config.startup_recovery)
+
+    @property
+    def store(self) -> Any:
+        """Expose the durable supervisor store required by the inbox controller contract."""
+        return self.execution_supervisor.store
+
+    def set_human_resume_dispatcher(
+        self,
+        dispatcher: Callable[[str, str, str, dict[str, Any]], None] | None,
+    ) -> None:
+        """Register the branch-owned dispatcher for durable human responses."""
+        self._human_resume_dispatcher = dispatcher
+
+    def suspend_for_human_input(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        request_type: str,
+    ) -> Any:
+        """Suspend one gateway branch for its linked durable inbox item."""
+        task = self.execution_supervisor.suspend_for_human_input(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            request_type=request_type,
+        )
+        self.transition(
+            task_id,
+            LaneTaskState.WAITING,
+            reason=f"waiting for {request_type} inbox item {inbox_item_id}",
+        )
+        self._stop_supervisor_heartbeats(task_id)
+        return task
+
+    def resume_from_human_input(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> Any:
+        """Queue only the branch whose durable inbox response holds this claim."""
+        task = self.execution_supervisor.resume_from_human_input(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            resume_claim_id=resume_claim_id,
+            structured_response=structured_response,
+        )
+        with self._condition:
+            execution = self._executions[task_id]
+            execution.worker_id = ""
+            execution.supervisor_attempt_id = ""
+            execution.supervisor_lease_token = ""
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.transition(task_id, LaneTaskState.QUEUED, reason="durable human response received")
+        self._dispatch_human_resume(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            resume_claim_id=resume_claim_id,
+            structured_response=structured_response,
+        )
+        return task
+
+    def restore_human_wait(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        checkpoint_id: str,
+        request_type: str,
+    ) -> Any:
+        """Restore an unresolved durable inbox wait without starting new work."""
+        task = self.execution_supervisor.restore_human_wait(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            checkpoint_id=checkpoint_id,
+            request_type=request_type,
+        )
+        if self.inspect_task(task_id).state is not LaneTaskState.WAITING:
+            self.transition(
+                task_id,
+                LaneTaskState.WAITING,
+                reason=f"restored {request_type} inbox wait {inbox_item_id}",
+            )
+        self._stop_supervisor_heartbeats(task_id)
+        return task
+
+    def _dispatch_human_resume(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> None:
+        dispatcher = self._human_resume_dispatcher
+        if dispatcher is None:
+            return
+
+        def run() -> None:
+            try:
+                dispatcher(task_id, inbox_item_id, resume_claim_id, structured_response)
+            except Exception as exc:
+                execution = self._executions.get(task_id)
+                if execution is not None:
+                    execution.error = f"human resume dispatch failed: {type(exc).__name__}: {exc}"
+                    execution.updated_at = _iso()
+                    with self._condition:
+                        self._persist_locked()
+                self.emit(
+                    "human_input.dispatch_failed",
+                    task_id=task_id,
+                    inbox_item_id=inbox_item_id,
+                    resume_claim_id=resume_claim_id,
+                    error_type=type(exc).__name__,
+                )
+
+        threading.Thread(
+            target=run,
+            name=f"mana-human-resume-{task_id}",
+            daemon=True,
+        ).start()
+
+    def dispatch_queued_human_resume(
+        self,
+        task_id: str,
+        *,
+        inbox_item_id: str,
+        resume_claim_id: str,
+        structured_response: dict[str, Any],
+    ) -> bool:
+        """Dispatch a recovered response only while its exact branch is still queued."""
+        task = self.execution_supervisor.store.get_task_or_none(task_id)
+        execution = self._executions.get(task_id)
+        if (
+            task is None
+            or task.state is not SupervisorState.QUEUED
+            or task.waiting_inbox_item_id
+            or execution is None
+            or execution.state is not LaneTaskState.QUEUED
+        ):
+            return False
+        self._dispatch_human_resume(
+            task_id,
+            inbox_item_id=inbox_item_id,
+            resume_claim_id=resume_claim_id,
+            structured_response=structured_response,
+        )
+        return True
 
     def _supervisor_event(self, event_type: str, payload: dict[str, Any]) -> None:
         task_id = str(payload.get("task_id") or "")
@@ -480,7 +661,11 @@ class LaneCoordinator:
         model: str = "",
         requested_input_tokens: int = 0,
         requested_output_tokens: int = 0,
-        estimated_cost: float = 0.0,
+        estimated_cost: float | None = None,
+        model_context_window: int = 0,
+        model_max_output_tokens: int = 0,
+        estimate_confidence: str = "",
+        estimate_source: str = "",
         capabilities: Sequence[str] = (),
         routing_decision_id: str = "",
         provider: str = "",
@@ -493,6 +678,11 @@ class LaneCoordinator:
         relation_type: str = "independent",
         previous_task_id: str = "",
         user_message_id: str = "",
+        supervision_contract_decision_id: str = "",
+        side_effect_classification: SideEffectClassification | None = None,
+        completion_contract: Sequence[CompletionContract] = (),
+        compensation_strategy: str = "",
+        important_constraints: Sequence[str] = (),
     ) -> LaneReservation:
         if not self.execution_supervisor.config.enabled:
             raise LaneCoordinatorError(
@@ -506,10 +696,9 @@ class LaneCoordinator:
         files = self.canonical_paths(target_files)
         fingerprint = _stable_hash({
             "intent": " ".join(normalized_intent.lower().split()), "repository_id": repository_id,
-            "workspace_id": workspace_id, "session_id": session_id, "target_files": files,
+            "workspace_id": workspace_id, "target_files": files,
             "lane": lane_id.value, "parent_task_id": parent_task_id,
-            "trigger_turn_id": trigger_turn_id, "relation_type": relation_type,
-            "user_message_id": user_message_id,
+            "relation_type": relation_type,
         })
         # ``lane_id`` is itself a validated structured routing decision. Older
         # callers did not persist a separate decision ID, so derive a stable
@@ -533,12 +722,10 @@ class LaneCoordinator:
                     for active in self._executions.values():
                         active_fingerprint = _stable_hash({
                             "intent": " ".join(active.normalized_intent.lower().split()), "repository_id": active.repository_id,
-                            "workspace_id": active.workspace_id, "session_id": active.session_id,
+                            "workspace_id": active.workspace_id,
                             "target_files": active.target_files, "lane": active.owning_lane.value,
                             "parent_task_id": active.parent_task_id,
-                            "trigger_turn_id": active.trigger_turn_id,
                             "relation_type": active.relation_type,
-                            "user_message_id": active.user_message_id,
                         })
                         explicit_identity_matches = (
                             not taskboard_task_id
@@ -561,9 +748,15 @@ class LaneCoordinator:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise LaneCapacityError(f"lane {lane_id.value} capacity wait timed out")
-                    self.emit("lane.queued", task_id=waiter["waiter_id"], lane_id=lane_id, reason="capacity")
-                    self._persist_locked()
-                    waiter_persisted = True
+                    if not waiter_persisted:
+                        self.emit(
+                            "lane.queued",
+                            task_id=waiter["waiter_id"],
+                            lane_id=lane_id,
+                            reason="capacity",
+                        )
+                        self._persist_locked()
+                        waiter_persisted = True
                     self._condition.wait(timeout=min(remaining, 0.25))
             finally:
                 self._waiters = [item for item in self._waiters if item["waiter_id"] != waiter["waiter_id"]]
@@ -572,7 +765,12 @@ class LaneCoordinator:
             budget = LaneBudget(
                 reserved_input_tokens=max(0, requested_input_tokens),
                 reserved_output_tokens=max(0, requested_output_tokens),
-                estimated_cost=max(0.0, estimated_cost),
+                estimated_cost=max(0.0, float(estimated_cost or 0.0)),
+                estimated_cost_known=estimated_cost is not None,
+                model_context_window=max(0, int(model_context_window)),
+                model_max_output_tokens=max(0, int(model_max_output_tokens)),
+                estimate_confidence=estimate_confidence,
+                estimate_source=estimate_source,
             )
             self._assert_budget(contract, session_id, budget)
             if parent_task_id:
@@ -613,13 +811,23 @@ class LaneCoordinator:
                     previous_task_id=previous_task_id,
                 )
             task_id = task.task_id
-            side_effect = (
+            side_effect = side_effect_classification or (
                 SideEffectClassification.READ_ONLY
                 if lane_id in {LaneId.RESEARCH, LaneId.REVIEW, LaneId.VERIFY}
                 and not contract.requires_write_access
                 and set(capabilities).issubset({"repository_read"})
                 else SideEffectClassification.UNKNOWN
             )
+            initial_contract = list(completion_contract) or [
+                CompletionContract(
+                    contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                    metadata={
+                        "required_keys": ["lane_state", "verification_evidence_present"],
+                        "expected_values": {"lane_state": "completed"},
+                    },
+                )
+            ]
+            contract_decision_id = supervision_contract_decision_id or effective_routing_decision_id
             self.execution_supervisor.create_task(
                 task_id=task_id,
                 parent_task_id=parent_task_id,
@@ -630,9 +838,15 @@ class LaneCoordinator:
                 workspace_path=self.root,
                 routing_decision_id=effective_routing_decision_id,
                 side_effect_classification=side_effect,
+                completion_contract=initial_contract,
+                compensation_strategy=compensation_strategy,
                 dependency_task_ids=task.depends_on,
                 token_budget=budget.reserved_tokens or None,
-                estimated_cost=budget.estimated_cost,
+                estimated_cost=(budget.estimated_cost if budget.estimated_cost_known else None),
+                model_context_window=budget.model_context_window,
+                model_max_output_tokens=budget.model_max_output_tokens,
+                estimate_confidence=budget.estimate_confidence,
+                estimate_source=budget.estimate_source,
                 monetary_budget=contract.cost_budget,
                 execution_fingerprint=fingerprint,
                 session_id=session_id,
@@ -642,6 +856,16 @@ class LaneCoordinator:
                 requested_operation=lane_id.value,
                 target_resources=files,
                 expected_output=task_type,
+                important_constraints=important_constraints,
+                field_provenance={
+                    "side_effect_classification": "model_selected_lane_contract",
+                    "completion_contract": "model_selected_lane_contract",
+                    "target_resources": "model_selected" if files else "not_applicable_or_not_selected",
+                    "important_constraints": (
+                        "model_selected" if important_constraints else "not_applicable_or_not_selected"
+                    ),
+                },
+                supervision_contract_decision_id=contract_decision_id,
                 supersedes_execution_id=supersedes_execution_id,
                 derived_from_execution_id=derived_from_execution_id,
                 previous_execution_id=previous_execution_id,
@@ -834,25 +1058,43 @@ class LaneCoordinator:
         changed_files: Sequence[str] = (),
         consumed_input_tokens: int = 0,
         consumed_output_tokens: int = 0,
-        actual_cost: float = 0.0,
+        actual_cost: float | None = None,
         verification_state: Mapping[str, Any] | None = None,
         error: str = "",
     ) -> LaneExecution:
         with self._condition:
             execution = self._executions[task_id]
             execution.changed_files = self.canonical_paths(changed_files)
+            execution_had_usage = execution.budget.consumed_tokens > 0
+            incremental_usage = consumed_input_tokens > 0 or consumed_output_tokens > 0
             execution.budget.consumed_input_tokens += max(0, consumed_input_tokens)
             execution.budget.consumed_output_tokens += max(0, consumed_output_tokens)
-            execution.budget.actual_cost += max(0.0, actual_cost)
+            execution.budget.actual_cost += max(0.0, float(actual_cost or 0.0))
+            if actual_cost is not None:
+                execution.budget.actual_cost_known = (
+                    not execution_had_usage or execution.budget.actual_cost_known
+                )
+            elif incremental_usage:
+                execution.budget.actual_cost_known = False
             if execution.parent_task_id and execution.parent_task_id in self._executions:
                 parent = self._executions[execution.parent_task_id]
+                parent_had_usage = parent.budget.consumed_tokens > 0
                 parent.budget.consumed_input_tokens += max(0, consumed_input_tokens)
                 parent.budget.consumed_output_tokens += max(0, consumed_output_tokens)
-                parent.budget.actual_cost += max(0.0, actual_cost)
+                parent.budget.actual_cost += max(0.0, float(actual_cost or 0.0))
+                if actual_cost is not None:
+                    parent.budget.actual_cost_known = (
+                        not parent_had_usage or parent.budget.actual_cost_known
+                    )
+                elif incremental_usage:
+                    parent.budget.actual_cost_known = False
                 parent.updated_at = _iso()
             execution.verification_state.update(dict(verification_state or {}))
             execution.error = error
             execution.updated_at = execution.last_heartbeat = _iso()
+            accounted_input_tokens = execution.budget.consumed_input_tokens
+            accounted_output_tokens = execution.budget.consumed_output_tokens
+            accounted_actual_cost = execution.budget.actual_cost
         self._stop_supervisor_heartbeats(task_id)
         verified = False
         if state == LaneTaskState.COMPLETED:
@@ -921,24 +1163,35 @@ class LaneCoordinator:
                         "verification_state": dict(execution.verification_state),
                         "chat_result": dict(execution.verification_state.get("chat_result") or {}),
                         "evidence": list(execution.evidence),
-                        "token_usage": consumed_input_tokens + consumed_output_tokens,
-                        "actual_cost": actual_cost,
+                        "token_usage": accounted_input_tokens + accounted_output_tokens,
+                        "actual_cost": accounted_actual_cost,
                     },
-                    token_usage=consumed_input_tokens + consumed_output_tokens,
-                    actual_cost=actual_cost,
+                    token_usage=accounted_input_tokens + accounted_output_tokens,
+                    actual_cost=(accounted_actual_cost if execution.budget.actual_cost_known else None),
                 )
             except CompletionVerificationError as exc:
                 execution.error = str(exc)
                 state = LaneTaskState.VERIFYING
+            except BudgetExceededError as exc:
+                # submit_result has already projected the durable task to its
+                # authoritative terminal budget state. Do not replace it with
+                # a second terminal transition to FAILED.
+                execution.error = str(exc)
+                state = LaneTaskState.BUDGET_EXHAUSTED
             except ExecutionSupervisorError as exc:
                 execution.error = str(exc)
-                state = LaneTaskState.FAILED
                 supervised = self.execution_supervisor.store.get_task(task_id)
+                state = (
+                    LaneTaskState.BUDGET_EXHAUSTED
+                    if supervised.state == SupervisorState.BUDGET_EXHAUSTED
+                    else LaneTaskState.FAILED
+                )
                 if supervised.state not in {
                     SupervisorState.FAILED,
                     SupervisorState.CANCELLED,
                     SupervisorState.COMPLETED,
                     SupervisorState.COMPLETED_PENDING_VERIFICATION,
+                    SupervisorState.BUDGET_EXHAUSTED,
                 }:
                     self.execution_supervisor.transition(
                         task_id,
@@ -947,10 +1200,18 @@ class LaneCoordinator:
                     )
             else:
                 verified = supervised.state == SupervisorState.COMPLETED
-                state = LaneTaskState.COMPLETED if verified else LaneTaskState.VERIFYING
+                state = (
+                    LaneTaskState.COMPLETED if verified
+                    else LaneTaskState.PENDING_BUDGET_DECISION
+                    if supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+                    else LaneTaskState.VERIFYING
+                )
                 if not verified:
-                    manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
-                    execution.error = _completion_verification_failure(manifest)
+                    if state is LaneTaskState.PENDING_BUDGET_DECISION:
+                        execution.error = "A validated model budget-overrun decision is required before finalization."
+                    else:
+                        manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+                        execution.error = _completion_verification_failure(manifest)
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
         elif state == LaneTaskState.BUDGET_EXHAUSTED:
@@ -980,6 +1241,7 @@ class LaneCoordinator:
                 LaneTaskState.COMPLETED: TaskStatus.DONE,
                 LaneTaskState.VERIFYING: TaskStatus.NEEDS_REVIEW,
                 LaneTaskState.CANCELLED: TaskStatus.CANCELLED,
+                LaneTaskState.PENDING_BUDGET_DECISION: TaskStatus.NEEDS_REVIEW,
             }.get(state, TaskStatus.FAILED)
             reason = error or execution.error or f"lane execution ended as {state.value}"
             if mapped_status == TaskStatus.DONE:
@@ -1002,15 +1264,141 @@ class LaneCoordinator:
                 )
             self._persist_locked()
         self.lock_manager.release_task(task_id)
-        event = {
-            LaneTaskState.COMPLETED: "lane.completed", LaneTaskState.CANCELLED: "lane.cancelled",
-            LaneTaskState.BUDGET_EXHAUSTED: "lane.budget_exhausted",
-        }.get(state, "lane.failed" if state != LaneTaskState.VERIFYING else "verification.failed")
-        self.emit(event, task_id=task_id, lane_id=execution.owning_lane, status="success" if verified else "error")
+        if state is LaneTaskState.PENDING_BUDGET_DECISION:
+            # The result is durable and valid, but requires its separate
+            # finalization decision. Never publish it as a lane failure: a
+            # later accepted decision would otherwise leave the UI showing a
+            # false execution error beside a successful response.
+            event = "budget.overrun.decision.required"
+            event_status = "waiting"
+        else:
+            event = {
+                LaneTaskState.COMPLETED: "lane.completed", LaneTaskState.CANCELLED: "lane.cancelled",
+                LaneTaskState.BUDGET_EXHAUSTED: "lane.budget_exhausted",
+            }.get(state, "lane.failed" if state != LaneTaskState.VERIFYING else "verification.failed")
+            event_status = "success" if verified else "error"
+        self.emit(event, task_id=task_id, lane_id=execution.owning_lane, status=event_status)
         self.emit("resource.released", task_id=task_id, lane_id=execution.owning_lane)
         with self._condition:
             self._condition.notify_all()
         return execution
+
+    def synchronize_usage(
+        self,
+        task_id: str,
+        *,
+        consumed_input_tokens: int = 0,
+        consumed_output_tokens: int = 0,
+        actual_cost: float | None = None,
+        accounting_reservation_ids: Sequence[str] = (),
+    ) -> LaneExecution:
+        """Persist cumulative provider usage without double-counting a later finish."""
+        with self._condition:
+            execution = self._executions[task_id]
+            input_delta = max(
+                0,
+                int(consumed_input_tokens)
+                - execution.budget.consumed_input_tokens,
+            )
+            output_delta = max(
+                0,
+                int(consumed_output_tokens)
+                - execution.budget.consumed_output_tokens,
+            )
+            cost_delta = max(0.0, float(actual_cost or 0.0) - execution.budget.actual_cost)
+            execution.budget.consumed_input_tokens += input_delta
+            execution.budget.consumed_output_tokens += output_delta
+            execution.budget.actual_cost += cost_delta
+            execution.budget.actual_cost_known = actual_cost is not None
+            for reservation_id in accounting_reservation_ids:
+                if reservation_id not in execution.accounting_reservation_ids:
+                    execution.accounting_reservation_ids.append(reservation_id)
+            if execution.parent_task_id and execution.parent_task_id in self._executions:
+                parent = self._executions[execution.parent_task_id]
+                parent_had_usage = parent.budget.consumed_tokens > 0
+                parent.budget.consumed_input_tokens += input_delta
+                parent.budget.consumed_output_tokens += output_delta
+                parent.budget.actual_cost += cost_delta
+                parent.budget.actual_cost_known = (
+                    (not parent_had_usage or parent.budget.actual_cost_known)
+                    and actual_cost is not None
+                )
+                parent.updated_at = _iso()
+            execution.updated_at = _iso()
+            self._persist_locked()
+            if accounting_reservation_ids:
+                self.execution_supervisor.record_accounting_reservations(
+                    task_id, accounting_reservation_ids
+                )
+            return execution
+
+    def recalculate_budget(
+        self,
+        task_id: str,
+        *,
+        forecast_input_tokens: int,
+        forecast_output_tokens: int,
+        forecast_cost: float | None,
+        accounting_reservation_id: str = "",
+        reason: str = "provider-call forecast",
+    ) -> LaneExecution:
+        """Atomically grow a reservation only when every immutable cap admits it."""
+        with self._condition:
+            execution = self._executions[task_id]
+            if execution.state not in ACTIVE_LANE_STATES:
+                raise LaneBudgetError("task is not eligible for budget recalculation")
+            budget = execution.budget
+            next_input = max(budget.reserved_input_tokens, budget.consumed_input_tokens + max(0, int(forecast_input_tokens)))
+            next_output = max(budget.reserved_output_tokens, budget.consumed_output_tokens + max(0, int(forecast_output_tokens)))
+            next_total = next_input + next_output
+            next_cost = max(budget.estimated_cost, budget.actual_cost + max(0.0, float(forecast_cost or 0.0)))
+            contract = self.contracts[execution.owning_lane]
+            if contract.token_budget is not None and next_total > contract.token_budget:
+                raise LaneBudgetError("recalculated budget exceeds the lane token limit")
+            if contract.cost_budget is not None and (forecast_cost is None or next_cost > contract.cost_budget):
+                raise LaneBudgetError("recalculated budget exceeds the lane cost limit")
+            active = [item for item in self._executions.values() if item.state in ACTIVE_LANE_STATES and item.task_id != task_id]
+            if self.session_token_budget is not None and sum(item.budget.reserved_tokens for item in active if item.session_id == execution.session_id) + next_total > self.session_token_budget:
+                raise LaneBudgetError("recalculated budget exceeds the session token limit")
+            if self.global_token_budget is not None and sum(item.budget.reserved_tokens for item in active) + next_total > self.global_token_budget:
+                raise LaneBudgetError("recalculated budget exceeds the global token limit")
+            if execution.parent_task_id and execution.parent_task_id in self._executions:
+                parent = self._executions[execution.parent_task_id]
+                if next_total > max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens):
+                    raise LaneBudgetError("recalculated child budget exceeds the parent remaining budget")
+            if next_total <= budget.reserved_tokens and next_cost <= budget.estimated_cost:
+                return execution
+            previous_total = budget.reserved_tokens
+            self.execution_supervisor.revise_budget(
+                task_id,
+                token_budget=next_total,
+                estimated_cost=(next_cost if forecast_cost is not None else None),
+                reason=reason,
+                evidence={
+                    "forecast_input_tokens": max(0, int(forecast_input_tokens)),
+                    "forecast_output_tokens": max(0, int(forecast_output_tokens)),
+                    "forecast_cost": forecast_cost,
+                    "accounting_reservation_id": accounting_reservation_id,
+                },
+            )
+            budget.reserved_input_tokens = next_input
+            budget.reserved_output_tokens = next_output
+            budget.estimated_cost = next_cost
+            budget.estimated_cost_known = forecast_cost is not None
+            budget.revisions.append({
+                "reason": reason,
+                "previous_reserved_tokens": previous_total,
+                "revised_reserved_tokens": next_total,
+                "forecast_input_tokens": max(0, int(forecast_input_tokens)),
+                "forecast_output_tokens": max(0, int(forecast_output_tokens)),
+                "forecast_cost": forecast_cost,
+                "accounting_reservation_id": accounting_reservation_id,
+                "at": _iso(),
+            })
+            execution.updated_at = _iso()
+            self._persist_locked()
+            self.emit("budget.recalculated", task_id=task_id, lane_id=execution.owning_lane, budget=asdict(budget))
+            return execution
 
     def transition(
         self,
@@ -1166,6 +1554,33 @@ class LaneCoordinator:
             checkpoint_id="",
         )
 
+    def replan_task(
+        self,
+        task_id: str,
+        *,
+        decision: RecoveryDecision,
+        session_id: str,
+    ) -> LaneReservation:
+        """Requeue the same stopped task after a model-selected plan revision."""
+        if decision.action is not RecoveryAction.REPLAN:
+            raise LaneCoordinatorError("same-task replan requires an explicit replan decision")
+        execution = self.inspect_task(task_id)
+        if execution.state not in {
+            LaneTaskState.FAILED,
+            LaneTaskState.INTERRUPTED,
+            LaneTaskState.TIMED_OUT,
+            LaneTaskState.BUDGET_EXHAUSTED,
+            LaneTaskState.REJECTED,
+        }:
+            raise LaneCoordinatorError("model-selected task is not in a replannable stopped state")
+        return self._retry_existing_task(
+            execution,
+            decision=decision,
+            session_id=session_id,
+            event_type="lane.task_replanned",
+            checkpoint_id="",
+        )
+
     def _retry_existing_task(
         self,
         execution: LaneExecution,
@@ -1229,6 +1644,67 @@ class LaneCoordinator:
 
     def pause(self, task_id: str, *, reason: str = "paused by coordinator") -> LaneExecution:
         return self.transition(task_id, LaneTaskState.PAUSED, reason=reason)
+
+    def finalize_budget_overrun(
+        self, decision: BudgetOverrunFinalizationDecision,
+    ) -> LaneExecution:
+        """Project only the validated supervisor finalization decision into the lane."""
+        supervised = self.execution_supervisor.finalize_budget_overrun(decision)
+        if supervised.state is ExecutionState.COMPLETED:
+            return self.reconcile_authoritative_completion(decision.task_id)
+        with self._condition:
+            execution = self._executions[decision.task_id]
+            if supervised.state is ExecutionState.PENDING_BUDGET_DECISION:
+                execution.state = LaneTaskState.PENDING_BUDGET_DECISION
+                self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.NEEDS_REVIEW)
+            else:
+                execution.state = LaneTaskState.QUEUED
+                self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.QUEUED)
+            execution.verification_state["budget_overrun"] = dict(supervised.budget_overrun)
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.emit(
+            "budget.overrun_finalized", task_id=decision.task_id,
+            lane_id=execution.owning_lane, decision_id=decision.decision_id,
+            action=decision.action.value,
+        )
+        return execution
+
+    def reconcile_authoritative_completion(self, task_id: str) -> LaneExecution:
+        """Repair the lane projection from an already completed supervisor record.
+
+        This is deliberately deterministic: it does not make a provider call or
+        authorize a result. It only exposes the supervisor completion that was
+        already durably finalized by a validated decision.
+        """
+        supervised = self.execution_supervisor.store.get_task(task_id)
+        if supervised.state is not ExecutionState.COMPLETED:
+            raise LaneCoordinatorError(
+                "authoritative completion reconciliation requires a completed supervisor task"
+            )
+        manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+        with self._condition:
+            execution = self._executions[task_id]
+            self.taskboard.project_supervisor_completion(
+                execution.taskboard_task_id,
+                supervisor_task=supervised,
+                verification_evidence={
+                    "result_id": supervised.result_id,
+                    "verification": manifest.get("verification"),
+                    "artefacts": manifest.get("artefacts", []),
+                },
+            )
+            execution.state = LaneTaskState.COMPLETED
+            execution.error = ""
+            execution.verification_state["budget_overrun"] = dict(supervised.budget_overrun)
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.emit(
+            "lane.supervisor_completion_reconciled",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+        )
+        return execution
 
     def resume(self, task_id: str) -> LaneExecution:
         return self.transition(task_id, LaneTaskState.QUEUED, reason="resumed by coordinator")
@@ -1308,8 +1784,8 @@ class LaneCoordinator:
         return {
             "reserved_tokens": sum(item.budget.reserved_tokens for item in rows),
             "consumed_tokens": sum(item.budget.consumed_tokens for item in rows),
-            "estimated_cost": sum(item.budget.estimated_cost for item in rows),
-            "actual_cost": sum(item.budget.actual_cost for item in rows),
+            "estimated_cost": (sum(item.budget.estimated_cost for item in rows) if rows and all(item.budget.estimated_cost_known for item in rows) else None),
+            "actual_cost": (sum(item.budget.actual_cost for item in rows) if rows and all(item.budget.actual_cost_known for item in rows) else None),
             "task_count": len(rows),
         }
 
@@ -1323,7 +1799,7 @@ class LaneCoordinator:
                 raise LaneHandoffError(f"handoff {handoff.source_lane.value} -> {handoff.target_lane.value} is not allowed")
             target = self.contracts[handoff.target_lane]
             self._assert_capacity(target, execution.model, exclude_task_id=execution.task_id)
-            if execution.budget.consumed_tokens >= source_contract.token_budget:
+            if source_contract.token_budget is not None and execution.budget.consumed_tokens >= source_contract.token_budget:
                 raise LaneBudgetError("task budget is exhausted; handoff was not started")
             execution.state = LaneTaskState.HANDOFF
             execution.handoffs.append(handoff)
@@ -1366,8 +1842,9 @@ class LaneCoordinator:
         ):
             self.emit("lane.permission_denied", task_id=task_id, lane_id=execution.owning_lane, tool_name=tool_name, reason="required read lock is not held")
             raise LaneCoordinatorError(f"Tool {tool_name} requires a gateway repository lock")
+        lane_limit = self.contracts[execution.owning_lane].token_budget
         if (
-            execution.budget.consumed_tokens >= self.contracts[execution.owning_lane].token_budget
+            (lane_limit is not None and execution.budget.consumed_tokens >= lane_limit)
             or execution.budget.consumed_tokens >= execution.budget.reserved_tokens
         ):
             self.emit("lane.budget_exhausted", task_id=task_id, lane_id=execution.owning_lane)
@@ -1469,6 +1946,10 @@ class LaneCoordinator:
             for item in self._executions.values()
             if item.task_id != exclude_task_id
             and item.state in ACTIVE_LANE_STATES
+            # A queued record has not acquired a supervisor lease or started a
+            # worker. It is durable recovery state, not active execution, and
+            # must not permanently consume capacity after a process exit.
+            and item.state != LaneTaskState.QUEUED
             # Completion verification is durable review work after the runtime
             # lease and gateway resource lock have been released. It must
             # prevent final success and equivalent duplicate execution, but it
@@ -1494,7 +1975,13 @@ class LaneCoordinator:
         return str(min(self._waiters, key=score)["waiter_id"]) if self._waiters else ""
 
     def _assert_budget(self, contract: LaneContract, session_id: str, requested: LaneBudget) -> None:
-        if requested.reserved_tokens > contract.token_budget or requested.estimated_cost > contract.cost_budget:
+        if (
+            (contract.token_budget is not None and requested.reserved_tokens > contract.token_budget)
+            or (
+                contract.cost_budget is not None
+                and (not requested.estimated_cost_known or requested.estimated_cost > contract.cost_budget)
+            )
+        ):
             raise LaneBudgetError(f"requested budget exceeds {contract.lane_id.value} lane limit")
         active = [
             item
@@ -1594,7 +2081,11 @@ class LaneCoordinator:
                         else ()
                     ),
                     token_budget=execution.budget.reserved_tokens or None,
-                    estimated_cost=execution.budget.estimated_cost,
+                    estimated_cost=(execution.budget.estimated_cost if execution.budget.estimated_cost_known else None),
+                    model_context_window=execution.budget.model_context_window,
+                    model_max_output_tokens=execution.budget.model_max_output_tokens,
+                    estimate_confidence=execution.budget.estimate_confidence,
+                    estimate_source=execution.budget.estimate_source,
                     monetary_budget=contract.cost_budget,
                 )
                 if classification == SideEffectClassification.READ_ONLY:
@@ -1628,7 +2119,7 @@ class LaneCoordinator:
             serialized["supervisor_lease_token"] = ""
             executions.append(serialized)
         payload = {
-            "schema_version": 1, "updated_at": _iso(),
+            "schema_version": 2, "updated_at": _iso(),
             "executions": executions,
             "waiters": list(self._waiters),
             "locks": [],

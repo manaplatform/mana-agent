@@ -54,6 +54,9 @@ from mana_agent.api_manager.runtime_tools import (
     build_api_manager_langchain_tools,
 )
 from mana_agent.api_manager.service import ApiManagerService
+from mana_agent.api_manager.transactional import ApiIntegrationActionAdapter
+from mana_agent.transactional_actions.models import PolicyOutcome
+from mana_agent.transactional_actions.policy import ActionPolicy
 
 
 OPENAPI: dict[str, Any] = {
@@ -407,9 +410,11 @@ def test_read_only_http_request_requires_exact_ui_approval(
         {"authentication": (AuthenticationConfig(),)},
     )
     broker = PendingApiApprovalBroker()
+    approval_events: list[tuple[str, dict[str, Any]]] = []
     executor = ApiExecutor(
         network_policy=NetworkAccessPolicy(allow_http=False),
         approval_broker=broker,
+        event_sink=lambda kind, payload: approval_events.append((kind, payload)),
         transport=_Transport(
             [_RawResponse(200, {"content-type": "application/json"}, b'{"ok":true}')]
         ),
@@ -443,9 +448,122 @@ def test_read_only_http_request_requires_exact_ui_approval(
     details = raised.value.details
     assert details["preview"]["approval_required"] is True
     assert "unencrypted HTTP" in details["preview"]["expected_side_effects"]
+    assert len(approval_events) == 1
+    event_type, event_payload = approval_events[0]
+    assert event_type == "api.waiting_approval"
+    assert event_payload["integration_id"] == integration.integration_id
+    assert event_payload["operation_id"] == "getContact"
+    assert event_payload["method"] == "GET"
+    assert event_payload["redacted_host_path"].endswith("/contacts/123")
+    assert event_payload["permission_request_id"] == details["permission_request_id"]
+    assert event_payload["permission_scope"] == "api.request.execute"
+    assert event_payload["preview"] == details["preview"]
+    assert event_payload["expires_at"] == details["expires_at"]
+    assert event_payload["api_approval"] is True
     approved = service.decide_approval(
         details["permission_request_id"],
         session_id="http-session",
+        approve=True,
+        client_type="tui",
+    )
+    assert approved["executed"] is True
+
+
+def test_request_preview_prepares_http_approval_and_records_inbox_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Network exceptions must reach the trusted UI before an execute tool call."""
+    _public_dns(monkeypatch)
+    document = json.loads(json.dumps(OPENAPI))
+    document["servers"] = [{"url": "http://api.acme.example/v1"}]
+    integration = DocumentationImporter().from_text(
+        json.dumps(document),
+        name="Preview HTTP API",
+        source_decision_id="preview-http-import-decision",
+    )
+    registry = ApiIntegrationRegistry(tmp_path / "integrations")
+    registry.save(integration)
+    registry.update(
+        integration.integration_id,
+        {"authentication": (AuthenticationConfig(),)},
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class _Inbox:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def create(self, request: Any) -> Any:
+            self.requests.append(request)
+            return type("InboxItem", (), {"inbox_item_id": "inbox-api-http"})()
+
+    inbox = _Inbox()
+    monkeypatch.setattr(
+        "mana_agent.api_manager.service.publish_api_event",
+        lambda event_type, payload: events.append((event_type, payload)),
+    )
+    broker = PendingApiApprovalBroker()
+    executor = ApiExecutor(
+        network_policy=NetworkAccessPolicy(allow_http=False),
+        approval_broker=broker,
+        transport=_Transport(
+            [_RawResponse(200, {"content-type": "application/json"}, b'{"ok":true}')]
+        ),
+    )
+    service = ApiManagerService(
+        tmp_path,
+        registry=registry,
+        executor=executor,
+        human_inbox_service=inbox,
+    )
+    route = ApiRouteDecision(
+        source_decision_id="preview-http-call-decision",
+        task_intent="retrieve one contact",
+        workflow="request_execution",
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        confidence=0.99,
+        matched_terms=("contact",),
+        reason="The saved read-only operation exactly matches.",
+        safe_to_continue=True,
+    )
+
+    preview = service.preview_request(
+        routing_decision=route,
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        path_parameters={"contact_id": "123"},
+        session_id="preview-http-session",
+        source_decision_id=route.source_decision_id,
+    )
+
+    assert preview["permission_required"] is True
+    details = preview
+    assert details["inbox_item_id"] == "inbox-api-http"
+    assert inbox.requests[0].request_type.value == "notice"
+    assert inbox.requests[0].permission_request_id == details["permission_request_id"]
+    waiting_events = [payload for event_type, payload in events if event_type == "api.waiting_approval"]
+    assert waiting_events == [{
+        key: details[key]
+        for key in (
+            "permission_request_id",
+            "permission_scope",
+            "preview",
+            "session_id",
+            "api_approval",
+            "expires_at",
+            "inbox_item_id",
+        )
+    } | {
+        "integration_id": integration.integration_id,
+        "operation_id": "getContact",
+        "method": "GET",
+        "redacted_host_path": "api.acme.example/v1/contacts/123",
+    }]
+    approved = service.decide_approval(
+        details["permission_request_id"],
+        session_id="preview-http-session",
         approve=True,
         client_type="tui",
     )
@@ -1114,3 +1232,38 @@ def test_integration_flow_import_search_preview_approval_execute(
     )
     assert approved["executed"] is True
     assert approved["result"]["status_code"] == 200
+
+
+def test_semantic_import_uses_a_durable_api_integration_action() -> None:
+    adapter = ApiIntegrationActionAdapter(
+        tool_name="api_docs_import_semantic",
+        arguments={
+            "name": "IPstack",
+            "source_decision_id": "turn-1:api-entry-decision",
+            "session_id": "session-1",
+            "text": "documented API evidence",
+            "documentation_reference": "https://docs.example.test/ipstack",
+            "semantic_definition": {"redacted": True},
+        },
+        invoke=lambda: json.dumps(
+            {
+                "ok": True,
+                "result": {
+                    "saved": True,
+                    "integration": {"integration_id": "api_0123456789abcdef01234567"},
+                },
+            }
+        ),
+        parent_task_id="task-1",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    action = adapter.build_intent()
+    result = adapter.execute(action)
+    verification = adapter.verify(action, result)
+    policy = ActionPolicy().evaluate(action)
+
+    assert action.target_resources == ["api-integration://name/457ab83da43936a7bf8cb905"]
+    assert policy.outcome is PolicyOutcome.ALLOW
+    assert verification.complete is True

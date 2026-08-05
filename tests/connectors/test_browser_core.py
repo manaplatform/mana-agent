@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+import mana_agent.connectors.browser.runtime_tools as browser_runtime_tools
 from mana_agent.connectors.browser.approval import BrowserApprovalBinding, issue_approval
 from mana_agent.connectors.browser.contracts import browser_tool_contracts
 from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
+from mana_agent.connectors.browser.runtime_tools import action_metadata, build_browser_langchain_tools
 from mana_agent.connectors.browser.session import BrowserConnectorError, BrowserSession, BrowserSessionManager
+from mana_agent.transactional_actions.enforcement import (
+    TransactionalGatewayRequired,
+    assert_model_tool_routed,
+)
 
 
 def test_sensitive_decision_requires_confirmation() -> None:
@@ -50,6 +57,78 @@ def test_contracts_are_strict_and_complete() -> None:
     assert expected == set(contracts)
     assert all(item.input_schema["additionalProperties"] is False for item in contracts.values())
     assert all(any("model decision" in rule for rule in item.safety_rules) for item in contracts.values())
+
+
+def test_documentation_browser_tools_are_explicitly_read_only() -> None:
+    tools = {item.name: item for item in build_browser_langchain_tools()}
+
+    for name in (
+        "browser_open",
+        "browser_inspect",
+        "browser_scroll",
+        "browser_wait",
+        "browser_tabs",
+        "browser_switch_tab",
+        "browser_close",
+    ):
+        assert tools[name].metadata == {"read_only": True, "side_effecting": False}
+        assert_model_tool_routed(name, tools[name].metadata)
+
+    assert tools["browser_click"].metadata is None
+    assert tools["browser_type"].metadata is None
+    with pytest.raises(TransactionalGatewayRequired, match="no registered transactional"):
+        assert_model_tool_routed("browser_click", tools["browser_click"].metadata)
+
+
+def test_read_only_browser_action_is_classified_from_the_model_decision() -> None:
+    metadata = action_metadata(
+        "browser_click",
+        {
+            "session_id": "docs-session",
+            "target": "e2-25",
+            "observed_page_version": 2,
+            "risk": "read_only",
+            "reason": "Expand the documented operation without submitting data.",
+        },
+        None,
+    )
+
+    assert metadata == {"read_only": True, "side_effecting": False}
+    assert_model_tool_routed("browser_click", metadata)
+
+
+def test_browser_action_requires_an_explicit_model_decision() -> None:
+    with pytest.raises(ValueError, match="explicit BrowserActionDecision"):
+        action_metadata("browser_click", {"session_id": "docs-session"}, None)
+
+
+def test_browser_action_reason_is_not_forwarded_to_the_session_manager(monkeypatch) -> None:  # noqa: ANN001
+    observed: dict[str, object] = {}
+
+    class _Manager:
+        def act(self, *, action: str, **kwargs: object) -> dict[str, object]:
+            observed.update({"action": action, **kwargs})
+            return {"ok": True}
+
+    monkeypatch.setattr(browser_runtime_tools, "default_browser_manager", lambda: _Manager())
+    tool = {
+        item.name: item
+        for item in browser_runtime_tools.build_browser_langchain_tools()
+    }["browser_click"]
+
+    result = tool.invoke(
+        {
+            "session_id": "docs-session",
+            "target": "e2-25",
+            "observed_page_version": 2,
+            "risk": "read_only",
+            "reason": "Expand the documented operation.",
+        }
+    )
+
+    assert json.loads(result) == {"ok": True}
+    assert observed["action"] == "click"
+    assert "reason" not in observed
 
 
 def test_playwright_status_is_structured_when_optional_dependency_missing(monkeypatch) -> None:  # noqa: ANN001

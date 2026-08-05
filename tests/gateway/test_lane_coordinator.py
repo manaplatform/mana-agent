@@ -7,6 +7,15 @@ import threading
 
 import pytest
 
+from mana_agent.execution_supervisor import (
+    BudgetOverrunAction,
+    BudgetOverrunFinalizationDecision,
+    ExecutionState as SupervisorState,
+    RecoveryDecision,
+    SideEffectClassification,
+)
+from mana_agent.execution_supervisor.models import RecoveryAction, RetryCategory
+from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.gateway.lane_coordinator import (
     LaneBudget,
     LaneBudgetError,
@@ -16,6 +25,7 @@ from mana_agent.gateway.lane_coordinator import (
     LaneHandoffError,
     LaneReservation,
 )
+from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.gateway.lanes import (
     LockMode,
     LaneId,
@@ -67,11 +77,171 @@ def test_default_contracts_define_all_specialist_lanes() -> None:
     assert contracts[LaneId.RELEASE].lock_policy == LockMode.REPOSITORY_WRITE
 
 
+def test_semantic_fingerprint_deduplicates_active_work_across_sessions(
+    coordinator: LaneCoordinator,
+) -> None:
+    first = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="create the deployment manifest",
+        files=("deploy.yaml",),
+        session="session-1",
+    )
+    coordinator.start(first)
+
+    duplicate = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="  create   the deployment manifest ",
+        files=("deploy.yaml",),
+        session="session-2",
+    )
+
+    assert duplicate.duplicate is True
+    assert duplicate.execution.task_id == first.execution.task_id
+    durable = coordinator.execution_supervisor.store.get_task(first.execution.task_id)
+    assert durable.completion_contract
+    assert durable.field_provenance["completion_contract"] == "model_selected_lane_contract"
+
+
+def test_recovery_candidates_include_failed_task_from_another_session(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="create the deployment manifest",
+        session="session-before-restart",
+    )
+    coordinator.start(reservation)
+    coordinator.finish(
+        reservation.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="worker disconnected",
+    )
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+
+    candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-new",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+
+    assert [item["task_id"] for item in candidates] == [reservation.execution.task_id]
+    assert candidates[0]["session_id"] == "session-before-restart"
+    assert candidates[0]["completion_contract"]
+
+
+def test_exposes_supervisor_store_for_human_inbox_branch_controller(
+    coordinator: LaneCoordinator,
+) -> None:
+    assert coordinator.store is coordinator.execution_supervisor.store
+
+
+def test_human_inbox_wait_delegates_to_the_active_supervisor_branch(
+    coordinator: LaneCoordinator,
+) -> None:
+    dispatched = threading.Event()
+    observed: dict[str, object] = {}
+
+    def dispatch(task_id: str, inbox_item_id: str, resume_claim_id: str, response: dict) -> None:
+        observed.update({
+            "task_id": task_id,
+            "inbox_item_id": inbox_item_id,
+            "resume_claim_id": resume_claim_id,
+            "response": response,
+            "lane_state": coordinator.inspect_task(task_id).state,
+        })
+        dispatched.set()
+
+    coordinator.set_human_resume_dispatcher(dispatch)
+    reservation = _reserve(coordinator, LaneId.CODING, intent="approval gated action")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    checkpoint_id = coordinator.checkpoint(task_id, boundary="await-approval")
+
+    waiting = coordinator.suspend_for_human_input(
+        task_id,
+        inbox_item_id="inbox-approval-1",
+        checkpoint_id=checkpoint_id,
+        request_type="approval",
+    )
+
+    assert waiting.waiting_inbox_item_id == "inbox-approval-1"
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.WAITING
+    resumed = coordinator.resume_from_human_input(
+        task_id,
+        inbox_item_id="inbox-approval-1",
+        checkpoint_id=checkpoint_id,
+        resume_claim_id="resume-claim-1",
+        structured_response={"operation": "approve"},
+    )
+    assert resumed.human_resume_claim_ids == ["resume-claim-1"]
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+    assert coordinator.inspect_task(task_id).supervisor_lease_token == ""
+    assert coordinator.taskboard.get_task(task_id).status is TaskStatus.QUEUED
+    assert dispatched.wait(timeout=1)
+    assert observed == {
+        "task_id": task_id,
+        "inbox_item_id": "inbox-approval-1",
+        "resume_claim_id": "resume-claim-1",
+        "response": {"operation": "approve"},
+        "lane_state": LaneTaskState.QUEUED,
+    }
+
+
+def test_recovered_human_resume_dispatches_only_the_matching_queued_branch(
+    coordinator: LaneCoordinator,
+) -> None:
+    dispatched = threading.Event()
+    coordinator.set_human_resume_dispatcher(
+        lambda *_args: dispatched.set()
+    )
+    reservation = _reserve(coordinator, LaneId.CODING, intent="recover approval")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    checkpoint_id = coordinator.checkpoint(task_id, boundary="await-approval")
+    coordinator.suspend_for_human_input(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        checkpoint_id=checkpoint_id,
+        request_type="approval",
+    )
+    coordinator.resume_from_human_input(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        checkpoint_id=checkpoint_id,
+        resume_claim_id="resume-claim-recovery-1",
+        structured_response={"operation": "approve"},
+    )
+    assert dispatched.wait(timeout=1)
+    dispatched.clear()
+
+    assert coordinator.dispatch_queued_human_resume(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        resume_claim_id="resume-claim-recovery-1",
+        structured_response={"operation": "approve"},
+    )
+    assert dispatched.wait(timeout=1)
+    coordinator.start(LaneReservation(coordinator.inspect_task(task_id)))
+    assert not coordinator.dispatch_queued_human_resume(
+        task_id,
+        inbox_item_id="inbox-recovery-1",
+        resume_claim_id="resume-claim-recovery-1",
+        structured_response={"operation": "approve"},
+    )
+    coordinator.finish(task_id)
+
+
 def test_lane_selection_uses_decision_intent_and_invalid_model_lane_uses_valid_route() -> None:
     assert select_lane(entry_route="coding") == LaneId.CODING
     assert select_lane(intent="verify") == LaneId.VERIFY
     assert select_lane(entry_route="search", model_lane="not-a-lane") == LaneId.RESEARCH
     assert select_lane(entry_route="remote_execution") == LaneId.OPERATIONS
+    assert select_lane(entry_route="canvas") == LaneId.CANVAS
     with pytest.raises(ValueError, match="No valid specialist lane decision"):
         select_lane(entry_route="missing", model_lane="not-a-lane")
 
@@ -104,6 +274,110 @@ def test_duplicate_active_task_reuses_existing_reference(coordinator: LaneCoordi
 
     assert second.duplicate is True
     assert second.execution.task_id == first.execution.task_id
+
+
+def test_task_id_allocation_skips_supervisor_only_record(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing_task_id = "task_20260803_000002"
+    coordinator.execution_supervisor.create_task(
+        task_id=existing_task_id,
+        routing_decision_id="existing-decision",
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    generated_ids = iter([existing_task_id, "task_20260803_000003"])
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.taskboard.taskboard.new_task_id",
+        lambda: next(generated_ids),
+    )
+
+    reservation = _reserve(coordinator, LaneId.RESEARCH, intent="new task")
+
+    assert reservation.execution.task_id == "task_20260803_000003"
+    assert (
+        coordinator.execution_supervisor.store.get_task(
+            existing_task_id
+        ).routing_decision_id
+        == "existing-decision"
+    )
+
+
+def test_checkpoint_resume_uses_validated_recovery_decision_and_supervisor_retry(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="resume gateway task")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    checkpoint_id = coordinator.checkpoint(
+        task_id,
+        boundary="before-retry",
+        completed_steps=("inspect",),
+        pending_steps=("patch",),
+    )
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="worker interrupted")
+    retry_calls: list[tuple[str, RecoveryDecision]] = []
+    original_retry = coordinator.execution_supervisor.retry
+
+    def record_retry(task_id: str, decision: RecoveryDecision):
+        retry_calls.append((task_id, decision))
+        return original_retry(task_id, decision)
+
+    monkeypatch.setattr(coordinator.execution_supervisor, "retry", record_retry)
+    decision = RecoveryDecision(
+        decision_id="checkpoint-resume-decision",
+        task_id=task_id,
+        action=RecoveryAction.RESUME_CHECKPOINT,
+        retry_category=RetryCategory.MODEL,
+        reason="The validated checkpoint is safe to resume.",
+        resume_checkpoint_id=checkpoint_id,
+        safe_to_continue=True,
+    )
+
+    resumed = coordinator.resume_checkpoint(
+        task_id,
+        decision=decision,
+        session_id="session-1",
+    )
+
+    assert resumed.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+    assert retry_calls == [(task_id, decision)]
+
+
+def test_same_task_retry_uses_validated_recovery_decision_and_supervisor_retry(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="retry gateway task")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="model response failed")
+    retry_calls: list[tuple[str, RecoveryDecision]] = []
+    original_retry = coordinator.execution_supervisor.retry
+
+    def record_retry(task_id: str, decision: RecoveryDecision):
+        retry_calls.append((task_id, decision))
+        return original_retry(task_id, decision)
+
+    monkeypatch.setattr(coordinator.execution_supervisor, "retry", record_retry)
+    decision = RecoveryDecision(
+        decision_id="same-task-retry-decision",
+        task_id=task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="The model authorized a safe same-task retry.",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+
+    retried = coordinator.retry_task(
+        task_id,
+        decision=decision,
+        session_id="session-1",
+    )
+
+    assert retried.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+    assert retry_calls == [(task_id, decision)]
 
 
 def test_explicit_taskboard_root_and_child_keep_their_persisted_lineage(
@@ -195,6 +469,31 @@ def test_lane_capacity_waits_in_queue_until_capacity_is_released(tmp_path: Path,
 
     assert not worker.is_alive()
     assert result and result[0].execution.state == LaneTaskState.QUEUED
+
+
+def test_unleased_queued_record_does_not_consume_lane_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    coordinator = LaneCoordinator(
+        root,
+        contracts={"research": {"max_concurrent_jobs": 1}},
+    )
+
+    unleased = _reserve(coordinator, LaneId.RESEARCH, intent="interrupted before start")
+    next_reservation = _reserve(
+        coordinator,
+        LaneId.RESEARCH,
+        intent="fresh task",
+        session="session-fresh",
+    )
+
+    assert unleased.execution.state is LaneTaskState.QUEUED
+    assert next_reservation.execution.state is LaneTaskState.QUEUED
+    assert not next_reservation.duplicate
 
 
 def test_provider_limit_waits_until_model_capacity_is_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,6 +693,40 @@ def test_completion_failure_surfaces_the_persisted_contract_reason(
     assert "artifact was not produced or modified by this attempt" in finished.error
 
 
+def test_synchronize_usage_is_cumulative_and_does_not_double_count(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="account model usage")
+    coordinator.start(reservation)
+
+    coordinator.synchronize_usage(
+        reservation.execution.task_id,
+        consumed_input_tokens=20,
+        consumed_output_tokens=10,
+        actual_cost=0.03,
+    )
+    synchronized = coordinator.synchronize_usage(
+        reservation.execution.task_id,
+        consumed_input_tokens=20,
+        consumed_output_tokens=10,
+        actual_cost=0.03,
+    )
+
+    assert synchronized.budget.consumed_input_tokens == 20
+    assert synchronized.budget.consumed_output_tokens == 10
+    assert synchronized.budget.actual_cost == pytest.approx(0.03)
+
+    coordinator.finish(
+        reservation.execution.task_id,
+        verification_state={"status": "accounted"},
+    )
+    supervised = coordinator.execution_supervisor.store.get_task(
+        reservation.execution.task_id
+    )
+    assert supervised.token_usage == 30
+    assert supervised.actual_cost == pytest.approx(0.03)
+
+
 def test_stale_lock_recovery(coordinator: LaneCoordinator) -> None:
     lease = coordinator.lock_manager.acquire(
         task_id="stale", mode=LockMode.REPOSITORY_WRITE,
@@ -432,7 +765,12 @@ def test_lock_leases_are_shared_across_gateway_process_state(coordinator: LaneCo
 
 
 def test_token_and_cost_budget_exhaustion(coordinator: LaneCoordinator) -> None:
+    coordinator.contracts = configured_lane_contracts({
+        "coding": {"token_budget": 100, "cost_budget": 0.10},
+    })
     coding = coordinator.contracts[LaneId.CODING]
+    assert coding.token_budget is not None
+    assert coding.cost_budget is not None
     with pytest.raises(LaneBudgetError):
         coordinator.reserve(
             normalized_intent="too many tokens", lane_id=LaneId.CODING, session_id="s",
@@ -447,6 +785,177 @@ def test_token_and_cost_budget_exhaustion(coordinator: LaneCoordinator) -> None:
             repository_id=coordinator.taskboard.store.repository_id,
             estimated_cost=coding.cost_budget + 0.01,
         )
+
+
+def test_canvas_task_does_not_wait_for_repository_lock(
+    coordinator: LaneCoordinator,
+) -> None:
+    workspace_id = coordinator.taskboard.store.workspace_id
+    repository_id = coordinator.taskboard.store.repository_id
+    operations = coordinator.reserve(
+        normalized_intent="run an infrastructure operation",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-operations",
+        workspace_id=workspace_id,
+        repository_id=repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+        capabilities=("automation",),
+    )
+    coordinator.start(operations)
+    reservation = coordinator.reserve(
+        normalized_intent="create a live canvas",
+        lane_id=LaneId.CANVAS,
+        session_id="session-canvas",
+        workspace_id=workspace_id,
+        repository_id=repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+        capabilities=("canvas",),
+    )
+
+    started = coordinator.start(reservation)
+
+    assert started.state is LaneTaskState.RUNNING
+    assert not [lock for lock in coordinator._locks.values() if lock.task_id == started.task_id]
+    coordinator.finish(started.task_id, state=LaneTaskState.CANCELLED)
+    coordinator.finish(operations.execution.task_id, state=LaneTaskState.CANCELLED)
+
+
+def test_finish_preserves_a_pending_model_budget_overrun_decision(coordinator: LaneCoordinator) -> None:
+    events: list[dict[str, object]] = []
+    coordinator.event_sink = lambda event_type, title, **kwargs: events.append({
+        "event_type": event_type,
+        "title": title,
+        **kwargs,
+    })
+    reservation = coordinator.reserve(
+        normalized_intent="complete within the reserved budget",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-exhaustion",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+
+    finished = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+
+    assert finished.state is LaneTaskState.PENDING_BUDGET_DECISION
+    assert "budget-overrun decision" in finished.error
+    supervised = coordinator.execution_supervisor.store.get_task(finished.task_id)
+    assert supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+    assert events[-2]["event_type"] == "budget.overrun.decision.required"
+    assert events[-2]["status"] == "waiting"
+
+
+def test_accepted_budget_overrun_projects_authoritative_supervisor_completion(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="complete with a model-authorized budget overrun",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-finalization",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+    pending = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+    supervised = coordinator.execution_supervisor.verify_completion(pending.task_id)
+
+    finalized = coordinator.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_accept_budget_overrun",
+        task_id=pending.task_id,
+        attempt_id=supervised.attempt_id,
+        result_id=supervised.result_id,
+        result_evidence_hash=supervised.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.ACCEPT_WITH_OVERRUN,
+        reason="verified result is authorized despite immutable-cap overrun",
+        safe_to_continue=True,
+    ))
+
+    assert finalized.state is LaneTaskState.COMPLETED
+    taskboard_task = coordinator.taskboard.get_task(finalized.taskboard_task_id)
+    assert taskboard_task.status is TaskStatus.DONE
+    assert taskboard_task.supervisor_execution_id == pending.task_id
+    assert taskboard_task.verification_status == "passed"
+
+
+def test_reconciles_completed_overrun_when_the_prior_taskboard_projection_failed(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = coordinator.reserve(
+        normalized_intent="repair a completed model-authorized budget overrun",
+        lane_id=LaneId.OPERATIONS,
+        session_id="session-budget-projection-repair",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=2,
+        requested_output_tokens=2,
+    )
+    coordinator.start(reservation)
+    pending = coordinator.finish(
+        reservation.execution.task_id,
+        consumed_input_tokens=3,
+        consumed_output_tokens=2,
+        verification_state={"result": "present"},
+    )
+    supervised = coordinator.execution_supervisor.verify_completion(pending.task_id)
+    coordinator.execution_supervisor.finalize_budget_overrun(BudgetOverrunFinalizationDecision(
+        decision_id="decision_repair_budget_overrun_projection",
+        task_id=pending.task_id,
+        attempt_id=supervised.attempt_id,
+        result_id=supervised.result_id,
+        result_evidence_hash=supervised.budget_overrun["evidence_hash"],
+        action=BudgetOverrunAction.ACCEPT_WITH_OVERRUN,
+        reason="verified result was already accepted before projection retry",
+        safe_to_continue=True,
+    ))
+
+    reconciled = coordinator.reconcile_authoritative_completion(pending.task_id)
+
+    assert reconciled.state is LaneTaskState.COMPLETED
+    taskboard_task = coordinator.taskboard.get_task(reconciled.taskboard_task_id)
+    assert taskboard_task.status is TaskStatus.DONE
+    assert taskboard_task.supervisor_execution_id == pending.task_id
+
+
+def test_recalculate_budget_expands_a_live_reservation_within_lane_policy(
+    coordinator: LaneCoordinator,
+) -> None:
+    coordinator.contracts = configured_lane_contracts({"operations": {"token_budget": 1000}})
+    reservation = coordinator.reserve(
+        normalized_intent="forecasted provider call", lane_id=LaneId.OPERATIONS,
+        session_id="session-recalculate",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10, requested_output_tokens=10,
+    )
+    coordinator.start(reservation)
+
+    revised = coordinator.recalculate_budget(
+        reservation.execution.task_id,
+        forecast_input_tokens=50,
+        forecast_output_tokens=75,
+        forecast_cost=0.01,
+        accounting_reservation_id="reservation_forecast",
+    )
+
+    assert revised.budget.reserved_tokens == 125
+    assert revised.budget.revisions[-1]["accounting_reservation_id"] == "reservation_forecast"
 
 
 def test_child_agent_reserves_and_consumes_parent_budget(coordinator: LaneCoordinator) -> None:

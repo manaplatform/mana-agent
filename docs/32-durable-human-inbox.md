@@ -29,6 +29,11 @@ of truth. The protected directory and signing key use owner-only permissions whe
 the platform supports them. Cards, events, audit details, and third-party
 notifications receive only explicitly disclosed, redacted fields.
 
+Mana-Agent creates this directory only when a validated workflow actually needs a
+durable approval or structured human response. A route that stops because a
+capability is unavailable, including `COMPUTER_NOT_AVAILABLE`, creates none of
+these inbox paths or files.
+
 ## Reviewer directory
 
 Specific-person assignment is explicit and authorizes only that identity. Role and

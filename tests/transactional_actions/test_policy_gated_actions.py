@@ -22,6 +22,8 @@ from mana_agent.transactional_actions.models import (
     PolicyOutcome,
     Reversibility,
     TransactionIntent,
+    TransactionalRequestRecord,
+    TransactionalRequestState,
     TransactionStrategy,
     VALID_TRANSITIONS,
     VerificationEvidence,
@@ -61,6 +63,24 @@ def test_file_action_commits_only_after_hash_verification(tmp_path: Path) -> Non
     assert outcome.action.state is ActionState.COMMITTED
     assert outcome.action.verification and outcome.action.verification.complete
     assert (tmp_path / "sample.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_redacted_consequential_request_ledger_deduplicates_and_updates(tmp_path: Path) -> None:
+    store = ActionStore(tmp_path / "state")
+    request = TransactionalRequestRecord(
+        idempotency_key="request-ledger-key-0001",
+        source_decision_id="decision-1",
+        operation_name="screen_recording.capture",
+        resource_digest="digest-only",
+    )
+    persisted = store.create_request(request)
+    duplicate = store.create_request(request.model_copy(update={"request_id": "req_duplicate"}))
+    assert duplicate.request_id == persisted.request_id
+    persisted.update(TransactionalRequestState.CAPABILITY_UNAVAILABLE, outcome_code="capability_unavailable")
+    store.save_request(persisted)
+    recovered = store.get_request(persisted.request_id)
+    assert recovered and recovered.state is TransactionalRequestState.CAPABILITY_UNAVAILABLE
+    assert recovered.resource_digest == "digest-only"
 
 
 def test_committed_idempotent_retry_returns_verified_prior_result(tmp_path: Path) -> None:
@@ -306,6 +326,12 @@ def test_unclassified_provider_tool_is_blocked_without_invocation() -> None:
     with pytest.raises(TransactionalGatewayRequired, match="no registered transactional"):
         assert_model_tool_routed("verify_project")
     assert_model_tool_routed("third_party_read", {"read_only": True})
+
+
+def test_api_integration_import_adapter_is_explicitly_routed() -> None:
+    assert_model_tool_routed(
+        "api_docs_import_semantic", {"transactional_adapter": "api_integration"}
+    )
 
 
 def test_file_compensation_recovers_from_durable_snapshot_after_restart(tmp_path: Path) -> None:

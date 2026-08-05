@@ -101,6 +101,20 @@ class ApprovalScope(str, Enum):
     TRANSACTION = "transaction"
 
 
+class TransactionalRequestState(str, Enum):
+    RECEIVED = "received"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    ROUTE_UNAVAILABLE = "route_unavailable"
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    PERMISSION_DENIED = "permission_denied"
+    POLICY_DENIED = "policy_denied"
+    APPROVAL_REQUIRED = "approval_required"
+    EXECUTING = "executing"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    MANUAL_RECOVERY_REQUIRED = "manual_recovery_required"
+
+
 class TransactionStrategy(str, Enum):
     STOP_ON_FAILURE = "stop_on_failure"
     CONTINUE_SAFE_ACTIONS = "continue_safe_actions"
@@ -207,6 +221,10 @@ class ActionIntent(StrictModel):
     state_version: int = Field(default=0, ge=0)
     preview: ActionPreview | None = None
     preview_digest: str = ""
+    inbox_item_id: str = ""
+    protected_context_ref: str = ""
+    protected_context_digest: str = ""
+    provider_receipt: dict[str, Any] = Field(default_factory=dict)
     policy_decision: PolicyDecision | None = None
     execution_attempts: int = Field(default=0, ge=0)
     execution_result: dict[str, Any] = Field(default_factory=dict)
@@ -331,6 +349,45 @@ class ActionIntent(StrictModel):
             raise ValueError(f"invalid action transition: {self.state.value} -> {target.value}")
         self.state = target
         self.state_version += 1
+        self.updated_at = utc_now()
+
+
+class TransactionalRequestRecord(StrictModel):
+    """Redacted ledger entry for a consequential request before/after action proposal."""
+
+    request_id: str = Field(default_factory=lambda: f"req_{uuid.uuid4().hex}", min_length=8)
+    idempotency_key: str = Field(min_length=8, max_length=256)
+    state: TransactionalRequestState = TransactionalRequestState.RECEIVED
+    source_decision_id: str = ""
+    session_id: str = ""
+    conversation_id: str = ""
+    turn_id: str = ""
+    task_id: str = ""
+    branch_id: str = ""
+    actor_id: str = ""
+    client_type: str = ""
+    route: str = "computer"
+    tool_name: str = ""
+    operation_name: str = ""
+    resource_digest: str = ""
+    outcome_code: str = ""
+    action_id: str = ""
+    inbox_item_id: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    def update(
+        self,
+        state: TransactionalRequestState,
+        *,
+        outcome_code: str = "",
+        action_id: str = "",
+        inbox_item_id: str = "",
+    ) -> None:
+        self.state = state
+        self.outcome_code = outcome_code or self.outcome_code
+        self.action_id = action_id or self.action_id
+        self.inbox_item_id = inbox_item_id or self.inbox_item_id
         self.updated_at = utc_now()
 
 

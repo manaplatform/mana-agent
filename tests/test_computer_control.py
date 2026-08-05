@@ -146,6 +146,31 @@ def test_computer_action_uses_durable_exact_approval_and_initializes_audit(tmp_p
     assert len(fake.executed) == 1
 
 
+def test_recording_destination_is_redacted_from_action_intent_and_kept_protected(tmp_path: Path) -> None:
+    destination = tmp_path / "private-recording.mov"
+    adapter = ComputerActionAdapter(
+        action=action(
+            "screen_recording.capture",
+            target=ComputerTarget(display_id="1"),
+            arguments={
+                "mode": "display",
+                "display_id": "1",
+                "output_path": str(destination),
+                "container": "mov",
+                "microphone_audio": False,
+                "system_audio": False,
+                "maximum_duration_seconds": 5,
+            },
+        ),
+        session_id="session-1",
+        client_type="tui",
+    )
+    intent = adapter.build_intent()
+    serialized = json.dumps(intent.model_dump(mode="json"))
+    assert str(destination) not in serialized
+    assert adapter.protected_action_context()["computer_action"]["arguments"]["output_path"] == str(destination)
+
+
 def test_platform_auto_detection_is_explicit() -> None:
     assert detect_platform("darwin") is SupportedPlatform.MACOS
     assert detect_platform("win32") is SupportedPlatform.WINDOWS
@@ -423,7 +448,10 @@ def test_runtime_tools_require_authenticated_gateway_context(tmp_path: Path) -> 
         allowed = json.loads(tools["media_pause"].invoke(payload))
     assert allowed["ok"] is False
     assert allowed["error_code"] == "transactional_approval_required"
-    assert allowed["action_id"] == allowed["permission_request_id"]
+    assert allowed["permission_request_id"] == allowed["inbox_item_id"]
+    assert allowed["action_id"] != allowed["inbox_item_id"]
+    assert allowed["action_id"].startswith("act_")
+    assert allowed["inbox_item_id"].startswith("inbox_")
     with computer_client_scope("session", "local_cli", allowed_decision_ids=frozenset({"another-decision"})):
         wrong_decision = json.loads(tools["media_pause"].invoke(payload))
     assert wrong_decision["error_code"] == "remote_control_denied"

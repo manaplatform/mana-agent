@@ -2,11 +2,276 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-05
+
+- Fixed checkpoint-resume context-budget failures being reported as generic lane-coordination
+  errors. The typed budget block now retains its original admission reason, returns a dedicated
+  safe gateway result, and creates no recovery or new task.
+  Checkpoint-resume decisions now use a scoped accounting identity and a 512-token structured
+  response cap, preventing unrelated long-running task history from inflating their admission
+  forecast. The cap uses the runtime's Chat Completions-compatible `max_tokens` argument.
+  API Manager execution now loads only its workflow-decision capability initially, then requires
+  the model to load each subsequent authorized API or browser capability; this applies in observe
+  mode as well, preventing the complete API schema surface from exhausting context before a call.
+  API workflow response allowance is now calculated by context accounting and enforced by the
+  governor for each provider call; no route-level token cap is hardcoded.
+  Explicit output limits now override historical output predictions during accounting, preventing
+  a small bounded decision from being inflated by unrelated earlier responses.
+  Non-enforcing governor modes now record task or session budget overruns without blocking provider
+  calls; true model context-window and output-capacity limits remain enforced.
+  Capabilities loaded late in a tool loop now receive the current step timestamp, preventing the
+  idle-capability reaper from unloading them before their first requested use.
+  API workflows now reserve up to 32 model-tool steps, allowing capability discovery plus the
+  model-selected inspect, import, configure, search, preview, and execute lifecycle to complete.
+  Repeated but non-duplicate capability-manifest results no longer trigger the generic no-progress
+  stop condition before a selected API capability can be used.
+  Browser documentation actions now require an explicit, validated model read-only decision before
+  the shared transactional gate permits a click; non-read-only browser actions remain fail-closed.
+  Browser-action decision reasons are retained for validation but are no longer forwarded to the
+  browser session runtime, which does not accept that audit-only field.
+  The browser runtime coverage now imports its JSON assertion helper.
+  API documentation imports and integration updates now use a durable API-integration action
+  adapter and narrow policy rule; deletion still requires an exact approval.
+  Pending API network approvals now publish a redacted session-bound `api.waiting_approval` event,
+  allowing the trusted TUI and dashboard to present the same approve-once or deny controls used for
+  other transactional requests.
+  API preview now creates that exact approval before `api_request_execute`, stops the model tool
+  loop with a `permission_required` result, and records a redacted durable root-user inbox notice
+  that points back to the trusted local approval modal.
+  The TUI now consumes the active session's preview-time API approval event directly, so it opens
+  its approval modal while the tool loop is still paused; dashboard already consumes that event
+  through its live conversation stream.
+  API workflow accounting now treats this exact preview-time `permission_required` result as
+  successful preview evidence while continuing to require execution evidence after approval.
+  Preview approval coverage now includes the documented server base path when checking the
+  redacted request target.
+  Resolving an API approval now finalizes the waiting chat with bounded, redacted execution
+  evidence (or an explicit no-execution denial) instead of only reporting the HTTP status.
+  Preview-time API approval waits now return a successful structured pending result rather than a
+  tool exception, while preserving the exact request ID, modal event, inbox record, and stop rule.
+  Dashboard approval controls now render the returned API completion message immediately instead
+  of waiting solely for a later WebSocket event.
+  TUI API approvals now add the validated completion evidence as a terminal assistant message
+  bound to the exact approval ID, with a concise completion or denial notification.
+  Approved API JSON responses now render as a generic nested, human-readable result instead of a
+  raw JSON dump, while preserving bounded redacted request metadata.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_api_conversations.py tests/test_tui_auto_chat_tool_events.py tests/test_ask_agent.py -q`.
+
+- Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
+  coordinate key creation with a per-key thread and process lock before loading
+  the published secret, preventing concurrent signers from caching different keys.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py -q`.
+
+- Repaired supervised task recovery and metadata durability. Gateway recovery candidates now span
+  sessions within the same workspace and repository, semantic task fingerprints no longer include
+  turn/message IDs, and a fresh model decision selects checkpoint resume, same-task retry, same-task
+  replan, fresh work, or a safe stop. Supervisor records now retain non-empty initial completion
+  contracts and explicit provenance for values that are pending runtime evidence rather than known.
+  Server and remote approved actions now write durable action states and receipts so ambiguous
+  outcomes block retries pending reconciliation.
+  Lightweight gateway adapters used by non-executing callers remain compatible while production
+  lane coordinators continue to require the durable action ledger.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py`.
+
+- Fixed enrolled-server directory-list routing so the router explicitly models
+  that `server_directory_list` establishes its own connection and must use the
+  `file_read` / `filesystem.read` contract. A bounded model-only correction now
+  retries an otherwise complete server decision that mismatches its selected
+  tool contract; the corrected response must still pass the same strict
+  validation before any tool can execute.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`.
+
+- Fixed dashboard server-action approvals so the validated completion summary is
+  persisted as an assistant message and emitted as a terminal chat event after
+  the action finishes. A missing summary now fails explicitly instead of
+  inventing a fallback response.
+  - User verification required: `venv/bin/python -m pytest tests/test_api_conversations.py -q`.
+
+- Corrected gateway follow-up handling so stopped tasks are classified before conversation execution, validated retry and checkpoint recovery retain an explicit successful error value, and completed tasks do not block a fresh Gmail turn.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`.
+
+- Corrected gateway recovery coverage to import non-public recovery enums from their typed models module.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py -q`.
+
+## 2026-08-04
+
+- Repaired gateway lifecycle gaps: follow-up classification is mandatory whenever durable task candidates exist, explicit memory retrieval now uses a model-selected task scope for private capsules, and every currently available registered route has an audited executor contract. Calendar remains truthfully registered-but-unavailable until a calendar connector exists.
+  - Removed unused gateway imports while retaining the typed checkpoint-resume and execution-supervisor retry chain.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/test_codex_integration.py -q`.
+
+- Bumped the package and documented version to `v0.1.5`.
+  - User verification required: `python -m pytest -q`.
+
+- Bound Codex coding turns to the durable gateway lane task selected before execution. Context-cost admission, transactional ownership, Codex live events, workspace tracking, and final lane reconciliation now use the same task ID instead of a connector-local `codex_task_*` ID that the lane coordinator cannot resolve.
+  - User verification required: `python -m pytest tests/test_codex_integration.py tests/gateway/test_chat_gateway.py -q`.
+
+- Added model-authorized adaptive execution budgets. Provider-call admission now recalculates active lane reservations from the exact accounting forecast within immutable policy caps, and durable result overruns enter `pending_budget_decision` rather than being discarded. A fresh validated overrun decision can accept a verified flagged result, require review, or request normally validated bounded recovery. Added `/budget recalculate <task-id>` and durable budget revision evidence.
+  - Pending decision, review, and scheduled-recovery outcomes are reported as successful chat handoffs with warnings instead of failed chat execution.
+  - Finalization-decision model calls receive a fresh accounting step identity, preventing collisions with the already reconciled execution call.
+  - Added `/budget finalize <task-id>` to resume a durable pending-overrun result through its required model decision.
+  - Accepted overruns now project the authoritative completed supervisor record and verification evidence before marking the taskboard item done.
+  - `/budget finalize <task-id>` now repairs a previously completed overrun whose taskboard projection was interrupted, without requesting another provider decision.
+  - Exported `BudgetOverrunAction` with the other public execution-supervisor budget decision types.
+  - Pending overrun decisions now emit a waiting budget-decision event instead of a false `lane.failed` event, so accepted Gmail and other connector responses remain visibly successful.
+  - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -q`.
+
+- Changed Gmail connector execution to begin with lightweight, model-controlled capability discovery instead of binding every email action schema before the first provider call. The executor now selects and loads its exact Gmail capability from the manifest, avoiding context-budget admission failures while preserving the allowlist and fail-closed tool policy. Capability controls are explicitly read-only for transactional enforcement, and capability activation now refreshes the bound tool set even when a tool's estimated schema size is unchanged.
+  - User verification required: `python -m pytest tests/test_ask_agent.py tests/gateway/test_entry_routing.py -q`.
+
+- Updated multi-agent queue accounting coverage so tool-result payloads remain uncharged until they are included in a provider model call; reservation and worker-execution evidence remain durable.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
+
+- Aligned context-cost and lane tests with model-aware accounting: enforce-mode admissions now register exact test-model pricing, and lane exhaustion coverage supplies explicit configured limits because default lane contracts deliberately have no synthetic token or cost cap.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_lane_coordinator.py -q`.
+
+- Made native coding-planner initialization tolerate injected AskAgent-compatible implementations that do not provide optional context-cost accounting, while retaining governor propagation for configured production agents.
+  - User verification required: `python -m pytest tests/test_coding_agent.py -q`.
+
+- Replaced the unconstrained second routing pass for an already selected public-web or GitHub search source with a dedicated, model-constrained search-operation decision. The operation decision now exposes only the selected search tool and requires its compact query, while invalid decisions still stop without an alternate source. Search-source failures now preserve the fail-closed message without a duplicated trailing period.
+  - User verification required: `python -m pytest tests/gateway/test_turn_engine_search.py tests/gateway/test_entry_routing.py -q`.
+
+- Deferred telemetry's context-cost tokenizer and usage-normalizer imports until their functions execute, breaking the `telemetry.tokens` ↔ `context_cost` package-initialization cycle that prevented gateway tests and CLI imports from being collected.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_gmail_uses_dedicated_connector_not_coding_or_conversation tests/gateway/test_chat_gateway.py -q`.
+
+- Initialized the retrieved-memory accounting component for first-turn and other no-prior-assistant gateway routes, preventing an `UnboundLocalError` before Gmail and other supervised connector execution.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_gmail_uses_dedicated_connector_not_coding_or_conversation tests/gateway/test_chat_gateway.py -q`.
+
+- Replaced scattered runtime token envelopes with model-aware accounting owned by `context_cost`. Routing and gateway execution now carry the final provider/model, context/output capabilities, expected calls, explainable payload components, confidence, and Decimal cost into durable lane and supervisor records; Canvas estimates its serialized catalog, surface state, and tool schemas without fixed 4,096/1,024 assumptions.
+  - Added provider-usage normalization, tokenizer/profile resolution, conservative marked unknown-model policy, exact cached/output/reasoning pricing, historical p80 prediction, atomic idempotent reservations, reconciliation/release auditing, and reversible context fitting. Unknown pricing remains unknown and cost-constrained execution fails safely.
+  - Removed default lane token/cost caps as synthetic model limits, removed fixed prompt/taskboard/delegation character-token assumptions from active model paths, and documented capacity-versus-policy configuration and private accounting persistence.
+  - User verification required: `python -m pytest tests/context_cost/test_model_accounting.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/test_model_routing.py tests/gateway/test_routing_authority.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py tests/test_openrouter_provider.py -q` and `python -m pytest -q`.
+
+- Restored Python 3.10 compatibility for MCP transport failure handling by using the conditional `exceptiongroup` backport where built-in exception groups are unavailable. The MCP regression test now uses that same compatibility type.
+  - User verification required: `python -m pytest tests/test_mcp.py::test_mcp_client_reports_the_concrete_task_group_failure` and `python -m pytest -q`.
+
+- Raised the default Operations lane to the configured 32k routing-token and 32-unit cost ceilings, then constrained every execution model-routing budget to its validated specialist-lane contract before reservation. Canvas now has sufficient default budget for its model-selected tool run; narrower custom lanes still fail during model routing when they cannot fund the model estimate, rather than reaching an opaque `lane_budget_exhausted` admission failure.
+  - Preserved the supervisor's authoritative `budget_exhausted` state when result acceptance exceeds a task reservation, preventing a second invalid terminal transition to `failed`.
+  - Moved validated Live Canvas work to its own non-repository lane, so stale Operations work cannot block Canvas through a workspace lock or the Operations capacity limit.
+  - Reserved the Canvas executor's configured prompt and tool-step envelope instead of only the initial routing estimate, and report a true budget exhaustion without mislabeling it as completion-verification failure.
+  - Made Canvas fail with an actionable error when no surface mutation is persisted, and excluded unleased queued recovery records from runtime capacity accounting.
+  - Emitted lock and lane-capacity waiting events once per wait instead of persisting a duplicate event every polling interval.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py`.
+
+- Registered Canvas create/update/delete tools with a dedicated transactional adapter instead of rejecting every model-selected Canvas mutation before execution. The adapter stores a redacted intent, verifies the returned durable surface snapshot before commit, and binds the action to the active Canvas lane task; Canvas deletion remains exact-approval-gated.
+  - User verification required: `python -m pytest tests/test_canvas.py tests/test_ask_agent.py tests/gateway/test_canvas_route.py`.
+
+- Isolated Canvas-lane routing-budget coverage from local provider credentials by supplying its explicit non-network test credential.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_constrains_model_routing_budgets_to_the_selected_lane`.
+
+- Connected durable lane budgets to the validated routing decision and provider-accounted context usage. Reserved token and cost estimates now use the selected model decision, while completed lanes record actual input/output usage and exact cost only when provider usage and configured pricing are available; estimated usage remains explicitly estimated.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py -q`.
+
+- Made human-inbox signing-key initialization atomically publish complete key files so concurrent response handling cannot read an empty key during creation.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py -q` and `python -m pytest -q`.
+
+## 2026-08-03
+
+- Restored browser-backed API documentation inspection by explicitly classifying the isolated
+  `browser_open` and `browser_inspect` tools as read-only. The transactional gate now permits a
+  model-selected public documentation page to be opened and inspected, while browser controls
+  that can interact with page state remain fail-closed without a transactional adapter. This
+  allows the API workflow to collect the documentation evidence needed before semantic import,
+  operation search, request preview, and execution.
+  - The API executor now supplies its initial workflow decision with a redacted snapshot of
+    enabled saved integrations. A documentation URL supplied as context no longer causes an
+    unnecessary re-import when that snapshot already contains the requested operation; the model
+    must select search, preview, and execution against the saved integration instead.
+  - User verification required: `python -m pytest tests/connectors/test_browser_core.py tests/gateway/test_api_manager_route.py tests/transactional_actions/test_policy_gated_actions.py`.
+
+- Removed completed-result reuse from checkpoint recovery. Follow-up classification now rejects
+  resuming a completed task and requires the model to classify a downstream live operation as a
+  task expansion, which creates a fresh durable action and its own approval boundary.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py`.
+
+- Published a bounded, redacted provider receipt into the owning chat history and frontend event
+  stream after an approved MCP action commits, so approval completion exposes the exact MCP result
+  instead of only an activity status.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py`.
+
+- Updated the model-selected MCP executor contract to keep credentials out of tool arguments and require provider identifiers and input references before it invokes a mutable operation. Removed the forced initial MCP tool call so the model can return a clarification rather than sending an empty mutable request.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py`.
+
+- Added a durable post-routing checkpoint for compound child lanes before they invoke an MCP route, allowing their approval inbox requests to suspend and resume the exact supervised child action.
+  - User verification required: `python -m pytest tests/gateway/test_multi_task_orchestration.py tests/gateway/test_entry_routing.py`.
+
+- Unwrapped and redacted concrete MCP async transport failures so approved-action lanes report the underlying provider error instead of an opaque `ExceptionGroup`.
+  - User verification required: `python -m pytest tests/test_mcp.py`.
+
+- Normalized MCP credential headers case-insensitively so a locally stored provider token replaces placeholder or stale `authorization` configuration values instead of sending conflicting headers.
+  - User verification required: `python -m pytest tests/test_mcp.py`.
+
+- Scoped MCP transactional idempotency to the durable model-selected task, allowing a fresh external attempt after a failed action while retaining exact-call deduplication within that task.
+  - User verification required: `python -m pytest tests/test_mcp.py tests/gateway/test_entry_routing.py`.
+
+- Made invalid follow-up classifications return their direct model-decision error before lane coordination, and clarified that non-task categories may not select a related task.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py`.
+
+- Bound approved MCP actions to their active durable lane task and added exact-provider/tool rehydration for the human-resume dispatcher; the dispatcher refuses missing or changed provider bindings instead of substituting an operation. Legacy unbound approvals now report that no task can resume and require a fresh model-selected MCP request.
+  - The owning frontend now receives explicit resumed MCP start, completion, and failure activity events; provider failures without a diagnostic are reported as such rather than appearing to remain in progress.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/test_ask_agent.py tests/test_mcp.py`.
+
+- Forwarded isolated MCP transactional approval requests through the owning gateway's activity stream and preserved their durable inbox item IDs so connected TUI and dashboard clients can present the approval modal.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/test_ask_agent.py tests/test_mcp.py`.
+
+- Registered a background, branch-owned transactional action dispatcher after a durable human-resume claim. Approval handlers now only persist the response and queue the matching branch; the dispatcher reacquires that branch before consuming the exact grant and executing the stored computer action.
+  - Gateway startup also recovers only approved, unclaimed, still-queued branches; claimed executions remain manual-recovery cases and are never retried automatically.
+  - Cleared the released pre-approval supervisor lease from the lane projection so the resumed dispatcher always acquires a fresh valid lease.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/test_computer_control.py`.
+
+- Added durable inbox-audit sequencing so events created at the same timestamp retain their append order instead of being reordered by random audit IDs.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py`.
+
+- Allowed a human-waiting taskboard item to return to `queued` after its matching durable resume claim, keeping the taskboard projection consistent with the execution supervisor without starting work inline.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py`.
+
+- Completed the `LaneCoordinator` human-inbox branch-controller interface, including durable store access plus suspension, recovery, and single-claim resume delegation. Transactional computer proposals can now create their linked authoritative inbox item instead of failing before an approval event is emitted.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/human_inbox/test_durable_inbox.py tests/test_computer_control.py`.
+
+- Added GitHub funding metadata for GitHub Sponsors, Open Collective, and Polar.
+  - User verification required: confirm the repository's GitHub funding panel lists the configured links.
+
+- Made `mana-agent inbox approve`, `deny`, and `answer` return a clear CLI validation error for recorded terminal notices instead of exposing an internal traceback; rejected response attempts remain audited.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py`.
+
+- Corrected the transactional inbox approval command's response construction so gateway imports no longer fail during test collection.
+  - User verification required: `python -m pytest tests/test_computer_control.py`.
+
+- Required computer-route responses to be backed by a typed tool outcome. A model prose-only refusal now creates a redacted terminal request/inbox notice and reports that no operating-system request or approval was sent; recording guidance directs the model to the typed recording tool for clarification or approval.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/test_computer_control.py`.
+
+- Bound computer-control execution to the model-selected `TOOL` role for each route, restoring the chat model afterward. Tool roles now require the routing model to select a profile with tool-call support.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/test_computer_control.py`.
+
+- Updated computer-control coverage to assert the durable inbox item, rather than the action record, is the transactional approval identity.
+  - User verification required: `python -m pytest tests/test_computer_control.py`.
+
+- Added a durable redacted ledger for model-selected computer requests, terminal inbox notices for blocked or incomplete requests, linked policy-denial evidence, and authoritative inbox-ID approval handling in dashboard and TUI flows. TUI now reloads and queues durable approval cards before displaying its modal; approval responses remain non-executing handoffs to the matching resumed branch.
+  - User verification required: `python -m pytest tests/test_computer_control.py tests/transactional_actions/test_policy_gated_actions.py tests/human_inbox/test_durable_inbox.py tests/test_dashboard_live_chat.py`.
+  - User verification required: `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+
+- Added a bounded, policy-gated macOS screen-recording computer action with typed clarification for incomplete requests, redacted transactional/inbox diagnostics, durable inbox correlation in approval events, and no inline computer execution from approval handlers. Recording remains macOS-only; user verification is required for provider capability, privacy authorization, restart recovery, and artifact verification.
+  - User verification required: `python -m pytest tests/test_computer_control.py tests/transactional_actions/test_policy_gated_actions.py tests/human_inbox/test_durable_inbox.py tests/gateway/test_chat_gateway.py`.
+
+- Normalized absent supervisor parent-task IDs in durable computer execution context so root branches preserve the typed context contract.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py`.
+
+- Deferred durable human-inbox initialization until a validated workflow needs a human approval or structured response. Capability-error routes, including `COMPUTER_NOT_AVAILABLE`, no longer create `~/.mana/inbox` or its files; partial gateway fixtures retain their transient remote-worker behavior without forcing durable inbox setup.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py`.
+
+- Prevented task-ID collisions when a TaskBoard projection is missing or stale while the execution supervisor still owns the durable task. New allocations now skip supervisor-reserved identities instead of attempting an immutable-contract replacement.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_gateway.py`.
+
 ## 2026-08-02
 
 - Fixed Windows Textual chat-message layout so the initial auto-height measurement rewraps the document at the width being measured. Long messages now receive their correct multi-line height during the first layout pass instead of depending on a later resize or render cycle.
   - User verification required: `python -m pytest tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py`.
 ## 2026-08-03
+
+- Added a model-selected MCP gateway route with a typed configured-provider decision, provider-only tool execution, live external-state checkpoint handling, and direct unsupported/capability stop responses that bypass lane recovery. Configured providers are surfaced to the routing model without starting MCP servers; provider tools are discovered only after the validated provider selection.
+  - Provider-only MCP turns no longer initialize repository run-evidence memory, so an external-memory configuration cannot block an MCP operation with an unmapped internal evidence requirement.
+  - MCP tool-denial traces now fail the selected MCP route, so compound workflows report the failed upload truthfully and block dependent submission work instead of marking both steps complete.
+  - Refactored discovered MCP operations through a generic registered transactional adapter: provider/tool/argument digests are previewed and approval-gated, provider failures fail verification, and successful provider results return durable receipt evidence. MCP approval responses now keep the gateway route waiting rather than reporting a failed operation.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_checkpoint_resume.py tests/test_ask_agent.py tests/test_mcp.py`.
 
 - Updated gateway regression coverage after user verification reported four failures while `tests/test_api_manager.py` passed. Missing managed workers and approval-time worker disconnects now assert exact-provider fail-closed behavior without direct SSH fallback, and server approval tests create and consume the durable inbox record instead of relying only on transient process state.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/test_api_manager.py`.

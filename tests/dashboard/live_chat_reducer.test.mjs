@@ -205,6 +205,32 @@ test("API approval requests use the exact mutation approval endpoint state", () 
   assert.equal(snapshot(state).permissionRequests[0].decision, "approve");
 });
 
+test("transactional approval uses the durable inbox item as authority", () => {
+  const state = createState("session-1");
+  reduce(state, {
+    type: "event",
+    event: event(1, "action.approval.required", {
+      metadata: {
+        permission_request_id: "inbox-1",
+        inbox_item_id: "inbox-1",
+        action_id: "act-1",
+        permission_scope: "transactional_action.once",
+        transactional_action_approval: true,
+        preview: "Record one display.",
+      },
+    }),
+  });
+  assert.deepEqual(snapshot(state).permissionRequests, [{
+    requestId: "inbox-1",
+    actionId: "act-1",
+    scope: "transactional_action.once",
+    preview: "Record one display.",
+    kind: "transactional",
+    status: "pending",
+    decision: "",
+  }]);
+});
+
 test("out-of-order terminal events and failed submissions remain visible", () => {
   const state = createState("session-1");
   reduce(state, { type: "event", event: event(5, "tool.finished", { event_id: "tool-a", status: "success", metadata: { tool_call_id: "tool-a", tool_name: "search" } }) });

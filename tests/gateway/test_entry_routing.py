@@ -22,7 +22,18 @@ from mana_agent.gateway.entry_routing import (
     EntryRoutingOutput,
 )
 from mana_agent.gateway.entry_routing import gmail_route_availability
-from mana_agent.gateway.checkpoint_resume import CHECKPOINT_RESUME_PROMPT
+from mana_agent.gateway.checkpoint_resume import (
+    CHECKPOINT_RESUME_PROMPT,
+    CheckpointResumeDecision,
+    CheckpointResumeError,
+)
+from mana_agent.gateway.followup_classifier import (
+    FollowupClassification,
+    FollowupClassificationError,
+)
+from mana_agent.gateway.lanes import LaneId, LaneTaskState
+from mana_agent.memory import MemoryContent
+from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.workspaces.service import WorkspaceService
 
 
@@ -31,7 +42,7 @@ class _RouteModel:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
 
-    def invoke(self, messages: list[Any]) -> Any:
+    def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
         if messages[0].content == CHECKPOINT_RESUME_PROMPT:
             return SimpleNamespace(
                 content=json.dumps(
@@ -53,6 +64,7 @@ class _RouteModel:
         route = self.routes.pop(0) if self.routes else "conversation"
         source_by_route = {
             "conversation": ["none"], "unsupported": ["none"], "coding": ["repository"],
+            "mcp": ["mcp"],
             "gmail": ["gmail"], "calendar": ["calendar"], "browser": ["browser"],
             "search": ["search"], "github": ["github"], "repository": ["repository"],
             "memory": ["memory"], "automation": ["repository"], "api": ["api"],
@@ -68,12 +80,13 @@ class _RouteModel:
                     "reason": f"selected {route}",
                     "required_sources": source_by_route.get(route, ["none"]),
                     "target_urls": ["https://example.com"] if route == "browser" else [],
-                    "requires_live_data": route in {"browser", "search", "github"},
+                    "requires_live_data": route in {"browser", "search", "github", "mcp"},
                     "reason_code": "TEST_ROUTE",
                     "error_code": "GMAIL_NOT_AVAILABLE" if route == "capability_error" else "",
                     "reuse_active_route": len(self.payloads) > 1,
                     "artifact_family": "pdf" if route == "artifact" else "",
                     "automation_operation": "create" if route == "automation" else "",
+                    "mcp_request": {"provider_id": "kaggle"} if route == "mcp" else None,
                 }
             )
         )
@@ -142,12 +155,16 @@ class _CodingAgent:
         return {"allowed_tools": ["read_file"]}
 
 
-def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
+def _registry(
+    gmail: RouteAvailability | None = None,
+    mcp: RouteAvailability | None = None,
+) -> EntryRouteRegistry:
     registry = EntryRouteRegistry()
     for name, description in (
         ("multi_task", "compound task orchestration"),
         ("conversation", "ordinary conversation"),
         ("coding", "Codex coding"),
+        ("mcp", "MCP provider operations"),
         ("gmail", "Gmail inbox"),
         ("calendar", "calendar"),
         ("browser", "browser inspection"),
@@ -162,7 +179,15 @@ def _registry(gmail: RouteAvailability | None = None) -> EntryRouteRegistry:
         ("unsupported", "safe stop"),
         ("capability_error", "missing capability"),
     ):
-        availability = gmail if name == "gmail" and gmail is not None else RouteAvailability(True)
+        availability = (
+            gmail
+            if name == "gmail" and gmail is not None
+            else mcp
+            if name == "mcp" and mcp is not None
+            else RouteAvailability(False, reason="No MCP provider is configured.")
+            if name == "mcp"
+            else RouteAvailability(True)
+        )
         registry.register(
             RouteRegistration(
                 name,  # type: ignore[arg-type]
@@ -178,13 +203,14 @@ def _gateway(
     model: _RouteModel,
     *,
     gmail: RouteAvailability | None = None,
+    mcp: RouteAvailability | None = None,
     ask_agent: _AskAgent | None = None,
     coding_agent: _CodingAgent | None = None,
 ) -> tuple[AgentChatGateway, _ChatService, _AskAgent]:
     agent = ask_agent or _AskAgent()
     ask_service = _AskService(agent)
     chat_service = _ChatService(ask_service)
-    registry = _registry(gmail)
+    registry = _registry(gmail, mcp)
     gateway = AgentChatGateway(
         root,
         coding_agent=coding_agent is not None,
@@ -207,9 +233,340 @@ def test_latest_gmail_routes_to_connector_and_preserves_identifiers(tmp_path: Pa
     assert not chat.conversation_calls
     assert ask_agent.calls[0]["flow_id"] == session_id
     assert ask_agent.calls[0]["run_id"] == "turn_exact"
+    assert ask_agent.calls[0]["tool_policy"]["capability_discovery_required"] is True
+    assert "capability_search" in ask_agent.calls[0]["system_prompt"]
     assert result.payload["session_id"] == session_id
     assert result.payload["conversation_id"] == session_id
     assert result.payload["turn_id"] == "turn_exact"
+
+
+def test_configured_kaggle_mcp_route_uses_only_the_model_selected_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, ask_agent = _gateway(
+        tmp_path,
+        _RouteModel("mcp"),
+        mcp=RouteAvailability(
+            True,
+            details={"providers": [{"id": "kaggle", "namespace": "mcp.kaggle"}]},
+        ),
+    )
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Use Kaggle MCP to upload the submission and submit it to the competition.",
+    )
+
+    assert result.mode == "route-mcp"
+    assert result.payload["provider_id"] == "kaggle"
+    assert ask_agent.calls[0]["required_mcp_server"] == "kaggle"
+    assert ask_agent.calls[0]["tool_policy"]["mcp_provider_only"] == "kaggle"
+    assert "require_initial_tool_call" not in ask_agent.calls[0]["tool_policy"]
+    assert ask_agent.calls[0]["transactional_parent_task_id"] == result.payload["lane_task_id"]
+    assert "Do not send an empty object" in ask_agent.calls[0]["system_prompt"]
+
+
+def test_failed_kaggle_mcp_tool_marks_the_route_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    failed_agent = _AskAgent(
+        SimpleNamespace(
+            answer="The upload was not performed.",
+            sources=[],
+            warnings=[],
+            trace=[
+                {
+                    "tool_name": "mcp__kaggle__start_competition_submission_upload",
+                    "status": "error",
+                    "output_preview": "no registered transactional action adapter",
+                }
+            ],
+        )
+    )
+    gateway, _chat, _ask_agent = _gateway(
+        tmp_path,
+        _RouteModel("mcp"),
+        mcp=RouteAvailability(
+            True,
+            details={"providers": [{"id": "kaggle", "namespace": "mcp.kaggle"}]},
+        ),
+        ask_agent=failed_agent,
+    )
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Use Kaggle MCP to upload the submission.",
+    )
+
+    assert result.mode == "route-mcp-error"
+    assert result.error == "mcp_tool_execution_failed"
+    assert result.payload["failed_tool"] == "mcp__kaggle__start_competition_submission_upload"
+
+
+def test_kaggle_mcp_action_approval_keeps_the_route_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    approval_agent = _AskAgent(
+        SimpleNamespace(
+            answer="Approval is required.",
+            sources=[],
+            warnings=[],
+            trace=[
+                {
+                    "tool_name": "mcp__kaggle__authorize",
+                    "status": "error",
+                    "output_preview": json.dumps(
+                        {
+                            "ok": False,
+                            "error_code": "approval_required",
+                            "permission_request_id": "inbox_kaggle_authorize",
+                            "inbox_item_id": "inbox_kaggle_authorize",
+                            "action_id": "act_kaggle_authorize",
+                        }
+                    ),
+                }
+            ],
+        )
+    )
+    gateway, _chat, _ask_agent = _gateway(
+        tmp_path,
+        _RouteModel("mcp"),
+        mcp=RouteAvailability(
+            True,
+            details={"providers": [{"id": "kaggle", "namespace": "mcp.kaggle"}]},
+        ),
+        ask_agent=approval_agent,
+    )
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Use Kaggle MCP to authorize access.",
+    )
+
+    assert result.mode == "route-mcp-awaiting-approval"
+    assert result.payload["confirmation_request_id"] == "inbox_kaggle_authorize"
+    assert result.payload["inbox_item_id"] == "inbox_kaggle_authorize"
+
+
+def test_unsupported_route_bypasses_checkpoint_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+
+    def _checkpoint_must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unsupported routes must not enter checkpoint recovery")
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        _checkpoint_must_not_run,
+    )
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("unsupported"))
+
+    result = gateway.process_turn(
+        gateway.create_session(frontend="test"),
+        "Perform an unavailable external action.",
+    )
+
+    assert result.mode == "route-unsupported"
+    assert result.error == "unsupported_route"
+
+
+def test_failed_followup_classification_stops_before_recovery_or_new_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="previous gateway task",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior worker failed",
+    )
+
+    def fail_classification(*_args: Any, **_kwargs: Any) -> Any:
+        raise FollowupClassificationError(
+            "Model decision failed: followup_classification. No recovery or new task was started."
+        )
+
+    new_reservations: list[Any] = []
+    original_reserve = gateway._lane_coordinator.reserve
+
+    def record_reserve(*args: Any, **kwargs: Any) -> Any:
+        new_reservations.append((args, kwargs))
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        fail_classification,
+    )
+    monkeypatch.setattr(gateway._lane_coordinator, "reserve", record_reserve)
+
+    result = gateway.process_turn(session_id, "Continue the previous gateway task.")
+
+    assert result.mode == "followup-classification-error"
+    assert result.error == "followup_classification_invalid"
+    assert new_reservations == []
+
+
+def test_checkpoint_resume_context_budget_block_stops_without_lane_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="previous gateway task",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior worker failed",
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *_args, **_kwargs: FollowupClassification(
+            decision_id="followup-decision",
+            category="resume_request",
+            related_task_id=prior.execution.task_id,
+            safe_to_continue=True,
+            reason="The same durable task was selected.",
+        ),
+    )
+
+    identities: list[dict[str, Any]] = []
+
+    def block_checkpoint_resume(*_args: Any, **_kwargs: Any) -> Any:
+        identities.append(gateway._stack.context_cost_governor._effective_identity())
+        raise CheckpointResumeError(
+            "Model decision failed: checkpoint_resume. No task was resumed or started. "
+            "Reason: Context budget blocked: context_limit_deficit:510. "
+            "No provider call was executed.",
+            code="context_budget_blocked",
+        )
+
+    new_reservations: list[Any] = []
+    original_reserve = gateway._lane_coordinator.reserve
+
+    def record_reserve(*args: Any, **kwargs: Any) -> Any:
+        new_reservations.append((args, kwargs))
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        block_checkpoint_resume,
+    )
+    monkeypatch.setattr(gateway._lane_coordinator, "reserve", record_reserve)
+
+    result = gateway.process_turn(session_id, "Continue the previous gateway task.")
+
+    assert result.mode == "checkpoint-resume-budget-blocked"
+    assert result.error == "context_budget_blocked"
+    assert "Gateway lane coordination failed" not in result.answer
+    assert "No task was resumed or started" in result.answer
+    assert new_reservations == []
+    assert identities[0]["execution_kind"] == "checkpoint_resume"
+    assert identities[0]["route"] == "conversation"
+    assert identities[0]["lane"] == LaneId.RESEARCH.value
+
+
+@pytest.mark.parametrize(
+    ("action", "with_checkpoint"),
+    (("resume_checkpoint", True), ("retry_task", False)),
+)
+def test_gateway_recovery_handoff_uses_validated_recovery_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    with_checkpoint: bool,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="previous gateway task",
+        lane_id=LaneId.RESEARCH,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    checkpoint_id = (
+        gateway._lane_coordinator.checkpoint(prior.execution.task_id, boundary="before-retry")
+        if with_checkpoint
+        else ""
+    )
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior worker failed",
+    )
+    monkeypatch.setattr(gateway, "_recall_task_capsules", lambda **_kwargs: "")
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *_args, **_kwargs: FollowupClassification(
+            decision_id="followup-decision",
+            category="resume_request" if with_checkpoint else "retry_request",
+            related_task_id=prior.execution.task_id,
+            safe_to_continue=True,
+            reason="The same durable task was selected.",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        lambda *_args, **_kwargs: CheckpointResumeDecision(
+            decision_id=f"{action}-decision",
+            action=action,  # type: ignore[arg-type]
+            task_id=prior.execution.task_id,
+            checkpoint_id=checkpoint_id,
+            same_work=True,
+            fresh_data_required=False,
+            checkpoint_still_valid=with_checkpoint,
+            side_effects_safe_to_repeat=True,
+            safe_to_continue=True,
+            reason="The validated recovery decision is safe.",
+        ),
+    )
+    recovery_calls: list[Any] = []
+    method_name = "resume_checkpoint" if with_checkpoint else "retry_task"
+    original_recovery = getattr(gateway._lane_coordinator, method_name)
+
+    def record_recovery(task_id: str, *, decision: Any, session_id: str) -> Any:
+        recovery_calls.append((task_id, decision, session_id))
+        return original_recovery(task_id, decision=decision, session_id=session_id)
+
+    monkeypatch.setattr(gateway._lane_coordinator, method_name, record_recovery)
+
+    result = gateway.process_turn(session_id, "Continue the previous gateway task.")
+
+    assert result.error == ""
+    assert recovery_calls[0][0] == prior.execution.task_id
+    assert recovery_calls[0][1].decision_id == f"{action}-decision"
+    assert recovery_calls[0][1].action.value == (
+        "resume_checkpoint" if with_checkpoint else "retry"
+    )
+    assert recovery_calls[0][2] == session_id
 
 
 def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_path: Path, monkeypatch) -> None:
@@ -268,6 +625,14 @@ def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path
         reason="No enabled Gmail account is configured.",
         setup_action="Run `mana-agent connector email add --provider gmail ...`.",
     )
+
+    def _checkpoint_must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("capability errors must not enter checkpoint recovery")
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        _checkpoint_must_not_run,
+    )
     gateway, chat, ask_agent = _gateway(tmp_path, _RouteModel("capability_error"), gmail=unavailable)
     result = gateway.process_turn(gateway.create_session(frontend="test"), "Check Gmail")
 
@@ -275,6 +640,50 @@ def test_missing_gmail_configuration_returns_truthful_setup_error(tmp_path: Path
     assert "gmail" in result.answer.lower()
     assert not chat.conversation_calls
     assert not ask_agent.calls
+
+
+def test_gateway_route_registry_has_executors_for_every_available_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    ask_service = _AskService()
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        chat_service=_ChatService(ask_service),
+    )
+    executor_contracts = {
+        "conversation": "_execute_entry_route",
+        "multi_task": "process_turn",
+        "coding": "_execute_entry_route",
+        "mcp": "_execute_mcp_route",
+        "remote_execution": "_execute_entry_route",
+        "server": "_execute_entry_route",
+        "artifact": "_execute_artifact_route",
+        "media": "_execute_media_route",
+        "command": "process_turn",
+        "gmail": "_execute_gmail_route",
+        "computer": "_execute_computer_route",
+        "browser": "_execute_required_sources",
+        "search": "_execute_required_sources",
+        "github": "_execute_required_sources",
+        "repository": "_execute_entry_route",
+        "memory": "_execute_memory_route",
+        "automation": "_execute_automation_route",
+        "api": "_execute_api_route",
+        "canvas": "_execute_canvas_route",
+        "unsupported": "_execute_entry_route",
+        "capability_error": "_execute_entry_route",
+    }
+    snapshot = {row["name"]: row["availability"] for row in gateway._entry_route_registry.snapshot()}
+
+    assert {name for name, availability in snapshot.items() if availability["available"]} <= set(
+        executor_contracts
+    )
+    assert all(callable(getattr(gateway, executor)) for executor in executor_contracts.values())
+    assert snapshot["calendar"]["available"] is False
+    assert snapshot["calendar"]["reason"] == "No calendar connector is registered."
 
 
 def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
@@ -430,6 +839,242 @@ def test_entry_router_validates_api_as_an_explicit_model_route() -> None:
     assert decision.route == "api"
     assert decision.required_sources == ("api",)
     assert "never expose a raw unrestricted HTTP tool" in ENTRY_ROUTER_PROMPT
+
+
+def test_entry_router_validates_private_memory_task_selection() -> None:
+    router = EntryRouter(llm=_RouteModel("memory"), registry=_registry())
+    context = EntryRouteContext(
+        session_id="session",
+        conversation_id="session",
+        turn_id="turn",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {
+                "task_id": "task-offered",
+                "normalized_intent": "inspect the gateway",
+                "state": "completed",
+            },
+        ),
+    )
+    payload = {
+        "route": "memory",
+        "confidence": 0.99,
+        "reason": "Retrieve the selected task's private result.",
+        "required_sources": ["memory"],
+        "memory_task_id": "task-offered",
+    }
+
+    decision = router._validate(payload, context=context)
+
+    assert decision.memory_task_id == "task-offered"
+    with pytest.raises(EntryRoutingError, match="not offered"):
+        router._validate({**payload, "memory_task_id": "task-foreign"}, context=context)
+    with pytest.raises(EntryRoutingError, match="requires a selected task ID"):
+        router._validate({**payload, "memory_task_id": ""}, context=context)
+
+
+def test_gateway_memory_route_reads_only_the_selected_private_capsules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+    calls: list[Any] = []
+
+    class CapsuleMemory:
+        user_id = "authenticated-user"
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
+
+        def __init__(self) -> None:
+            self.capsules = self
+
+        def query_capsules(self, request: Any, *, correlation_id: str = "") -> list[Any]:
+            calls.append((request, correlation_id))
+            return [
+                SimpleNamespace(
+                    capsule_id="capsule-1",
+                    revision=2,
+                    summary="Gateway audit evidence",
+                    content={"note": "private task result"},
+                )
+            ]
+
+    gateway._stack.memory_service = CapsuleMemory()
+    context = EntryRouteContext(
+        session_id="session",
+        conversation_id="session",
+        turn_id="turn-memory",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+        ),
+    )
+    decision = EntryRoutingDecision(
+        route="memory",
+        confidence=0.99,
+        reason="Read the selected task memory.",
+        required_sources=("memory",),
+        memory_task_id="task-offered",
+    )
+
+    result = gateway._execute_memory_route(decision=decision, context=context, query="gateway")
+
+    assert result.mode == "route-memory"
+    assert result.payload["memory_task_id"] == "task-offered"
+    assert result.payload["memory_record_count"] == 1
+    assert "capsule-1" in result.answer
+    assert calls[0][0].principal.task_id == "task-offered"
+    assert calls[0][0].task_context.session_id == "session"
+    assert calls[0][1] == "turn-memory"
+
+
+def test_gateway_memory_route_rejects_unoffered_task_before_private_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+
+    class CapsuleMemory:
+        user_id = "authenticated-user"
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
+
+        def __init__(self) -> None:
+            self.capsules = self
+            self.reads = 0
+
+        def query_capsules(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            self.reads += 1
+            return []
+
+    memory = CapsuleMemory()
+    gateway._stack.memory_service = memory
+    result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read a task memory.",
+            required_sources=("memory",),
+            memory_task_id="task-foreign",
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="session",
+            turn_id="turn-memory",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+            ),
+        ),
+        query="gateway",
+    )
+
+    assert result.error == "memory_task_id_invalid"
+    assert memory.reads == 0
+    missing_task_result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read a task memory.",
+            required_sources=("memory",),
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="session",
+            turn_id="turn-memory-missing",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+            ),
+        ),
+        query="gateway",
+    )
+
+    assert missing_task_result.error == "memory_task_id_invalid"
+    assert memory.reads == 0
+
+
+def test_gateway_memory_route_requires_an_authenticated_capsule_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+
+    class CapsuleMemory:
+        user_id = ""
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
+
+        def __init__(self) -> None:
+            self.capsules = self
+            self.reads = 0
+
+        def query_capsules(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            self.reads += 1
+            return []
+
+    memory = CapsuleMemory()
+    gateway._stack.memory_service = memory
+    result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read a task memory.",
+            required_sources=("memory",),
+            memory_task_id="task-offered",
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="session",
+            turn_id="turn-memory",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
+            ),
+        ),
+        query="gateway",
+    )
+
+    assert result.error == "memory_principal_unavailable"
+    assert memory.reads == 0
+
+
+def test_gateway_memory_route_uses_legacy_scoped_search_when_capsules_are_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _chat, _ask_agent = _gateway(tmp_path, _RouteModel("conversation"))
+
+    class LegacyMemory:
+        config = SimpleNamespace(capsules=SimpleNamespace(enabled=False))
+
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def search_blocking(self, request: Any) -> list[Any]:
+            self.requests.append(request)
+            return [
+                SimpleNamespace(content=MemoryContent("Scoped legacy evidence")),
+            ]
+
+    memory = LegacyMemory()
+    gateway._stack.memory_service = memory
+    result = gateway._execute_memory_route(
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read scoped legacy memory.",
+            required_sources=("memory",),
+        ),
+        context=EntryRouteContext(
+            session_id="session",
+            conversation_id="conversation",
+            turn_id="turn-memory",
+        ),
+        query="gateway",
+    )
+
+    assert result.mode == "route-memory"
+    assert result.answer == "Scoped legacy evidence"
+    assert memory.requests[0].scope.session_id == "session"
+    assert memory.requests[0].scope.conversation_id == "conversation"
 
 
 def test_entry_router_requires_a_typed_automation_operation() -> None:
@@ -899,6 +1544,64 @@ def test_server_route_decodes_closed_arguments_json() -> None:
     }
 
 
+def test_server_directory_listing_repairs_a_tool_contract_mismatch() -> None:
+    registry = EntryRouteRegistry()
+    registry.register(
+        RouteRegistration(
+            "server",
+            "enrolled server management",
+            lambda: RouteAvailability(available=True),
+        )
+    )
+    calls: list[dict[str, Any]] = []
+    invalid_decision = {
+        "decision_id": "directory-list-1",
+        "server_id": "mana-agent-server-1",
+        "action": "inspect",
+        "tool_name": "server_directory_list",
+        "arguments_json": json.dumps({"path": "/home/ubuntu"}),
+        "required_capability": "inspect",
+        "read_only": True,
+        "consequential": False,
+        "destructive": False,
+        "affected_resources": ["directory:/home/ubuntu"],
+        "safe_to_continue": True,
+        "reason": "List the requested directory.",
+    }
+    valid_decision = {
+        **invalid_decision,
+        "action": "file_read",
+        "required_capability": "filesystem.read",
+    }
+
+    class Model:
+        def invoke(self, messages: list[Any]) -> Any:
+            calls.append(json.loads(messages[-1].content))
+            decision = invalid_decision if len(calls) == 1 else valid_decision
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "server",
+                        "confidence": 0.98,
+                        "reason": "Use the enrolled server directory-list tool.",
+                        "required_sources": ["server"],
+                        "server_request": {"decision": decision},
+                    }
+                )
+            )
+
+    decision = EntryRouter(llm=Model(), registry=registry).route(
+        user_prompt="Connect to mana-agent-server-1 and list /home/ubuntu.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["previous_invalid_decision"]["server_request"]["decision"] == invalid_decision
+    assert "tool_contracts" in calls[1]["correction"]
+    assert decision.server_request["decision"]["action"] == "file_read"
+    assert decision.server_request["decision"]["required_capability"] == "filesystem.read"
+
+
 def test_remote_routing_requires_direct_ssh_without_a_managed_worker() -> None:
     registry = EntryRouteRegistry()
     registry.register(
@@ -962,7 +1665,56 @@ def test_failed_required_browser_source_stops_multi_source_plan(tmp_path: Path, 
     assert result.payload["executions"] == {
         "browser": {"status": "failed", "error": "browser returned no evidence"}
     }
+    assert result.answer.endswith("browser returned no evidence. No alternative source was used.")
     assert len(failing_browser.calls) == 1
+
+
+def test_required_search_source_uses_constrained_operation_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _RouteModel("conversation"))
+    captured: dict[str, Any] = {}
+    operation = AgentDecision(
+        intent="web_research",
+        confidence=0.9,
+        selected_tools=["web_search"],
+        tool_inputs={"web_search": {"query": "latest Mana-Agent release"}},
+        web_search_needed=True,
+        verifier_passed=True,
+    )
+
+    def decide_search_operation(**kwargs: Any) -> AgentDecision:
+        captured.update(kwargs)
+        return operation
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.decide_search_operation",
+        decide_search_operation,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.run_web_research_answer",
+        lambda **_kwargs: ("current search evidence", [], []),
+    )
+    decision = EntryRoutingDecision(
+        route="search",
+        confidence=0.9,
+        reason="Current information is required.",
+        required_sources=("search",),
+        requires_live_data=True,
+    )
+
+    result = gateway._execute_required_sources(
+        decision=decision,
+        text="What is the latest Mana-Agent release?",
+        ask_service=gateway.get_ask_service(),
+        callbacks=None,
+    )
+
+    assert result.answer == "current search evidence"
+    assert captured["required_tool"] == "web_search"
+    assert captured["question"] == "What is the latest Mana-Agent release?"
 
 
 def test_compound_child_search_uses_only_its_validated_child_prompt(

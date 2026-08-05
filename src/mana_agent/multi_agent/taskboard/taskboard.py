@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from mana_agent.multi_agent.core.ids import new_task_id
 from mana_agent.multi_agent.core.types import (
@@ -18,6 +18,7 @@ from mana_agent.memory import MultiAgentMemoryService, task_fingerprint
 from mana_agent.memory import CapsuleTaskContext, MemoryPrincipal
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.context_cost.compression import compress_tool_result, render_envelope
+from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
 from mana_agent.multi_agent.taskboard.validators import validate_transition
 
@@ -32,19 +33,35 @@ def _append_unique(target: list[str], values: list[str]) -> None:
 
 
 class TaskBoard:
-    def __init__(self, root: str | Path = ".", *, memory_service: MultiAgentMemoryService | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path = ".",
+        *,
+        memory_service: MultiAgentMemoryService | None = None,
+        task_id_is_reserved: Callable[[str], bool] | None = None,
+    ) -> None:
         self.store = JsonStateStore(root)
         self._save_lock = threading.RLock()
         self.memory_service = memory_service
+        self._task_id_is_reserved = task_id_is_reserved
         self.tasks: dict[str, TaskBoardItem] = {}
         self.load()
 
     def _new_task_id(self) -> str:
-        """Allocate an ID that cannot overwrite a durable task after restart."""
+        """Allocate an ID unused by this projection or an authoritative store."""
         task_id = new_task_id()
-        while task_id in self.tasks:
+        while task_id in self.tasks or (
+            self._task_id_is_reserved is not None
+            and self._task_id_is_reserved(task_id)
+        ):
             task_id = new_task_id()
         return task_id
+
+    def set_task_id_reservation_checker(
+        self, checker: Callable[[str], bool] | None
+    ) -> None:
+        """Bind authoritative task-ID reservations before creating new tasks."""
+        self._task_id_is_reserved = checker
 
     def create_task(
         self,
@@ -126,8 +143,8 @@ class TaskBoard:
             supervisor_agent_id=owner_agent_id,
             delegated_by_agent_id=owner_agent_id,
             approved_by_agent_id=owner_agent_id,
-            budget_reserved_tokens=20_000,
-            budget_remaining_tokens=20_000,
+            budget_reserved_tokens=0,
+            budget_remaining_tokens=0,
             budget_reserved_ms=120_000,
             blockers=[],
             memory_status={
@@ -459,7 +476,7 @@ class TaskBoard:
                 lines.append(f"{label}:")
                 lines.extend(f"- {item}" for item in values)
         text = "\n".join(lines)
-        if len(text) <= max(200, int(token_budget) * 4):
+        if estimate_value_tokens(text) <= max(1, int(token_budget)):
             return text
         store = ContextArtifactStore()
         envelope = compress_tool_result(

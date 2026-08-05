@@ -9,6 +9,7 @@ import typer
 
 from . import default_human_inbox_service
 from .models import InboxQuery, InboxRequestType, InboxStatus, ResponseOperation, ResponseSubmission
+from .repository import InboxConcurrentUpdateError
 
 
 inbox_app = typer.Typer(help="Review and respond to durable human-input requests.", no_args_is_help=True)
@@ -70,17 +71,28 @@ def show_item(
 def _respond(inbox_item_id: str, *, operation: ResponseOperation, actor: str, comment: str, answer: dict | None = None) -> None:
     service = _service()
     item = service.repository.get(inbox_item_id)
-    result = service.respond(ResponseSubmission(
-        inbox_item_id=inbox_item_id,
-        operation=operation,
-        actor_id=_actor(actor),
-        channel="cli",
-        idempotency_key=f"cli:{operation.value}:{inbox_item_id}:{item.version}",
-        answer=answer or {},
-        comment=comment,
-        expected_version=item.version,
-        current_action_digest=item.action_digest,
-    ))
+    try:
+        result = service.respond(ResponseSubmission(
+            inbox_item_id=inbox_item_id,
+            operation=operation,
+            actor_id=_actor(actor),
+            channel="cli",
+            idempotency_key=f"cli:{operation.value}:{inbox_item_id}:{item.version}",
+            answer=answer or {},
+            comment=comment,
+            expected_version=item.version,
+            current_action_digest=item.action_digest,
+        ))
+    except InboxConcurrentUpdateError as exc:
+        if item.request_type is InboxRequestType.NOTICE:
+            raise typer.BadParameter(
+                "This is a recorded terminal notice, not an approval request. "
+                "No action was proposed, so it cannot be approved or denied.",
+                param_hint="INBOX_ITEM_ID",
+            ) from exc
+        raise typer.BadParameter(str(exc), param_hint="INBOX_ITEM_ID") from exc
+    except PermissionError as exc:
+        raise typer.BadParameter(str(exc), param_hint="INBOX_ITEM_ID") from exc
     typer.echo(json.dumps(result.card(), indent=2, ensure_ascii=False, default=str))
 
 

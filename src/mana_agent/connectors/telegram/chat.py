@@ -114,9 +114,9 @@ class ManaChatGateway:
         self._active.add(session_id)
         try:
             history = (
-                self._history_store.history(session_id, limit=12)
+                self._history_store.history(session_id, limit=None)
                 if self._history_store is not None
-                else self._history.get(session_id, [])[-12:]
+                else self._history.get(session_id, [])
             )
             question = text
             if history:
@@ -124,14 +124,13 @@ class ManaChatGateway:
                     f"User: {question_text}\nMana-Agent: {answer_text}"
                     for question_text, answer_text in history
                 )
-                question = f"Conversation history for continuity:\n{transcript[-20_000:]}\n\nCurrent user message:\n{text}"
+                question = f"Conversation history for continuity:\n{transcript}\n\nCurrent user message:\n{text}"
             response = await asyncio.to_thread(self._service(session_id).ask, question)
             answer = getattr(response, "answer", response)
             if not isinstance(answer, str) or not answer.strip():
                 raise RuntimeError("Mana-Agent returned no final response.")
             result = answer.strip()
             self._history.setdefault(session_id, []).append((text, result))
-            self._history[session_id] = self._history[session_id][-12:]
             if self._history_store is not None:
                 self._history_store.append_history(session_id, text, result)
             return result

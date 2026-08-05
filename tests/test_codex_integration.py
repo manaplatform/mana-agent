@@ -358,6 +358,27 @@ def test_coding_agent_shim_delegates_plan_decision_to_one_read_only_codex_turn(t
         shim._tool_policy_for_request("plan it")
 
 
+def test_coding_agent_shim_uses_the_gateway_task_identity_for_codex_execution(
+    tmp_path: Path,
+) -> None:
+    _git_repo(tmp_path)
+    backend = _ShimBackend()
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        backend_factory=lambda: backend,
+    )
+
+    result = shim.generate(
+        "plan the auth refactor",
+        auto_chat_mode="plan_only",
+        gateway_task_id="task_gateway_lane_123",
+    )
+
+    assert backend.tasks[0].task_id == "task_gateway_lane_123"
+    assert result["run_id"] == "task_gateway_lane_123"
+
+
 def test_coding_agent_shim_delegates_planning_editing_and_verification_to_codex_worktree(
     tmp_path: Path,
 ) -> None:

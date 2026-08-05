@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from langchain_core.tools import StructuredTool
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
+from mana_agent.canvas.service import canvas_service_for_root
 from mana_agent.context_cost.governor import ContextCostGovernor
+from mana_agent.context_cost.models import GovernorMode
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.services.coding_memory_service import CodingMemoryService
 from mana_agent.search.config import SearchConfig
@@ -76,6 +78,29 @@ class _FakeLLM:
         return _FakeBoundModel(self._responses)
 
 
+class _CapabilityBindingLLM:
+    """Captures each active capability set while replaying model decisions."""
+
+    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+        self._responses = list(responses)
+        self.bound_tool_names: list[set[str]] = []
+        self.invocation_kwargs: list[dict[str, object]] = []
+
+    def bind_tools(
+        self, tools: list[object], tool_choice: str | None = None
+    ) -> "_CapabilityBindingLLM":
+        del tool_choice
+        self.bound_tool_names.append({str(getattr(tool, "name", "")) for tool in tools})
+        return self
+
+    def invoke(
+        self, _messages: list[object], config: object | None = None, **kwargs: object
+    ) -> _FakeAIMessage:
+        del config
+        self.invocation_kwargs.append(kwargs)
+        return self._responses.pop(0)
+
+
 def _build_agent(tmp_path: Path) -> AskAgent:
     governor = ContextCostGovernor(
         session_id="test-ask-agent",
@@ -118,6 +143,64 @@ def test_ask_agent_enforces_max_steps(tmp_path: Path) -> None:
     assert result.trace
     assert any(item.tool_name == "semantic_search" for item in result.trace)
     assert any("returned best-effort final answer" in str(w) for w in result.warnings)
+
+
+def test_ask_agent_executes_canvas_create_through_transactional_adapter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    agent = _build_agent(tmp_path)
+    agent.llm = _FakeLLM(
+        [
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "canvas-1",
+                        "name": "canvas_create_surface",
+                        "args": {
+                            "source_decision_id": "turn-canvas",
+                            "session_id": "session-canvas",
+                            "conversation_id": "session-canvas",
+                            "surface_id": "pet",
+                            "owner": {"agent_id": "main", "task_id": "task-canvas"},
+                            "components": [
+                                {
+                                    "id": "root",
+                                    "component": "Column",
+                                    "children": ["title"],
+                                },
+                                {
+                                    "id": "title",
+                                    "component": "Heading",
+                                    "text": "Pixel pet",
+                                },
+                            ],
+                            "data_model": {"mood": "happy"},
+                        },
+                    }
+                ],
+            ),
+            _FakeAIMessage("Canvas created.", tool_calls=[]),
+        ]
+    )
+
+    result = agent.run(
+        "Create a pixel pet.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=3,
+        timeout_seconds=2,
+        tool_policy={"allowed_tools": ["canvas_create_surface"]},
+        transactional_parent_task_id="task-canvas",
+    )
+
+    assert result.answer == "Canvas created."
+    assert result.trace[0].status == "ok"
+    assert '"action_state": "committed"' in result.trace[0].output_preview
+    snapshot = canvas_service_for_root(tmp_path).get_surface("session-canvas", "pet")
+    assert snapshot.components[0].id == "root"
 
 
 class _CountingTool:
@@ -200,6 +283,146 @@ def test_ask_agent_email_only_turn_does_not_initialize_run_evidence(
 
     assert result.answer == "No new messages."
     assert len(calls.calls) == 1
+
+
+def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Path) -> None:
+    """A connector's full tool surface must not block its first model call."""
+    agent = _build_agent(tmp_path)
+    agent.context_cost_governor.enabled = True
+    agent.context_cost_governor.mode = GovernorMode.SOFT
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "discover",
+                        "name": "capability_search",
+                        "args": {"query": "search"},
+                    }
+                ],
+            ),
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "load-search",
+                        "name": "capability_load",
+                        "args": {"names": ["email_search"]},
+                    }
+                ],
+            ),
+            _FakeAIMessage("No new messages."),
+        ]
+    )
+    agent.llm = llm  # type: ignore[assignment]
+
+    result = agent.run(
+        "Check my latest Gmail",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=4,
+        timeout_seconds=2,
+        system_prompt="Discover and load the selected email capability first.",
+        tool_policy={
+            "allowed_tools": ["email_search"],
+            "capability_discovery_required": True,
+            "require_initial_tool_call": True,
+        },
+        run_id="gmail-capability-turn",
+    )
+
+    assert result.answer == "No new messages."
+    assert "email_search" not in llm.bound_tool_names[0]
+    assert any("email_search" in names for names in llm.bound_tool_names[2:])
+
+
+def test_ask_agent_keeps_a_late_loaded_capability_for_the_next_step(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    agent.context_cost_governor.enabled = True
+    agent.context_cost_governor.mode = GovernorMode.OBSERVE
+    _register_tool(agent, "email_search", lambda: {"ok": True, "result": "inbox"})
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{
+                "id": "discover-1", "name": "capability_search", "args": {"query": "unmatched-one"},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "discover-2", "name": "capability_search", "args": {"query": "unmatched-two"},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "discover-3", "name": "capability_search", "args": {"query": "unmatched-three"},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "load-email", "name": "capability_load", "args": {"names": ["email_search"]},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "email", "name": "email_search", "args": {},
+            }]),
+            _FakeAIMessage("Inbox checked."),
+        ]
+    )
+    agent.llm = llm  # type: ignore[assignment]
+
+    result = agent.run(
+        "Check my latest email.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=6,
+        timeout_seconds=2,
+        tool_policy={
+            "allowed_tools": ["email_search"],
+            "capability_discovery_required": True,
+            "require_initial_tool_call": True,
+        },
+        run_id="late-capability-turn",
+    )
+
+    assert result.answer == "Inbox checked."
+    assert any(trace.tool_name == "email_search" and trace.status == "ok" for trace in result.trace)
+    assert not any("no-progress detection" in str(warning) for warning in result.warnings)
+
+
+def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    agent.context_cost_governor.enabled = True
+    agent.context_cost_governor.mode = GovernorMode.OBSERVE
+    _register_tool(agent, "api_workflow_decide", lambda: {"ok": True})
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "id": "workflow",
+                        "name": "api_workflow_decide",
+                        "args": {},
+                    }
+                ],
+            ),
+            _FakeAIMessage("Workflow decision recorded."),
+        ]
+    )
+    agent.llm = llm  # type: ignore[assignment]
+
+    result = agent.run(
+        "Plan the API workflow.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=3,
+        timeout_seconds=2,
+        tool_policy={
+            "allowed_tools": ["api_workflow_decide"],
+            "capability_discovery_required": True,
+            "initial_tools": ["api_workflow_decide"],
+            "require_initial_tool_call": True,
+        },
+        run_id="api-capability-turn",
+    )
+
+    assert result.answer == "Workflow decision recorded."
+    assert "api_workflow_decide" in llm.bound_tool_names[0]
+    assert llm.invocation_kwargs == [{}, {}]
 
 
 def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:
@@ -480,6 +703,63 @@ def test_ask_agent_discovers_only_the_explicitly_required_mcp_provider(tmp_path:
     agent._build_tools(k_default=4, timeout_seconds=1, required_mcp_server="context7")
 
     assert calls == [{"overrides": [], "server_ids": ["context7"]}]
+
+
+def test_ask_agent_mcp_provider_only_policy_binds_only_selected_provider_tools(
+    tmp_path: Path, monkeypatch
+) -> None:
+    agent = _build_agent(tmp_path)
+    bound_tool_names: list[list[str]] = []
+
+    class _RecordingMcpModel:
+        def bind_tools(self, tools, **_kwargs):  # noqa: ANN001
+            bound_tool_names.append([tool.name for tool in tools])
+            return _FakeBoundModel([_FakeAIMessage("Done", tool_calls=[])])
+
+    def _discover(**_kwargs):
+        return [
+            StructuredTool.from_function(
+                func=lambda: "ok",
+                name="mcp__kaggle__submit_to_competition",
+                description="Submit a Kaggle competition entry.",
+            ),
+            StructuredTool.from_function(
+                func=lambda: "ok",
+                name="mcp__other__unrelated",
+                description="An unrelated MCP tool.",
+            ),
+        ], []
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        _discover,
+    )
+
+    class _EvidenceMustNotOpen:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise AssertionError("provider-only MCP work must not open run evidence memory")
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.ask_agent.EvidenceMemory",
+        _EvidenceMustNotOpen,
+    )
+    agent.llm = _RecordingMcpModel()
+
+    agent.run(
+        "Submit the competition entry.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=1,
+        timeout_seconds=2,
+        required_mcp_server="kaggle",
+        tool_policy={
+            "mcp_provider_only": "kaggle",
+            "require_initial_tool_call": True,
+        },
+    )
+
+    assert bound_tool_names
+    assert all(names == ["mcp__kaggle__submit_to_competition"] for names in bound_tool_names)
 
 
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:

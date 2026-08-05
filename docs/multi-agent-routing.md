@@ -49,7 +49,7 @@ existing repository-safe commands and blocks dangerous shell operations such as
 
 ## Gateway specialist lanes
 
-The production `AgentChatGateway` is the outer resource owner for CLI, TUI, dashboard, API, connector, and automation turns. It coordinates the `coding`, `research`, `review`, `verify`, `release`, and `operations` lanes before dispatching into the existing agent/taskboard/queue runtime. There is no second orchestration entry point.
+The production `AgentChatGateway` is the outer resource owner for CLI, TUI, dashboard, API, connector, and automation turns. It coordinates the `artifact`, `media`, `canvas`, `coding`, `research`, `review`, `verify`, `release`, and `operations` lanes before dispatching into the existing agent/taskboard/queue runtime. There is no second orchestration entry point.
 
 Lane contracts define ownership, handoffs, tool capabilities, model restrictions, per-lane concurrency, subagent limits, token/cost budgets, priority, repository/write requirements, lock policy, timeout, and retry policy. The coordinator also applies global, provider/model, repository-mutation, and per-session limits. Capacity-constrained work remains queued and interactive priority precedes background priority without changing task identity.
 

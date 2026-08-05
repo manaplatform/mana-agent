@@ -7,7 +7,13 @@ from pathlib import Path
 
 from types import SimpleNamespace
 
-from mana_agent.chat.events import ToolCallEvent, ToolResultEvent, UserMessageEvent
+from mana_agent.chat.events import (
+    AssistantMessageEvent,
+    CodingActivityEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserMessageEvent,
+)
 from mana_agent.chat.history import ChatHistory
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.gateway.turn_engine import ChatTurnResult, _serialize_tool_traces
@@ -77,6 +83,65 @@ def test_tool_emit_bridge_writes_history(tmp_path: Path) -> None:
     bridge("end", "web_search", duration=0.01, event_id="e1")
     names = [e.tool_name for e in history.get_events() if isinstance(e, (ToolCallEvent, ToolResultEvent))]
     assert names.count("web_search") == 2
+
+
+def test_tui_bridges_preview_time_api_approval_for_its_active_session(
+    tmp_path: Path,
+) -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path, model="gpt-test")
+    app._gateway_session_id = "session-api-approval"
+
+    app._handle_api_approval_event({
+        "type": "api.waiting_approval",
+        "title": "API request approval required",
+        "conversation_id": "session-api-approval",
+        "execution_id": "turn-api-approval",
+        "metadata": {
+            "permission_request_id": "api_approval_1",
+            "permission_scope": "api.request.execute",
+            "api_approval": True,
+        },
+    })
+    app._handle_api_approval_event({
+        "type": "api.waiting_approval",
+        "conversation_id": "another-session",
+        "metadata": {"permission_request_id": "api_approval_other"},
+    })
+
+    approval_events = [
+        event for event in history.get_events()
+        if isinstance(event, CodingActivityEvent)
+        and event.activity.get("event_type") == "api.waiting_approval"
+    ]
+    assert len(approval_events) == 1
+    assert (
+        approval_events[0].activity["metadata"]["permission_request_id"]
+        == "api_approval_1"
+    )
+
+
+def test_tui_records_api_approval_completion_as_terminal_assistant_message(
+    tmp_path: Path,
+) -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path, model="gpt-test")
+    app.notify = lambda *_args, **_kwargs: None
+    app.update_status = lambda _text: None
+    app._record_api_approval_completion(
+        "api_approval_1",
+        {
+            "status": "completed",
+            "message": "Validated API execution evidence:\n{\"city\": \"Tehran\"}",
+        },
+    )
+
+    messages = [
+        event for event in history.get_events()
+        if isinstance(event, AssistantMessageEvent)
+    ]
+    assert messages[-1].turn_id == "api_approval_1"
+    assert "Tehran" in messages[-1].content
 
 
 def test_tui_new_conversation_uses_gateway_boundary_and_clears_visible_history(tmp_path: Path) -> None:

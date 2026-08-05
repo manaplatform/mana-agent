@@ -6,10 +6,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mana_agent.analysis.models import AskResponseWithTrace
-from mana_agent.mcp.client import McpClient
+from mana_agent.mcp.client import ExceptionGroup, McpClient
 from mana_agent.mcp.tools import discovered_mcp_langchain_tools, mcp_model_tool_name
 from mana_agent.mcp.config import McpConfigError, McpServerConfig, load_mcp_servers, load_mcp_token, parse_mcp_server_json, save_mcp_server, save_mcp_token
 from mana_agent.mcp.server import protected_http_app
+from mana_agent.transactional_actions.adapters import McpActionAdapter
+from mana_agent.transactional_actions.models import PolicyOutcome
+from mana_agent.transactional_actions.policy import ActionPolicy
+from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobType
 from mana_agent.multi_agent.tools.tool_manager import ToolsManager
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision
@@ -56,6 +60,108 @@ def test_mcp_queue_job_uses_namespaced_tool(monkeypatch, tmp_path):
 
 def test_mcp_model_tool_name_is_openai_compatible():
     assert mcp_model_tool_name("context7", "query-docs") == "mcp__context7__query-docs"
+
+
+def test_mcp_client_reports_the_concrete_task_group_failure():
+    async def fail() -> None:
+        raise ExceptionGroup("transport", [ValueError("credential rejected")])
+
+    with pytest.raises(RuntimeError, match="credential rejected"):
+        McpClient._run(fail())
+
+
+def test_mcp_transactional_adapter_requires_provider_success_for_verification():
+    adapter = McpActionAdapter(
+        provider_id="kaggle",
+        tool_name="authorize",
+        arguments={"request": "authorize this session"},
+        invoke=lambda: {"ok": True, "server_id": "kaggle", "tool_name": "authorize"},
+        parent_task_id="task-kaggle",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    action = adapter.build_intent()
+    result = adapter.execute(action)
+    verification = adapter.verify(action, result)
+
+    assert action.tool_name == "mcp"
+    assert action.target_resources == ["mcp.kaggle.authorize"]
+    assert verification.complete is True
+    assert ActionPolicy().evaluate(action).outcome is PolicyOutcome.REQUIRE_APPROVAL
+
+
+def test_mcp_transactional_adapter_reports_a_provider_failure_without_inventing_detail():
+    adapter = McpActionAdapter(
+        provider_id="kaggle",
+        tool_name="start_competition_submission_upload",
+        arguments={"request": {}},
+        invoke=lambda: {"ok": False},
+        parent_task_id="task-kaggle",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    with pytest.raises(RuntimeError, match="ok=false without a diagnostic"):
+        adapter.execute(adapter.build_intent())
+
+
+def test_mcp_transactional_idempotency_is_scoped_to_the_durable_task():
+    def build(parent_task_id: str) -> McpActionAdapter:
+        return McpActionAdapter(
+            provider_id="kaggle",
+            tool_name="authorize",
+            arguments={"request": {}},
+            invoke=lambda: {"ok": True},
+            parent_task_id=parent_task_id,
+            actor="model_tool",
+            originating_agent="ask_agent",
+        )
+
+    first_attempt = build("task-first")
+    duplicate_in_first_attempt = build("task-first")
+    fresh_attempt = build("task-fresh")
+
+    assert first_attempt.idempotency_key == duplicate_in_first_attempt.idempotency_key
+    assert first_attempt.idempotency_key != fresh_attempt.idempotency_key
+
+
+def test_approved_mcp_action_rehydrates_only_its_exact_provider_tool(monkeypatch):
+    adapter = McpActionAdapter(
+        provider_id="kaggle",
+        tool_name="authorize",
+        arguments={"request": "authorize this session"},
+        invoke=lambda: {"ok": True},
+        parent_task_id="task-kaggle",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+    action = adapter.build_intent()
+    calls = []
+
+    class _RegisteredTool:
+        metadata = {
+            "mcp_provider_id": "kaggle",
+            "mcp_tool_name": "authorize",
+        }
+
+        def invoke(self, arguments):
+            calls.append(arguments)
+            return {"ok": True, "tool_name": "authorize"}
+
+    monkeypatch.setattr(
+        "mana_agent.mcp.tools.discovered_mcp_langchain_tools",
+        lambda *, server_ids: ([_RegisteredTool()], []),
+    )
+
+    resumed = AgentChatGateway._mcp_adapter_for_stored_action(
+        action,
+        protected_context=adapter.protected_action_context(),
+    )
+
+    assert resumed.idempotency_key == action.idempotency_key
+    assert resumed.execute(action)["ok"] is True
+    assert calls == [{"request": "authorize this session"}]
 
 
 def test_explicit_mcp_discovery_uses_only_the_requested_configured_provider(monkeypatch, tmp_path):
@@ -115,6 +221,21 @@ def test_mcp_token_is_stored_outside_server_config(monkeypatch, tmp_path):
     config = McpServerConfig(id="remote", transport="streamable_http", url="https://example.test/mcp")
     assert config.resolved_headers()["Authorization"] == "Bearer secret-value"
     assert "secret-value" not in config.model_dump_json()
+
+
+def test_mcp_stored_token_replaces_case_variant_authorization_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    save_mcp_token("kaggle", "stored-token")
+    config = McpServerConfig(
+        id="kaggle",
+        transport="streamable_http",
+        url="https://www.kaggle.com/mcp",
+        headers={"authorization": "Bearer <YOUR_TOKEN>"},
+    )
+
+    headers = config.resolved_headers()
+
+    assert headers == {"Authorization": "Bearer stored-token"}
 
 
 def test_context7_stdio_receives_its_stored_token(monkeypatch, tmp_path):

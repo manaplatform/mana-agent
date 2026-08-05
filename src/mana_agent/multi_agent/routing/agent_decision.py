@@ -169,6 +169,9 @@ Use repo_search/read_file for local repository inspection.
 Use browser tools for interactive website tasks that require navigation, page inspection, forms, clicks, uploads, downloads, tabs, account creation, sign-up, login, or authenticated browser state. Website actions do not edit repository code: set intent="tool", repo_context_needed=false, and code_editing_needed=false. Words such as create, change, submit, delete, or edit refer to the website when their target is a page, account, form, or URL; they must not select repository mutation tools. Select browser_open and browser_inspect plus the browser interaction capabilities the browser operator may need. Choose each concrete action later from current page evidence; do not assume a website-specific workflow.
 Never select browser actions intended to bypass CAPTCHA, MFA, access restrictions, or website security controls. Sensitive or irreversible final actions require explicit user approval before execution.
 Use apply_patch or edit/write tools only when the user wants code or files changed.
+When operation_constraint is supplied, it is a model-selected execution boundary
+for a follow-up operation. Satisfy it exactly: select only the permitted tool,
+provide every required tool input, and do not add unrelated tools or context.
 Return JSON only with this schema:
 {
   "intent": "answer|repo_search|web_research|analyze|plan|edit|verify|review|tool|high_risk_tool",
@@ -209,6 +212,8 @@ Enforce these boundaries:
   distinct repository work (new). Plain conversation uses none.
 - Select only tools present in available_tools. Preserve a valid proposal; fix
   an invalid one. Do not infer a static route from keywords alone.
+- When operation_constraint is supplied, enforce it exactly in the corrected
+  decision, including its required tool inputs.
 Return JSON only.
 """
 
@@ -232,6 +237,7 @@ class AgentDecisionEngine:
         repo_context: str = "",
         memory_context: str = "",
         command_hint: str = "",
+        operation_constraint: str = "",
     ) -> AgentDecision:
         request = str(user_request or "").strip()
         if SAFETY_COMMAND_RE.search(request):
@@ -257,6 +263,7 @@ class AgentDecisionEngine:
             repo_context=repo_context,
             memory_context=memory_context,
             command_hint=command_hint,
+            operation_constraint=operation_constraint,
         )
         if model_decision is not None:
             return self._with_verification(
@@ -282,14 +289,16 @@ class AgentDecisionEngine:
         repo_context: str,
         memory_context: str,
         command_hint: str,
+        operation_constraint: str,
     ) -> AgentDecision | None:
         if self.llm is None or not hasattr(self.llm, "invoke"):
             return None
         payload = {
             "user_request": request,
             "command_hint": command_hint,
-            "repo_context": repo_context[:1200],
-            "memory_context": memory_context[:1200],
+            "repo_context": repo_context,
+            "memory_context": memory_context,
+            "operation_constraint": operation_constraint,
             "tools": self.tool_descriptions,
         }
         try:
@@ -313,7 +322,8 @@ class AgentDecisionEngine:
                             {
                                 "user_request": request,
                                 "proposed_decision": proposed.to_dict(),
-                                "memory_context": memory_context[:1200],
+                                "memory_context": memory_context,
+                                "operation_constraint": operation_constraint,
                                 "available_tools": self.tool_descriptions,
                             },
                             ensure_ascii=False,

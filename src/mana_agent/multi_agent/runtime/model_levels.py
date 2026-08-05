@@ -85,7 +85,12 @@ def route_model(request: RoutingRequest, *, global_model: str, profiles=None) ->
 
         settings = Settings()
         explicit = configured_profiles(settings.mana_model_profiles)
-        candidates = explicit or profiles_from_legacy_configuration(global_model=global_model, default_provider=settings.mana_ai_provider)
+        candidates = explicit or profiles_from_legacy_configuration(
+            global_model=global_model,
+            default_provider=settings.mana_ai_provider,
+            context_window=settings.mana_context_unknown_model_context_window,
+            max_output_tokens=settings.mana_context_unknown_model_max_output_tokens,
+        )
         language_preferences = settings.mana_routing_language_preferences if isinstance(settings.mana_routing_language_preferences, dict) else {}
         candidates = tuple(
             replace(candidate, supported_languages=_language_preference(language_preferences.get(candidate.key, candidate.supported_languages)))
@@ -155,7 +160,19 @@ def resolve_model_for_role(
             repository=repository or RepositoryMetadata(),
             latency_requirement=LatencyClass.STANDARD if complexity is not Complexity.LOW else LatencyClass.INTERACTIVE,
             budgets=routing_budgets_from_settings(settings),
-            required_capabilities=frozenset({"structured_output"}) if role in {AgentRole.MAIN, AgentRole.HEAD_DECISION, AgentRole.PLANNER, AgentRole.REVIEWER, AgentRole.VERIFIER} else frozenset(),
+            required_capabilities=(
+                frozenset({"structured_output"})
+                if role in {
+                    AgentRole.MAIN,
+                    AgentRole.HEAD_DECISION,
+                    AgentRole.PLANNER,
+                    AgentRole.REVIEWER,
+                    AgentRole.VERIFIER,
+                }
+                else frozenset({"tool_calls"})
+                if role in {AgentRole.TOOL, AgentRole.TOOL_WORKER}
+                else frozenset()
+            ),
             task_id=task_id,
             parent_task_id=parent_task_id,
             session_id=session_id,

@@ -74,6 +74,8 @@ class LocalInboxRepository:
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
+        layout_marker = self.root / ".layout-v2"
+        first_initialization = not layout_marker.exists()
         self.root.mkdir(parents=True, exist_ok=True)
         try:
             self.root.chmod(0o700)
@@ -89,6 +91,14 @@ class LocalInboxRepository:
         self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".repository.lock"
         self._lock_path.touch(exist_ok=True)
+        if first_initialization:
+            layout_marker.touch(exist_ok=True)
+            from mana_agent.utils.durable_diagnostics import append_diagnostic
+            append_diagnostic(
+                self.root / "logs" / "inbox.jsonl",
+                component="human_inbox",
+                event="repository_initialized",
+            )
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -236,8 +246,18 @@ class LocalInboxRepository:
             return item, result
 
     def append_audit(self, event: InboxAuditEvent) -> None:
-        path = self.root / "audit" / f"{event.created_at.strftime('%Y%m%dT%H%M%S.%fZ')}-{_safe_name(event.audit_event_id)}.json"
         with self.locked():
+            existing = [
+                InboxAuditEvent.model_validate_json(path.read_text(encoding="utf-8"))
+                for path in (self.root / "audit").glob("*.json")
+            ]
+            if any(row.audit_event_id == event.audit_event_id for row in existing):
+                return
+            event.sequence = max((row.sequence for row in existing), default=0) + 1
+            path = self.root / "audit" / (
+                f"{event.created_at.strftime('%Y%m%dT%H%M%S.%fZ')}-"
+                f"{event.sequence:020d}-{_safe_name(event.audit_event_id)}.json"
+            )
             if path.exists():
                 return
             self._atomic_write(path, event.model_dump(mode="json"))
@@ -248,7 +268,7 @@ class LocalInboxRepository:
             event = InboxAuditEvent.model_validate_json(path.read_text(encoding="utf-8"))
             if event.inbox_item_id == inbox_item_id:
                 rows.append(event)
-        return rows
+        return sorted(rows, key=lambda event: (event.created_at, event.sequence, event.audit_event_id))
 
     def save_delivery_attempt(self, attempt: DeliveryAttempt) -> None:
         path = self.root / "deliveries" / f"{attempt.timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}-{_safe_name(attempt.delivery_attempt_id)}.json"

@@ -22,6 +22,8 @@ def _profile(provider: str, model: str, *, reliability: float, cost: float) -> M
     return ModelProfile(
         provider=provider,
         model_id=model,
+        context_window=16_384,
+        max_output_tokens=4_096,
         supported_roles=frozenset({"*"}),
         supported_tools=frozenset({"*"}),
         reasoning_settings=frozenset({"high"}),

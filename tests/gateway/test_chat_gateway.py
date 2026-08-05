@@ -25,6 +25,7 @@ from mana_agent.gateway import (
     RichChatContext,
 )
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
+from mana_agent.gateway.lanes import LaneId
 from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
 from mana_agent.human_inbox.models import (
     InboxRequest,
@@ -49,13 +50,16 @@ from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.remote_execution.target_policy import TargetPolicy, TargetPolicyMode
 from mana_agent.server.models import ServerActionDecision
 from mana_agent.services.chat_session_history import ChatSessionHistory
+from mana_agent.transactional_actions.store import ActionStore
+from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
+from mana_agent.chat.history import reset_global_history
 
 
 class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
     class _EntryModel:
-        def invoke(self, messages):
+        def invoke(self, messages, **_kwargs):
             payload = json.loads(messages[-1].content)
             if "recovery_candidates" in payload:
                 return SimpleNamespace(
@@ -303,6 +307,7 @@ def test_missing_worker_at_permission_resume_fails_without_provider_change(
         return SimpleNamespace(state=state, error="")
 
     gateway._remote_job_lanes = {"job": "lane-task"}
+    gateway._finish_lane = finish
     gateway._lane_coordinator = SimpleNamespace(
         transition=lambda task_id, state, reason: transitions.append((task_id, state.value, reason)),
         finish=finish,
@@ -370,6 +375,7 @@ def test_server_approval_is_session_bound_exact_and_single_use(tmp_path: Path) -
     })
     gateway = object.__new__(AgentChatGateway)
     gateway.server_management_service = SimpleNamespace(execute=execute)
+    gateway._finish_lane = finish
     gateway._lane_coordinator = SimpleNamespace(
         transition=lambda task_id, state, *, reason: transitions.append(
             (task_id, state.value, reason)
@@ -480,6 +486,140 @@ def test_gateway_constructs_minimally(tmp_path: Path, monkeypatch) -> None:
         "automation_update", "automation_delete", "automation_enable",
         "automation_disable", "automation_run_now",
     }
+
+
+def test_resumed_mcp_action_surfaces_its_result_in_chat_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    history = reset_global_history()
+    emitted: list[dict[str, Any]] = []
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_tools=False,
+        config=ChatGatewayConfig(
+            event_sink=lambda event_type, title, **kwargs: emitted.append(
+                {"event_type": event_type, "title": title, **kwargs}
+            )
+        ),
+    )
+    action = SimpleNamespace(
+        action_id="action_context7_docs",
+        parent_task_id="task_context7",
+        tool_name="mcp",
+        operation_name="query-docs",
+        normalized_arguments={"provider_id": "context7"},
+        state=SimpleNamespace(value="committed"),
+    )
+
+    gateway._publish_transactional_resume_activity(
+        event_type="action.committed",
+        title="Approved MCP action completed",
+        action=action,
+        inbox_item_id="inbox_context7",
+        result={"ok": True, "content": [{"type": "text", "text": "FastAPI docs"}]},
+    )
+
+    assistant_messages = [
+        event for event in history.get_events() if isinstance(event, AssistantMessageEvent)
+    ]
+    activity_events = [
+        event for event in history.get_events() if isinstance(event, CodingActivityEvent)
+    ]
+    assert assistant_messages[-1].turn_id == "task_context7"
+    assert "mcp.context7.query-docs" in assistant_messages[-1].content
+    assert "FastAPI docs" in assistant_messages[-1].content
+    assert activity_events[-1].activity["output_preview"]
+    assert emitted[-1]["output_preview"]
+
+
+def test_capability_error_records_terminal_computer_notice(tmp_path: Path, monkeypatch) -> None:
+    mana_root = tmp_path / "mana-home"
+    monkeypatch.setattr("mana_agent.human_inbox.mana_home", lambda: mana_root)
+    monkeypatch.setattr(
+        "mana_agent.transactional_actions.runtime.mana_home", lambda: mana_root
+    )
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    decision = EntryRoutingDecision(
+        route="capability_error",
+        confidence=1.0,
+        reason="computer control is unavailable",
+        required_sources=("computer",),
+        error_code="COMPUTER_NOT_AVAILABLE",
+    )
+
+    result = gateway._execute_entry_route(
+        decision=decision,
+        context=EntryRouteContext(
+            session_id="session", conversation_id="session", turn_id="turn"
+        ),
+        text="use the computer",
+        state={},
+        ask_service=None,
+        sink=None,
+        options={},
+    )
+
+    assert result.error == "COMPUTER_NOT_AVAILABLE"
+    records = ActionStore(mana_root / "transactional_actions").list_requests()
+    assert len(records) == 1
+    assert records[0].outcome_code == "COMPUTER_NOT_AVAILABLE"
+    assert records[0].inbox_item_id.startswith("inbox_")
+    item = gateway.human_inbox_service.repository.get(records[0].inbox_item_id)
+    assert item.request_type is InboxRequestType.NOTICE
+
+
+def test_computer_route_without_typed_tool_outcome_records_notice(tmp_path: Path, monkeypatch) -> None:
+    mana_root = tmp_path / "mana-home"
+    monkeypatch.setattr("mana_agent.human_inbox.mana_home", lambda: mana_root)
+    monkeypatch.setattr(
+        "mana_agent.transactional_actions.runtime.mana_home", lambda: mana_root
+    )
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+
+    class NoOutcomeAskAgent:
+        def run(self, **_: Any) -> Any:
+            return SimpleNamespace(answer="The environment blocked the action.", trace=[])
+
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    decision = EntryRoutingDecision(
+        route="computer",
+        confidence=1.0,
+        reason="model selected the computer workflow",
+        required_sources=("computer",),
+    )
+    from mana_agent.integrations.computer_control.context import computer_client_scope
+
+    with computer_client_scope("session", "tui", workspace_root=str(tmp_path)):
+        result = gateway._execute_computer_route(
+            decision=decision,
+            context=EntryRouteContext(
+                session_id="session", conversation_id="session", turn_id="turn"
+            ),
+            text="record the selected display",
+            ask_service=SimpleNamespace(ask_agent=NoOutcomeAskAgent()),
+            callbacks=None,
+        )
+
+    assert result.error == "computer_typed_outcome_missing"
+    assert "no operating-system request" in result.answer
+    records = ActionStore(mana_root / "transactional_actions").list_requests()
+    assert len(records) == 1
+    assert records[0].outcome_code == "computer_typed_outcome_missing"
+    assert records[0].inbox_item_id.startswith("inbox_")
+    item = gateway.human_inbox_service.repository.get(records[0].inbox_item_id)
+    assert item.request_type is InboxRequestType.NOTICE
 
 
 def test_gateway_creates_session_and_simple_send(tmp_path: Path, monkeypatch) -> None:
@@ -902,6 +1042,59 @@ def test_gateway_config_normalized_full_auto() -> None:
     assert cfg.execution_profile == "full-auto"
     assert cfg.auto_execute_plan is True
     assert cfg.auto_execute_max_passes == 10
+
+
+def test_gateway_keeps_task_policy_when_lane_has_no_explicit_cap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *args, **kwargs: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        settings=Settings(
+            OPENAI_API_KEY="test-key",
+            MANA_ROUTING_TASK_TOKEN_BUDGET=40_000,
+            MANA_ROUTING_TASK_COST_BUDGET=40.0,
+        ),
+    )
+
+    budgets = gateway._routing_budgets_for_lane(LaneId.CANVAS)
+
+    assert budgets.task_token_limit == 40_000
+    assert budgets.task_cost_limit == 40.0
+
+
+def test_gateway_estimates_canvas_payload_without_fixed_minimums(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *args, **kwargs: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(
+        tmp_path,
+        coding_agent=False,
+        agent_max_steps=2,
+        settings=Settings(MANA_ROUTING_TASK_TOKEN_BUDGET=1_000_000),
+    )
+
+    estimate = gateway._execution_token_estimate(
+        entry_route="canvas",
+        execution_decision=SimpleNamespace(
+            provider="openai",
+            selected_model=gateway.settings.openai_chat_model,
+            estimated_output_tokens=100,
+            expected_model_calls=1,
+        ),
+        request_text="draw a small rectangle",
+        session_id="",
+    )
+
+    assert estimate.components["user_request"] > 0
+    assert estimate.output_tokens == gateway.config.agent_max_steps * 100
+    assert "canvas_catalog" in estimate.components
+    assert "tool_schemas" in estimate.components
 
 
 def test_gateway_decision_failure_no_fallback(tmp_path: Path, monkeypatch) -> None:

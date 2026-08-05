@@ -336,6 +336,12 @@ All frontends use the gateway's six specialist lanes. Defaults are conservative 
 
 Lane overrides use the existing user configuration as a table/object. Only `enabled`, `max_concurrent_jobs`, `max_subagents`, `token_budget`, `cost_budget`, `priority`, `timeout_seconds`, and `allowed_models` are configurable; invalid lane names, fields, priorities, or non-positive limits stop gateway construction with an actionable validation error.
 
+For execution routing, Mana uses the more restrictive of the selected model's
+capacity, `MANA_ROUTING_TASK_TOKEN_BUDGET` /
+`MANA_ROUTING_TASK_COST_BUDGET`, remaining session/task budget, and an optional
+validated lane `token_budget` / `cost_budget`. Lane caps are product policy, not
+model context metadata. See [Model-aware token accounting](model-token-accounting.md).
+
 ```toml
 MANA_LANE_GLOBAL_WORKER_LIMIT = 8
 MANA_LANE_SESSION_TOKEN_BUDGET = 120000
@@ -426,11 +432,17 @@ MANA_ROUTING_CIRCUIT_BREAKER_WINDOW_SECONDS=900
 MANA_ROUTING_RELIABILITY_DECAY_SECONDS=3600
 MANA_ROUTING_MODEL_FAILURE_PENALTY_WEIGHT=0.08
 MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT=0.04
+MANA_CONTEXT_ESTIMATION_SAFETY_MARGIN_RATIO=0.05
+MANA_CONTEXT_DEFAULT_OUTPUT_RATIO=0.20
+MANA_CONTEXT_HISTORICAL_PREDICTION_ENABLED=true
+MANA_CONTEXT_UNKNOWN_MODEL_POLICY=conservative
+MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW=16384
+MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS=4096
 ```
 
 Invalid profile, capability, latency, or budget configuration stops selection. Disabling adaptive routing also stops model execution; it does not restore static routing.
 
-An explicit profile includes `provider`, `model_id`, `supported_roles`, `supported_tools`, `reasoning_settings`, `context_window`, `latency_class`, input/output pricing or `logical_cost_per_1k_tokens`, `reliability_score`, `supported_languages`, `benchmark_scores`, and the `can_patch`, `can_structured_output`, `can_tool_call`, `can_verify`, and `available` flags. Duplicate provider/model IDs and invalid ranges fail validation.
+An explicit profile includes `provider`, `model_id`, `supported_roles`, `supported_tools`, `reasoning_settings`, required `context_window` and `max_output_tokens`, optional `tokenizer`, input/cached-input/output/reasoning pricing or `logical_cost_per_1k_tokens`, `reliability_score`, `supported_languages`, `benchmark_scores`, and the `can_patch`, `can_structured_output`, `can_tool_call`, `can_verify`, and `available` flags. Duplicate provider/model IDs and invalid ranges fail validation. Unknown pricing remains unknown rather than becoming zero.
 
 ### Legacy model-level migration
 

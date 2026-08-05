@@ -26,14 +26,21 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
                 "browser_close",
             ]
             assert tool_policy["disable_external_search"] is True
+            assert tool_policy["capability_discovery_required"] is True
+            assert tool_policy["initial_tools"] == ["api_workflow_decide"]
+            assert "model_max_tokens" not in tool_policy
             assert "api_operations_search first" in system_prompt
+            assert "capability_search and capability_load" in system_prompt
             assert "api_docs_import_semantic" in system_prompt
             assert "retry the same import" in system_prompt
             assert "refresh_integration_id" in system_prompt
+            assert "redacted saved-integration snapshot" in system_prompt
+            assert "declare only operation_search, request_preview, and request_execution" in system_prompt
             assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
+            assert "explicit risk=read_only declaration" in system_prompt
             assert kwargs["flow_id"] == "session-api"
-            assert kwargs["max_steps"] >= 16
+            assert kwargs["max_steps"] >= 32
             return SimpleNamespace(
                 answer="Contact 123 was returned by the saved API operation.",
                 sources=[],
@@ -192,14 +199,16 @@ def test_api_route_treats_documentation_url_as_optional_when_integration_is_save
     ]
 
 
-def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -> None:
+def test_api_route_stops_at_preview_when_network_approval_is_required(tmp_path: Path) -> None:
     permission = {
-        "ok": False,
-        "error_code": "permission_required",
-        "permission_request_id": "api_approval_http_1",
-        "permission_scope": "api.request.execute",
-        "session_id": "session-api",
-        "preview": {"method": "GET", "approval_required": True},
+        "ok": True,
+        "result": {
+            "permission_required": True,
+            "permission_request_id": "api_approval_http_1",
+            "permission_scope": "api.request.execute",
+            "session_id": "session-api",
+            "preview": {"method": "GET", "approval_required": True},
+        },
     }
 
     class ModelToolExecutor:
@@ -236,13 +245,8 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
                     {
                         "tool_name": "api_request_preview",
                         "status": "ok",
-                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
-                    },
-                    {
-                        "tool_name": "api_request_execute",
-                        "status": "ok",
                         "output_preview": json.dumps(permission),
-                    }
+                    },
                 ],
             )
 
@@ -251,7 +255,10 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
     gateway._index_dir = None
     gateway._resolved_k = 4
     gateway._agent_timeout_seconds = 30
-    gateway._event_sink = None
+    observed_events: list[tuple[str, str, dict]] = []
+    gateway._event_sink = lambda event_type, title, metadata: observed_events.append(
+        (event_type, title, metadata)
+    )
     gateway.config = SimpleNamespace(agent_max_steps=8)
     result = gateway._execute_api_route(
         decision=EntryRoutingDecision(
@@ -271,9 +278,31 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
     )
 
     assert result.mode == "route-api-awaiting-approval"
-    assert result.payload["permission_requests"][0]["permission_request_id"] == (
-        "api_approval_http_1"
+    assert result.payload["permission_requests"][0]["permission_request_id"] == "api_approval_http_1"
+    assert observed_events[0][0] == "api.waiting_approval"
+    assert observed_events[0][2]["permission_request_id"] == "api_approval_http_1"
+
+
+def test_api_approval_completion_includes_validated_response_evidence() -> None:
+    message = AgentChatGateway._api_approval_completion_message(
+        {
+            "method": "GET",
+            "redacted_url": "http://api.example.test/5.216.25.186?access_key=[REDACTED]",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_kind": "json",
+            "json_body": {"city": "Tehran", "country_name": "Iran"},
+            "latency_ms": 42.5,
+        },
+        200,
     )
+
+    assert "HTTP status 200" in message
+    assert "Validated API result" in message
+    assert "**City:** Tehran" in message
+    assert "**Country Name:** Iran" in message
+    assert "**Endpoint:** http://api.example.test/5.216.25.186?access_key=[REDACTED]" in message
+    assert "[REDACTED]" in message
 
 
 def test_api_route_does_not_complete_without_required_execution_evidence(

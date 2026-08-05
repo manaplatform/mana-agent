@@ -42,6 +42,7 @@ This guarantees tool visibility on *every* turn, not just the first message.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 from pathlib import Path
 from typing import Any
@@ -159,7 +160,10 @@ class ManaChatApp(App):
         self._planning_answers: list[str] = []
         self._turn_in_progress = False
         self._computer_permission_requests_shown: set[str] = set()
+        self._transactional_modal_queue: list[str] = []
+        self._transactional_modal_active = False
         self._unsubscribe_computer_permissions = None
+        self._unsubscribe_api_approval_events = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -198,6 +202,13 @@ class ManaChatApp(App):
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
+        if self._gateway_session_id:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            self._unsubscribe_api_approval_events = get_execution_event_hub().subscribe(
+                self._gateway_session_id,
+                self._handle_api_approval_event,
+            )
 
         # Safe immediate footer (avoids any early watcher issues)
         self.sub_title = "Ready"
@@ -234,6 +245,7 @@ class ManaChatApp(App):
         self.call_after_refresh(
             lambda: self.update_status(f"Ready — {self.repo_root.name or self.repo_root}")
         )
+        self.call_after_refresh(self._queue_outstanding_transactional_approvals)
 
         # If the CLI passed an initial prompt (e.g. `mana-agent chat "explain the architecture"`),
         # send it automatically as the first user message.
@@ -254,6 +266,11 @@ class ManaChatApp(App):
             return
         metadata = activity.get("metadata") or {}
         request_id = str(metadata.get("permission_request_id") or "")
+        if bool(metadata.get("transactional_action_approval")):
+            inbox_item_id = str(metadata.get("inbox_item_id") or request_id)
+            if inbox_item_id:
+                self._enqueue_transactional_modal(inbox_item_id)
+            return
         if not request_id or request_id in self._computer_permission_requests_shown:
             return
         self._computer_permission_requests_shown.add(request_id)
@@ -281,8 +298,81 @@ class ManaChatApp(App):
             transactional=bool(metadata.get("transactional_action_approval")),
         ))
 
+    def _handle_api_approval_event(self, event: dict[str, Any]) -> None:
+        """Bridge a preview-time API approval to the active TUI modal immediately."""
+        if str(event.get("type") or event.get("event_type") or "") != "api.waiting_approval":
+            return
+        if str(event.get("conversation_id") or "") != str(self._gateway_session_id or ""):
+            return
+        self.history.add(CodingActivityEvent(
+            activity={
+                "event_type": "api.waiting_approval",
+                "title": str(event.get("title") or "API request approval required"),
+                "status": str(event.get("status") or "running"),
+                "metadata": dict(event.get("metadata") or {}),
+            },
+            turn_id=str(event.get("execution_id") or ""),
+        ))
+
+    def _queue_outstanding_transactional_approvals(self) -> None:
+        if self.gateway is None:
+            return
+        try:
+            from mana_agent.human_inbox.models import InboxQuery, InboxStatus
+
+            rows = self.gateway.human_inbox_service.list(
+                InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
+                actor_id=getpass.getuser(),
+            )
+        except Exception:
+            return
+        for item in rows:
+            if item.request_type.value == "approval" and item.action_intent_id:
+                self._enqueue_transactional_modal(item.inbox_item_id)
+
+    def _enqueue_transactional_modal(self, inbox_item_id: str) -> None:
+        if self.gateway is None or inbox_item_id in self._computer_permission_requests_shown:
+            return
+        try:
+            item = self.gateway.human_inbox_service.get(
+                inbox_item_id,
+                actor_id=getpass.getuser(),
+            )
+        except Exception:
+            return
+        if item.request_type.value != "approval" or item.status.value not in {"pending", "delivered"}:
+            return
+        self._computer_permission_requests_shown.add(inbox_item_id)
+        self._transactional_modal_queue.append(inbox_item_id)
+        self._show_next_transactional_modal()
+
+    def _show_next_transactional_modal(self) -> None:
+        if self._transactional_modal_active or not self._transactional_modal_queue or self.gateway is None:
+            return
+        inbox_item_id = self._transactional_modal_queue.pop(0)
+        try:
+            item = self.gateway.human_inbox_service.get(inbox_item_id, actor_id=getpass.getuser())
+        except Exception:
+            self._show_next_transactional_modal()
+            return
+        self._transactional_modal_active = True
+        from mana_agent.tui.computer_permission import ComputerPermissionRequested
+
+        self.post_message(ComputerPermissionRequested(
+            request_id=item.inbox_item_id,
+            scope="transactional_action.once",
+            preview=json.dumps(item.card(), indent=2, ensure_ascii=False, default=str),
+            transactional=True,
+        ))
+
     def on_computer_permission_requested(self, event: Any) -> None:
         from mana_agent.tui.computer_permission import ComputerPermissionScreen
+
+        def complete(choice: Any) -> None:
+            if event.transactional:
+                self._transactional_modal_active = False
+                self.call_after_refresh(self._show_next_transactional_modal)
+            self._apply_computer_permission(choice)
 
         self.push_screen(
             ComputerPermissionScreen(
@@ -294,7 +384,7 @@ class ManaChatApp(App):
                 api=event.api,
                 transactional=event.transactional,
             ),
-            self._apply_computer_permission,
+            complete,
         )
 
     def _apply_computer_permission(self, choice: Any) -> None:
@@ -351,8 +441,7 @@ class ManaChatApp(App):
                     choice.request_id,
                     session_id=self._gateway_session_id or "",
                 )
-                self.notify(result["message"])
-                self.history.add(AssistantMessageEvent(content=result["message"]))
+                self._record_api_approval_completion(choice.request_id, result)
                 return
             if choice.remote:
                 if choice.decision is None:
@@ -389,6 +478,27 @@ class ManaChatApp(App):
                 else "Computer permission"
             )
             self.notify(f"{action_name} action failed: {exc}", severity="error")
+
+    def _record_api_approval_completion(
+        self,
+        approval_request_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Show the validated approved API outcome as the TUI's terminal assistant message."""
+        message = str(result.get("message") or "").strip()
+        if not message:
+            raise ValueError("API approval completed without a validated result message.")
+        status = str(result.get("status") or "")
+        self.history.add(AssistantMessageEvent(
+            content=message,
+            turn_id=approval_request_id,
+        ))
+        if status == "denied":
+            self.notify("API request denied. No API request was executed.", severity="warning")
+            self.update_status("API request denied")
+            return
+        self.notify("API request completed. Response added to chat.")
+        self.update_status("API request completed")
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
@@ -1539,6 +1649,9 @@ class ManaChatApp(App):
         if self._unsubscribe_computer_permissions is not None:
             self._unsubscribe_computer_permissions()
             self._unsubscribe_computer_permissions = None
+        if self._unsubscribe_api_approval_events is not None:
+            self._unsubscribe_api_approval_events()
+            self._unsubscribe_api_approval_events = None
         if self.gateway is not None and hasattr(self.gateway, "close_session"):
             self.gateway.close_session(self._gateway_session_id)
 

@@ -367,7 +367,26 @@ def decide_server_approval_in_chat(
         if result.get("status") == "succeeded"
         else "failed"
     )
-    get_execution_event_hub().emit(
+    completion_summary = str(result.get("message") or "").strip()
+    if not completion_summary:
+        raise ManaApiError(
+            409,
+            "Server action completed without a validated completion summary. "
+            "No fallback chat response was created.",
+        )
+    assistant_message = service.append_message(
+        conversation_id,
+        role="assistant",
+        content=completion_summary,
+        execution_id=approval_request_id,
+        metadata={
+            "approval_request_id": approval_request_id,
+            "server_approval": True,
+            "status": str(result.get("status") or ""),
+        },
+    )
+    hub = get_execution_event_hub()
+    hub.emit(
         "server.approval_decided",
         title=(
             "Server action approved"
@@ -383,7 +402,27 @@ def decide_server_approval_in_chat(
             "server_approval": True,
         },
     )
-    return {"ok": True, "decision": payload.decision, "result": result}
+    hub.emit(
+        "turn.finished",
+        title="Server action summary",
+        conversation_id=conversation_id,
+        execution_id=approval_request_id,
+        repository_id=service.repository_id,
+        message=completion_summary,
+        status=status,
+        metadata={
+            "message_id": assistant_message.message_id,
+            "content": completion_summary,
+            "approval_request_id": approval_request_id,
+            "server_approval": True,
+        },
+    )
+    return {
+        "ok": True,
+        "decision": payload.decision,
+        "result": result,
+        "assistant_message": assistant_message.to_dict(),
+    }
 
 
 @router.post(
@@ -419,7 +458,33 @@ def decide_api_approval_in_chat(
         if isinstance(result, dict)
         else 0
     )
-    get_execution_event_hub().emit(
+    status = (
+        "cancelled"
+        if payload.decision != "approve"
+        else "failed"
+        if status_code >= 400
+        else "success"
+    )
+    completion_summary = str(result.get("message") or "").strip()
+    if not completion_summary:
+        raise ManaApiError(
+            409,
+            "API approval completed without validated execution evidence. "
+            "No fallback chat response was created.",
+        )
+    assistant_message = service.append_message(
+        conversation_id,
+        role="assistant",
+        content=completion_summary,
+        execution_id=approval_request_id,
+        metadata={
+            "approval_request_id": approval_request_id,
+            "api_approval": True,
+            "status": str(result.get("status") or ""),
+        },
+    )
+    hub = get_execution_event_hub()
+    hub.emit(
         "api.approval_decided",
         title=(
             "API request approved"
@@ -428,32 +493,47 @@ def decide_api_approval_in_chat(
         ),
         conversation_id=conversation_id,
         repository_id=service.repository_id,
-        status=(
-            "cancelled"
-            if payload.decision != "approve"
-            else "failed"
-            if status_code >= 400
-            else "success"
-        ),
+        status=status,
         metadata={
             "permission_request_id": approval_request_id,
             "decision": payload.decision,
             "api_approval": True,
         },
     )
-    return {"ok": True, "decision": payload.decision, "result": result}
+    hub.emit(
+        "turn.finished",
+        title="API approval summary",
+        conversation_id=conversation_id,
+        execution_id=approval_request_id,
+        repository_id=service.repository_id,
+        message=completion_summary,
+        status=status,
+        metadata={
+            "message_id": assistant_message.message_id,
+            "content": completion_summary,
+            "approval_request_id": approval_request_id,
+            "api_approval": True,
+        },
+    )
+    return {
+        "ok": True,
+        "decision": payload.decision,
+        "result": result,
+        "assistant_message": assistant_message.to_dict(),
+    }
 
 
 @router.post(
-    "/conversations/{conversation_id}/transactional-actions/{action_id}"
+    "/conversations/{conversation_id}/transactional-actions/{inbox_item_id}"
 )
 def decide_transactional_action_in_chat(
     conversation_id: str,
-    action_id: str,
+    inbox_item_id: str,
     payload: ServerApprovalDecisionRequest,
+    request: Request,
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
-    """Approve or deny one exact policy-gated action from a trusted dashboard."""
+    """Respond to the authoritative durable inbox item without executing inline."""
     _require_mutation_token(authorization)
     service = _service(root=payload.root, repository_id=payload.repository_id)
     try:
@@ -461,34 +541,33 @@ def decide_transactional_action_in_chat(
     except (FileNotFoundError, ValueError) as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
 
-    from mana_agent.transactional_actions.runtime import (
-        approve_action,
-        deny_action,
-        default_action_gateway,
-        execute_approved_computer_action,
-    )
+    import getpass
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
     try:
-        if payload.decision == "approve":
-            approval_id = approve_action(
-                service.root,
-                action_id,
-                approved_by=f"dashboard:{conversation_id}",
-            )
-            action = default_action_gateway(service.root).store.get_action(action_id)
-            executed = action is not None and action.tool_name == "computer"
-            result: dict[str, Any] = {"approval_id": approval_id, "executed": executed}
-            if executed:
-                result["result"] = execute_approved_computer_action(
-                    service.root, action_id, approval_id=approval_id,
-                )
-        else:
-            result = deny_action(
-                service.root,
-                action_id,
-                denied_by=f"dashboard:{conversation_id}",
-            )
-            result["executed"] = False
+        gateway = getattr(request.app.state, "chat_gateway", None)
+        inbox = (
+            gateway.human_inbox_service
+            if gateway is not None and getattr(gateway, "root", None) == service.root
+            else getattr(request.app.state, "human_inbox", None) or default_human_inbox_service()
+        )
+        item = inbox.repository.get(inbox_item_id)
+        response = inbox.respond(ResponseSubmission(
+            inbox_item_id=inbox_item_id,
+            operation=(ResponseOperation.APPROVE if payload.decision == "approve" else ResponseOperation.DENY),
+            actor_id=getpass.getuser(),
+            channel="dashboard-local-api",
+            idempotency_key=f"dashboard:{conversation_id}:{payload.decision}:{inbox_item_id}:{item.version}",
+            expected_version=item.version,
+            current_action_digest=item.action_digest,
+        ))
+        result = {
+            "inbox_item_id": response.inbox_item_id,
+            "action_id": response.action_intent_id,
+            "executed": False,
+            "resume": "queued_for_matching_branch" if payload.decision == "approve" else "not_applicable",
+        }
     except (LookupError, PermissionError, RuntimeError, ValueError) as exc:
         raise ManaApiError(409, str(exc)) from exc
     get_execution_event_hub().emit(
@@ -498,8 +577,9 @@ def decide_transactional_action_in_chat(
         repository_id=service.repository_id,
         status="success" if payload.decision == "approve" else "cancelled",
         metadata={
-            "permission_request_id": action_id,
-            "action_id": action_id,
+            "permission_request_id": inbox_item_id,
+            "inbox_item_id": inbox_item_id,
+            "action_id": result["action_id"],
             "decision": payload.decision,
             "transactional_action_approval": True,
         },

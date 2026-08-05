@@ -138,23 +138,53 @@ class PendingApiApprovalBroker:
             ):
                 self._pending.pop(approval_reference, None)
                 return
+        details = self.prepare(request, preview)
+        raise PermissionRequiredError(
+            "The API request is waiting for a trusted local approval.",
+            details=details,
+        )
+
+    def prepare(
+        self,
+        request: BuiltApiRequest,
+        preview: RequestPreview,
+    ) -> dict[str, Any]:
+        """Create or reuse the exact approval required by a redacted preview.
+
+        Preview preparation never permits a request to execute.  It only records
+        the session-bound approval that a trusted local client may later resolve.
+        """
+        if not request.risk_level.mutating and not preview.approval_required:
+            return {}
+        now = datetime.now(timezone.utc)
+        fingerprint = _request_fingerprint(request)
+        with self._lock:
+            self._expire(now)
+            for request_id, pending in self._pending.items():
+                if _request_fingerprint(pending.request) == fingerprint:
+                    return self._details(request_id, pending)
             request_id = f"api_approval_{uuid.uuid4().hex}"
-            self._pending[request_id] = _PendingApproval(
+            pending = _PendingApproval(
                 request=request.model_copy(deep=True),
                 preview=preview.model_copy(deep=True),
                 expires_at=now + timedelta(seconds=self.ttl_seconds),
             )
-        raise PermissionRequiredError(
-            "The API request is waiting for a trusted local approval.",
-            details={
-                "permission_request_id": request_id,
-                "permission_scope": "api.request.execute",
-                "preview": preview.model_dump(mode="json"),
-                "session_id": request.session_id,
-                "api_approval": True,
-                "expires_at": self._pending[request_id].expires_at.isoformat(),
-            },
-        )
+            self._pending[request_id] = pending
+            return self._details(request_id, pending)
+
+    @staticmethod
+    def _details(
+        request_id: str,
+        pending: _PendingApproval,
+    ) -> dict[str, Any]:
+        return {
+            "permission_request_id": request_id,
+            "permission_scope": "api.request.execute",
+            "preview": pending.preview.model_dump(mode="json"),
+            "session_id": pending.request.session_id,
+            "api_approval": True,
+            "expires_at": pending.expires_at.isoformat(),
+        }
 
     def approve(self, request_id: str, *, session_id: str, client_type: str) -> tuple[BuiltApiRequest, RequestPreview]:
         if client_type not in {"local_cli", "tui", "dashboard"}:
@@ -261,7 +291,11 @@ class ApiExecutor:
         cancellation: threading.Event | None = None,
     ) -> ApiExecutionResult:
         if not request.risk_level.mutating:
-            self.approval_broker.authorize(request, preview, approval_reference)
+            try:
+                self.approval_broker.authorize(request, preview, approval_reference)
+            except PermissionRequiredError as exc:
+                self._emit_waiting_approval(request, exc)
+                raise
             return self._execute_authorized(request, preview=preview, cancellation=cancellation)
 
         from mana_agent.transactional_actions.adapters import HttpActionAdapter
@@ -327,6 +361,7 @@ class ApiExecutor:
                 "preview_digest": action.preview_digest,
                 "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
             })
+            self._emit_waiting_approval(request, exc)
             raise
         transactional_approval_id = action_gateway.approve(
             action.action_id,
@@ -633,6 +668,26 @@ class ApiExecutor:
                     **redact_mapping(payload, secret_values=request.secret_values),
                 },
             )
+
+    def _emit_waiting_approval(
+        self,
+        request: BuiltApiRequest,
+        error: PermissionRequiredError,
+    ) -> None:
+        """Publish an exact redacted API approval request to trusted local clients."""
+        details = dict(error.details or {})
+        request_id = str(details.get("permission_request_id") or "").strip()
+        if not request_id:
+            return
+        self._emit(
+            "api.waiting_approval",
+            request,
+            permission_request_id=request_id,
+            permission_scope=str(details.get("permission_scope") or "api.request.execute"),
+            preview=details.get("preview") or {},
+            expires_at=str(details.get("expires_at") or ""),
+            api_approval=True,
+        )
 
 
 @dataclass

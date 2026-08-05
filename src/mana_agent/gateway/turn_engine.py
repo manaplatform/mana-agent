@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine
+from mana_agent.multi_agent.routing.agent_decision import (
+    AgentDecision,
+    AgentDecisionEngine,
+    agent_tool_descriptions,
+)
 from mana_agent.multi_agent.runtime.agent_session import route_for_turn
 from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
@@ -36,11 +40,33 @@ class SearchOperationDecisionError(RuntimeError):
     """Raised when a search route lacks a valid model-selected query."""
 
 
+def is_valid_search_operation_decision(
+    decision: AgentDecision,
+    *,
+    required_tool: str,
+) -> bool:
+    """Validate the exact operation contract required by a routed search source."""
+    query = str(
+        (decision.tool_inputs.get(required_tool) or {}).get("query") or ""
+    ).strip()
+    return bool(
+        decision.verifier_passed
+        and decision.intent == "web_research"
+        and decision.selected_tools == [required_tool]
+        and decision.web_search_needed
+        and not decision.repo_context_needed
+        and not decision.code_editing_needed
+        and decision.flow_action == "none"
+        and query
+        and len(query) <= 400
+    )
+
+
 def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
     """Build one chronological conversation prompt with the current message once."""
     messages = list(session_state.get("messages") or [])
     prior = messages[:-1] if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == current_message else messages
-    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}][-40:]
+    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}]
     if not prior:
         return current_message
     lines = ["Active conversation history (chronological):"]
@@ -58,7 +84,7 @@ def _conversation_prompt(session_state: dict[str, Any], current_message: str) ->
         else:
             lines.extend(["", "Relevant shared memory:", followup_memory])
     lines.extend(["", "Current user message:", current_message])
-    return "\n".join(lines)[-40000:]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -102,6 +128,48 @@ def decide_chat_route(
         repo_context=f"Repository root: {root}",
         memory_context=memory_context,
         command_hint="chat",
+    )
+
+
+def decide_search_operation(
+    *,
+    ask_service: Any,
+    question: str,
+    root: Path,
+    required_tool: str,
+    memory_context: str = "",
+) -> AgentDecision:
+    """Obtain the exact model decision needed to execute one selected search source."""
+    if required_tool not in {"web_search", "github_search"}:
+        raise ValueError(f"unsupported search operation tool: {required_tool}")
+    tool_descriptions = [
+        description
+        for description in agent_tool_descriptions()
+        if description.get("name") == required_tool
+    ]
+    if len(tool_descriptions) != 1:
+        raise SearchOperationDecisionError(
+            f"Model decision failed: {required_tool}.query. "
+            "No search was executed because the selected search operation is unavailable."
+        )
+    operation_constraint = (
+        "Create exactly one external-search operation for the already selected source. "
+        f'Select only "{required_tool}" and provide its non-empty "query" input as a '
+        "compact standalone search query of at most 400 characters. "
+        "Set intent=web_research, web_search_needed=true, repo_context_needed=false, "
+        "code_editing_needed=false, and flow_action=none."
+    )
+    engine = AgentDecisionEngine(
+        llm=agent_decision_llm(ask_service),
+        tool_descriptions=tool_descriptions,
+        enable_fallback=False,
+    )
+    return engine.decide(
+        user_request=question,
+        repo_context=f"Repository root: {root}",
+        memory_context=memory_context,
+        command_hint="search_operation",
+        operation_constraint=operation_constraint,
     )
 
 
@@ -487,6 +555,7 @@ def process_chat_turn(
     callbacks: list[Any] | None = None,
     agent_decision: AgentDecision | None = None,
     coding_workspace_preparer: Callable[[], Any] | None = None,
+    gateway_task_id: str = "",
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -747,7 +816,7 @@ def process_chat_turn(
         )
         hist = session_state.setdefault("history", [])
         hist.append((original_question, answer))
-        session_state["history"] = hist[-12:]
+        session_state["history"] = hist
         return ChatTurnResult(
             answer=answer or "(No response from agent)",
             sources=sources,
@@ -799,6 +868,12 @@ def process_chat_turn(
     pending_prechecklist = session_state.get("pending_prechecklist")
     pending_source = str(session_state.get("pending_prechecklist_source") or "")
     pending_warning = str(session_state.get("pending_prechecklist_warning") or "")
+    gateway_task_kwargs = (
+        {"gateway_task_id": gateway_task_id}
+        if gateway_task_id
+        and bool(getattr(coding_agent, "supports_gateway_task_identity", False))
+        else {}
+    )
 
     try:
         if dir_mode:
@@ -822,6 +897,7 @@ def process_chat_turn(
                         pass_cap=auto_execute_max_passes,
                         flow_id=active_flow_id,
                         auto_chat_mode=auto_chat_mode.value,
+                        **gateway_task_kwargs,
                         prechecklist_payload=(
                             {
                                 "flow_id": active_flow_id,
@@ -841,6 +917,7 @@ def process_chat_turn(
                     timeout_seconds=timeout,
                     flow_id=active_flow_id,
                     auto_chat_mode=auto_chat_mode.value,
+                    **gateway_task_kwargs,
                 )
         else:
             target_index = index_dir
@@ -861,6 +938,7 @@ def process_chat_turn(
                         pass_cap=auto_execute_max_passes,
                         flow_id=active_flow_id,
                         auto_chat_mode=auto_chat_mode.value,
+                        **gateway_task_kwargs,
                         prechecklist_payload=(
                             {
                                 "flow_id": active_flow_id,
@@ -880,6 +958,7 @@ def process_chat_turn(
                     timeout_seconds=timeout,
                     flow_id=active_flow_id,
                     auto_chat_mode=auto_chat_mode.value,
+                    **gateway_task_kwargs,
                 )
 
         result: dict[str, Any] = {}
@@ -930,7 +1009,7 @@ def process_chat_turn(
         )
         hist = session_state.setdefault("history", [])
         hist.append((original_question, answer))
-        session_state["history"] = hist[-12:]
+        session_state["history"] = hist
 
         return ChatTurnResult(
             answer=answer or "(No response from coding agent)",

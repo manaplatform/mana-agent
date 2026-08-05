@@ -9,6 +9,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from mana_agent.compat import StrEnum
+from mana_agent.runtime_context import DurableExecutionContext
 
 
 def utc_now() -> datetime:
@@ -93,6 +94,30 @@ class ComputerAction(BaseModel):
     timeout_seconds: float = Field(default=30, ge=0.1, le=300)
     confirmation_token: str | None = None
     source_decision_id: str = Field(min_length=1, max_length=256)
+    execution_context: DurableExecutionContext | None = None
+
+
+class ScreenRecordingRequest(BaseModel):
+    """Closed bounded recording request; omitted material is clarified, never defaulted."""
+
+    mode: str = "display"
+    display_id: str | None = None
+    output_path: str | None = None
+    container: str = "mov"
+    microphone_audio: bool = False
+    system_audio: bool = False
+    maximum_duration_seconds: int | None = Field(default=None, ge=1, le=1800)
+
+
+class ScreenRecordingReceipt(BaseModel):
+    execution_id: str
+    provider_id: str
+    pid: int | None = None
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    artifact_sha256: str = ""
+    artifact_bytes: int = 0
+    duration_seconds: float | None = None
 
 
 class ComputerActionResult(BaseModel):

@@ -74,7 +74,7 @@ class RepositoryMetadata:
 
 @dataclass(frozen=True, slots=True)
 class RoutingBudgets:
-    task_token_limit: int | None = 32_000
+    task_token_limit: int | None = None
     task_cost_limit: float | None = None
     session_cost_remaining: float | None = None
     competition_cost_limit: float | None = None
@@ -99,10 +99,15 @@ class ModelProfile:
     supported_roles: frozenset[str]
     supported_tools: frozenset[str] = frozenset()
     reasoning_settings: frozenset[str] = frozenset({"none"})
-    context_window: int = 128_000
+    context_window: int = 0
+    max_output_tokens: int = 0
+    tokenizer: str | None = None
     latency_class: LatencyClass = LatencyClass.STANDARD
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
+    cached_input_cost_per_million: float | None = None
+    reasoning_cost_per_million: float | None = None
+    supports_usage_reporting: bool = True
     logical_cost_per_1k_tokens: float = 1.0
     reliability_score: float = 0.8
     supported_languages: frozenset[str] = frozenset()
@@ -118,8 +123,10 @@ class ModelProfile:
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.model_id.strip() or not self.supported_roles:
             raise ValueError("model profile requires provider, model_id, and supported_roles")
-        if self.context_window <= 0:
-            raise ValueError("context_window must be positive")
+        if self.context_window <= 0 or self.max_output_tokens <= 0:
+            raise ValueError("context_window and max_output_tokens must be positive")
+        if self.max_output_tokens > self.context_window:
+            raise ValueError("max_output_tokens cannot exceed context_window")
         if min(self.input_cost_per_million, self.output_cost_per_million, self.logical_cost_per_1k_tokens) < 0:
             raise ValueError("model costs cannot be negative")
         if not 0.0 <= self.reliability_score <= 1.0:
@@ -146,10 +153,12 @@ class RoutingRequest:
     required_capabilities: frozenset[str] = frozenset()
     latency_requirement: LatencyClass = LatencyClass.STANDARD
     budgets: RoutingBudgets = RoutingBudgets()
-    expected_prompt_tokens: int = 2_000
+    expected_prompt_tokens: int = 0
     retrieved_context_tokens: int = 0
-    expected_response_tokens: int = 2_000
+    expected_response_tokens: int = 0
     expected_tool_calls: int = 0
+    expected_model_calls: int = 1
+    estimation_components: dict[str, Any] = field(default_factory=dict, compare=False)
     multi_candidate_permitted: bool = False
     previous_verification_failed: bool = False
     explicit_competition: bool = False
@@ -184,7 +193,7 @@ class RoutingRequest:
             raise ValueError("complexity and risk must use the typed routing enums")
         if not isinstance(self.latency_requirement, LatencyClass):
             raise ValueError("latency_requirement must use LatencyClass")
-        if min(self.expected_prompt_tokens, self.retrieved_context_tokens, self.expected_response_tokens, self.expected_tool_calls) < 0:
+        if min(self.expected_prompt_tokens, self.retrieved_context_tokens, self.expected_response_tokens, self.expected_tool_calls) < 0 or self.expected_model_calls < 1:
             raise ValueError("routing token and tool-call estimates cannot be negative")
         if not 0.0 <= self.historical_parallel_benefit <= 1.0 or not 0.0 <= self.historical_result_variance <= 1.0:
             raise ValueError("parallel evidence scores must be between 0 and 1")
@@ -208,7 +217,13 @@ class RoutingDecision:
     confidence: float
     estimated_input_tokens: int
     estimated_output_tokens: int
-    estimated_cost: float
+    estimated_cost: float | None
+    estimate_confidence: str
+    estimate_components: dict[str, int]
+    estimate_assumptions: tuple[str, ...]
+    model_context_window: int
+    model_max_output_tokens: int
+    expected_model_calls: int
     expected_latency_class: LatencyClass
     selection_reasons: tuple[str, ...]
     rejected_candidates: tuple[CandidateRejection, ...]
@@ -236,6 +251,14 @@ class RoutingDecision:
             "score": self.routing_score,
             "confidence": self.confidence,
             "estimated_cost": self.estimated_cost,
+            "estimated_input_tokens": self.estimated_input_tokens,
+            "estimated_output_tokens": self.estimated_output_tokens,
+            "estimate_confidence": self.estimate_confidence,
+            "estimate_components": dict(self.estimate_components),
+            "estimate_assumptions": list(self.estimate_assumptions),
+            "context_window": self.model_context_window,
+            "max_output_tokens": self.model_max_output_tokens,
+            "expected_model_calls": self.expected_model_calls,
             "competition": self.candidate_competition,
             "routing_mode": self.routing_mode.value,
             "decision_id": self.decision_id,
@@ -274,7 +297,7 @@ class RoutingOutcome:
     selection_reason: str
     input_tokens: int = 0
     output_tokens: int = 0
-    estimated_cost: float = 0.0
+    estimated_cost: float | None = None
     actual_cost: float | None = None
     latency_seconds: float = 0.0
     tool_failures: int = 0

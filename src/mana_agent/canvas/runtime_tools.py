@@ -151,6 +151,7 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 f"{common}"
             ),
             args_schema=_Create,
+            metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id, owner, components, data_model=None, retain_on_complete=True: (
                 _json(
                     lambda: _create_surface_with_content(
@@ -174,6 +175,7 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 f"as canvas_create_surface. {common}"
             ),
             args_schema=_Components,
+            metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id, components: (
                 _json(
                     lambda: service.update_components(
@@ -190,6 +192,7 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
             name="canvas_update_data",
             description=f"Update a validated surface data model. {common}",
             args_schema=_Data,
+            metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id, value, path: (
                 _json(
                     lambda: service.update_data(
@@ -207,6 +210,7 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
             name="canvas_delete_surface",
             description="Delete a surface from its owning session.",
             args_schema=_Surface,
+            metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id: (
                 _json(
                     lambda: service.delete_surface(

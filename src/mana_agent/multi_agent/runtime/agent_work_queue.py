@@ -1612,7 +1612,7 @@ class QueueManager:
             memory.record_turn(
                 flow_id=active_flow_id,
                 user_request=request,
-                effective_prompt=(flow_context or "")[:4000],
+                effective_prompt=(flow_context or ""),
                 agent_answer=answer or "",
                 changed_files=list(changed_files),
                 warnings=list(warnings),

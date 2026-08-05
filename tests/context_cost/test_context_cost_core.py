@@ -42,6 +42,25 @@ def settings(**overrides):
     return SimpleNamespace(**values)
 
 
+def register_priced_test_model(
+    governor: ContextCostGovernor,
+    *,
+    context_window: int,
+    max_output_tokens: int,
+) -> None:
+    governor.register_model_profiles((
+        SimpleNamespace(
+            provider="unknown",
+            model_id="test",
+            input_cost_per_million=1.0,
+            output_cost_per_million=1.0,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            configuration={},
+        ),
+    ))
+
+
 def test_token_estimation_and_exact_configured_pricing() -> None:
     assert estimate_value_tokens("hello") > 0
     profile = SimpleNamespace(input_cost_per_million=2.0, output_cost_per_million=4.0)
@@ -50,6 +69,7 @@ def test_token_estimation_and_exact_configured_pricing() -> None:
     assert cost.estimated is False
     fallback = calculate_cost(100, 100)
     assert fallback.estimated is True
+    assert fallback.total_cost is None
 
 
 def test_parent_child_budget_allocation_and_consumption() -> None:
@@ -63,12 +83,58 @@ def test_parent_child_budget_allocation_and_consumption() -> None:
         parent.allocate_child("candidate", token_limit=800)
 
 
+def test_task_usage_keeps_actual_and_estimated_costs_separate() -> None:
+    governor = ContextCostGovernor(session_id="s", settings=settings())
+    governor.register_model_profiles((
+        SimpleNamespace(
+            provider="test-provider",
+            model_id="test-model",
+            input_cost_per_million=2.0,
+            output_cost_per_million=4.0,
+            context_window=16_384,
+            max_output_tokens=4_096,
+            configuration={},
+        ),
+    ))
+    governor.set_execution_identity(task_id="task-1")
+
+    governor.record_model_call(
+        "actual-call",
+        usage={"input_tokens": 100, "output_tokens": 50},
+        provider="test-provider",
+        model="test-model",
+    )
+    governor.record_model_call(
+        "estimated-call",
+        provider="test-provider",
+        model="test-model",
+        estimated_input="estimated prompt",
+        estimated_output="estimated result",
+    )
+
+    usage = governor.task_usage("task-1")
+    assert usage["consumed_input_tokens"] >= 100
+    assert usage["consumed_output_tokens"] >= 50
+    assert usage["actual_cost"] == pytest.approx(0.0004)
+    assert usage["estimated_cost"] > 0
+    assert governor.observability_snapshot()["actual_cost"] == pytest.approx(0.0004)
+
+
 def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_path: Path) -> None:
     governor = ContextCostGovernor(
         session_id="s", repository_id="r", workspace_id="w",
-        settings=settings(mana_context_governor_mode="enforce"),
+        settings=settings(
+            mana_context_governor_mode="enforce",
+            mana_context_unknown_model_context_window=10_000,
+            mana_context_unknown_model_max_output_tokens=1_000,
+        ),
     )
     governor.logger = ContextCostLogger(enabled=False, root=tmp_path / "logs")
+    register_priced_test_model(
+        governor,
+        context_window=10_000,
+        max_output_tokens=1_000,
+    )
     protected = ContextSegment("system", "safety", 10, protected=True, source_id="system")
     duplicate_protected = ContextSegment("system", "safety", 10, protected=True, source_id="system-copy")
     history = ContextSegment("history", "old", 10, source_id="old")
@@ -78,11 +144,37 @@ def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_
         model="test", context_window=10_000, apply_compaction=True,
     )
     assert [segment.source_id for segment in decision.segments] == ["system", "system-copy", "old"]
-    huge = ContextSegment("user", "x", 9_000, protected=True, source_id="current-user")
+    huge = ContextSegment("user", "context " * 12_000, 12_000, protected=True, source_id="current-user")
     with pytest.raises(ContextBudgetExceeded) as raised:
         governor.before_model_call([protected, huge], model="test", context_window=10_000)
     assert raised.value.decision.allowed is False
     assert any(segment.source_id == "current-user" for segment in raised.value.decision.segments)
+
+
+def test_observe_mode_records_task_budget_overrun_without_blocking() -> None:
+    governor = ContextCostGovernor(
+        session_id="observe-session",
+        settings=settings(
+            mana_context_governor_mode="observe",
+            mana_routing_task_token_budget=100,
+        ),
+    )
+    register_priced_test_model(
+        governor,
+        context_window=10_000,
+        max_output_tokens=1_000,
+    )
+
+    _, decision = governor.before_model_call(
+        [ContextSegment("user", "short request", 3, protected=True, source_id="user")],
+        model="test",
+        expected_output_tokens=100,
+    )
+
+    assert decision.allowed is True
+    assert decision.action == "observe"
+    assert decision.reason == "context_hard_limit"
+    assert governor.observability_snapshot()["calls_blocked_token"] == 0
 
 
 def test_history_selection_is_token_aware_and_chronological() -> None:
@@ -92,6 +184,32 @@ def test_history_selection_is_token_aware_and_chronological() -> None:
     assert selected
     assert selected == messages[-len(selected):]
     assert sum(estimate_value_tokens(item) for item in selected) <= 20
+
+
+def test_scoped_execution_identity_restores_the_prior_accounting_scope() -> None:
+    governor = ContextCostGovernor(session_id="s", settings=settings())
+    governor.set_execution_identity(
+        turn_id="outer-turn",
+        task_id="outer-task",
+        execution_kind="route_execution",
+    )
+
+    with governor.scoped_execution_identity(
+        turn_id="checkpoint-turn",
+        step_id="checkpoint_resume:decision",
+        route="conversation",
+        lane="research",
+        execution_kind="checkpoint_resume",
+    ):
+        scoped = governor._effective_identity()
+        assert scoped["turn_id"] == "checkpoint-turn"
+        assert scoped["task_id"] == "outer-task"
+        assert scoped["execution_kind"] == "checkpoint_resume"
+
+    restored = governor._effective_identity()
+    assert restored["turn_id"] == "outer-turn"
+    assert restored["task_id"] == "outer-task"
+    assert restored["execution_kind"] == "route_execution"
 
 
 def test_deterministic_compression_is_small_and_exactly_recoverable(tmp_path: Path) -> None:
@@ -169,9 +287,16 @@ def test_parallel_model_reservations_cannot_spend_the_same_budget(
         workspace_id="w",
         settings=settings(
             mana_context_governor_mode="enforce",
-            mana_routing_task_token_budget=1_300,
+            mana_routing_task_token_budget=130,
             mana_context_response_reserve_ratio=0.12,
+            mana_context_unknown_model_context_window=1_000,
+            mana_context_unknown_model_max_output_tokens=200,
         ),
+    )
+    register_priced_test_model(
+        governor,
+        context_window=1_000,
+        max_output_tokens=200,
     )
     segment = ContextSegment("user", "constraint", 1, protected=True, source_id="user:1")
     first, _ = governor.before_model_call([segment], model="test", context_window=1_000)

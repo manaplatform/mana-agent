@@ -250,6 +250,8 @@ def build_api_manager_langchain_tools(
             raise ValueError("Routing decision ID does not match the tool decision ID.")
         return _json(
             lambda: manager.preview_request(
+                session_id=request.session_id,
+                source_decision_id=request.source_decision_id,
                 routing_decision=request.routing_decision,
                 **request.request_kwargs(),
             ),
@@ -311,6 +313,7 @@ def build_api_manager_langchain_tools(
             ),
             args_schema=_Import,
             func=import_docs,
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_docs_import_semantic",
@@ -324,6 +327,7 @@ def build_api_manager_langchain_tools(
             ),
             args_schema=_SemanticImport,
             func=import_semantic_docs,
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_integrations_list",
@@ -360,6 +364,7 @@ def build_api_manager_langchain_tools(
                 session_id=session_id,
                 source_decision_id=source_decision_id,
             ),
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_integration_delete",
@@ -370,6 +375,7 @@ def build_api_manager_langchain_tools(
                 session_id=session_id,
                 source_decision_id=source_decision_id,
             ),
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_operations_search",
@@ -393,7 +399,9 @@ def build_api_manager_langchain_tools(
                 "Build and validate a saved API operation and return a redacted preview. Use before "
                 "every execution. Supply an explicit env:// or mana-secret:// credential_reference "
                 "when the selected operation identifies its authentication scheme but the saved "
-                "integration has not bound a credential. Arbitrary base URL overrides are not accepted."
+                "integration has not bound a credential. Network-policy exceptions create the exact "
+                "trusted-local approval during preview and return permission_required; stop there "
+                "until the TUI or dashboard resolves it. Arbitrary base URL overrides are not accepted."
             ),
             args_schema=_Request,
             func=preview,

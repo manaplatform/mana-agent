@@ -10,19 +10,26 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
+from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
+
+CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS = 512
 
 
 class CheckpointResumeError(RuntimeError):
     """Raised when no valid stopped-task recovery decision is available."""
+
+    def __init__(self, message: str, *, code: str = "checkpoint_resume_invalid") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class CheckpointResumeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision_id: str = Field(min_length=1)
-    action: Literal["resume_checkpoint", "retry_task", "return_verified", "reverify", "start_fresh", "stop"]
+    action: Literal["resume_checkpoint", "retry_task", "replan_task", "start_fresh", "stop"]
     task_id: str = ""
     checkpoint_id: str = ""
     same_work: bool
@@ -30,13 +37,13 @@ class CheckpointResumeOutput(BaseModel):
     checkpoint_still_valid: bool
     side_effects_safe_to_repeat: bool
     safe_to_continue: bool
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=480)
 
 
 @dataclass(frozen=True, slots=True)
 class CheckpointResumeDecision:
     decision_id: str
-    action: Literal["resume_checkpoint", "retry_task", "return_verified", "reverify", "start_fresh", "stop"]
+    action: Literal["resume_checkpoint", "retry_task", "replan_task", "start_fresh", "stop"]
     task_id: str
     checkpoint_id: str
     same_work: bool
@@ -58,23 +65,25 @@ state, search results, and similarly time-sensitive facts normally require start
 semantically from the supplied request and route evidence; do not use keyword matching. Repository
 editing or analysis may resume only when the candidate evidence shows that its checkpoint remains
 valid for the current request. Select retry_task when it is the same stable work and repeating its
-unfinished actions is safe, but the candidate has no reusable checkpoint. When uncertain, select
+unfinished actions is safe, but the candidate has no reusable checkpoint. Select replan_task when
+the task identity and goal remain the same but its incomplete plan needs a model-selected revision
+before it can safely continue. When uncertain, select
 stop rather than guessing.
 
 When incomplete work is the same, does not require fresh data, and is safe to continue, you must
-select resume_checkpoint or retry_task for the applicable candidate; do not select start_fresh. Select
+select resume_checkpoint, retry_task, or replan_task for the applicable candidate; do not select start_fresh. Select
 start_fresh only when the work is different or fresh data is required. If the work is the same but
 cannot safely resume or repeat, select stop.
 
-Select return_verified for the same work when a candidate is complete, its verification status is
-passed, and neither live data nor mutable external state is involved. Select reverify for a complete
-same-work candidate when its artifacts or external state may have changed. Both actions must copy
-the candidate task_id, leave checkpoint_id empty, and set same_work and safe_to_continue true.
+Completed results are returned only by the caller after it has already classified the turn as a
+duplicate or status request; this decision boundary must never select or reuse a completed result.
+Do not resume or retry a completed task. A requested downstream action, including an operation on a
+live external provider, must select start_fresh so it receives its own task identity and approval.
 
 For resume_checkpoint, copy one exact candidate task_id and checkpoint_id and set same_work,
 checkpoint_still_valid, side_effects_safe_to_repeat, and safe_to_continue true and
 fresh_data_required false. For start_fresh or stop, leave task_id and checkpoint_id empty. For
-retry_task, copy an exact candidate task_id, leave checkpoint_id empty, set same_work,
+retry_task or replan_task, copy an exact candidate task_id, leave checkpoint_id empty, set same_work,
 side_effects_safe_to_repeat, and safe_to_continue true, and set fresh_data_required false. Set
 safe_to_continue true for start_fresh and false for stop. Return strict JSON matching the supplied
 schema.
@@ -93,19 +102,6 @@ class CheckpointResumeDecider:
         requires_live_data: bool,
         candidates: list[dict[str, Any]],
     ) -> CheckpointResumeDecision:
-        if not candidates:
-            return CheckpointResumeDecision(
-                decision_id="no-recovery-candidates",
-                action="start_fresh",
-                task_id="",
-                checkpoint_id="",
-                same_work=False,
-                fresh_data_required=requires_live_data,
-                checkpoint_still_valid=False,
-                side_effects_safe_to_repeat=False,
-                safe_to_continue=True,
-                reason="no durable stopped-task candidates exist",
-            )
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
@@ -127,12 +123,24 @@ class CheckpointResumeDecider:
             if callable(structured):
                 response = structured(
                     CheckpointResumeOutput, method="json_schema", strict=True
-                ).invoke(messages)
+                ).invoke(
+                    messages,
+                    max_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
+                )
                 output = CheckpointResumeOutput.model_validate(response)
             else:
-                response = self.llm.invoke(messages)
+                response = self.llm.invoke(
+                    messages,
+                    max_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
+                )
                 content = getattr(response, "content", response)
                 output = CheckpointResumeOutput.model_validate_json(str(content))
+        except ContextBudgetExceeded as exc:
+            raise CheckpointResumeError(
+                "Model decision failed: checkpoint_resume. No task was resumed or started. "
+                f"Reason: {exc}",
+                code="context_budget_blocked",
+            ) from exc
         except Exception as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
@@ -168,11 +176,11 @@ class CheckpointResumeDecider:
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
                     "Reason: checkpoint reuse safety fields are inconsistent."
                 )
-        elif output.action == "retry_task":
+        elif output.action in {"retry_task", "replan_task"}:
             if output.task_id not in retryable_task_ids or output.checkpoint_id:
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
-                    "Reason: retry_task must select one offered task without a checkpoint ID."
+                    "Reason: retry_task or replan_task must select one offered task without a checkpoint ID."
                 )
             if not (
                 output.same_work
@@ -183,28 +191,7 @@ class CheckpointResumeDecider:
             ):
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
-                    "Reason: same-task retry safety fields are inconsistent."
-                )
-        elif output.action in {"return_verified", "reverify"}:
-            complete_task_ids = {
-                str(item["task_id"])
-                for item in candidates
-                if str(item.get("state") or "") == "completed"
-                and str(item.get("verification_status") or "") == "passed"
-            }
-            if output.task_id not in complete_task_ids or output.checkpoint_id:
-                raise CheckpointResumeError(
-                    "Model decision failed: checkpoint_resume. No result was reused. "
-                    "Reason: completed-result action did not select a verified candidate."
-                )
-            if not output.same_work or not output.safe_to_continue:
-                raise CheckpointResumeError(
-                    "Model decision failed: checkpoint_resume. No result was reused. "
-                    "Reason: completed-result safety fields are inconsistent."
-                )
-            if output.action == "return_verified" and (output.fresh_data_required or requires_live_data):
-                raise CheckpointResumeError(
-                    "Model decision failed: checkpoint_resume. No stale result was returned."
+                    "Reason: same-task retry or replan safety fields are inconsistent."
                 )
         else:
             if output.task_id or output.checkpoint_id:

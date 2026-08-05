@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from mana_agent.api.app import create_app
 from mana_agent.services.execution_event_hub import reset_execution_event_hub_for_tests
+from mana_agent.workspaces.paths import repository_id_for_path
 
 
 @pytest.fixture()
@@ -124,9 +125,56 @@ def test_dashboard_server_approval_endpoint_resumes_cached_exact_action(
 
     assert response.status_code == 200
     assert response.json()["result"]["status"] == "succeeded"
+    assert response.json()["assistant_message"]["content"] == "Approved server action completed."
     assert calls[0]["conversation_id"] == conversation_id
     assert calls[0]["approval_request_id"] == "server_approval_1"
     assert calls[0]["approve"] is True
+    history = client.get(
+        f"/api/v1/conversations/{conversation_id}/messages", params={"root": root}
+    )
+    assert [item["content"] for item in history.json()["messages"]] == [
+        "Approved server action completed."
+    ]
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+    completed = [
+        event
+        for event in get_execution_event_hub().history(
+            conversation_id=conversation_id,
+            repository_id=repository_id_for_path(Path(root)),
+        )
+        if event["type"] == "turn.finished"
+    ]
+    assert completed[-1]["metadata"]["content"] == "Approved server action completed."
+
+
+def test_dashboard_server_approval_requires_a_completion_summary(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = str(tmp_path / "repo")
+    created = client.post(
+        "/api/v1/conversations",
+        json={"title": "Missing summary", "root": root},
+    )
+    conversation_id = created.json()["conversation"]["conversation_id"]
+    monkeypatch.setattr(
+        "mana_agent.ui.streamlit_helpers.decide_dashboard_server_approval",
+        lambda *_args, **_kwargs: {"status": "succeeded"},
+    )
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/server-approvals/server_approval_1",
+        json={"decision": "approve", "root": root},
+    )
+
+    assert response.status_code == 409
+    assert "No fallback chat response was created" in response.json()["detail"]
+    history = client.get(
+        f"/api/v1/conversations/{conversation_id}/messages", params={"root": root}
+    )
+    assert history.json()["messages"] == []
 
 
 def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
@@ -174,6 +222,7 @@ def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
 
     assert response.status_code == 200
     assert response.json()["result"]["result"]["result"]["executed"] is True
+    assert response.json()["assistant_message"]["content"] == "Approved API request executed."
     assert calls[0]["conversation_id"] == conversation_id
     assert calls[0]["approval_request_id"] == "api_approval_1"
     assert calls[0]["approve"] is True

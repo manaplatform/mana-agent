@@ -145,6 +145,41 @@ def test_canvas_route_rolls_back_surface_when_model_correction_stays_incomplete(
     assert snapshot.deleted is True
 
 
+def test_canvas_route_fails_when_executor_persists_no_surface_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+
+    result = _gateway(tmp_path)._execute_canvas_route(
+        decision=_decision(),
+        context=_context(),
+        text="Create a pixel pet.",
+        ask_service=SimpleNamespace(
+            ask_agent=SimpleNamespace(
+                run=lambda **_kwargs: SimpleNamespace(
+                    answer="The canvas tool did not confirm a change.",
+                    sources=[],
+                    warnings=[],
+                    trace=[
+                        {
+                            "tool_name": "canvas_create_surface",
+                            "status": "error",
+                            "output_preview": "Canvas mutation was rejected.",
+                        }
+                    ],
+                )
+            )
+        ),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-canvas-error"
+    assert result.error == "canvas_no_persisted_change"
+    assert "did not persist" in result.answer
+    assert result.payload["failure_detail"] == "Canvas mutation was rejected."
+
+
 def test_canvas_renderer_action_resumes_owning_model_and_updates_surface(
     tmp_path: Path,
     monkeypatch,

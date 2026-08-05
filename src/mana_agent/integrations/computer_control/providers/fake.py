@@ -36,6 +36,7 @@ class FakeComputerControlProvider:
         self.capabilities = capabilities or {
             "applications", "calendar", "media", "notes", "browser", "clipboard",
             "filesystem", "screenshots", "notifications", "system",
+            "screen_recording",
         }
         self.delay_seconds = delay_seconds
         self.os_permissions = dict(os_permissions or {})

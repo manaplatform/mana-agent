@@ -26,12 +26,11 @@ from mana_agent.prompting.mode_rules import render_mode_rules
 from mana_agent.prompting.output_contract import render_output_contract
 from mana_agent.prompting.repo_rules import render_repo_rules
 from mana_agent.prompting.skills_index import render_matched_skill_context, render_stable_skills_index
+from mana_agent.context_cost.estimator import estimate_value_tokens
 
 
 logger = logging.getLogger(__name__)
 
-STABLE_PROMPT_BUDGET_CHARS = 24_000
-EPHEMERAL_PROMPT_BUDGET_CHARS = 12_000
 MAX_EPHEMERAL_ITEMS = 12
 
 
@@ -51,7 +50,7 @@ def _hash_text(text: str) -> str:
 
 
 def _estimate_tokens(text: str) -> int:
-    return max(1, (len(str(text or "")) + 3) // 4)
+    return estimate_value_tokens(text)
 
 
 def _normalize_tools(tools: Sequence[str] | None) -> tuple[str, ...]:
@@ -164,18 +163,6 @@ class PromptCache:
             cache_key=cache_key,
             version=PROMPT_TEMPLATE_VERSION,
         )
-        prompt = compose_stable_prompt(state)
-        if len(prompt) > STABLE_PROMPT_BUDGET_CHARS:
-            state = StablePromptState(
-                identity=_compact_text(identity, max_chars=6000),
-                tool_rules=_compact_text(tool_rules, max_chars=5000),
-                behavior_rules=_compact_text(behavior_rules, max_chars=5000),
-                skill_index=_compact_text(skill_index, max_chars=4000),
-                repo_rules=_compact_text(repo_rules, max_chars=2500),
-                verification_rules=verification_rules,
-                cache_key=cache_key,
-                version=PROMPT_TEMPLATE_VERSION,
-            )
         self._state = state
         self.last_hit = False
         self.last_invalidation_reason = reason
@@ -219,13 +206,13 @@ def build_ephemeral_context(
     temporary_constraints: Sequence[str] | None = None,
 ) -> EphemeralPromptContext:
     return EphemeralPromptContext(
-        current_task=_compact_text(task, max_chars=3000),
+        current_task=str(task),
         mode=str(mode or "answer_only"),
-        retrieved_files=[_compact_text(item, max_chars=900) for item in list(retrieved_files or ())[:MAX_EPHEMERAL_ITEMS]],
-        tool_results=[_compact_text(item, max_chars=900) for item in list(tool_results or ())[:MAX_EPHEMERAL_ITEMS]],
-        recent_summary=_compact_text(recent_summary, max_chars=2000) if recent_summary else None,
+        retrieved_files=[str(item) for item in list(retrieved_files or ())[:MAX_EPHEMERAL_ITEMS]],
+        tool_results=[str(item) for item in list(tool_results or ())[:MAX_EPHEMERAL_ITEMS]],
+        recent_summary=str(recent_summary) if recent_summary else None,
         temporary_constraints=[
-            _compact_text(item, max_chars=500)
+            str(item)
             for item in list(temporary_constraints or ())[:MAX_EPHEMERAL_ITEMS]
             if str(item).strip()
         ],
@@ -250,8 +237,7 @@ def render_ephemeral_context(context: EphemeralPromptContext) -> str:
     if context.tool_results:
         lines.append("- summarized_tool_results:")
         lines.extend(f"  - {item}" for item in context.tool_results)
-    rendered = "\n".join(lines)
-    return _compact_text(rendered, max_chars=EPHEMERAL_PROMPT_BUDGET_CHARS)
+    return "\n".join(lines)
 
 
 def compose(

@@ -212,12 +212,14 @@ class FleetService:
                     },
                 },
             )],
-            estimated_cost=plan.decision.estimated_cost or 0.0,
+            estimated_cost=plan.decision.estimated_cost,
             monetary_budget=plan.monetary_budget,
         )
         self.execution_supervisor.queue(plan.fleet_run_id)
         per_job_estimated_cost = (
-            (plan.decision.estimated_cost or 0.0) / max(1, len(jobs))
+            None
+            if plan.decision.estimated_cost is None
+            else plan.decision.estimated_cost / max(1, len(jobs))
         )
         for job in jobs:
             self.execution_supervisor.create_task(

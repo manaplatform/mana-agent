@@ -1778,8 +1778,16 @@ def build_ask_service(
         project_root=root,
         context_cost_governor=context_cost_governor,
     )
+    for model_client in (getattr(qna_chain, "llm", None), getattr(ask_agent, "llm", None)):
+        if model_client is not None and hasattr(model_client, "selected_provider"):
+            model_client.selected_provider = connection.provider
+        if model_client is not None and hasattr(model_client, "context_cost_governor"):
+            model_client.context_cost_governor = context_cost_governor
+    if hasattr(ask_agent, "provider"):
+        ask_agent.provider = connection.provider
     router_kwargs = {"api_key": connection.api_key, "model": router_model, "base_url": connection.base_url, "provider": connection.provider, "default_headers": connection.headers}
     router_llm = create_chat_model(**router_kwargs)
+    router_llm.context_cost_governor = context_cost_governor
 
     return ask_service_cls(
         store=build_store(settings),

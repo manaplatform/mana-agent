@@ -264,6 +264,7 @@ class AskAgent:
         execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
+        self.provider = str(getattr(self.llm, "selected_provider", "") or "unknown")
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
@@ -276,6 +277,7 @@ class AskAgent:
         self.run_logger = LlmRunLogger()
         self.search_config = SearchConfig.from_env()
         self.context_cost_governor = context_cost_governor
+        self.llm.context_cost_governor = context_cost_governor
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
@@ -286,8 +288,29 @@ class AskAgent:
         if not resolved or resolved == self.model:
             return
         governor = self.context_cost_governor
-        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url)
+        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url, provider=self.provider)
         self.llm.context_cost_governor = governor
+        self.model = resolved
+
+    def update_model_assignment(self, provider: str, model_name: str, *, settings: Any | None = None) -> None:
+        from mana_agent.config.inference_provider import resolve_inference_connection
+        from mana_agent.config.settings import Settings
+
+        connection = resolve_inference_connection(settings or Settings(), provider=provider)
+        resolved = str(model_name or "").strip()
+        if not resolved:
+            raise ValueError("model assignment requires a model")
+        self.api_key = connection.api_key
+        self.base_url = connection.base_url
+        self.provider = connection.provider
+        self.llm = create_chat_model(
+            api_key=connection.api_key,
+            model=resolved,
+            base_url=connection.base_url,
+            provider=connection.provider,
+            default_headers=connection.headers,
+        )
+        self.llm.context_cost_governor = self.context_cost_governor
         self.model = resolved
 
     def _is_blocked_command(self, cmd: str) -> bool:
@@ -1930,6 +1953,7 @@ class AskAgent:
         flow_id: str | None = None,
         run_id: str | None = None,
         required_mcp_server: str | None = None,
+        transactional_parent_task_id: str | None = None,
     ) -> AskResponseWithTrace:
         started = perf_counter()
 
@@ -1940,6 +1964,19 @@ class AskAgent:
             self._resolved_indexes = [self._resolved_index]
 
         policy = dict(tool_policy or {})
+        requested_model_max_tokens = policy.get("model_max_tokens")
+        try:
+            model_max_tokens = (
+                int(requested_model_max_tokens)
+                if requested_model_max_tokens is not None
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Tool policy model_max_tokens must be a positive integer."
+            ) from exc
+        if model_max_tokens is not None and model_max_tokens < 1:
+            raise RuntimeError("Tool policy model_max_tokens must be a positive integer.")
         external_search_result = self._prepare_external_search_context(
             question=question,
             system_prompt=system_prompt,
@@ -1959,6 +1996,7 @@ class AskAgent:
         raw_allowed = [str(x) for x in (policy.get("allowed_tools") or []) if str(x).strip()]
         allowed_tools = set(resolve_allowed_tools(raw_allowed, strict=False))
         allowed_tools.update(name for name in raw_allowed if name.startswith(("mcp.", "mcp__")))
+        mcp_provider_only = str(policy.get("mcp_provider_only") or "").strip()
         search_budget = int(policy.get("search_budget", 0) or 0)
         read_budget = int(policy.get("read_budget", 0) or 0)
         read_line_window = max(200, min(int(policy.get("read_line_window", 400) or 400), 2000))
@@ -1978,7 +2016,11 @@ class AskAgent:
         # run evidence only if the validated policy exposes file reading.  Email
         # tools are registered after this policy normalization, so retain the
         # raw decision as the source of truth here.
-        use_run_evidence = not raw_allowed or "read_file" in allowed_tools or "read_file" in raw_allowed
+        use_run_evidence = (
+            (not raw_allowed and not mcp_provider_only)
+            or "read_file" in allowed_tools
+            or "read_file" in raw_allowed
+        )
         evidence_memory = (
             EvidenceMemory(repo_root=self.project_root, run_id=run_id)
             if use_run_evidence
@@ -2006,12 +2048,21 @@ class AskAgent:
         # of the repository alias registry (for example browser_* connectors).
         # Unknown names remain excluded and never widen the policy.
         allowed_tools.update(name for name in raw_allowed if name in tool_map)
+        if mcp_provider_only:
+            provider_prefix = f"mcp__{mcp_provider_only}__"
+            allowed_tools = {
+                name for name in tool_map if name.startswith(provider_prefix)
+            }
+            if not allowed_tools:
+                raise RuntimeError(
+                    "Model-selected MCP provider returned no registered tools: "
+                    f"{mcp_provider_only}"
+                )
 
         capability_registry: CapabilityRegistry | None = None
         governor = self.context_cost_governor
         lazy_capabilities = bool(
             governor.enabled
-            and governor.mode is not GovernorMode.OBSERVE
             and getattr(governor.settings, "mana_context_lazy_capabilities", True)
         )
         if lazy_capabilities:
@@ -2024,7 +2075,26 @@ class AskAgent:
                 event_callback=lambda event_type, payload: governor._record_capability_event(event_type, payload),
             )
             holder["registry"] = capability_registry
-            initial_names = set(allowed_tools)
+            # A route may require the executor model to choose a narrow tool
+            # capability before its first provider call.  In that case, bind
+            # only the lightweight manifest controls; the model must search
+            # and load the exact permitted capability itself.  This prevents a
+            # broad connector surface from consuming the entire context window
+            # before that model decision can be made.
+            if bool(policy.get("capability_discovery_required")):
+                initial_names = {
+                    str(name)
+                    for name in (policy.get("initial_tools") or ())
+                    if str(name).strip()
+                }
+                unauthorized_initial = initial_names - allowed_tools
+                if unauthorized_initial:
+                    raise RuntimeError(
+                        "Capability discovery initial tools must be explicitly allowed: "
+                        + ", ".join(sorted(unauthorized_initial))
+                    )
+            else:
+                initial_names = set(allowed_tools)
             bound_tools = capability_registry.initial(initial_names)
             tool_map.update({tool.name: tool for tool in core_tools})
             allowed_tools.update(tool.name for tool in core_tools)
@@ -2252,9 +2322,14 @@ class AskAgent:
                     model=self.model,
                     turn_id=str(run_id or flow_id or ""),
                     step_id=str(step_idx),
+                    expected_output_tokens=model_max_tokens,
+                    historical_prediction_enabled=model_max_tokens is None,
                 )
             try:
-                ai_msg = use_bound.invoke(messages, config=cfg)
+                invoke_kwargs: dict[str, Any] = {"config": cfg}
+                if model_max_tokens is not None:
+                    invoke_kwargs["max_tokens"] = model_max_tokens
+                ai_msg = use_bound.invoke(messages, **invoke_kwargs)
             except BaseException as exc:
                 if governor.enabled and model_call_id:
                     governor.release_reservation(
@@ -2449,10 +2524,22 @@ class AskAgent:
                             append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     try:
+                        from mana_agent.connectors.browser.runtime_tools import action_metadata
                         from mana_agent.transactional_actions.enforcement import assert_model_tool_routed
+                        tool_metadata = getattr(tool_map[name], "metadata", None)
+                        if name.startswith("browser_") and not (
+                            isinstance(tool_metadata, dict)
+                            and tool_metadata.get("read_only") is True
+                            and tool_metadata.get("side_effecting") is not True
+                        ):
+                            tool_metadata = action_metadata(
+                                name,
+                                args if isinstance(args, dict) else {},
+                                tool_metadata,
+                            )
                         assert_model_tool_routed(
                             name,
-                            getattr(tool_map[name], "metadata", None),
+                            tool_metadata,
                         )
                         trace_count_before = len(traces)
                         tool_started = perf_counter()
@@ -2463,7 +2550,194 @@ class AskAgent:
                                 tool_call_id=str(call.get("id", "")),
                                 arguments=args,
                             )
-                        content = tool_map[name].invoke(args, config=cfg)
+                        tool_metadata = dict(tool_metadata or {})
+                        if tool_metadata.get("transactional_adapter") == "mcp":
+                            from mana_agent.transactional_actions.adapters import McpActionAdapter
+                            from mana_agent.transactional_actions.gateway import ApprovalRequired
+                            from mana_agent.transactional_actions.runtime import default_action_gateway
+
+                            adapter = McpActionAdapter(
+                                provider_id=str(tool_metadata.get("mcp_provider_id") or ""),
+                                tool_name=str(tool_metadata.get("mcp_tool_name") or ""),
+                                arguments=dict(args) if isinstance(args, dict) else {},
+                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                parent_task_id=str(
+                                    transactional_parent_task_id
+                                    or flow_id
+                                    or run_id
+                                    or "ask-mcp"
+                                ),
+                                actor="model_tool",
+                                originating_agent="ask_agent",
+                            )
+                            try:
+                                outcome = default_action_gateway(self.project_root).execute(
+                                    adapter
+                                )
+                            except ApprovalRequired as exc:
+                                action = exc.action
+                                inbox_item_id = str(
+                                    exc.inbox_item_id
+                                    or action.inbox_item_id
+                                    or ""
+                                )
+                                content = json.dumps(
+                                    {
+                                        "ok": False,
+                                        "error_code": "approval_required",
+                                        "permission_required": True,
+                                        # The durable inbox item is the only approval
+                                        # handle that a trusted UI may present to the
+                                        # reviewer.  The action ID remains audit data,
+                                        # never a substitute for an inbox request.
+                                        "permission_request_id": inbox_item_id,
+                                        "inbox_item_id": inbox_item_id,
+                                        "action_id": action.action_id,
+                                        "preview": (
+                                            action.preview.redacted()
+                                            if action.preview
+                                            else {}
+                                        ),
+                                        "preview_digest": action.preview_digest,
+                                    }
+                                )
+                            else:
+                                action_payload = {
+                                    "ok": outcome.action.state.value == "committed",
+                                    "action_id": outcome.action.action_id,
+                                    "action_state": outcome.action.state.value,
+                                    "verification": (
+                                        outcome.action.verification.model_dump(mode="json")
+                                        if outcome.action.verification
+                                        else {}
+                                    ),
+                                    "result": outcome.result,
+                                }
+                                if not action_payload["ok"]:
+                                    action_payload["error"] = (
+                                        outcome.action.error
+                                        or "MCP action verification did not complete"
+                                    )
+                                content = json.dumps(
+                                    action_payload,
+                                    ensure_ascii=False,
+                                    default=str,
+                                )
+                        elif tool_metadata.get("transactional_adapter") == "canvas":
+                            from mana_agent.canvas.transactional import CanvasActionAdapter
+                            from mana_agent.transactional_actions.gateway import ApprovalRequired
+                            from mana_agent.transactional_actions.runtime import default_action_gateway
+
+                            adapter = CanvasActionAdapter(
+                                tool_name=name,
+                                arguments=dict(args) if isinstance(args, dict) else {},
+                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                parent_task_id=str(
+                                    transactional_parent_task_id
+                                    or flow_id
+                                    or run_id
+                                    or "ask-canvas"
+                                ),
+                                actor="model_tool",
+                                originating_agent="ask_agent",
+                            )
+                            try:
+                                outcome = default_action_gateway(self.project_root).execute(
+                                    adapter
+                                )
+                            except ApprovalRequired as exc:
+                                action = exc.action
+                                inbox_item_id = str(
+                                    exc.inbox_item_id
+                                    or action.inbox_item_id
+                                    or ""
+                                )
+                                content = json.dumps(
+                                    {
+                                        "ok": False,
+                                        "error_code": "approval_required",
+                                        "permission_required": True,
+                                        "permission_request_id": inbox_item_id,
+                                        "inbox_item_id": inbox_item_id,
+                                        "action_id": action.action_id,
+                                        "preview": (
+                                            action.preview.redacted()
+                                            if action.preview
+                                            else {}
+                                        ),
+                                        "preview_digest": action.preview_digest,
+                                    }
+                                )
+                            else:
+                                action_payload = {
+                                    "ok": outcome.action.state.value == "committed",
+                                    "action_id": outcome.action.action_id,
+                                    "action_state": outcome.action.state.value,
+                                    "verification": (
+                                        outcome.action.verification.model_dump(mode="json")
+                                        if outcome.action.verification
+                                        else {}
+                                    ),
+                                    "result": outcome.result,
+                                }
+                                if not action_payload["ok"]:
+                                    action_payload["error"] = (
+                                        outcome.action.error
+                                        or "Canvas action verification did not complete"
+                                    )
+                                content = json.dumps(
+                                    action_payload,
+                                    ensure_ascii=False,
+                                    default=str,
+                                )
+                        elif tool_metadata.get("transactional_adapter") == "api_integration":
+                            from mana_agent.api_manager.transactional import ApiIntegrationActionAdapter
+                            from mana_agent.transactional_actions.gateway import ApprovalRequired
+                            from mana_agent.transactional_actions.runtime import default_action_gateway
+
+                            adapter = ApiIntegrationActionAdapter(
+                                tool_name=name,
+                                arguments=dict(args) if isinstance(args, dict) else {},
+                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                parent_task_id=str(
+                                    transactional_parent_task_id
+                                    or flow_id
+                                    or run_id
+                                    or "ask-api-integration"
+                                ),
+                                actor="model_tool",
+                                originating_agent="ask_agent",
+                            )
+                            try:
+                                outcome = default_action_gateway(self.project_root).execute(adapter)
+                            except ApprovalRequired as exc:
+                                action = exc.action
+                                inbox_item_id = str(exc.inbox_item_id or action.inbox_item_id or "")
+                                content = json.dumps(
+                                    {
+                                        "ok": False,
+                                        "error_code": "approval_required",
+                                        "permission_required": True,
+                                        "permission_request_id": inbox_item_id,
+                                        "inbox_item_id": inbox_item_id,
+                                        "action_id": action.action_id,
+                                        "preview": action.preview.redacted() if action.preview else {},
+                                        "preview_digest": action.preview_digest,
+                                    }
+                                )
+                            else:
+                                action_payload = {
+                                    "ok": outcome.action.state.value == "committed",
+                                    "action_id": outcome.action.action_id,
+                                    "action_state": outcome.action.state.value,
+                                    "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+                                    "result": outcome.result,
+                                }
+                                if not action_payload["ok"]:
+                                    action_payload["error"] = outcome.action.error or "API integration action verification did not complete"
+                                content = json.dumps(action_payload, ensure_ascii=False, default=str)
+                        else:
+                            content = tool_map[name].invoke(args, config=cfg)
                         if governor.enabled and tool_reservation_id:
                             governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:
@@ -2510,7 +2784,12 @@ class AskAgent:
                     # except for read_file, which has a dedicated repeated-failure
                     # limit and would otherwise be cut off early.
                     if self._tool_error_detail(content):
-                        if name != "read_file":
+                        if name not in {
+                            "read_file",
+                            "capability_search",
+                            "capability_load",
+                            "capability_unload",
+                        }:
                             stagnant_steps += 1
                     else:
                         fingerprint = self._evidence_fingerprint(content)
@@ -2520,7 +2799,11 @@ class AskAgent:
                             observation = self._summarize_tool_result(name, content)
                             if observation:
                                 observations.append(observation)
-                        else:
+                        elif name not in {
+                            "capability_search",
+                            "capability_load",
+                            "capability_unload",
+                        }:
                             stagnant_steps += 1
 
                 # A blocked duplicate makes no progress either.
@@ -2557,6 +2840,11 @@ class AskAgent:
                             evidence_memory.invalidate_many(set(changed_paths))
                         mutation_succeeded = True
                 if capability_registry is not None:
+                    if name == "capability_load" and isinstance(args, dict):
+                        for loaded_name in args.get("names", ()):
+                            capability_registry.mark_used(
+                                str(loaded_name), step_idx
+                            )
                     capability_registry.mark_used(name, step_idx)
                 append_tool_message(name, content, str(call.get("id", "")), step_idx)
 

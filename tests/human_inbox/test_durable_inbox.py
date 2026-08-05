@@ -3,14 +3,17 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Lock
 import getpass
 
 import pytest
+from typer.testing import CliRunner
 
 from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import LeaseConflictError
 from mana_agent.execution_supervisor.models import ExecutionState, SideEffectClassification
 from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
+from mana_agent.human_inbox import cli as inbox_cli
 from mana_agent.human_inbox.models import (
     ClarificationField,
     ExpectedResponseType,
@@ -28,6 +31,7 @@ from mana_agent.human_inbox.models import (
 from mana_agent.human_inbox.notifications import NotificationResult
 from mana_agent.human_inbox.repository import InboxConcurrentUpdateError, LocalInboxRepository
 from mana_agent.human_inbox.service import HumanInboxService
+from mana_agent.human_inbox import tokens as inbox_tokens
 from mana_agent.human_inbox.tokens import ResponseTokenSigner
 from mana_agent.transactional_actions.adapters import ActionInvalidatedError, FileActionAdapter
 from mana_agent.transactional_actions.approvals import ApprovalRegistry
@@ -89,6 +93,57 @@ def request(clock: Clock, **changes) -> InboxRequest:
     }
     values.update(changes)
     return InboxRequest(**values)
+
+
+def test_terminal_notice_is_persisted_without_response_or_delivery(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = service(tmp_path, clock)
+    notice = inbox.create(request(
+        clock,
+        request_type=InboxRequestType.NOTICE,
+        title="Computer request recorded without execution",
+        summary="The selected action was unavailable.",
+        allowed_responses=[],
+        requested_fields=[],
+        idempotency_key="notice-1",
+        deduplication_key="notice-dedupe-1",
+    ))
+    assert notice.status is InboxStatus.RECORDED
+    assert notice.allowed_responses == []
+    assert inbox.repository.delivery_attempts(notice.inbox_item_id) == []
+    audit = inbox.repository.audit_for_item(notice.inbox_item_id)
+    assert [event.event_type for event in audit] == [
+        "request_created",
+        "reviewer_resolved",
+    ]
+    assert [event.sequence for event in audit] == [1, 2]
+
+
+def test_cli_rejects_terminal_notice_without_traceback(tmp_path: Path, monkeypatch) -> None:
+    clock = Clock()
+    inbox = service(tmp_path, clock)
+    notice = inbox.create(request(
+        clock,
+        request_type=InboxRequestType.NOTICE,
+        title="Computer request recorded without execution",
+        summary="The selected action was unavailable.",
+        allowed_responses=[],
+        requested_fields=[],
+        idempotency_key="notice-cli-1",
+        deduplication_key="notice-cli-dedupe-1",
+    ))
+    monkeypatch.setattr(inbox_cli, "_service", lambda: inbox)
+    monkeypatch.setattr(inbox_cli, "_actor", lambda _actor: "reviewer-1")
+
+    result = CliRunner().invoke(inbox_cli.inbox_app, ["approve", notice.inbox_item_id])
+
+    assert result.exit_code == 2
+    assert "recorded terminal notice" in result.output
+    assert "Traceback" not in result.output
+    assert any(
+        event.event_type == "response_rejected"
+        for event in inbox.repository.audit_for_item(notice.inbox_item_id)
+    )
 
 
 def respond(item, **changes) -> ResponseSubmission:
@@ -215,6 +270,40 @@ def test_concurrent_approve_and_deny_accepts_one_terminal_response(tmp_path: Pat
         results = list(pool.map(submit, [ResponseOperation.APPROVE, ResponseOperation.DENY]))
     assert results.count("conflict") == 1
     assert inbox.repository.get(item.inbox_item_id).status in {InboxStatus.APPROVED, InboxStatus.DENIED}
+
+
+def test_concurrent_signers_publish_only_complete_key_files(tmp_path: Path, monkeypatch) -> None:
+    key_path = tmp_path / "inbox" / "signing.key"
+    first = ResponseTokenSigner(key_path)
+    second = ResponseTokenSigner(key_path)
+    first_write_started = Event()
+    release_first_write = Event()
+    write_lock = Lock()
+    write_count = 0
+    original_write = inbox_tokens.os.write
+
+    def delayed_first_write(descriptor: int, value: bytes) -> int:
+        nonlocal write_count
+        with write_lock:
+            write_count += 1
+            is_first_write = write_count == 1
+        if is_first_write:
+            first_write_started.set()
+            assert release_first_write.wait(timeout=5)
+        return original_write(descriptor, value)
+
+    monkeypatch.setattr(inbox_tokens.os, "write", delayed_first_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_digest = pool.submit(first.protected_digest, {"response": "value"})
+        assert first_write_started.wait(timeout=5)
+        second_digest = pool.submit(second.protected_digest, {"response": "value"})
+        assert not second_digest.done()
+        release_first_write.set()
+        first_result = first_digest.result(timeout=5)
+        second_result = second_digest.result(timeout=5)
+
+    assert first_result == second_result
+    assert len(key_path.read_bytes()) >= 32
 
 
 def test_response_idempotency_key_cannot_be_rebound(tmp_path: Path) -> None:
