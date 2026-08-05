@@ -103,7 +103,7 @@ def test_model_may_resume_exact_non_stale_checkpoint() -> None:
 
     assert decision.action == "resume_checkpoint"
     assert decision.task_id == "task_existing"
-    assert model.invocation_kwargs == [{"max_output_tokens": 512}]
+    assert model.invocation_kwargs == [{"max_tokens": 512}]
 
 
 def test_model_may_replan_the_same_stopped_task() -> None:

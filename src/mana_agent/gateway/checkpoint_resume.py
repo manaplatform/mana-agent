@@ -125,13 +125,13 @@ class CheckpointResumeDecider:
                     CheckpointResumeOutput, method="json_schema", strict=True
                 ).invoke(
                     messages,
-                    max_output_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
+                    max_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
                 )
                 output = CheckpointResumeOutput.model_validate(response)
             else:
                 response = self.llm.invoke(
                     messages,
-                    max_output_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
+                    max_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
                 )
                 content = getattr(response, "content", response)
                 output = CheckpointResumeOutput.model_validate_json(str(content))
