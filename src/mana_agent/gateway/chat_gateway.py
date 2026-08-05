@@ -384,6 +384,17 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                     )
                     if executed.get(key) not in (None, "")
                 }
+        elif (
+            action == "request_preview"
+            and result.get("error_code") == "permission_required"
+            and isinstance(result.get("details"), dict)
+            and str(result["details"].get("permission_scope") or "")
+            == "api.request.execute"
+            and str(result["details"].get("permission_request_id") or "")
+        ):
+            # The preview successfully built the exact request, then stopped it
+            # before execution to await the trusted-local approval it created.
+            completed.add(action)
         elif action and (result_succeeded or clipped_success_evidence):
             completed.add(action)
     missing = [action for action in required if action not in completed]

@@ -469,6 +469,97 @@ def test_read_only_http_request_requires_exact_ui_approval(
     assert approved["executed"] is True
 
 
+def test_request_preview_prepares_http_approval_and_records_inbox_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Network exceptions must reach the trusted UI before an execute tool call."""
+    _public_dns(monkeypatch)
+    document = json.loads(json.dumps(OPENAPI))
+    document["servers"] = [{"url": "http://api.acme.example/v1"}]
+    integration = DocumentationImporter().from_text(
+        json.dumps(document),
+        name="Preview HTTP API",
+        source_decision_id="preview-http-import-decision",
+    )
+    registry = ApiIntegrationRegistry(tmp_path / "integrations")
+    registry.save(integration)
+    registry.update(
+        integration.integration_id,
+        {"authentication": (AuthenticationConfig(),)},
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class _Inbox:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def create(self, request: Any) -> Any:
+            self.requests.append(request)
+            return type("InboxItem", (), {"inbox_item_id": "inbox-api-http"})()
+
+    inbox = _Inbox()
+    monkeypatch.setattr(
+        "mana_agent.api_manager.service.publish_api_event",
+        lambda event_type, payload: events.append((event_type, payload)),
+    )
+    broker = PendingApiApprovalBroker()
+    executor = ApiExecutor(
+        network_policy=NetworkAccessPolicy(allow_http=False),
+        approval_broker=broker,
+        transport=_Transport(
+            [_RawResponse(200, {"content-type": "application/json"}, b'{"ok":true}')]
+        ),
+    )
+    service = ApiManagerService(
+        tmp_path,
+        registry=registry,
+        executor=executor,
+        human_inbox_service=inbox,
+    )
+    route = ApiRouteDecision(
+        source_decision_id="preview-http-call-decision",
+        task_intent="retrieve one contact",
+        workflow="request_execution",
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        confidence=0.99,
+        matched_terms=("contact",),
+        reason="The saved read-only operation exactly matches.",
+        safe_to_continue=True,
+    )
+
+    with pytest.raises(PermissionRequiredError) as raised:
+        service.preview_request(
+            routing_decision=route,
+            integration_id=integration.integration_id,
+            operation_id="getContact",
+            path_parameters={"contact_id": "123"},
+            session_id="preview-http-session",
+            source_decision_id=route.source_decision_id,
+        )
+
+    details = raised.value.details
+    assert details["inbox_item_id"] == "inbox-api-http"
+    assert inbox.requests[0].request_type.value == "notice"
+    assert inbox.requests[0].permission_request_id == details["permission_request_id"]
+    waiting_events = [payload for event_type, payload in events if event_type == "api.waiting_approval"]
+    assert waiting_events == [{
+        **details,
+        "integration_id": integration.integration_id,
+        "operation_id": "getContact",
+        "method": "GET",
+        "redacted_host_path": "api.acme.example/v1/contacts/123",
+    }]
+    approved = service.decide_approval(
+        details["permission_request_id"],
+        session_id="preview-http-session",
+        approve=True,
+        client_type="tui",
+    )
+    assert approved["executed"] is True
+
+
 def test_local_documentation_import_is_confined_to_authorized_roots(
     tmp_path: Path,
 ) -> None:

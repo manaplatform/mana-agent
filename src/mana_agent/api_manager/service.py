@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import getpass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from mana_agent.api_manager.discovery import ApiOperationDiscovery, ApiRouteDecision
 from mana_agent.api_manager.documentation import DocumentationImporter, SemanticDefinition
-from mana_agent.api_manager.errors import ApiManagerError, UpstreamApiError
+from mana_agent.api_manager.errors import ApiManagerError, PermissionRequiredError, UpstreamApiError
 from mana_agent.api_manager.executor import (
     ApiExecutor,
     NetworkAccessPolicy,
@@ -30,6 +32,7 @@ class ApiManagerService:
         registry: ApiIntegrationRegistry | None = None,
         executor: ApiExecutor | None = None,
         network_policy: NetworkAccessPolicy | None = None,
+        human_inbox_service: Any | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.registry = registry or ApiIntegrationRegistry(event_sink=publish_api_event)
@@ -68,6 +71,7 @@ class ApiManagerService:
         )
         self.builder = ApiRequestBuilder(self.registry)
         self.discovery = ApiOperationDiscovery(self.registry)
+        self.human_inbox_service = human_inbox_service
 
     def import_documentation(
         self,
@@ -229,6 +233,8 @@ class ApiManagerService:
     def preview_request(
         self,
         *,
+        session_id: str = "",
+        source_decision_id: str = "",
         routing_decision: ApiRouteDecision | dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -243,8 +249,11 @@ class ApiManagerService:
             raise ValueError(
                 "Request identifiers do not match the validated model operation decision."
             )
-        request = self._build_validated(**kwargs)
-        preview = self.builder.preview(request)
+        request, preview = self._prepare_request_and_preview(
+            session_id=session_id,
+            task_intent=route.task_intent,
+            **kwargs,
+        )
         publish_api_event(
             "api.operation.selected",
             {
@@ -263,6 +272,28 @@ class ApiManagerService:
                 "valid": True,
             },
         )
+        approval = self.approvals.prepare(request, preview)
+        if approval:
+            inbox_item_id = self._record_approval_notice(
+                request,
+                approval,
+                source_decision_id=source_decision_id or route.source_decision_id,
+            )
+            publish_api_event(
+                "api.waiting_approval",
+                {
+                    **approval,
+                    "inbox_item_id": inbox_item_id,
+                    "integration_id": request.integration_id,
+                    "operation_id": request.operation_id,
+                    "method": request.method,
+                    "redacted_host_path": self._redacted_host_path(request.url),
+                },
+            )
+            raise PermissionRequiredError(
+                "The API request is waiting for trusted local approval before execution.",
+                details={**approval, "inbox_item_id": inbox_item_id},
+            )
         return preview.model_dump(mode="json")
 
     def execute_request(
@@ -284,10 +315,64 @@ class ApiManagerService:
             raise ValueError(
                 "Request identifiers do not match the validated model operation decision."
             )
+        request, preview = self._prepare_request_and_preview(
+            session_id=session_id,
+            task_intent=route.task_intent,
+            **kwargs,
+        )
+
+        publish_api_event(
+            "api.request.validation.completed",
+            {
+                "integration_id": request.integration_id,
+                "operation_id": request.operation_id,
+                "valid": True,
+                "routing_evidence": evidence.model_dump(mode="json"),
+            },
+        )
+        result = self.executor.execute(
+            request,
+            preview=preview,
+            approval_reference=approval_reference,
+        )
+        if not result.upstream_ok:
+            if self.registry.get(request.integration_id).ephemeral:
+                self.registry.discard_ephemeral(request.integration_id)
+            raise UpstreamApiError(
+                f"The upstream API returned HTTP {result.status_code}.",
+                details={
+                    "executed": True,
+                    "integration_id": result.integration_id,
+                    "operation_id": result.operation_id,
+                    "status_code": result.status_code,
+                    "content_type": result.content_type,
+                    "body_kind": result.body_kind,
+                    "json_body": result.json_body,
+                    "text_body": result.text_body[:4000],
+                    "latency_ms": result.latency_ms,
+                },
+            )
+        if self.registry.get(request.integration_id).ephemeral:
+            self.registry.discard_ephemeral(request.integration_id)
+        self.discovery.record_success(
+            task_intent=route.task_intent,
+            integration_id=request.integration_id,
+            operation_id=request.operation_id,
+        )
+        return result.model_dump(mode="json")
+
+    def _prepare_request_and_preview(
+        self,
+        *,
+        session_id: str,
+        task_intent: str,
+        **kwargs: Any,
+    ):
+        """Build the exact request and surface any network exception in preview."""
         request = self._build_validated(**kwargs).model_copy(
             update={
                 "session_id": session_id,
-                "routing_task_intent": route.task_intent,
+                "routing_task_intent": task_intent,
             }
         )
         preview = self.builder.preview(request)
@@ -330,45 +415,71 @@ class ApiManagerService:
                     ),
                 }
             )
-        publish_api_event(
-            "api.request.validation.completed",
-            {
+        return request, preview
+
+    def _record_approval_notice(
+        self,
+        request: Any,
+        approval: dict[str, Any],
+        *,
+        source_decision_id: str,
+    ) -> str:
+        """Persist a redacted record without creating a second approval authority."""
+        from mana_agent.human_inbox import default_human_inbox_service
+        from mana_agent.human_inbox.models import (
+            InboxRequest,
+            InboxRequestType,
+            ReviewerAssignment,
+            ReviewerType,
+            RiskLevel,
+        )
+
+        request_id = str(approval["permission_request_id"])
+        expires_at = datetime.fromisoformat(str(approval["expires_at"]))
+        inbox = self.human_inbox_service or default_human_inbox_service()
+        item = inbox.create(InboxRequest(
+            request_type=InboxRequestType.NOTICE,
+            task_id=source_decision_id,
+            branch_id=source_decision_id,
+            permission_request_id=request_id,
+            action_intent_id=f"api:{request_id}",
+            requested_by_agent_id="api_manager",
+            reviewer=ReviewerAssignment(
+                reviewer_type=ReviewerType.PERSON,
+                reviewer_id=getpass.getuser(),
+            ),
+            title="API request awaiting trusted local approval",
+            summary=(
+                "A redacted API request preview is waiting for approval in the active "
+                "trusted TUI or dashboard. This inbox record does not grant approval."
+            ),
+            risk_level=RiskLevel.MEDIUM,
+            minimal_context={
                 "integration_id": request.integration_id,
                 "operation_id": request.operation_id,
-                "valid": True,
-                "routing_evidence": evidence.model_dump(mode="json"),
+                "method": request.method,
+                "redacted_host_path": self._redacted_host_path(request.url),
+                "expires_at": expires_at.isoformat(),
             },
-        )
-        result = self.executor.execute(
-            request,
-            preview=preview,
-            approval_reference=approval_reference,
-        )
-        if not result.upstream_ok:
-            if self.registry.get(request.integration_id).ephemeral:
-                self.registry.discard_ephemeral(request.integration_id)
-            raise UpstreamApiError(
-                f"The upstream API returned HTTP {result.status_code}.",
-                details={
-                    "executed": True,
-                    "integration_id": result.integration_id,
-                    "operation_id": result.operation_id,
-                    "status_code": result.status_code,
-                    "content_type": result.content_type,
-                    "body_kind": result.body_kind,
-                    "json_body": result.json_body,
-                    "text_body": result.text_body[:4000],
-                    "latency_ms": result.latency_ms,
-                },
-            )
-        if self.registry.get(request.integration_id).ephemeral:
-            self.registry.discard_ephemeral(request.integration_id)
-        self.discovery.record_success(
-            task_intent=route.task_intent,
-            integration_id=request.integration_id,
-            operation_id=request.operation_id,
-        )
-        return result.model_dump(mode="json")
+            protected_context={"preview": approval.get("preview") or {}},
+            disclosed_fields=[
+                "integration_id",
+                "operation_id",
+                "method",
+                "redacted_host_path",
+                "expires_at",
+            ],
+            reversibility="not_executed",
+            expires_at=expires_at,
+            idempotency_key=f"api-approval-notice:{request_id}",
+            deduplication_key=f"api-approval-notice:{request_id}",
+        ))
+        return item.inbox_item_id
+
+    @staticmethod
+    def _redacted_host_path(url: str) -> str:
+        parsed = urlsplit(url)
+        return f"{parsed.hostname or ''}{parsed.path}"
 
     def decide_approval(
         self,

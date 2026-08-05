@@ -199,14 +199,16 @@ def test_api_route_treats_documentation_url_as_optional_when_integration_is_save
     ]
 
 
-def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -> None:
+def test_api_route_stops_at_preview_when_network_approval_is_required(tmp_path: Path) -> None:
     permission = {
         "ok": False,
         "error_code": "permission_required",
-        "permission_request_id": "api_approval_http_1",
-        "permission_scope": "api.request.execute",
-        "session_id": "session-api",
-        "preview": {"method": "GET", "approval_required": True},
+        "details": {
+            "permission_request_id": "api_approval_http_1",
+            "permission_scope": "api.request.execute",
+            "session_id": "session-api",
+            "preview": {"method": "GET", "approval_required": True},
+        },
     }
 
     class ModelToolExecutor:
@@ -243,13 +245,8 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
                     {
                         "tool_name": "api_request_preview",
                         "status": "ok",
-                        "output_preview": '{"ok":true,"result":{"risk_level":"read_only"}}',
-                    },
-                    {
-                        "tool_name": "api_request_execute",
-                        "status": "ok",
                         "output_preview": json.dumps(permission),
-                    }
+                    },
                 ],
             )
 
@@ -258,7 +255,10 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
     gateway._index_dir = None
     gateway._resolved_k = 4
     gateway._agent_timeout_seconds = 30
-    gateway._event_sink = None
+    observed_events: list[tuple[str, str, dict]] = []
+    gateway._event_sink = lambda event_type, title, metadata: observed_events.append(
+        (event_type, title, metadata)
+    )
     gateway.config = SimpleNamespace(agent_max_steps=8)
     result = gateway._execute_api_route(
         decision=EntryRoutingDecision(
@@ -278,9 +278,9 @@ def test_api_route_surfaces_network_approval_in_result_payload(tmp_path: Path) -
     )
 
     assert result.mode == "route-api-awaiting-approval"
-    assert result.payload["permission_requests"][0]["permission_request_id"] == (
-        "api_approval_http_1"
-    )
+    assert result.payload["permission_requests"][0]["permission_request_id"] == "api_approval_http_1"
+    assert observed_events[0][0] == "api.waiting_approval"
+    assert observed_events[0][2]["permission_request_id"] == "api_approval_http_1"
 
 
 def test_api_route_does_not_complete_without_required_execution_evidence(

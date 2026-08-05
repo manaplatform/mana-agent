@@ -35,7 +35,17 @@ All notable repository changes should be recorded here.
   Pending API network approvals now publish a redacted session-bound `api.waiting_approval` event,
   allowing the trusted TUI and dashboard to present the same approve-once or deny controls used for
   other transactional requests.
-  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_ask_agent.py -q`.
+  API preview now creates that exact approval before `api_request_execute`, stops the model tool
+  loop with a `permission_required` result, and records a redacted durable root-user inbox notice
+  that points back to the trusted local approval modal.
+  The TUI now consumes the active session's preview-time API approval event directly, so it opens
+  its approval modal while the tool loop is still paused; dashboard already consumes that event
+  through its live conversation stream.
+  API workflow accounting now treats this exact preview-time `permission_required` result as
+  successful preview evidence while continuing to require execution evidence after approval.
+  Preview approval coverage now includes the documented server base path when checking the
+  redacted request target.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_tui_auto_chat_tool_events.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
   coordinate key creation with a per-key thread and process lock before loading

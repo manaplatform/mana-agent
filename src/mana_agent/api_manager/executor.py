@@ -138,23 +138,53 @@ class PendingApiApprovalBroker:
             ):
                 self._pending.pop(approval_reference, None)
                 return
+        details = self.prepare(request, preview)
+        raise PermissionRequiredError(
+            "The API request is waiting for a trusted local approval.",
+            details=details,
+        )
+
+    def prepare(
+        self,
+        request: BuiltApiRequest,
+        preview: RequestPreview,
+    ) -> dict[str, Any]:
+        """Create or reuse the exact approval required by a redacted preview.
+
+        Preview preparation never permits a request to execute.  It only records
+        the session-bound approval that a trusted local client may later resolve.
+        """
+        if not request.risk_level.mutating and not preview.approval_required:
+            return {}
+        now = datetime.now(timezone.utc)
+        fingerprint = _request_fingerprint(request)
+        with self._lock:
+            self._expire(now)
+            for request_id, pending in self._pending.items():
+                if _request_fingerprint(pending.request) == fingerprint:
+                    return self._details(request_id, pending)
             request_id = f"api_approval_{uuid.uuid4().hex}"
-            self._pending[request_id] = _PendingApproval(
+            pending = _PendingApproval(
                 request=request.model_copy(deep=True),
                 preview=preview.model_copy(deep=True),
                 expires_at=now + timedelta(seconds=self.ttl_seconds),
             )
-        raise PermissionRequiredError(
-            "The API request is waiting for a trusted local approval.",
-            details={
-                "permission_request_id": request_id,
-                "permission_scope": "api.request.execute",
-                "preview": preview.model_dump(mode="json"),
-                "session_id": request.session_id,
-                "api_approval": True,
-                "expires_at": self._pending[request_id].expires_at.isoformat(),
-            },
-        )
+            self._pending[request_id] = pending
+            return self._details(request_id, pending)
+
+    @staticmethod
+    def _details(
+        request_id: str,
+        pending: _PendingApproval,
+    ) -> dict[str, Any]:
+        return {
+            "permission_request_id": request_id,
+            "permission_scope": "api.request.execute",
+            "preview": pending.preview.model_dump(mode="json"),
+            "session_id": pending.request.session_id,
+            "api_approval": True,
+            "expires_at": pending.expires_at.isoformat(),
+        }
 
     def approve(self, request_id: str, *, session_id: str, client_type: str) -> tuple[BuiltApiRequest, RequestPreview]:
         if client_type not in {"local_cli", "tui", "dashboard"}:

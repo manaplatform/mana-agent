@@ -250,6 +250,8 @@ def build_api_manager_langchain_tools(
             raise ValueError("Routing decision ID does not match the tool decision ID.")
         return _json(
             lambda: manager.preview_request(
+                session_id=request.session_id,
+                source_decision_id=request.source_decision_id,
                 routing_decision=request.routing_decision,
                 **request.request_kwargs(),
             ),
@@ -397,7 +399,9 @@ def build_api_manager_langchain_tools(
                 "Build and validate a saved API operation and return a redacted preview. Use before "
                 "every execution. Supply an explicit env:// or mana-secret:// credential_reference "
                 "when the selected operation identifies its authentication scheme but the saved "
-                "integration has not bound a credential. Arbitrary base URL overrides are not accepted."
+                "integration has not bound a credential. Network-policy exceptions create the exact "
+                "trusted-local approval during preview and return permission_required; stop there "
+                "until the TUI or dashboard resolves it. Arbitrary base URL overrides are not accepted."
             ),
             args_schema=_Request,
             func=preview,

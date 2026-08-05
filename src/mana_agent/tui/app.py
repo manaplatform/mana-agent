@@ -163,6 +163,7 @@ class ManaChatApp(App):
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
         self._unsubscribe_computer_permissions = None
+        self._unsubscribe_api_approval_events = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -201,6 +202,13 @@ class ManaChatApp(App):
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
+        if self._gateway_session_id:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            self._unsubscribe_api_approval_events = get_execution_event_hub().subscribe(
+                self._gateway_session_id,
+                self._handle_api_approval_event,
+            )
 
         # Safe immediate footer (avoids any early watcher issues)
         self.sub_title = "Ready"
@@ -288,6 +296,22 @@ class ManaChatApp(App):
             server=bool(metadata.get("server_approval")),
             api=bool(metadata.get("api_approval")),
             transactional=bool(metadata.get("transactional_action_approval")),
+        ))
+
+    def _handle_api_approval_event(self, event: dict[str, Any]) -> None:
+        """Bridge a preview-time API approval to the active TUI modal immediately."""
+        if str(event.get("type") or event.get("event_type") or "") != "api.waiting_approval":
+            return
+        if str(event.get("conversation_id") or "") != str(self._gateway_session_id or ""):
+            return
+        self.history.add(CodingActivityEvent(
+            activity={
+                "event_type": "api.waiting_approval",
+                "title": str(event.get("title") or "API request approval required"),
+                "status": str(event.get("status") or "running"),
+                "metadata": dict(event.get("metadata") or {}),
+            },
+            turn_id=str(event.get("execution_id") or ""),
         ))
 
     def _queue_outstanding_transactional_approvals(self) -> None:
@@ -1605,6 +1629,9 @@ class ManaChatApp(App):
         if self._unsubscribe_computer_permissions is not None:
             self._unsubscribe_computer_permissions()
             self._unsubscribe_computer_permissions = None
+        if self._unsubscribe_api_approval_events is not None:
+            self._unsubscribe_api_approval_events()
+            self._unsubscribe_api_approval_events = None
         if self.gateway is not None and hasattr(self.gateway, "close_session"):
             self.gateway.close_session(self._gateway_session_id)
 
