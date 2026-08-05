@@ -467,6 +467,7 @@
                     const payload = await response.json();
                     if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
                     const resultMessage = text(payload.result && payload.result.message);
+                    if (payload.assistant_message) applyMessage(state, payload.assistant_message);
                     state.permissionRequests.set(authorityId, {
                       ...request,
                       requestId: authorityId,

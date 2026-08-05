@@ -441,8 +441,7 @@ class ManaChatApp(App):
                     choice.request_id,
                     session_id=self._gateway_session_id or "",
                 )
-                self.notify(result["message"])
-                self.history.add(AssistantMessageEvent(content=result["message"]))
+                self._record_api_approval_completion(choice.request_id, result)
                 return
             if choice.remote:
                 if choice.decision is None:
@@ -479,6 +478,27 @@ class ManaChatApp(App):
                 else "Computer permission"
             )
             self.notify(f"{action_name} action failed: {exc}", severity="error")
+
+    def _record_api_approval_completion(
+        self,
+        approval_request_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Show the validated approved API outcome as the TUI's terminal assistant message."""
+        message = str(result.get("message") or "").strip()
+        if not message:
+            raise ValueError("API approval completed without a validated result message.")
+        status = str(result.get("status") or "")
+        self.history.add(AssistantMessageEvent(
+            content=message,
+            turn_id=approval_request_id,
+        ))
+        if status == "denied":
+            self.notify("API request denied. No API request was executed.", severity="warning")
+            self.update_status("API request denied")
+            return
+        self.notify("API request completed. Response added to chat.")
+        self.update_status("API request completed")
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
