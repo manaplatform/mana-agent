@@ -1475,6 +1475,64 @@ def test_server_route_decodes_closed_arguments_json() -> None:
     }
 
 
+def test_server_directory_listing_repairs_a_tool_contract_mismatch() -> None:
+    registry = EntryRouteRegistry()
+    registry.register(
+        RouteRegistration(
+            "server",
+            "enrolled server management",
+            lambda: RouteAvailability(available=True),
+        )
+    )
+    calls: list[dict[str, Any]] = []
+    invalid_decision = {
+        "decision_id": "directory-list-1",
+        "server_id": "mana-agent-server-1",
+        "action": "inspect",
+        "tool_name": "server_directory_list",
+        "arguments_json": json.dumps({"path": "/home/ubuntu"}),
+        "required_capability": "inspect",
+        "read_only": True,
+        "consequential": False,
+        "destructive": False,
+        "affected_resources": ["directory:/home/ubuntu"],
+        "safe_to_continue": True,
+        "reason": "List the requested directory.",
+    }
+    valid_decision = {
+        **invalid_decision,
+        "action": "file_read",
+        "required_capability": "filesystem.read",
+    }
+
+    class Model:
+        def invoke(self, messages: list[Any]) -> Any:
+            calls.append(json.loads(messages[-1].content))
+            decision = invalid_decision if len(calls) == 1 else valid_decision
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "server",
+                        "confidence": 0.98,
+                        "reason": "Use the enrolled server directory-list tool.",
+                        "required_sources": ["server"],
+                        "server_request": {"decision": decision},
+                    }
+                )
+            )
+
+    decision = EntryRouter(llm=Model(), registry=registry).route(
+        user_prompt="Connect to mana-agent-server-1 and list /home/ubuntu.",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["previous_invalid_decision"]["server_request"]["decision"] == invalid_decision
+    assert "tool_contracts" in calls[1]["correction"]
+    assert decision.server_request["decision"]["action"] == "file_read"
+    assert decision.server_request["decision"]["required_capability"] == "filesystem.read"
+
+
 def test_remote_routing_requires_direct_ssh_without_a_managed_worker() -> None:
     registry = EntryRouteRegistry()
     registry.register(

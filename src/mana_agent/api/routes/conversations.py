@@ -367,7 +367,26 @@ def decide_server_approval_in_chat(
         if result.get("status") == "succeeded"
         else "failed"
     )
-    get_execution_event_hub().emit(
+    completion_summary = str(result.get("message") or "").strip()
+    if not completion_summary:
+        raise ManaApiError(
+            409,
+            "Server action completed without a validated completion summary. "
+            "No fallback chat response was created.",
+        )
+    assistant_message = service.append_message(
+        conversation_id,
+        role="assistant",
+        content=completion_summary,
+        execution_id=approval_request_id,
+        metadata={
+            "approval_request_id": approval_request_id,
+            "server_approval": True,
+            "status": str(result.get("status") or ""),
+        },
+    )
+    hub = get_execution_event_hub()
+    hub.emit(
         "server.approval_decided",
         title=(
             "Server action approved"
@@ -383,7 +402,27 @@ def decide_server_approval_in_chat(
             "server_approval": True,
         },
     )
-    return {"ok": True, "decision": payload.decision, "result": result}
+    hub.emit(
+        "turn.finished",
+        title="Server action summary",
+        conversation_id=conversation_id,
+        execution_id=approval_request_id,
+        repository_id=service.repository_id,
+        message=completion_summary,
+        status=status,
+        metadata={
+            "message_id": assistant_message.message_id,
+            "content": completion_summary,
+            "approval_request_id": approval_request_id,
+            "server_approval": True,
+        },
+    )
+    return {
+        "ok": True,
+        "decision": payload.decision,
+        "result": result,
+        "assistant_message": assistant_message.to_dict(),
+    }
 
 
 @router.post(

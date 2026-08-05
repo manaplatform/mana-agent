@@ -305,6 +305,12 @@ Route semantics:
   The server catalog's login_user is the configured remote SSH user. For a path in that
   user's home directory, use a relative argv path with no cwd (for example
   ["mkdir", "-p", "mana-agent-test"]); do not copy a placeholder absolute home path.
+  A directory listing is performed by server_directory_list, which establishes its own authenticated
+  connection; wording such as "connect to SERVER and list DIRECTORY" does not require a separate
+  server_connect decision. Its exact contract is action=file_read,
+  required_capability=filesystem.read, read_only=true, consequential=false, destructive=false,
+  and arguments_json must be {"path":"/absolute/directory"}. Never use the inspect action or
+  inspect capability for a directory-list tool.
 - artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
   one. Return a complete typed media_request. Never route media generation to artifact, coding, or
@@ -433,6 +439,23 @@ Examples:
 """
 
 
+def _routing_correction(validation_error: str) -> str:
+    """Return model-only correction guidance for a bounded invalid-decision retry."""
+    if "browser source requires target_urls" in validation_error:
+        return (
+            "Return a new complete routing decision. Open-ended discovery must use "
+            'route="search" and required_sources=["search"]; browser requires target_urls.'
+        )
+    if "invalid server decision: Server decision does not match tool contract fields:" in validation_error:
+        return (
+            "Return a new complete server routing decision. Read the selected tool's exact "
+            "action, required_capability, read_only, consequential, and destructive values "
+            "from the live route availability tool_contracts and copy all five values exactly. "
+            "Do not retain any mismatched values from the previous invalid decision."
+        )
+    return ""
+
+
 class EntryRouter:
     """Obtain and validate the single entry decision for one gateway turn."""
 
@@ -521,16 +544,14 @@ class EntryRouter:
             except EntryRoutingError as validation_error:
                 # This is a bounded correction request, not a static reroute:
                 # the model must supply a new, fully validated decision.
-                if "browser source requires target_urls" not in str(validation_error):
+                correction = _routing_correction(str(validation_error))
+                if not correction:
                     raise
                 repair_payload = {
                     **payload,
                     "previous_invalid_decision": decision_payload,
                     "validation_error": str(validation_error),
-                    "correction": (
-                        "Return a new complete routing decision. Open-ended discovery must use "
-                        'route="search" and required_sources=["search"]; browser requires target_urls.'
-                    ),
+                    "correction": correction,
                 }
                 repair_messages = [
                     SystemMessage(content=ENTRY_ROUTER_PROMPT),

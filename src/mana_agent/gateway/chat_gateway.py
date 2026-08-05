@@ -3718,6 +3718,25 @@ class AgentChatGateway:
                             session_id=session_id,
                         )
                         recovered_task = True
+                    elif resume_decision.action == "replan_task":
+                        recovery_decision = RecoveryDecision(
+                            decision_id=resume_decision.decision_id,
+                            task_id=resume_decision.task_id,
+                            action=RecoveryAction.REPLAN,
+                            retry_category=RetryCategory.REPLAN,
+                            reason=resume_decision.reason,
+                            selected_model=(
+                                f"{execution_decision.provider}/"
+                                f"{execution_decision.selected_model}"
+                            ),
+                            safe_to_continue=resume_decision.safe_to_continue,
+                        )
+                        reservation = self._lane_coordinator.replan_task(
+                            resume_decision.task_id,
+                            decision=recovery_decision,
+                            session_id=session_id,
+                        )
+                        recovered_task = True
                     else:
                         previous_execution_id = (
                             str(recovery_candidates[0]["task_id"])
@@ -4913,17 +4932,25 @@ class AgentChatGateway:
             LaneTaskState.REJECTED,
             LaneTaskState.COMPLETED,
         }
-        for execution in reversed(self._lane_coordinator.executions):
+        executions = {item.task_id: item for item in self._lane_coordinator.executions}
+        durable_tasks = sorted(
+            supervisor.store.list_tasks(),
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
+        for task in durable_tasks:
+            execution = executions.get(task.task_id)
+            selected_lane = (
+                execution.owning_lane
+                if execution is not None
+                else str(task.assigned_agent).removeprefix("lane:")
+            )
             if (
-                (lane_id is not None and execution.owning_lane != lane_id)
-                or execution.state not in candidate_states
-                or execution.session_id != session_id
-                or execution.workspace_id != workspace_id
-                or execution.repository_id != repository_id
+                (lane_id is not None and selected_lane != lane_id and selected_lane != lane_id.value)
+                or task.state.value not in {item.value for item in candidate_states}
+                or task.workspace_id != workspace_id
+                or task.repository_id != repository_id
             ):
-                continue
-            task = supervisor.store.get_task_or_none(execution.task_id)
-            if task is None:
                 continue
             checkpoint = None
             checkpoint_error = ""
@@ -4937,13 +4964,13 @@ class AgentChatGateway:
                 "checkpoint_id": checkpoint.checkpoint_id if checkpoint else "",
                 "checkpoint_available": checkpoint is not None,
                 "checkpoint_error": checkpoint_error,
-                "normalized_intent": redact_text(execution.normalized_intent),
-                "lane": execution.owning_lane.value,
-                "session_id": execution.session_id,
-                "workspace_id": execution.workspace_id,
-                "repository_id": execution.repository_id,
-                "state": execution.state.value,
-                "updated_at": execution.updated_at,
+                "normalized_intent": redact_text(task.normalized_intent),
+                "lane": selected_lane.value if isinstance(selected_lane, LaneId) else selected_lane,
+                "session_id": task.session_id,
+                "workspace_id": task.workspace_id,
+                "repository_id": task.repository_id,
+                "state": task.state.value,
+                "updated_at": task.updated_at.isoformat(),
                 "failure_reason": redact_text(task.failure_reason),
                 "side_effect_classification": task.side_effect_classification.value,
                 "irreversible_side_effect_started": task.irreversible_side_effect_started,
@@ -4952,6 +4979,25 @@ class AgentChatGateway:
                 "resume_payload_fields": sorted(checkpoint.resume_payload) if checkpoint else [],
                 "generated_files": list(checkpoint.generated_files) if checkpoint else [],
                 "verification_status": task.verification_status.value,
+                "completion_contract": [
+                    item.model_dump(mode="json") for item in task.completion_contract
+                ],
+                "target_resources": list(task.target_resources),
+                "important_constraints": list(task.important_constraints),
+                "field_provenance": dict(task.field_provenance),
+                "retry_budget_remaining": {
+                    category.value: task.retry_budget.remaining(category, task.retry_usage)
+                    for category in RetryCategory
+                },
+                "action_states": [
+                    {
+                        "action_id": action.action_id,
+                        "tool_name": action.tool_name,
+                        "classification": action.classification.value,
+                        "request_state": action.request_state.value,
+                    }
+                    for action in supervisor.store.actions_for_task(task.task_id)
+                ],
             }
             candidates.append(candidate)
             if len(candidates) >= 20:

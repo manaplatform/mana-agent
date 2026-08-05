@@ -260,7 +260,7 @@ class ExecutionEvent(StrictModel):
 
 
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=6, ge=1)
+    schema_version: int = Field(default=7, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
@@ -335,6 +335,11 @@ class TaskRecord(StrictModel):
     target_resources: list[str] = Field(default_factory=list)
     expected_output: str = ""
     important_constraints: list[str] = Field(default_factory=list)
+    # Values that cannot exist until a provider call or verifier runs must stay
+    # visibly unknown.  This avoids treating an empty string/list as evidence
+    # that a value was deliberately selected or observed.
+    field_provenance: dict[str, str] = Field(default_factory=dict)
+    supervision_contract_decision_id: str = ""
     supersedes_execution_id: str = ""
     derived_from_execution_id: str = ""
     previous_execution_id: str = ""

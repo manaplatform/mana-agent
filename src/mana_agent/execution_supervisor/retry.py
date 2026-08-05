@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Iterable
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import RetrySafetyError
 from mana_agent.execution_supervisor.models import (
+    ActionRequestState,
+    ActionRecord,
     RecoveryAction,
     RecoveryDecision,
     RetryCategory,
@@ -29,7 +32,13 @@ class RetryPolicy:
     def __init__(self, config: ExecutionSupervisorConfig) -> None:
         self.config = config
 
-    def validate(self, task: TaskRecord, decision: RecoveryDecision) -> None:
+    def validate(
+        self,
+        task: TaskRecord,
+        decision: RecoveryDecision,
+        *,
+        actions: Iterable[ActionRecord] = (),
+    ) -> None:
         if decision.task_id != task.task_id:
             raise RetrySafetyError("recovery decision task does not match the execution task")
         if not decision.safe_to_continue:
@@ -55,6 +64,19 @@ class RetryPolicy:
                 "reassignment requires an explicitly selected agent, worker, or model"
             )
         classification = task.side_effect_classification
+        ambiguous_actions = [
+            action.action_id
+            for action in actions
+            if action.request_state in {
+                ActionRequestState.STARTED,
+                ActionRequestState.OUTCOME_UNKNOWN,
+            }
+        ]
+        if ambiguous_actions:
+            raise RetrySafetyError(
+                "consequential action outcome is ambiguous; reconcile durable action receipts "
+                "before retrying: " + ", ".join(ambiguous_actions)
+            )
         if classification in {
             SideEffectClassification.NON_IDEMPOTENT,
             SideEffectClassification.UNKNOWN,

@@ -678,6 +678,11 @@ class LaneCoordinator:
         relation_type: str = "independent",
         previous_task_id: str = "",
         user_message_id: str = "",
+        supervision_contract_decision_id: str = "",
+        side_effect_classification: SideEffectClassification | None = None,
+        completion_contract: Sequence[CompletionContract] = (),
+        compensation_strategy: str = "",
+        important_constraints: Sequence[str] = (),
     ) -> LaneReservation:
         if not self.execution_supervisor.config.enabled:
             raise LaneCoordinatorError(
@@ -691,10 +696,9 @@ class LaneCoordinator:
         files = self.canonical_paths(target_files)
         fingerprint = _stable_hash({
             "intent": " ".join(normalized_intent.lower().split()), "repository_id": repository_id,
-            "workspace_id": workspace_id, "session_id": session_id, "target_files": files,
+            "workspace_id": workspace_id, "target_files": files,
             "lane": lane_id.value, "parent_task_id": parent_task_id,
-            "trigger_turn_id": trigger_turn_id, "relation_type": relation_type,
-            "user_message_id": user_message_id,
+            "relation_type": relation_type,
         })
         # ``lane_id`` is itself a validated structured routing decision. Older
         # callers did not persist a separate decision ID, so derive a stable
@@ -718,12 +722,10 @@ class LaneCoordinator:
                     for active in self._executions.values():
                         active_fingerprint = _stable_hash({
                             "intent": " ".join(active.normalized_intent.lower().split()), "repository_id": active.repository_id,
-                            "workspace_id": active.workspace_id, "session_id": active.session_id,
+                            "workspace_id": active.workspace_id,
                             "target_files": active.target_files, "lane": active.owning_lane.value,
                             "parent_task_id": active.parent_task_id,
-                            "trigger_turn_id": active.trigger_turn_id,
                             "relation_type": active.relation_type,
-                            "user_message_id": active.user_message_id,
                         })
                         explicit_identity_matches = (
                             not taskboard_task_id
@@ -809,13 +811,23 @@ class LaneCoordinator:
                     previous_task_id=previous_task_id,
                 )
             task_id = task.task_id
-            side_effect = (
+            side_effect = side_effect_classification or (
                 SideEffectClassification.READ_ONLY
                 if lane_id in {LaneId.RESEARCH, LaneId.REVIEW, LaneId.VERIFY}
                 and not contract.requires_write_access
                 and set(capabilities).issubset({"repository_read"})
                 else SideEffectClassification.UNKNOWN
             )
+            initial_contract = list(completion_contract) or [
+                CompletionContract(
+                    contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                    metadata={
+                        "required_keys": ["lane_state", "verification_evidence_present"],
+                        "expected_values": {"lane_state": "completed"},
+                    },
+                )
+            ]
+            contract_decision_id = supervision_contract_decision_id or effective_routing_decision_id
             self.execution_supervisor.create_task(
                 task_id=task_id,
                 parent_task_id=parent_task_id,
@@ -826,6 +838,8 @@ class LaneCoordinator:
                 workspace_path=self.root,
                 routing_decision_id=effective_routing_decision_id,
                 side_effect_classification=side_effect,
+                completion_contract=initial_contract,
+                compensation_strategy=compensation_strategy,
                 dependency_task_ids=task.depends_on,
                 token_budget=budget.reserved_tokens or None,
                 estimated_cost=(budget.estimated_cost if budget.estimated_cost_known else None),
@@ -842,6 +856,16 @@ class LaneCoordinator:
                 requested_operation=lane_id.value,
                 target_resources=files,
                 expected_output=task_type,
+                important_constraints=important_constraints,
+                field_provenance={
+                    "side_effect_classification": "model_selected_lane_contract",
+                    "completion_contract": "model_selected_lane_contract",
+                    "target_resources": "model_selected" if files else "not_applicable_or_not_selected",
+                    "important_constraints": (
+                        "model_selected" if important_constraints else "not_applicable_or_not_selected"
+                    ),
+                },
+                supervision_contract_decision_id=contract_decision_id,
                 supersedes_execution_id=supersedes_execution_id,
                 derived_from_execution_id=derived_from_execution_id,
                 previous_execution_id=previous_execution_id,
@@ -1527,6 +1551,33 @@ class LaneCoordinator:
             decision=decision,
             session_id=session_id,
             event_type="lane.task_retried",
+            checkpoint_id="",
+        )
+
+    def replan_task(
+        self,
+        task_id: str,
+        *,
+        decision: RecoveryDecision,
+        session_id: str,
+    ) -> LaneReservation:
+        """Requeue the same stopped task after a model-selected plan revision."""
+        if decision.action is not RecoveryAction.REPLAN:
+            raise LaneCoordinatorError("same-task replan requires an explicit replan decision")
+        execution = self.inspect_task(task_id)
+        if execution.state not in {
+            LaneTaskState.FAILED,
+            LaneTaskState.INTERRUPTED,
+            LaneTaskState.TIMED_OUT,
+            LaneTaskState.BUDGET_EXHAUSTED,
+            LaneTaskState.REJECTED,
+        }:
+            raise LaneCoordinatorError("model-selected task is not in a replannable stopped state")
+        return self._retry_existing_task(
+            execution,
+            decision=decision,
+            session_id=session_id,
+            event_type="lane.task_replanned",
             checkpoint_id="",
         )
 

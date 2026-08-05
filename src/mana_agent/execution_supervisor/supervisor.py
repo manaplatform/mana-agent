@@ -185,6 +185,8 @@ class ExecutionSupervisor:
         target_resources: Iterable[str] = (),
         expected_output: str = "",
         important_constraints: Iterable[str] = (),
+        field_provenance: dict[str, str] | None = None,
+        supervision_contract_decision_id: str = "",
         supersedes_execution_id: str = "",
         derived_from_execution_id: str = "",
         previous_execution_id: str = "",
@@ -202,6 +204,26 @@ class ExecutionSupervisor:
         dependencies = list(dependency_task_ids)
         targets = list(target_resources)
         constraints = list(important_constraints)
+        provenance = dict(field_provenance or {})
+        provenance.setdefault("side_effect_classification", "model_selected")
+        provenance.setdefault(
+            "completion_contract",
+            "model_selected" if contracts else "pending_runtime_evidence",
+        )
+        provenance.setdefault(
+            "target_resources",
+            "model_selected" if targets else "not_applicable_or_not_selected",
+        )
+        provenance.setdefault(
+            "important_constraints",
+            "model_selected" if constraints else "not_applicable_or_not_selected",
+        )
+        provenance.setdefault(
+            "estimated_cost",
+            "provider_estimate" if estimated_cost is not None else "unknown_provider_pricing",
+        )
+        provenance.setdefault("actual_cost", "pending_runtime_accounting")
+        provenance.setdefault("completion_artefacts", "pending_completion_verification")
         idempotency_hash = (
             _token_hash(f"idempotency:{idempotency_key}") if idempotency_key else ""
         )
@@ -227,6 +249,8 @@ class ExecutionSupervisor:
                 or existing.target_resources != targets
                 or existing.expected_output != expected_output
                 or existing.important_constraints != constraints
+                or existing.field_provenance != provenance
+                or existing.supervision_contract_decision_id != supervision_contract_decision_id
                 or existing.supersedes_execution_id != supersedes_execution_id
                 or existing.derived_from_execution_id != derived_from_execution_id
                 or existing.previous_execution_id != previous_execution_id
@@ -347,6 +371,10 @@ class ExecutionSupervisor:
             target_resources=targets,
             expected_output=expected_output,
             important_constraints=constraints,
+            field_provenance=provenance,
+            supervision_contract_decision_id=(
+                supervision_contract_decision_id or routing_decision_id
+            ),
             supersedes_execution_id=supersedes_execution_id,
             derived_from_execution_id=derived_from_execution_id,
             previous_execution_id=previous_execution_id,
@@ -1472,7 +1500,11 @@ class ExecutionSupervisor:
 
     def retry(self, task_id: str, decision: RecoveryDecision) -> TaskRecord:
         task = self.store.get_task(task_id)
-        self.retry_policy.validate(task, decision)
+        self.retry_policy.validate(
+            task,
+            decision,
+            actions=self.store.actions_for_task(task_id),
+        )
         checkpoint = None
         if decision.action == RecoveryAction.RESUME_CHECKPOINT:
             checkpoint = self.store.get_checkpoint(decision.resume_checkpoint_id or task.checkpoint_id)

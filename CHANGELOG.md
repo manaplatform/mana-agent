@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-05
 
+- Fixed enrolled-server directory-list routing so the router explicitly models
+  that `server_directory_list` establishes its own connection and must use the
+  `file_read` / `filesystem.read` contract. A bounded model-only correction now
+  retries an otherwise complete server decision that mismatches its selected
+  tool contract; the corrected response must still pass the same strict
+  validation before any tool can execute.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`.
+
+- Fixed dashboard server-action approvals so the validated completion summary is
+  persisted as an assistant message and emitted as a terminal chat event after
+  the action finishes. A missing summary now fails explicitly instead of
+  inventing a fallback response.
+  - User verification required: `venv/bin/python -m pytest tests/test_api_conversations.py -q`.
+
 - Corrected gateway follow-up handling so stopped tasks are classified before conversation execution, validated retry and checkpoint recovery retain an explicit successful error value, and completed tasks do not block a fresh Gmail turn.
   - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`.
 
