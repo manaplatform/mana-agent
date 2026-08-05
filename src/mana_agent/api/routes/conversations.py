@@ -458,7 +458,33 @@ def decide_api_approval_in_chat(
         if isinstance(result, dict)
         else 0
     )
-    get_execution_event_hub().emit(
+    status = (
+        "cancelled"
+        if payload.decision != "approve"
+        else "failed"
+        if status_code >= 400
+        else "success"
+    )
+    completion_summary = str(result.get("message") or "").strip()
+    if not completion_summary:
+        raise ManaApiError(
+            409,
+            "API approval completed without validated execution evidence. "
+            "No fallback chat response was created.",
+        )
+    assistant_message = service.append_message(
+        conversation_id,
+        role="assistant",
+        content=completion_summary,
+        execution_id=approval_request_id,
+        metadata={
+            "approval_request_id": approval_request_id,
+            "api_approval": True,
+            "status": str(result.get("status") or ""),
+        },
+    )
+    hub = get_execution_event_hub()
+    hub.emit(
         "api.approval_decided",
         title=(
             "API request approved"
@@ -467,20 +493,34 @@ def decide_api_approval_in_chat(
         ),
         conversation_id=conversation_id,
         repository_id=service.repository_id,
-        status=(
-            "cancelled"
-            if payload.decision != "approve"
-            else "failed"
-            if status_code >= 400
-            else "success"
-        ),
+        status=status,
         metadata={
             "permission_request_id": approval_request_id,
             "decision": payload.decision,
             "api_approval": True,
         },
     )
-    return {"ok": True, "decision": payload.decision, "result": result}
+    hub.emit(
+        "turn.finished",
+        title="API approval summary",
+        conversation_id=conversation_id,
+        execution_id=approval_request_id,
+        repository_id=service.repository_id,
+        message=completion_summary,
+        status=status,
+        metadata={
+            "message_id": assistant_message.message_id,
+            "content": completion_summary,
+            "approval_request_id": approval_request_id,
+            "api_approval": True,
+        },
+    )
+    return {
+        "ok": True,
+        "decision": payload.decision,
+        "result": result,
+        "assistant_message": assistant_message.to_dict(),
+    }
 
 
 @router.post(

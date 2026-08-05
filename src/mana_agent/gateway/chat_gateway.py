@@ -1775,15 +1775,52 @@ class AgentChatGateway:
             if isinstance(result, dict)
             else 0
         )
+        execution = dict(result.get("result") or {}) if isinstance(result, dict) else {}
         return {
             "status": "completed",
             "approval_request_id": approval_request_id,
             "result": result,
-            "message": (
-                "Approved API request executed through the controlled API runtime"
-                + (f" with HTTP status {status_code}." if status_code else ".")
-            ),
+            "message": self._api_approval_completion_message(execution, status_code),
         }
+
+    @staticmethod
+    def _api_approval_completion_message(
+        execution: dict[str, Any],
+        status_code: int,
+    ) -> str:
+        """Render bounded redacted evidence after the exact approved request finishes."""
+        evidence = {
+            key: execution.get(key)
+            for key in (
+                "method",
+                "redacted_url",
+                "status_code",
+                "content_type",
+                "body_kind",
+                "json_body",
+                "file_reference",
+                "latency_ms",
+            )
+            if execution.get(key) not in (None, "")
+        }
+        text_body = execution.get("text_body")
+        if text_body:
+            evidence["text_body"] = str(text_body)[:4000]
+        encoded = json.dumps(
+            redact_secrets(evidence),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        if len(encoded) > 16_000:
+            encoded = encoded[:16_000] + "\n[Execution evidence truncated]"
+        return (
+            "Approved API request executed through the controlled API runtime"
+            + (f" with HTTP status {status_code}." if status_code else ".")
+            + "\n\nValidated API execution evidence:\n"
+            + encoded
+        )
 
     def transactional_action_approval_command(
         self,

@@ -222,6 +222,7 @@ def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
 
     assert response.status_code == 200
     assert response.json()["result"]["result"]["result"]["executed"] is True
+    assert response.json()["assistant_message"]["content"] == "Approved API request executed."
     assert calls[0]["conversation_id"] == conversation_id
     assert calls[0]["approval_request_id"] == "api_approval_1"
     assert calls[0]["approve"] is True

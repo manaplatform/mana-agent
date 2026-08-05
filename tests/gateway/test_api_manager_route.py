@@ -283,6 +283,26 @@ def test_api_route_stops_at_preview_when_network_approval_is_required(tmp_path: 
     assert observed_events[0][2]["permission_request_id"] == "api_approval_http_1"
 
 
+def test_api_approval_completion_includes_validated_response_evidence() -> None:
+    message = AgentChatGateway._api_approval_completion_message(
+        {
+            "method": "GET",
+            "redacted_url": "http://api.example.test/5.216.25.186?access_key=[REDACTED]",
+            "status_code": 200,
+            "content_type": "application/json",
+            "body_kind": "json",
+            "json_body": {"city": "Tehran", "country_name": "Iran"},
+            "latency_ms": 42.5,
+        },
+        200,
+    )
+
+    assert "HTTP status 200" in message
+    assert "Validated API execution evidence" in message
+    assert '"city": "Tehran"' in message
+    assert "[REDACTED]" in message
+
+
 def test_api_route_does_not_complete_without_required_execution_evidence(
     tmp_path: Path,
 ) -> None:
