@@ -2322,6 +2322,8 @@ class AskAgent:
                     model=self.model,
                     turn_id=str(run_id or flow_id or ""),
                     step_id=str(step_idx),
+                    expected_output_tokens=model_max_tokens,
+                    historical_prediction_enabled=model_max_tokens is None,
                 )
             try:
                 invoke_kwargs: dict[str, Any] = {"config": cfg}

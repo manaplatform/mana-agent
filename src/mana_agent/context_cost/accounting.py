@@ -33,6 +33,7 @@ class TokenEstimationRequest:
     expected_tool_steps: int = 0
     expected_model_calls: int = 1
     requested_output_tokens: int | None = None
+    historical_prediction_enabled: bool = True
     execution_kind: str = "model_call"
     tool_count: int = 0
     task_token_remaining: int | None = None
@@ -139,7 +140,7 @@ class ModelTokenAccountingService:
             assumptions.append("output allowance uses configured estimation policy")
         output = max(1, int(requested_output)) * calls
         key = self._prediction_key(request)
-        if self.historical_prediction_enabled:
+        if self.historical_prediction_enabled and request.historical_prediction_enabled:
             historical_input, historical_output, sample_count = self.predictor.predict(key)
             if historical_input is not None:
                 base_input = max(base_input, historical_input)

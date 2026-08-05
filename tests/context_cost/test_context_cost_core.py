@@ -151,6 +151,32 @@ def test_enforce_mode_blocks_before_provider_and_protects_required_segments(tmp_
     assert any(segment.source_id == "current-user" for segment in raised.value.decision.segments)
 
 
+def test_observe_mode_records_task_budget_overrun_without_blocking() -> None:
+    governor = ContextCostGovernor(
+        session_id="observe-session",
+        settings=settings(
+            mana_context_governor_mode="observe",
+            mana_routing_task_token_budget=100,
+        ),
+    )
+    register_priced_test_model(
+        governor,
+        context_window=10_000,
+        max_output_tokens=1_000,
+    )
+
+    _, decision = governor.before_model_call(
+        [ContextSegment("user", "short request", 3, protected=True, source_id="user")],
+        model="test",
+        expected_output_tokens=100,
+    )
+
+    assert decision.allowed is True
+    assert decision.action == "observe"
+    assert decision.reason == "context_hard_limit"
+    assert governor.observability_snapshot()["calls_blocked_token"] == 0
+
+
 def test_history_selection_is_token_aware_and_chronological() -> None:
     governor = ContextCostGovernor(session_id="s", settings=settings(mana_context_history_max_tokens=20))
     messages = [{"role": "user", "content": str(index) * 20} for index in range(10)]

@@ -271,6 +271,7 @@ class ContextCostGovernor:
         expected_tool_steps: int = 0,
         expected_model_calls: int = 1,
         requested_output_tokens: int | None = None,
+        historical_prediction_enabled: bool = True,
         execution_kind: str = "model_call",
         tool_count: int = 0,
         lane_policy_limit: int | None = None,
@@ -284,6 +285,7 @@ class ContextCostGovernor:
             expected_tool_steps=expected_tool_steps,
             expected_model_calls=expected_model_calls,
             requested_output_tokens=requested_output_tokens,
+            historical_prediction_enabled=historical_prediction_enabled,
             execution_kind=execution_kind,
             tool_count=tool_count,
             task_token_remaining=self._implementation_tokens_remaining(),
@@ -345,6 +347,7 @@ class ContextCostGovernor:
         profile: Any | None = None,
         context_window: int | None = None,
         expected_output_tokens: int | None = None,
+        historical_prediction_enabled: bool | None = None,
         turn_id: str = "",
         task_id: str = "",
         agent_id: str = "main",
@@ -388,6 +391,11 @@ class ContextCostGovernor:
                 route=str(identity.get("route") or ""),
                 lane=str(identity.get("lane") or ""),
                 requested_output_tokens=expected_output_tokens,
+                historical_prediction_enabled=(
+                    expected_output_tokens is None
+                    if historical_prediction_enabled is None
+                    else bool(historical_prediction_enabled)
+                ),
                 execution_kind=str(identity.get("execution_kind") or agent_id or "model_call"),
                 task_token_remaining=self._implementation_tokens_remaining(),
                 session_token_remaining=self.ledger.remaining_tokens,
@@ -416,6 +424,28 @@ class ContextCostGovernor:
                     None,
                 )
                 if removable_index is None:
+                    # Non-enforcing modes record a task/session-budget overrun
+                    # but must never turn that forecast into a provider-call
+                    # denial. Re-estimate without those policy limits; a real
+                    # model context or output-capacity violation still raises.
+                    if self.mode is not GovernorMode.ENFORCE:
+                        observation_request = replace(
+                            estimation_request(compacted),
+                            task_token_remaining=None,
+                            session_token_remaining=None,
+                        )
+                        try:
+                            accounting_reservation = self.accounting.reserve(
+                                observation_request,
+                                operation_id=call_id,
+                                task_id=task_id,
+                                session_id=self.session_id,
+                                run_id=turn_id,
+                                attempt_id=str(identity.get("attempt_id") or ""),
+                            )
+                            break
+                        except ModelContextLimitError:
+                            pass
                     resolved = self.profile_resolver.resolve(
                         ModelIdentity(resolved_provider, model)
                     )

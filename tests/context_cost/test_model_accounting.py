@@ -187,3 +187,25 @@ def test_historical_prediction_uses_matching_reconciled_runs(tmp_path: Path) -> 
     predicted = accounting.estimate(request("history"))
     assert predicted.input_tokens >= 600
     assert any("historical p80" in item for item in predicted.assumptions)
+
+
+def test_explicit_output_limit_disables_historical_prediction(tmp_path: Path) -> None:
+    accounting = service(tmp_path, profile("bounded", context=16_384, output=4_096))
+    first = accounting.reserve(request(
+        "bounded",
+        requested_output_tokens=64,
+    ), operation_id="bounded-history-1")
+    accounting.reconcile(first, usage={
+        "input_tokens": 100,
+        "output_tokens": 1_024,
+        "total_tokens": 1_124,
+    })
+
+    bounded = accounting.estimate(request(
+        "bounded",
+        requested_output_tokens=384,
+        historical_prediction_enabled=False,
+    ))
+
+    assert bounded.output_tokens == 384
+    assert not any("historical p80" in item for item in bounded.assumptions)

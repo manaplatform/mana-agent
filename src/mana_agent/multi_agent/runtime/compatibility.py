@@ -351,6 +351,10 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 protected=True,
                 source_id=f"schema:{index}",
             ))
+        has_explicit_output_limit = any(
+            kwargs.get(name) is not None
+            for name in ("max_output_tokens", "max_completion_tokens", "max_tokens")
+        )
         call_id, _decision = governor.before_model_call(
             segments,
             model=self.model_name,
@@ -358,9 +362,10 @@ class CompatibleChatOpenAI(ChatOpenAI):
             step_id="compatibility-retry" if self.compatibility_retry_attempted else "",
             expected_output_tokens=(
                 int(kwargs.get("max_output_tokens") or kwargs.get("max_completion_tokens") or kwargs.get("max_tokens"))
-                if any(kwargs.get(name) is not None for name in ("max_output_tokens", "max_completion_tokens", "max_tokens"))
+                if has_explicit_output_limit
                 else None
             ),
+            historical_prediction_enabled=not has_explicit_output_limit,
         )
         return call_id
 

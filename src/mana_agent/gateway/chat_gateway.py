@@ -6798,7 +6798,7 @@ class AgentChatGateway:
                     "allowed_tools": allowed_tools,
                     "capability_discovery_required": True,
                     "initial_tools": ["api_workflow_decide"],
-                    "model_max_tokens": 512,
+                    "model_max_tokens": 384,
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },
