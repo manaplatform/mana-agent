@@ -49,7 +49,10 @@ def build_browser_langchain_tools() -> list[Any]:
     manager = default_browser_manager()
     def open_page(**kw): return _result(lambda: manager.open(**_Open.model_validate(kw).model_dump()))
     def inspect(**kw): return _result(lambda: manager.inspect(**_Inspect.model_validate(kw).model_dump()))
-    def action(name, kw): return _result(lambda: manager.act(action=name, **_Act.model_validate(kw).model_dump()))
+    def action(name, kw):
+        payload = _Act.model_validate(kw).model_dump()
+        payload.pop("reason")
+        return _result(lambda: manager.act(action=name, **payload))
     def screenshot(**kw): return _result(lambda: manager.screenshot(**_Screenshot.model_validate(kw).model_dump()))
     def upload(**kw): return _result(lambda: manager.upload(**_Upload.model_validate(kw).model_dump()))
     def tabs(**kw): return _result(lambda: manager.tabs(**_Session.model_validate(kw).model_dump()))

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+import mana_agent.connectors.browser.runtime_tools as browser_runtime_tools
 from mana_agent.connectors.browser.approval import BrowserApprovalBinding, issue_approval
 from mana_agent.connectors.browser.contracts import browser_tool_contracts
 from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
@@ -98,6 +100,35 @@ def test_read_only_browser_action_is_classified_from_the_model_decision() -> Non
 def test_browser_action_requires_an_explicit_model_decision() -> None:
     with pytest.raises(ValueError, match="explicit BrowserActionDecision"):
         action_metadata("browser_click", {"session_id": "docs-session"}, None)
+
+
+def test_browser_action_reason_is_not_forwarded_to_the_session_manager(monkeypatch) -> None:  # noqa: ANN001
+    observed: dict[str, object] = {}
+
+    class _Manager:
+        def act(self, *, action: str, **kwargs: object) -> dict[str, object]:
+            observed.update({"action": action, **kwargs})
+            return {"ok": True}
+
+    monkeypatch.setattr(browser_runtime_tools, "default_browser_manager", lambda: _Manager())
+    tool = {
+        item.name: item
+        for item in browser_runtime_tools.build_browser_langchain_tools()
+    }["browser_click"]
+
+    result = tool.invoke(
+        {
+            "session_id": "docs-session",
+            "target": "e2-25",
+            "observed_page_version": 2,
+            "risk": "read_only",
+            "reason": "Expand the documented operation.",
+        }
+    )
+
+    assert json.loads(result) == {"ok": True}
+    assert observed["action"] == "click"
+    assert "reason" not in observed
 
 
 def test_playwright_status_is_structured_when_optional_dependency_missing(monkeypatch) -> None:  # noqa: ANN001

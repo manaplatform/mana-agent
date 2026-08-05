@@ -27,6 +27,9 @@ All notable repository changes should be recorded here.
   stop condition before a selected API capability can be used.
   Browser documentation actions now require an explicit, validated model read-only decision before
   the shared transactional gate permits a click; non-read-only browser actions remain fail-closed.
+  Browser-action decision reasons are retained for validation but are no longer forwarded to the
+  browser session runtime, which does not accept that audit-only field.
+  The browser runtime coverage now imports its JSON assertion helper.
   API documentation imports and integration updates now use a durable API-integration action
   adapter and narrow policy rule; deletion still requires an exact approval.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_ask_agent.py -q`.
