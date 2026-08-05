@@ -2775,6 +2775,11 @@ class AskAgent:
                             evidence_memory.invalidate_many(set(changed_paths))
                         mutation_succeeded = True
                 if capability_registry is not None:
+                    if name == "capability_load" and isinstance(args, dict):
+                        for loaded_name in args.get("names", ()):
+                            capability_registry.mark_used(
+                                str(loaded_name), step_idx
+                            )
                     capability_registry.mark_used(name, step_idx)
                 append_tool_message(name, content, str(call.get("id", "")), step_idx)
 

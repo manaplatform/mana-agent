@@ -19,6 +19,8 @@ All notable repository changes should be recorded here.
   a small bounded decision from being inflated by unrelated earlier responses.
   Non-enforcing governor modes now record task or session budget overruns without blocking provider
   calls; true model context-window and output-capacity limits remain enforced.
+  Capabilities loaded late in a tool loop now receive the current step timestamp, preventing the
+  idle-capability reaper from unloading them before their first requested use.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now

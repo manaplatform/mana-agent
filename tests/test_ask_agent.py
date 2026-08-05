@@ -337,6 +337,51 @@ def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Pa
     assert any("email_search" in names for names in llm.bound_tool_names[2:])
 
 
+def test_ask_agent_keeps_a_late_loaded_capability_for_the_next_step(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    agent.context_cost_governor.enabled = True
+    agent.context_cost_governor.mode = GovernorMode.OBSERVE
+    _register_tool(agent, "email_search", lambda: {"ok": True, "result": "inbox"})
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{
+                "id": "discover-1", "name": "capability_search", "args": {"query": "email"},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "discover-2", "name": "capability_search", "args": {"query": "capability"},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "discover-3", "name": "capability_search", "args": {"query": "search tool"},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "load-email", "name": "capability_load", "args": {"names": ["email_search"]},
+            }]),
+            _FakeAIMessage("", tool_calls=[{
+                "id": "email", "name": "email_search", "args": {},
+            }]),
+            _FakeAIMessage("Inbox checked."),
+        ]
+    )
+    agent.llm = llm  # type: ignore[assignment]
+
+    result = agent.run(
+        "Check my latest email.",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=6,
+        timeout_seconds=2,
+        tool_policy={
+            "allowed_tools": ["email_search"],
+            "capability_discovery_required": True,
+            "require_initial_tool_call": True,
+        },
+        run_id="late-capability-turn",
+    )
+
+    assert result.answer == "Inbox checked."
+    assert any(trace.tool_name == "email_search" and trace.status == "ok" for trace in result.trace)
+
+
 def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.context_cost_governor.enabled = True
