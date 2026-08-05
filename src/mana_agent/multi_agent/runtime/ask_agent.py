@@ -1964,6 +1964,19 @@ class AskAgent:
             self._resolved_indexes = [self._resolved_index]
 
         policy = dict(tool_policy or {})
+        requested_model_max_tokens = policy.get("model_max_tokens")
+        try:
+            model_max_tokens = (
+                int(requested_model_max_tokens)
+                if requested_model_max_tokens is not None
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Tool policy model_max_tokens must be a positive integer."
+            ) from exc
+        if model_max_tokens is not None and model_max_tokens < 1:
+            raise RuntimeError("Tool policy model_max_tokens must be a positive integer.")
         external_search_result = self._prepare_external_search_context(
             question=question,
             system_prompt=system_prompt,
@@ -2311,7 +2324,10 @@ class AskAgent:
                     step_id=str(step_idx),
                 )
             try:
-                ai_msg = use_bound.invoke(messages, config=cfg)
+                invoke_kwargs: dict[str, Any] = {"config": cfg}
+                if model_max_tokens is not None:
+                    invoke_kwargs["max_tokens"] = model_max_tokens
+                ai_msg = use_bound.invoke(messages, **invoke_kwargs)
             except BaseException as exc:
                 if governor.enabled and model_call_id:
                     governor.release_reservation(

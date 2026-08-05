@@ -13,6 +13,8 @@ All notable repository changes should be recorded here.
   API Manager execution now loads only its workflow-decision capability initially, then requires
   the model to load each subsequent authorized API or browser capability; this applies in observe
   mode as well, preventing the complete API schema surface from exhausting context before a call.
+  API workflow model calls now use a bounded 512-token response allowance so prior workflow
+  evidence can remain in context for the next selected capability without exceeding the task budget.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now

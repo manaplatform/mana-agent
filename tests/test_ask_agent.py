@@ -84,6 +84,7 @@ class _CapabilityBindingLLM:
     def __init__(self, responses: list[_FakeAIMessage]) -> None:
         self._responses = list(responses)
         self.bound_tool_names: list[set[str]] = []
+        self.invocation_kwargs: list[dict[str, object]] = []
 
     def bind_tools(
         self, tools: list[object], tool_choice: str | None = None
@@ -93,9 +94,10 @@ class _CapabilityBindingLLM:
         return self
 
     def invoke(
-        self, _messages: list[object], config: object | None = None
+        self, _messages: list[object], config: object | None = None, **kwargs: object
     ) -> _FakeAIMessage:
         del config
+        self.invocation_kwargs.append(kwargs)
         return self._responses.pop(0)
 
 
@@ -367,6 +369,7 @@ def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: P
             "allowed_tools": ["api_workflow_decide"],
             "capability_discovery_required": True,
             "initial_tools": ["api_workflow_decide"],
+            "model_max_tokens": 512,
             "require_initial_tool_call": True,
         },
         run_id="api-capability-turn",
@@ -374,6 +377,7 @@ def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: P
 
     assert result.answer == "Workflow decision recorded."
     assert "api_workflow_decide" in llm.bound_tool_names[0]
+    assert llm.invocation_kwargs == [{"max_tokens": 512}, {"max_tokens": 512}]
 
 
 def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:
