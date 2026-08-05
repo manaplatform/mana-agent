@@ -54,6 +54,9 @@ from mana_agent.api_manager.runtime_tools import (
     build_api_manager_langchain_tools,
 )
 from mana_agent.api_manager.service import ApiManagerService
+from mana_agent.api_manager.transactional import ApiIntegrationActionAdapter
+from mana_agent.transactional_actions.models import PolicyOutcome
+from mana_agent.transactional_actions.policy import ActionPolicy
 
 
 OPENAPI: dict[str, Any] = {
@@ -1114,3 +1117,38 @@ def test_integration_flow_import_search_preview_approval_execute(
     )
     assert approved["executed"] is True
     assert approved["result"]["status_code"] == 200
+
+
+def test_semantic_import_uses_a_durable_api_integration_action() -> None:
+    adapter = ApiIntegrationActionAdapter(
+        tool_name="api_docs_import_semantic",
+        arguments={
+            "name": "IPstack",
+            "source_decision_id": "turn-1:api-entry-decision",
+            "session_id": "session-1",
+            "text": "documented API evidence",
+            "documentation_reference": "https://docs.example.test/ipstack",
+            "semantic_definition": {"redacted": True},
+        },
+        invoke=lambda: json.dumps(
+            {
+                "ok": True,
+                "result": {
+                    "saved": True,
+                    "integration": {"integration_id": "api_0123456789abcdef01234567"},
+                },
+            }
+        ),
+        parent_task_id="task-1",
+        actor="model_tool",
+        originating_agent="ask_agent",
+    )
+
+    action = adapter.build_intent()
+    result = adapter.execute(action)
+    verification = adapter.verify(action, result)
+    policy = ActionPolicy().evaluate(action)
+
+    assert action.target_resources == ["api-integration://name/457ab83da43936a7bf8cb905"]
+    assert policy.outcome is PolicyOutcome.ALLOW
+    assert verification.complete is True

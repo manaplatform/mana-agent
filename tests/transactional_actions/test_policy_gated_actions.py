@@ -328,6 +328,12 @@ def test_unclassified_provider_tool_is_blocked_without_invocation() -> None:
     assert_model_tool_routed("third_party_read", {"read_only": True})
 
 
+def test_api_integration_import_adapter_is_explicitly_routed() -> None:
+    assert_model_tool_routed(
+        "api_docs_import_semantic", {"transactional_adapter": "api_integration"}
+    )
+
+
 def test_file_compensation_recovers_from_durable_snapshot_after_restart(tmp_path: Path) -> None:
     target = tmp_path / "sample.txt"
     target.write_text("before\n", encoding="utf-8")

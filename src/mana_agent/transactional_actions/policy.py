@@ -101,6 +101,8 @@ class ActionPolicy:
             return self._git(action)
         if action.tool_name == "canvas":
             return self._canvas(action)
+        if action.tool_name == "api_integration":
+            return self._api_integration(action)
         if action.tool_name == "computer":
             return (
                 PolicyOutcome.REQUIRE_APPROVAL,
@@ -136,6 +138,19 @@ class ActionPolicy:
         if action.operation_name == "delete_surface":
             return PolicyOutcome.REQUIRE_APPROVAL, ["canvas_delete"], "Deleting a durable Canvas surface requires exact approval.", ["approve_canvas_delete"]
         return PolicyOutcome.ALLOW, ["local_canvas_mutation"], "A validated model-selected Canvas surface mutation is allowed.", ["allow_canvas_mutation"]
+
+    def _api_integration(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
+        if (
+            action.operation_name not in {"import", "update", "delete"}
+            or len(action.target_resources) != 1
+            or not action.target_resources[0].startswith("api-integration://")
+            or not str(action.normalized_arguments.get("source_decision_id") or "").strip()
+            or not str(action.normalized_arguments.get("session_id") or "").strip()
+        ):
+            return PolicyOutcome.DENY, ["invalid_api_integration_action"], "API integration changes require one validated target and source decision.", ["api_integration_shape"]
+        if action.operation_name == "delete":
+            return PolicyOutcome.REQUIRE_APPROVAL, ["api_integration_delete"], "Deleting a saved API integration requires exact approval.", ["approve_api_integration_delete"]
+        return PolicyOutcome.ALLOW, ["local_api_integration_mutation"], "A validated model-selected API integration change is allowed.", ["allow_api_integration_mutation"]
 
     def _scoped_policy(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]] | None:
         scopes = (

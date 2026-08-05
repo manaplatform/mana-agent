@@ -2690,6 +2690,52 @@ class AskAgent:
                                     ensure_ascii=False,
                                     default=str,
                                 )
+                        elif tool_metadata.get("transactional_adapter") == "api_integration":
+                            from mana_agent.api_manager.transactional import ApiIntegrationActionAdapter
+                            from mana_agent.transactional_actions.gateway import ApprovalRequired
+                            from mana_agent.transactional_actions.runtime import default_action_gateway
+
+                            adapter = ApiIntegrationActionAdapter(
+                                tool_name=name,
+                                arguments=dict(args) if isinstance(args, dict) else {},
+                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                parent_task_id=str(
+                                    transactional_parent_task_id
+                                    or flow_id
+                                    or run_id
+                                    or "ask-api-integration"
+                                ),
+                                actor="model_tool",
+                                originating_agent="ask_agent",
+                            )
+                            try:
+                                outcome = default_action_gateway(self.project_root).execute(adapter)
+                            except ApprovalRequired as exc:
+                                action = exc.action
+                                inbox_item_id = str(exc.inbox_item_id or action.inbox_item_id or "")
+                                content = json.dumps(
+                                    {
+                                        "ok": False,
+                                        "error_code": "approval_required",
+                                        "permission_required": True,
+                                        "permission_request_id": inbox_item_id,
+                                        "inbox_item_id": inbox_item_id,
+                                        "action_id": action.action_id,
+                                        "preview": action.preview.redacted() if action.preview else {},
+                                        "preview_digest": action.preview_digest,
+                                    }
+                                )
+                            else:
+                                action_payload = {
+                                    "ok": outcome.action.state.value == "committed",
+                                    "action_id": outcome.action.action_id,
+                                    "action_state": outcome.action.state.value,
+                                    "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+                                    "result": outcome.result,
+                                }
+                                if not action_payload["ok"]:
+                                    action_payload["error"] = outcome.action.error or "API integration action verification did not complete"
+                                content = json.dumps(action_payload, ensure_ascii=False, default=str)
                         else:
                             content = tool_map[name].invoke(args, config=cfg)
                         if governor.enabled and tool_reservation_id:

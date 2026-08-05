@@ -311,6 +311,7 @@ def build_api_manager_langchain_tools(
             ),
             args_schema=_Import,
             func=import_docs,
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_docs_import_semantic",
@@ -324,6 +325,7 @@ def build_api_manager_langchain_tools(
             ),
             args_schema=_SemanticImport,
             func=import_semantic_docs,
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_integrations_list",
@@ -360,6 +362,7 @@ def build_api_manager_langchain_tools(
                 session_id=session_id,
                 source_decision_id=source_decision_id,
             ),
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_integration_delete",
@@ -370,6 +373,7 @@ def build_api_manager_langchain_tools(
                 session_id=session_id,
                 source_decision_id=source_decision_id,
             ),
+            metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_operations_search",

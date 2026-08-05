@@ -65,6 +65,11 @@ def assert_model_tool_routed(tool_name: str, metadata: dict | None = None) -> No
     if name.startswith("mcp__") and declared.get("transactional_adapter") == "mcp":
         return
     if (
+        name in {"api_docs_import", "api_docs_import_semantic", "api_integration_update", "api_integration_delete"}
+        and declared.get("transactional_adapter") == "api_integration"
+    ):
+        return
+    if (
         name in UNROUTED_SIDE_EFFECT_TOOLS
         and declared.get("transactional_adapter") == "canvas"
         and name.startswith("canvas_")
