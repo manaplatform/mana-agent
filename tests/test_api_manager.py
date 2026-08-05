@@ -529,23 +529,33 @@ def test_request_preview_prepares_http_approval_and_records_inbox_notice(
         safe_to_continue=True,
     )
 
-    with pytest.raises(PermissionRequiredError) as raised:
-        service.preview_request(
-            routing_decision=route,
-            integration_id=integration.integration_id,
-            operation_id="getContact",
-            path_parameters={"contact_id": "123"},
-            session_id="preview-http-session",
-            source_decision_id=route.source_decision_id,
-        )
+    preview = service.preview_request(
+        routing_decision=route,
+        integration_id=integration.integration_id,
+        operation_id="getContact",
+        path_parameters={"contact_id": "123"},
+        session_id="preview-http-session",
+        source_decision_id=route.source_decision_id,
+    )
 
-    details = raised.value.details
+    assert preview["permission_required"] is True
+    details = preview
     assert details["inbox_item_id"] == "inbox-api-http"
     assert inbox.requests[0].request_type.value == "notice"
     assert inbox.requests[0].permission_request_id == details["permission_request_id"]
     waiting_events = [payload for event_type, payload in events if event_type == "api.waiting_approval"]
     assert waiting_events == [{
-        **details,
+        key: details[key]
+        for key in (
+            "permission_request_id",
+            "permission_scope",
+            "preview",
+            "session_id",
+            "api_approval",
+            "expires_at",
+            "inbox_item_id",
+        )
+    } | {
         "integration_id": integration.integration_id,
         "operation_id": "getContact",
         "method": "GET",

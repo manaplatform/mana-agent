@@ -201,9 +201,9 @@ def test_api_route_treats_documentation_url_as_optional_when_integration_is_save
 
 def test_api_route_stops_at_preview_when_network_approval_is_required(tmp_path: Path) -> None:
     permission = {
-        "ok": False,
-        "error_code": "permission_required",
-        "details": {
+        "ok": True,
+        "result": {
+            "permission_required": True,
             "permission_request_id": "api_approval_http_1",
             "permission_scope": "api.request.execute",
             "session_id": "session-api",

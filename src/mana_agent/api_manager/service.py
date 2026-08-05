@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from mana_agent.api_manager.discovery import ApiOperationDiscovery, ApiRouteDecision
 from mana_agent.api_manager.documentation import DocumentationImporter, SemanticDefinition
-from mana_agent.api_manager.errors import ApiManagerError, PermissionRequiredError, UpstreamApiError
+from mana_agent.api_manager.errors import ApiManagerError, UpstreamApiError
 from mana_agent.api_manager.executor import (
     ApiExecutor,
     NetworkAccessPolicy,
@@ -290,10 +290,15 @@ class ApiManagerService:
                     "redacted_host_path": self._redacted_host_path(request.url),
                 },
             )
-            raise PermissionRequiredError(
-                "The API request is waiting for trusted local approval before execution.",
-                details={**approval, "inbox_item_id": inbox_item_id},
-            )
+            return {
+                **preview.model_dump(mode="json"),
+                "permission_required": True,
+                "message": (
+                    "The API request is waiting for trusted local approval before execution."
+                ),
+                **approval,
+                "inbox_item_id": inbox_item_id,
+            }
         return preview.model_dump(mode="json")
 
     def execute_request(
