@@ -30,6 +30,7 @@ from mana_agent.execution_supervisor.models import (
     CancellationStatus,
     CheckpointRecord,
     CompletionContract,
+    CompletionContractType,
     EscrowResult,
     EscrowStatus,
     ExecutionEvent,
@@ -201,9 +202,22 @@ class ExecutionSupervisor:
             )
         identifier = task_id or f"task_{uuid4()}"
         contracts = list(completion_contract)
+        if not contracts:
+            # Every supervised execution has a durable, non-empty completion
+            # boundary from creation. Route-specific callers replace this
+            # minimal contract with their validated model-selected contract.
+            contracts = [
+                CompletionContract(
+                    contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                    metadata={"required_keys": []},
+                )
+            ]
         dependencies = list(dependency_task_ids)
         targets = list(target_resources)
         constraints = list(important_constraints)
+        effective_contract_decision_id = (
+            supervision_contract_decision_id or routing_decision_id
+        )
         provenance = dict(field_provenance or {})
         provenance.setdefault("side_effect_classification", "model_selected")
         provenance.setdefault(
@@ -250,7 +264,7 @@ class ExecutionSupervisor:
                 or existing.expected_output != expected_output
                 or existing.important_constraints != constraints
                 or existing.field_provenance != provenance
-                or existing.supervision_contract_decision_id != supervision_contract_decision_id
+                or existing.supervision_contract_decision_id != effective_contract_decision_id
                 or existing.supersedes_execution_id != supersedes_execution_id
                 or existing.derived_from_execution_id != derived_from_execution_id
                 or existing.previous_execution_id != previous_execution_id
@@ -372,9 +386,7 @@ class ExecutionSupervisor:
             expected_output=expected_output,
             important_constraints=constraints,
             field_provenance=provenance,
-            supervision_contract_decision_id=(
-                supervision_contract_decision_id or routing_decision_id
-            ),
+            supervision_contract_decision_id=effective_contract_decision_id,
             supersedes_execution_id=supersedes_execution_id,
             derived_from_execution_id=derived_from_execution_id,
             previous_execution_id=previous_execution_id,
@@ -1499,7 +1511,7 @@ class ExecutionSupervisor:
         return changed
 
     def retry(self, task_id: str, decision: RecoveryDecision) -> TaskRecord:
-        task = self.store.get_task(task_id)
+        task = self._ensure_recovery_metadata(task_id)
         self.retry_policy.validate(
             task,
             decision,
@@ -1557,6 +1569,34 @@ class ExecutionSupervisor:
                 selected_worker=decision.selected_worker,
                 selected_model=decision.selected_model,
             )
+        return task
+
+    def _ensure_recovery_metadata(self, task_id: str) -> TaskRecord:
+        """Backfill only safe, generic evidence for legacy stopped tasks.
+
+        A recovery decision can reuse an old task that predates the creation-time
+        contract.  The method never invents outputs or receipts; it merely gives
+        that task the same minimal completion boundary and explicit provenance
+        used for new supervised work.
+        """
+        def enrich(task: TaskRecord) -> None:
+            if not task.completion_contract:
+                task.completion_contract = [
+                    CompletionContract(
+                        contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                        metadata={"required_keys": []},
+                    )
+                ]
+                task.field_provenance["completion_contract"] = "recovery_backfill"
+            task.field_provenance.setdefault(
+                "actual_cost", "pending_runtime_accounting"
+            )
+            task.field_provenance.setdefault(
+                "completion_artefacts", "pending_completion_verification"
+            )
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, enrich)
         return task
 
     def resume_checkpoint(self, task_id: str) -> CheckpointRecord:

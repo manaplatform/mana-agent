@@ -25,6 +25,7 @@ from mana_agent.gateway.lane_coordinator import (
     LaneHandoffError,
     LaneReservation,
 )
+from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.gateway.lanes import (
     LockMode,
     LaneId,
@@ -74,6 +75,63 @@ def test_default_contracts_define_all_specialist_lanes() -> None:
     assert contracts[LaneId.RESEARCH].max_concurrent_jobs == 4
     assert contracts[LaneId.REVIEW].can_create_subagents is False
     assert contracts[LaneId.RELEASE].lock_policy == LockMode.REPOSITORY_WRITE
+
+
+def test_semantic_fingerprint_deduplicates_active_work_across_sessions(
+    coordinator: LaneCoordinator,
+) -> None:
+    first = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="create the deployment manifest",
+        files=("deploy.yaml",),
+        session="session-1",
+    )
+    coordinator.start(first)
+
+    duplicate = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="  create   the deployment manifest ",
+        files=("deploy.yaml",),
+        session="session-2",
+    )
+
+    assert duplicate.duplicate is True
+    assert duplicate.execution.task_id == first.execution.task_id
+    durable = coordinator.execution_supervisor.store.get_task(first.execution.task_id)
+    assert durable.completion_contract
+    assert durable.field_provenance["completion_contract"] == "model_selected_lane_contract"
+
+
+def test_recovery_candidates_include_failed_task_from_another_session(
+    coordinator: LaneCoordinator,
+) -> None:
+    reservation = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="create the deployment manifest",
+        session="session-before-restart",
+    )
+    coordinator.start(reservation)
+    coordinator.finish(
+        reservation.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="worker disconnected",
+    )
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+
+    candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-new",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+
+    assert [item["task_id"] for item in candidates] == [reservation.execution.task_id]
+    assert candidates[0]["session_id"] == "session-before-restart"
+    assert candidates[0]["completion_contract"]
 
 
 def test_exposes_supervisor_store_for_human_inbox_branch_controller(

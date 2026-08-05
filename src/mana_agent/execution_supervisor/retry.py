@@ -98,7 +98,11 @@ class RetryPolicy:
                     f"{classification.value} task may already have produced an external side effect; "
                     "no retry was scheduled"
                 )
-        if classification in {SideEffectClassification.DEDUPLICATED, SideEffectClassification.IDEMPOTENT}:
+        if classification in {
+            SideEffectClassification.DEDUPLICATED,
+            SideEffectClassification.IDEMPOTENT,
+            SideEffectClassification.CONDITIONALLY_IDEMPOTENT,
+        }:
             if not task.idempotency_key:
                 raise RetrySafetyError(
                     f"{classification.value} retry requires a stable idempotency key"

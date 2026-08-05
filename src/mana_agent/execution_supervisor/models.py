@@ -356,6 +356,31 @@ class TaskRecord(StrictModel):
 
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":
+        if self.schema_version < 7:
+            object.__setattr__(self, "schema_version", 7)
+        provenance_defaults = {
+            "side_effect_classification": "legacy_or_unspecified",
+            "completion_contract": (
+                "model_selected" if self.completion_contract else "pending_runtime_evidence"
+            ),
+            "target_resources": (
+                "model_selected" if self.target_resources else "not_applicable_or_not_selected"
+            ),
+            "important_constraints": (
+                "model_selected" if self.important_constraints else "not_applicable_or_not_selected"
+            ),
+            "estimated_cost": (
+                "provider_estimate" if self.estimated_cost_known else "unknown_provider_pricing"
+            ),
+            "actual_cost": (
+                "runtime_accounting" if self.actual_cost_known else "pending_runtime_accounting"
+            ),
+            "completion_artefacts": (
+                "verified" if self.completion_artefacts else "pending_completion_verification"
+            ),
+        }
+        for field_name, status in provenance_defaults.items():
+            self.field_provenance.setdefault(field_name, status)
         if not self.root_task_id:
             object.__setattr__(self, "root_task_id", self.task_id)
         if self.parent_task_id == self.task_id:

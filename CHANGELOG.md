@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-05
 
+- Repaired supervised task recovery and metadata durability. Gateway recovery candidates now span
+  sessions within the same workspace and repository, semantic task fingerprints no longer include
+  turn/message IDs, and a fresh model decision selects checkpoint resume, same-task retry, same-task
+  replan, fresh work, or a safe stop. Supervisor records now retain non-empty initial completion
+  contracts and explicit provenance for values that are pending runtime evidence rather than known.
+  Server and remote approved actions now write durable action states and receipts so ambiguous
+  outcomes block retries pending reconciliation.
+  Lightweight gateway adapters used by non-executing callers remain compatible while production
+  lane coordinators continue to require the durable action ledger.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py`.
+
 - Fixed enrolled-server directory-list routing so the router explicitly models
   that `server_directory_list` establishes its own connection and must use the
   `file_read` / `filesystem.read` contract. A bounded model-only correction now

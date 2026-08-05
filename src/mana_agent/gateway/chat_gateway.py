@@ -97,11 +97,13 @@ from mana_agent.model_routing.models import (
     RoutingRequest,
 )
 from mana_agent.execution_supervisor.models import (
+    ActionRequestState,
     BudgetForecast,
     ExecutionState,
     RecoveryAction,
     RecoveryDecision,
     RetryCategory,
+    SideEffectClassification,
 )
 from mana_agent.execution_supervisor.budget_decision import BudgetOverrunDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
@@ -1341,15 +1343,52 @@ class AgentChatGateway:
         job = self.remote_execution_service.approve_permission(permission_request_id)
         lane_task_id = getattr(self, "_remote_job_lanes", {}).get(job.request.job_id)
         supervision_error = ""
+        supervised_action = None
         if lane_task_id:
             self._lane_coordinator.transition(
                 lane_task_id,
                 LaneTaskState.RUNNING,
                 reason="remote SSH permission approved",
             )
+            inspect_task = getattr(self._lane_coordinator, "inspect_task", None)
+            supervisor = getattr(self._lane_coordinator, "execution_supervisor", None)
+            if callable(inspect_task) and supervisor is not None:
+                lane_execution = inspect_task(lane_task_id)
+                if not (
+                    lane_execution.supervisor_attempt_id
+                    and lane_execution.supervisor_lease_token
+                ):
+                    raise RuntimeError(
+                        "Approved remote execution has no active supervised attempt; no action was executed."
+                    )
+                supervised_action = supervisor.prepare_action(
+                    lane_task_id,
+                    attempt_id=lane_execution.supervisor_attempt_id,
+                    lease_token=lane_execution.supervisor_lease_token,
+                    tool_name="remote_execution",
+                    action_fingerprint=job.request.exact_action_key(),
+                    classification=(
+                        SideEffectClassification.READ_ONLY
+                        if job.request.read_only
+                        else SideEffectClassification.UNKNOWN
+                    ),
+                    idempotency_key=(
+                        f"remote:{job.request.job_id}:{job.request.exact_action_key()}"
+                    ),
+                )
+                supervisor.update_action(
+                    supervised_action.action_id,
+                    request_state=ActionRequestState.STARTED,
+                )
         try:
             job = run_sync(self.remote_execution_service.execute(job.request.job_id))
         except RuntimeError as exc:
+            if supervised_action is not None:
+                self._lane_coordinator.execution_supervisor.update_action(
+                    supervised_action.action_id,
+                    request_state=ActionRequestState.OUTCOME_UNKNOWN,
+                    verification_state={"exception_type": type(exc).__name__},
+                )
             if lane_task_id:
                 self._finish_lane(
                     lane_task_id,
@@ -1362,6 +1401,18 @@ class AgentChatGateway:
                 "job_id": job.request.job_id,
                 "message": str(exc),
             }
+        if supervised_action is not None:
+            succeeded = job.state.value == "succeeded"
+            self._lane_coordinator.execution_supervisor.update_action(
+                supervised_action.action_id,
+                request_state=(
+                    ActionRequestState.SUCCEEDED
+                    if succeeded
+                    else ActionRequestState.FAILED
+                ),
+                external_receipt=canonical_digest(job.model_dump(mode="json")),
+                verification_state={"remote_job_state": job.state.value},
+            )
         if lane_task_id:
             lane_state = (
                 LaneTaskState.COMPLETED
@@ -1466,12 +1517,52 @@ class AgentChatGateway:
             approved_by=item.response_actor_id,
         )
         lane_task_id = str(pending.get("lane_task_id") or "")
+        supervised_action = None
         if lane_task_id:
             self._lane_coordinator.transition(
                 lane_task_id,
                 LaneTaskState.RUNNING,
                 reason="server action approved by the user",
             )
+            inspect_task = getattr(self._lane_coordinator, "inspect_task", None)
+            supervisor = getattr(self._lane_coordinator, "execution_supervisor", None)
+            if callable(inspect_task) and supervisor is not None:
+                lane_execution = inspect_task(lane_task_id)
+                if not (
+                    lane_execution.supervisor_attempt_id
+                    and lane_execution.supervisor_lease_token
+                ):
+                    raise RuntimeError(
+                        "Approved server action has no active supervised attempt; no action was executed."
+                    )
+                action_classification = (
+                    SideEffectClassification.READ_ONLY
+                    if decision.read_only
+                    else (
+                        SideEffectClassification.COMPENSATABLE
+                        if decision.recovery_plan
+                        else SideEffectClassification.UNKNOWN
+                    )
+                )
+                supervised_action = supervisor.prepare_action(
+                    lane_task_id,
+                    attempt_id=lane_execution.supervisor_attempt_id,
+                    lease_token=lane_execution.supervisor_lease_token,
+                    tool_name=decision.tool_name,
+                    action_fingerprint=current_action_key,
+                    classification=action_classification,
+                    idempotency_key=f"server:{current_action_key}",
+                )
+                supervisor.update_action(
+                    supervised_action.action_id,
+                    request_state=ActionRequestState.STARTED,
+                )
+                if decision.destructive:
+                    supervisor.mark_irreversible_side_effect(
+                        lane_task_id,
+                        attempt_id=lane_execution.supervisor_attempt_id,
+                        lease_token=lane_execution.supervisor_lease_token,
+                    )
         self._pending_server_approvals.pop(approval_request_id)
         self.human_inbox_service.record_execution_event(
             item.inbox_item_id,
@@ -1492,6 +1583,12 @@ class AgentChatGateway:
                 )
             )
         except Exception as exc:
+            if supervised_action is not None:
+                self._lane_coordinator.execution_supervisor.update_action(
+                    supervised_action.action_id,
+                    request_state=ActionRequestState.OUTCOME_UNKNOWN,
+                    verification_state={"exception_type": type(exc).__name__},
+                )
             if lane_task_id:
                 self._finish_lane(
                     lane_task_id,
@@ -1503,6 +1600,22 @@ class AgentChatGateway:
         succeeded = (
             outcome.exit_code == 0 and not outcome.timed_out and not outcome.cancelled
         )
+        if supervised_action is not None:
+            self._lane_coordinator.execution_supervisor.update_action(
+                supervised_action.action_id,
+                request_state=(
+                    ActionRequestState.SUCCEEDED
+                    if succeeded
+                    else ActionRequestState.FAILED
+                ),
+                external_receipt=canonical_digest(serialized),
+                verification_state={
+                    "exit_code": outcome.exit_code,
+                    "timed_out": outcome.timed_out,
+                    "cancelled": outcome.cancelled,
+                    "succeeded": succeeded,
+                },
+            )
         self.human_inbox_service.complete_action_execution(
             item.inbox_item_id,
             execution_claim_id=execution_claim_id,

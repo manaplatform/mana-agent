@@ -376,6 +376,42 @@ def test_retry_budget_backoff_and_idempotency_safety(runtime):
         supervisor.retry(unsafe.task_id, decision(unsafe.task_id))
 
 
+def test_task_creation_records_provenance_and_ambiguous_actions_block_retry(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    assert task.schema_version == 7
+    assert task.completion_contract
+    assert task.field_provenance["actual_cost"] == "pending_runtime_accounting"
+
+    attempt_id, token = running(supervisor, task)
+    action = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="server_command",
+        action_fingerprint="action-fingerprint",
+        classification=SideEffectClassification.UNKNOWN,
+    )
+    supervisor.update_action(action.action_id, request_state=ActionRequestState.OUTCOME_UNKNOWN)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="connection interrupted")
+
+    with pytest.raises(RetrySafetyError, match="outcome is ambiguous"):
+        supervisor.retry(task.task_id, decision(task.task_id))
+
+
+def test_legacy_task_records_upgrade_to_metadata_provenance_schema() -> None:
+    legacy = TaskRecord.model_validate(
+        {
+            "schema_version": 6,
+            "task_id": "task_legacy",
+            "routing_decision_id": "decision_legacy",
+        }
+    )
+
+    assert legacy.schema_version == 7
+    assert legacy.field_provenance["actual_cost"] == "pending_runtime_accounting"
+
+
 def test_replan_limit_and_child_limits(runtime):
     supervisor, _clock, tmp_path = runtime
     task = create(supervisor, tmp_path)
@@ -798,6 +834,9 @@ def test_consequential_action_duplicate_and_stale_generation_are_fenced(runtime)
             classification=SideEffectClassification.NON_IDEMPOTENT,
         )
 
+    with pytest.raises(RetrySafetyError, match="outcome is ambiguous"):
+        supervisor.retry(task.task_id, decision(task.task_id))
+    supervisor.update_action(action.action_id, request_state=ActionRequestState.FAILED)
     supervisor.retry(task.task_id, decision(task.task_id))
     clock.advance(120)
     supervisor.release_retry(task.task_id)

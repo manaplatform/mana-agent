@@ -67,6 +67,61 @@ def test_model_may_resume_exact_non_stale_checkpoint() -> None:
     assert decision.task_id == "task_existing"
 
 
+def test_model_may_replan_the_same_stopped_task() -> None:
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "replan-decision-1",
+                "action": "replan_task",
+                "task_id": "task_existing",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "the same goal needs a revised plan",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="retry the repository refactor with a corrected plan",
+        route="coding",
+        requires_live_data=False,
+        candidates=[{**candidate(), "checkpoint_id": ""}],
+    )
+
+    assert decision.action == "replan_task"
+    assert decision.task_id == "task_existing"
+
+
+def test_empty_candidate_set_still_requires_a_model_decision() -> None:
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "fresh-decision-1",
+                "action": "start_fresh",
+                "task_id": "",
+                "checkpoint_id": "",
+                "same_work": False,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": False,
+                "safe_to_continue": True,
+                "reason": "no durable task applies",
+            }
+        )
+    )
+
+    assert decider.decide(
+        current_request="a new repository task",
+        route="coding",
+        requires_live_data=False,
+        candidates=[],
+    ).decision_id == "fresh-decision-1"
+
+
 def test_live_data_route_cannot_reuse_checkpoint_even_if_model_requests_it() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(

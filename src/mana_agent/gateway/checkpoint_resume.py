@@ -172,7 +172,7 @@ class CheckpointResumeDecider:
             ):
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
-                    "Reason: same-task retry safety fields are inconsistent."
+                    "Reason: same-task retry or replan safety fields are inconsistent."
                 )
         else:
             if output.task_id or output.checkpoint_id:
