@@ -59,7 +59,7 @@ class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
     class _EntryModel:
-        def invoke(self, messages):
+        def invoke(self, messages, **_kwargs):
             payload = json.loads(messages[-1].content)
             if "recovery_candidates" in payload:
                 return SimpleNamespace(

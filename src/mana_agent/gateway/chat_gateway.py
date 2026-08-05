@@ -3760,14 +3760,22 @@ class AgentChatGateway:
                             previous_task_id = followup.related_task_id
                         elif followup.category == "new_task":
                             recovery_candidates = []
-                    resume_decision = CheckpointResumeDecider(
-                        self._entry_router.llm
-                    ).decide(
-                        current_request=text,
+                    with self._stack.context_cost_governor.scoped_execution_identity(
+                        turn_id=turn_id,
+                        agent_id="main",
+                        step_id=f"checkpoint_resume:{uuid.uuid4().hex}",
                         route=entry_decision.route,
-                        requires_live_data=entry_decision.requires_live_data,
-                        candidates=recovery_candidates,
-                    )
+                        lane=lane_id.value,
+                        execution_kind="checkpoint_resume",
+                    ):
+                        resume_decision = CheckpointResumeDecider(
+                            self._entry_router.llm
+                        ).decide(
+                            current_request=text,
+                            route=entry_decision.route,
+                            requires_live_data=entry_decision.requires_live_data,
+                            candidates=recovery_candidates,
+                        )
                     if resume_decision.action == "stop":
                         raise CheckpointResumeError(
                             "Model decision stopped checkpoint recovery. No task was resumed or "

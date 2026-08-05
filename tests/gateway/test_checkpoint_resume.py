@@ -18,13 +18,15 @@ from mana_agent.context_cost.models import (
 class StructuredDecisionModel:
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = payload
+        self.invocation_kwargs: list[dict[str, object]] = []
 
     def with_structured_output(self, _schema, *, method: str, strict: bool):
         assert method == "json_schema"
         assert strict is True
         return self
 
-    def invoke(self, _messages):
+    def invoke(self, _messages, **kwargs):
+        self.invocation_kwargs.append(kwargs)
         return self.payload
 
 
@@ -34,7 +36,7 @@ class ContextBlockedDecisionModel:
         assert strict is True
         return self
 
-    def invoke(self, _messages):
+    def invoke(self, _messages, **_kwargs):
         snapshot = BudgetSnapshot(
             breakdown=ContextBreakdown(),
             budget=ContextBudget(context_window=1_000),
@@ -76,8 +78,7 @@ def candidate() -> dict[str, object]:
 
 
 def test_model_may_resume_exact_non_stale_checkpoint() -> None:
-    decider = CheckpointResumeDecider(
-        StructuredDecisionModel(
+    model = StructuredDecisionModel(
             {
                 "decision_id": "resume-decision-1",
                 "action": "resume_checkpoint",
@@ -91,7 +92,7 @@ def test_model_may_resume_exact_non_stale_checkpoint() -> None:
                 "reason": "same repository work and checkpoint remains applicable",
             }
         )
-    )
+    decider = CheckpointResumeDecider(model)
 
     decision = decider.decide(
         current_request="continue the repository refactor",
@@ -102,6 +103,7 @@ def test_model_may_resume_exact_non_stale_checkpoint() -> None:
 
     assert decision.action == "resume_checkpoint"
     assert decision.task_id == "task_existing"
+    assert model.invocation_kwargs == [{"max_output_tokens": 512}]
 
 
 def test_model_may_replan_the_same_stopped_task() -> None:

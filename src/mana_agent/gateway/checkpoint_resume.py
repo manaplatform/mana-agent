@@ -14,6 +14,8 @@ from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 
+CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS = 512
+
 
 class CheckpointResumeError(RuntimeError):
     """Raised when no valid stopped-task recovery decision is available."""
@@ -35,7 +37,7 @@ class CheckpointResumeOutput(BaseModel):
     checkpoint_still_valid: bool
     side_effects_safe_to_repeat: bool
     safe_to_continue: bool
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=480)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,10 +123,16 @@ class CheckpointResumeDecider:
             if callable(structured):
                 response = structured(
                     CheckpointResumeOutput, method="json_schema", strict=True
-                ).invoke(messages)
+                ).invoke(
+                    messages,
+                    max_output_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
+                )
                 output = CheckpointResumeOutput.model_validate(response)
             else:
-                response = self.llm.invoke(messages)
+                response = self.llm.invoke(
+                    messages,
+                    max_output_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
+                )
                 content = getattr(response, "content", response)
                 output = CheckpointResumeOutput.model_validate_json(str(content))
         except ContextBudgetExceeded as exc:

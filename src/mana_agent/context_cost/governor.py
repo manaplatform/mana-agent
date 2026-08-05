@@ -6,9 +6,10 @@ import json
 import hashlib
 import threading
 import uuid
+from contextlib import contextmanager
 from decimal import Decimal
 from dataclasses import replace
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterator, Iterable, Sequence
 
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.context_cost.compression import compress_tool_result, normalize_permitted_result, render_envelope
@@ -176,6 +177,19 @@ class ContextCostGovernor:
             key: value if value not in (None, "") else current.get(key, value)
             for key, value in updates.items()
         }
+
+    @contextmanager
+    def scoped_execution_identity(self, **identity: Any) -> Iterator[None]:
+        """Temporarily isolate accounting metadata for a bounded model decision."""
+        previous = getattr(self._scope, "identity", None)
+        self.set_execution_identity(**identity)
+        try:
+            yield
+        finally:
+            if previous is None:
+                del self._scope.identity
+            else:
+                self._scope.identity = previous
 
     def _effective_identity(self, **values: Any) -> dict[str, Any]:
         scoped = dict(getattr(self._scope, "identity", {}) or {})

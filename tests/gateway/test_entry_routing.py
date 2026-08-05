@@ -42,7 +42,7 @@ class _RouteModel:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
 
-    def invoke(self, messages: list[Any]) -> Any:
+    def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
         if messages[0].content == CHECKPOINT_RESUME_PROMPT:
             return SimpleNamespace(
                 content=json.dumps(
@@ -453,7 +453,10 @@ def test_checkpoint_resume_context_budget_block_stops_without_lane_failure(
         ),
     )
 
+    identities: list[dict[str, Any]] = []
+
     def block_checkpoint_resume(*_args: Any, **_kwargs: Any) -> Any:
+        identities.append(gateway._stack.context_cost_governor._effective_identity())
         raise CheckpointResumeError(
             "Model decision failed: checkpoint_resume. No task was resumed or started. "
             "Reason: Context budget blocked: context_limit_deficit:510. "
@@ -481,6 +484,9 @@ def test_checkpoint_resume_context_budget_block_stops_without_lane_failure(
     assert "Gateway lane coordination failed" not in result.answer
     assert "No task was resumed or started" in result.answer
     assert new_reservations == []
+    assert identities[0]["execution_kind"] == "checkpoint_resume"
+    assert identities[0]["route"] == "conversation"
+    assert identities[0]["lane"] == LaneId.RESEARCH.value
 
 
 @pytest.mark.parametrize(

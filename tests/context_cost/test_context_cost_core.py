@@ -160,6 +160,32 @@ def test_history_selection_is_token_aware_and_chronological() -> None:
     assert sum(estimate_value_tokens(item) for item in selected) <= 20
 
 
+def test_scoped_execution_identity_restores_the_prior_accounting_scope() -> None:
+    governor = ContextCostGovernor(session_id="s", settings=settings())
+    governor.set_execution_identity(
+        turn_id="outer-turn",
+        task_id="outer-task",
+        execution_kind="route_execution",
+    )
+
+    with governor.scoped_execution_identity(
+        turn_id="checkpoint-turn",
+        step_id="checkpoint_resume:decision",
+        route="conversation",
+        lane="research",
+        execution_kind="checkpoint_resume",
+    ):
+        scoped = governor._effective_identity()
+        assert scoped["turn_id"] == "checkpoint-turn"
+        assert scoped["task_id"] == "outer-task"
+        assert scoped["execution_kind"] == "checkpoint_resume"
+
+    restored = governor._effective_identity()
+    assert restored["turn_id"] == "outer-turn"
+    assert restored["task_id"] == "outer-task"
+    assert restored["execution_kind"] == "route_execution"
+
+
 def test_deterministic_compression_is_small_and_exactly_recoverable(tmp_path: Path) -> None:
     store = ContextArtifactStore(tmp_path / "artifacts")
     payload = [{"id": index, "status": "ok", "value": "same " * 100} for index in range(200)]
