@@ -345,13 +345,13 @@ def test_ask_agent_keeps_a_late_loaded_capability_for_the_next_step(tmp_path: Pa
     llm = _CapabilityBindingLLM(
         [
             _FakeAIMessage("", tool_calls=[{
-                "id": "discover-1", "name": "capability_search", "args": {"query": "email"},
+                "id": "discover-1", "name": "capability_search", "args": {"query": "unmatched-one"},
             }]),
             _FakeAIMessage("", tool_calls=[{
-                "id": "discover-2", "name": "capability_search", "args": {"query": "capability"},
+                "id": "discover-2", "name": "capability_search", "args": {"query": "unmatched-two"},
             }]),
             _FakeAIMessage("", tool_calls=[{
-                "id": "discover-3", "name": "capability_search", "args": {"query": "search tool"},
+                "id": "discover-3", "name": "capability_search", "args": {"query": "unmatched-three"},
             }]),
             _FakeAIMessage("", tool_calls=[{
                 "id": "load-email", "name": "capability_load", "args": {"names": ["email_search"]},
@@ -380,6 +380,7 @@ def test_ask_agent_keeps_a_late_loaded_capability_for_the_next_step(tmp_path: Pa
 
     assert result.answer == "Inbox checked."
     assert any(trace.tool_name == "email_search" and trace.status == "ok" for trace in result.trace)
+    assert not any("no-progress detection" in str(warning) for warning in result.warnings)
 
 
 def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: Path) -> None:

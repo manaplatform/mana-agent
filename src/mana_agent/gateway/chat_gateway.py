@@ -6790,7 +6790,7 @@ class AgentChatGateway:
                 question=text,
                 index_dir=self._index_dir or default_index_dir(self.root),
                 k=self._resolved_k,
-                max_steps=max(16, int(self.config.agent_max_steps or 6)),
+                max_steps=max(32, int(self.config.agent_max_steps or 6)),
                 timeout_seconds=max(30, self._agent_timeout_seconds),
                 callbacks=callbacks,
                 system_prompt=system_prompt,

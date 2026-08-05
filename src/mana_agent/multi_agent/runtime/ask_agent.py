@@ -2728,7 +2728,12 @@ class AskAgent:
                     # except for read_file, which has a dedicated repeated-failure
                     # limit and would otherwise be cut off early.
                     if self._tool_error_detail(content):
-                        if name != "read_file":
+                        if name not in {
+                            "read_file",
+                            "capability_search",
+                            "capability_load",
+                            "capability_unload",
+                        }:
                             stagnant_steps += 1
                     else:
                         fingerprint = self._evidence_fingerprint(content)
@@ -2738,7 +2743,11 @@ class AskAgent:
                             observation = self._summarize_tool_result(name, content)
                             if observation:
                                 observations.append(observation)
-                        else:
+                        elif name not in {
+                            "capability_search",
+                            "capability_load",
+                            "capability_unload",
+                        }:
                             stagnant_steps += 1
 
                 # A blocked duplicate makes no progress either.

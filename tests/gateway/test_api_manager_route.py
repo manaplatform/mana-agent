@@ -39,7 +39,7 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
             assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
             assert kwargs["flow_id"] == "session-api"
-            assert kwargs["max_steps"] >= 16
+            assert kwargs["max_steps"] >= 32
             return SimpleNamespace(
                 answer="Contact 123 was returned by the saved API operation.",
                 sources=[],

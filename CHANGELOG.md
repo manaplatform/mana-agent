@@ -21,6 +21,10 @@ All notable repository changes should be recorded here.
   calls; true model context-window and output-capacity limits remain enforced.
   Capabilities loaded late in a tool loop now receive the current step timestamp, preventing the
   idle-capability reaper from unloading them before their first requested use.
+  API workflows now reserve up to 32 model-tool steps, allowing capability discovery plus the
+  model-selected inspect, import, configure, search, preview, and execute lifecycle to complete.
+  Repeated but non-duplicate capability-manifest results no longer trigger the generic no-progress
+  stop condition before a selected API capability can be used.
   - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
