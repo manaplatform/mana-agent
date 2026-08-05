@@ -3,12 +3,13 @@ import json
 from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
+from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
 from mana_agent.connectors.browser.session import BrowserConnectorError, default_browser_manager
 
 class _Session(BaseModel): session_id: str
 class _Open(_Session): url: str; profile_name: str | None = None
 class _Inspect(_Session): tab_id: str | None = None
-class _Act(_Inspect): target: str = ""; value: Any = None; observed_page_version: int | None = None; expected_origin: str | None = None; risk: str = "reversible"; confirmation_required: bool = False; approval_token: str | None = None; timeout_ms: int | None = None
+class _Act(_Inspect): target: str = ""; value: Any = None; observed_page_version: int | None = None; expected_origin: str | None = None; risk: BrowserRisk; reason: str = Field(min_length=1, max_length=600); confirmation_required: bool = False; approval_token: str | None = None; timeout_ms: int | None = None
 class _Screenshot(_Inspect): full_page: bool = True
 class _Upload(_Session): ref: str; path: str; observed_page_version: int; tab_id: str | None = None
 class _Switch(_Session): tab_id: str
@@ -18,6 +19,31 @@ def _result(call):
     try: return json.dumps(call(), ensure_ascii=False, default=str)
     except BrowserConnectorError as exc: return json.dumps({"ok": False, "error_code": exc.code, "message": str(exc)})
     except Exception as exc: return json.dumps({"ok": False, "error_code": "browser_error", "message": str(exc)})
+
+
+def action_metadata(tool_name: str, arguments: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Classify only a validated model-declared read-only browser action."""
+    action = str(tool_name).removeprefix("browser_")
+    try:
+        decision = BrowserActionDecision(
+            session_id=str(arguments["session_id"]),
+            action=action,
+            tab_id=arguments.get("tab_id"),
+            target=arguments.get("target"),
+            arguments={"value": arguments.get("value")},
+            observed_page_version=arguments.get("observed_page_version"),
+            expected_origin=arguments.get("expected_origin"),
+            risk=arguments["risk"],
+            confirmation_required=bool(arguments.get("confirmation_required", False)),
+            reason=str(arguments["reason"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Browser action requires a valid explicit BrowserActionDecision."
+        ) from exc
+    if decision.action == "click" and decision.risk is BrowserRisk.READ_ONLY:
+        return {**(metadata or {}), "read_only": True, "side_effecting": False}
+    return metadata
 
 def build_browser_langchain_tools() -> list[Any]:
     manager = default_browser_manager()

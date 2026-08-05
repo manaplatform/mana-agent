@@ -13,8 +13,8 @@ All notable repository changes should be recorded here.
   API Manager execution now loads only its workflow-decision capability initially, then requires
   the model to load each subsequent authorized API or browser capability; this applies in observe
   mode as well, preventing the complete API schema surface from exhausting context before a call.
-  API workflow model calls now use a bounded 1,024-token response allowance, providing enough
-  room to emit a cited semantic import definition while keeping workflow evidence bounded.
+  API workflow response allowance is now calculated by context accounting and enforced by the
+  governor for each provider call; no route-level token cap is hardcoded.
   Explicit output limits now override historical output predictions during accounting, preventing
   a small bounded decision from being inflated by unrelated earlier responses.
   Non-enforcing governor modes now record task or session budget overruns without blocking provider
@@ -25,7 +25,9 @@ All notable repository changes should be recorded here.
   model-selected inspect, import, configure, search, preview, and execute lifecycle to complete.
   Repeated but non-duplicate capability-manifest results no longer trigger the generic no-progress
   stop condition before a selected API capability can be used.
-  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_ask_agent.py -q`.
+  Browser documentation actions now require an explicit, validated model read-only decision before
+  the shared transactional gate permits a click; non-read-only browser actions remain fail-closed.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py tests/context_cost/test_model_accounting.py tests/connectors/test_browser_core.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_entry_routing.py tests/gateway/test_api_manager_route.py tests/test_ask_agent.py -q`.
 
 - Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
   coordinate key creation with a per-key thread and process lock before loading

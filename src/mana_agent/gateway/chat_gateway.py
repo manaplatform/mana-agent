@@ -6750,7 +6750,8 @@ class AgentChatGateway:
             "may explicitly select browser_open and browser_inspect for the same supplied URL. It "
             "may use browser_click, browser_wait, and browser_scroll only to expand or reveal API "
             "operation documentation referenced by the inspected page, using current inspected "
-            "element references and read-only risk. Re-inspect after each action and collect the "
+            "element references, an explicit risk=read_only declaration, and a concise reason. "
+            "Re-inspect after each action and collect the "
             "documented method, path, server, parameters, authentication, and responses. Never "
             "type, submit forms, sign in, or click login, authorization, consent, CAPTCHA, or MFA "
             "controls. Pass the returned rendered documentation text—not the redirecting URL—and "
@@ -6798,7 +6799,6 @@ class AgentChatGateway:
                     "allowed_tools": allowed_tools,
                     "capability_discovery_required": True,
                     "initial_tools": ["api_workflow_decide"],
-                    "model_max_tokens": 1_024,
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },

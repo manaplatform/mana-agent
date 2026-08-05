@@ -415,7 +415,6 @@ def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: P
             "allowed_tools": ["api_workflow_decide"],
             "capability_discovery_required": True,
             "initial_tools": ["api_workflow_decide"],
-            "model_max_tokens": 1_024,
             "require_initial_tool_call": True,
         },
         run_id="api-capability-turn",
@@ -423,7 +422,7 @@ def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: P
 
     assert result.answer == "Workflow decision recorded."
     assert "api_workflow_decide" in llm.bound_tool_names[0]
-    assert llm.invocation_kwargs == [{"max_tokens": 1_024}, {"max_tokens": 1_024}]
+    assert llm.invocation_kwargs == [{}, {}]
 
 
 def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:

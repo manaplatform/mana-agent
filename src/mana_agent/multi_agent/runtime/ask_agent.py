@@ -2524,10 +2524,22 @@ class AskAgent:
                             append_tool_message(name, content, str(call.get("id", "")), step_idx)
                             continue
                     try:
+                        from mana_agent.connectors.browser.runtime_tools import action_metadata
                         from mana_agent.transactional_actions.enforcement import assert_model_tool_routed
+                        tool_metadata = getattr(tool_map[name], "metadata", None)
+                        if name.startswith("browser_") and not (
+                            isinstance(tool_metadata, dict)
+                            and tool_metadata.get("read_only") is True
+                            and tool_metadata.get("side_effecting") is not True
+                        ):
+                            tool_metadata = action_metadata(
+                                name,
+                                args if isinstance(args, dict) else {},
+                                tool_metadata,
+                            )
                         assert_model_tool_routed(
                             name,
-                            getattr(tool_map[name], "metadata", None),
+                            tool_metadata,
                         )
                         trace_count_before = len(traces)
                         tool_started = perf_counter()
@@ -2538,9 +2550,7 @@ class AskAgent:
                                 tool_call_id=str(call.get("id", "")),
                                 arguments=args,
                             )
-                        tool_metadata = dict(
-                            getattr(tool_map[name], "metadata", None) or {}
-                        )
+                        tool_metadata = dict(tool_metadata or {})
                         if tool_metadata.get("transactional_adapter") == "mcp":
                             from mana_agent.transactional_actions.adapters import McpActionAdapter
                             from mana_agent.transactional_actions.gateway import ApprovalRequired

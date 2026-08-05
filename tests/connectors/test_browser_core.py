@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from mana_agent.connectors.browser.approval import BrowserApprovalBinding, issue_approval
 from mana_agent.connectors.browser.contracts import browser_tool_contracts
 from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
-from mana_agent.connectors.browser.runtime_tools import build_browser_langchain_tools
+from mana_agent.connectors.browser.runtime_tools import action_metadata, build_browser_langchain_tools
 from mana_agent.connectors.browser.session import BrowserConnectorError, BrowserSession, BrowserSessionManager
 from mana_agent.transactional_actions.enforcement import (
     TransactionalGatewayRequired,
@@ -76,6 +76,28 @@ def test_documentation_browser_tools_are_explicitly_read_only() -> None:
     assert tools["browser_type"].metadata is None
     with pytest.raises(TransactionalGatewayRequired, match="no registered transactional"):
         assert_model_tool_routed("browser_click", tools["browser_click"].metadata)
+
+
+def test_read_only_browser_action_is_classified_from_the_model_decision() -> None:
+    metadata = action_metadata(
+        "browser_click",
+        {
+            "session_id": "docs-session",
+            "target": "e2-25",
+            "observed_page_version": 2,
+            "risk": "read_only",
+            "reason": "Expand the documented operation without submitting data.",
+        },
+        None,
+    )
+
+    assert metadata == {"read_only": True, "side_effecting": False}
+    assert_model_tool_routed("browser_click", metadata)
+
+
+def test_browser_action_requires_an_explicit_model_decision() -> None:
+    with pytest.raises(ValueError, match="explicit BrowserActionDecision"):
+        action_metadata("browser_click", {"session_id": "docs-session"}, None)
 
 
 def test_playwright_status_is_structured_when_optional_dependency_missing(monkeypatch) -> None:  # noqa: ANN001
