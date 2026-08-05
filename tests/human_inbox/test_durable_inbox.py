@@ -297,11 +297,10 @@ def test_concurrent_signers_publish_only_complete_key_files(tmp_path: Path, monk
         first_digest = pool.submit(first.protected_digest, {"response": "value"})
         assert first_write_started.wait(timeout=5)
         second_digest = pool.submit(second.protected_digest, {"response": "value"})
-        try:
-            second_result = second_digest.result(timeout=5)
-        finally:
-            release_first_write.set()
+        assert not second_digest.done()
+        release_first_write.set()
         first_result = first_digest.result(timeout=5)
+        second_result = second_digest.result(timeout=5)
 
     assert first_result == second_result
     assert len(key_path.read_bytes()) >= 32

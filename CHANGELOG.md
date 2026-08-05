@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-05
 
+- Fixed concurrent human-inbox signing-key initialization on Windows. Signers now
+  coordinate key creation with a per-key thread and process lock before loading
+  the published secret, preventing concurrent signers from caching different keys.
+  - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py -q`.
+
 - Repaired supervised task recovery and metadata durability. Gateway recovery candidates now span
   sessions within the same workspace and repository, semantic task fingerprints no longer include
   turn/message IDs, and a fresh model decision selects checkpoint resume, same-task retry, same-task
