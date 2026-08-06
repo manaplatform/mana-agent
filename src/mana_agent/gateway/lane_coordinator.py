@@ -772,15 +772,33 @@ class LaneCoordinator:
                 estimate_confidence=estimate_confidence,
                 estimate_source=estimate_source,
             )
-            self._assert_budget(contract, session_id, budget)
             if parent_task_id:
                 parent = self._executions.get(parent_task_id)
                 if parent is None:
                     raise LaneBudgetError("parent task budget is unavailable")
-                if parent.state not in {LaneTaskState.COMPLETED, LaneTaskState.FAILED, LaneTaskState.CANCELLED}:
-                    remaining = max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens)
-                    if budget.reserved_tokens > remaining:
-                        raise LaneBudgetError("child reservation exceeds the parent task's remaining budget")
+                # Grow the active parent (and ancestors) before the child is
+                # charged against session/global caps, so the expanded parent
+                # envelope is included in the subsequent budget assertion.
+                # Terminal parents do not constrain children (same policy as
+                # recalculate_budget). Hard-fail only when expansion exceeds a
+                # real lane/session/global cap.
+                if parent.state not in {
+                    LaneTaskState.COMPLETED,
+                    LaneTaskState.FAILED,
+                    LaneTaskState.CANCELLED,
+                }:
+                    self._ensure_parent_envelope_for_child_locked(
+                        child_task_id=None,
+                        parent_task_id=parent_task_id,
+                        required_child_tokens=budget.reserved_tokens,
+                        child_estimated_cost=(
+                            float(budget.estimated_cost)
+                            if budget.estimated_cost_known
+                            else None
+                        ),
+                        reason="parent envelope for child reservation",
+                    )
+            self._assert_budget(contract, session_id, budget)
             if taskboard_task_id:
                 task = self.taskboard.get_task(taskboard_task_id)
                 expected_parent = self._executions[parent_task_id].taskboard_task_id if parent_task_id else None
@@ -1342,7 +1360,13 @@ class LaneCoordinator:
         accounting_reservation_id: str = "",
         reason: str = "provider-call forecast",
     ) -> LaneExecution:
-        """Atomically grow a reservation only when every immutable cap admits it."""
+        """Atomically grow a reservation only when every immutable cap admits it.
+
+        When the task has an active parent, the parent (and active ancestors)
+        reserved envelope is expanded first so child growth adds into the parent
+        budget instead of failing with "recalculated child budget exceeds the
+        parent remaining budget". Terminal parents do not constrain children.
+        """
         with self._condition:
             execution = self._executions[task_id]
             if execution.state not in ACTIVE_LANE_STATES:
@@ -1364,23 +1388,36 @@ class LaneCoordinator:
                 raise LaneBudgetError("recalculated budget exceeds the global token limit")
             if execution.parent_task_id and execution.parent_task_id in self._executions:
                 parent = self._executions[execution.parent_task_id]
-                if next_total > max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens):
-                    raise LaneBudgetError("recalculated child budget exceeds the parent remaining budget")
+                if parent.state not in {
+                    LaneTaskState.COMPLETED,
+                    LaneTaskState.FAILED,
+                    LaneTaskState.CANCELLED,
+                }:
+                    self._ensure_parent_envelope_for_child_locked(
+                        child_task_id=task_id,
+                        parent_task_id=execution.parent_task_id,
+                        required_child_tokens=next_total,
+                        child_estimated_cost=forecast_cost,
+                        reason="parent envelope for child recalculation",
+                    )
             if next_total <= budget.reserved_tokens and next_cost <= budget.estimated_cost:
                 return execution
             previous_total = budget.reserved_tokens
-            self.execution_supervisor.revise_budget(
-                task_id,
-                token_budget=next_total,
-                estimated_cost=(next_cost if forecast_cost is not None else None),
-                reason=reason,
-                evidence={
-                    "forecast_input_tokens": max(0, int(forecast_input_tokens)),
-                    "forecast_output_tokens": max(0, int(forecast_output_tokens)),
-                    "forecast_cost": forecast_cost,
-                    "accounting_reservation_id": accounting_reservation_id,
-                },
-            )
+            try:
+                self.execution_supervisor.revise_budget(
+                    task_id,
+                    token_budget=next_total,
+                    estimated_cost=(next_cost if forecast_cost is not None else None),
+                    reason=reason,
+                    evidence={
+                        "forecast_input_tokens": max(0, int(forecast_input_tokens)),
+                        "forecast_output_tokens": max(0, int(forecast_output_tokens)),
+                        "forecast_cost": forecast_cost,
+                        "accounting_reservation_id": accounting_reservation_id,
+                    },
+                )
+            except BudgetExceededError as exc:
+                raise LaneBudgetError(str(exc)) from exc
             budget.reserved_input_tokens = next_input
             budget.reserved_output_tokens = next_output
             budget.estimated_cost = next_cost
@@ -1399,6 +1436,219 @@ class LaneCoordinator:
             self._persist_locked()
             self.emit("budget.recalculated", task_id=task_id, lane_id=execution.owning_lane, budget=asdict(budget))
             return execution
+
+    def _ensure_parent_envelope_for_child_locked(
+        self,
+        *,
+        child_task_id: str | None,
+        parent_task_id: str,
+        required_child_tokens: int,
+        child_estimated_cost: float | None = None,
+        reason: str = "parent envelope for child budget",
+    ) -> None:
+        """Grow parent (and active ancestors) so required_child_tokens fits.
+
+        ``required_child_tokens`` is the full post-change total for the target
+        child. Active siblings keep their current reservations; the revising
+        child (when provided) is excluded so its previous reservation is not
+        double-counted. Terminal parents are not expanded and do not block.
+
+        Must be called while holding ``self._condition``.
+        """
+        parent_id: str | None = parent_task_id
+        revising_id = str(child_task_id or "")
+        required = max(0, int(required_child_tokens))
+        cost = child_estimated_cost
+        seen: set[str] = set()
+
+        while parent_id and parent_id in self._executions and parent_id not in seen:
+            seen.add(parent_id)
+            parent = self._executions[parent_id]
+            if parent.state in {
+                LaneTaskState.COMPLETED,
+                LaneTaskState.FAILED,
+                LaneTaskState.CANCELLED,
+            }:
+                # Terminal parents do not constrain live children (matches reserve).
+                return
+
+            sibling_reserved = sum(
+                item.budget.reserved_tokens
+                for item in self._executions.values()
+                if item.parent_task_id == parent_id
+                and item.state in ACTIVE_LANE_STATES
+                and item.task_id != revising_id
+            )
+            needed_total = (
+                parent.budget.consumed_tokens
+                + sibling_reserved
+                + required
+            )
+            if needed_total <= parent.budget.reserved_tokens:
+                return
+
+            # Expand ancestors first so the parent's new total still fits.
+            grandparent_id = parent.parent_task_id
+            if grandparent_id and grandparent_id in self._executions:
+                grandparent = self._executions[grandparent_id]
+                if grandparent.state not in {
+                    LaneTaskState.COMPLETED,
+                    LaneTaskState.FAILED,
+                    LaneTaskState.CANCELLED,
+                }:
+                    self._ensure_parent_envelope_for_child_locked(
+                        child_task_id=parent_id,
+                        parent_task_id=grandparent_id,
+                        required_child_tokens=needed_total,
+                        child_estimated_cost=cost,
+                        reason=reason,
+                    )
+
+            self._grow_execution_reservation_locked(
+                parent_id,
+                target_total_tokens=needed_total,
+                additional_cost=cost,
+                reason=reason,
+                evidence={
+                    "for_child_task_id": revising_id or "",
+                    "required_child_tokens": required,
+                },
+            )
+            return
+
+    def _grow_execution_reservation_locked(
+        self,
+        task_id: str,
+        *,
+        target_total_tokens: int,
+        additional_cost: float | None,
+        reason: str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Increase one execution's reserved tokens/cost under lane/session/global caps.
+
+        Must be called while holding ``self._condition``.
+        """
+        execution = self._executions[task_id]
+        budget = execution.budget
+        target = max(
+            0,
+            int(target_total_tokens),
+            budget.reserved_tokens,
+            budget.consumed_tokens,
+        )
+        current_output = max(
+            budget.reserved_output_tokens,
+            budget.consumed_output_tokens,
+        )
+        target_input = max(budget.reserved_input_tokens, target - current_output)
+        if target_input + current_output < target:
+            current_output = target - target_input
+        next_total = target_input + current_output
+        next_cost = budget.estimated_cost
+        cost_known = budget.estimated_cost_known
+        if additional_cost is not None or budget.estimated_cost_known:
+            next_cost = max(
+                0.0,
+                float(budget.estimated_cost)
+                + max(0.0, float(additional_cost or 0.0)),
+            )
+            cost_known = additional_cost is not None or budget.estimated_cost_known
+        if next_total <= budget.reserved_tokens and (
+            additional_cost is None or next_cost <= budget.estimated_cost
+        ):
+            return
+
+        contract = self.contracts[execution.owning_lane]
+        if contract.token_budget is not None and next_total > contract.token_budget:
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the lane token limit"
+            )
+        if contract.cost_budget is not None and (
+            not cost_known or next_cost > contract.cost_budget
+        ):
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the lane cost limit"
+            )
+        active = [
+            item
+            for item in self._executions.values()
+            if item.state in ACTIVE_LANE_STATES and item.task_id != task_id
+        ]
+        if self.session_token_budget is not None and (
+            sum(
+                item.budget.reserved_tokens
+                for item in active
+                if item.session_id == execution.session_id
+            )
+            + next_total
+            > self.session_token_budget
+        ):
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the session token limit"
+            )
+        if self.global_token_budget is not None and (
+            sum(item.budget.reserved_tokens for item in active) + next_total
+            > self.global_token_budget
+        ):
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the global token limit"
+            )
+
+        previous_total = budget.reserved_tokens
+        try:
+            self.execution_supervisor.revise_budget(
+                task_id,
+                token_budget=next_total,
+                estimated_cost=(next_cost if cost_known else None),
+                reason=reason,
+                evidence=dict(evidence or {}),
+            )
+        except BudgetExceededError as exc:
+            raise LaneBudgetError(str(exc)) from exc
+
+        budget.reserved_input_tokens = target_input
+        budget.reserved_output_tokens = current_output
+        budget.estimated_cost = next_cost
+        budget.estimated_cost_known = cost_known
+        budget.revisions.append(
+            {
+                "reason": reason,
+                "previous_reserved_tokens": previous_total,
+                "revised_reserved_tokens": next_total,
+                "forecast_input_tokens": max(
+                    0, target_input - budget.consumed_input_tokens
+                ),
+                "forecast_output_tokens": max(
+                    0, current_output - budget.consumed_output_tokens
+                ),
+                "forecast_cost": (next_cost if cost_known else None),
+                "accounting_reservation_id": "",
+                "at": _iso(),
+                **{
+                    key: value
+                    for key, value in dict(evidence or {}).items()
+                    if key
+                    not in {
+                        "reason",
+                        "previous_reserved_tokens",
+                        "revised_reserved_tokens",
+                        "forecast_input_tokens",
+                        "forecast_output_tokens",
+                        "forecast_cost",
+                        "accounting_reservation_id",
+                        "at",
+                    }
+                },
+            }
+        )
+        execution.updated_at = _iso()
+        self.emit(
+            "budget.recalculated",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+            budget=asdict(budget),
+        )
 
     def transition(
         self,

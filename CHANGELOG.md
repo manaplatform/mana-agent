@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed parent/child lane budget growth so recalculating a child reservation
+  expands the active parent (and nested ancestors) instead of failing with
+  “recalculated child budget exceeds the parent remaining budget”. This covers
+  multi-task children, nested coding follow-ups under a parent lane task, and
+  reserve-time child admission when the child needs more than the parent’s
+  current remaining envelope. Terminal (failed/completed/cancelled) parents no
+  longer block child recalculation, matching reserve-time policy. Session, global,
+  and lane caps still fail closed with no fallback route.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/gateway/test_multi_task_orchestration.py -q`.
+
 - Fixed multi-task budget coordination so compound children can reserve and run
   under a real parent envelope. The multi-task root now reserves capacity for
   the planned children (not only the goal text), expands that envelope before

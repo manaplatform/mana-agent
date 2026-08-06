@@ -100,6 +100,15 @@ admission. Actual provider calls still pass through the session context
 governor. Missing or insufficient parent envelope capacity fails closed as a
 blocked multi-task budget decision with no fallback route.
 
+Lane-coordinator parent envelopes apply to every parent/child lane relationship,
+not only multi-task: `reserve` and `recalculate_budget` grow the active parent
+(and active ancestors) so the child’s required total plus active sibling
+reservations fit under the parent reserved budget. Child growth therefore adds
+into the parent envelope rather than aborting with a parent-remaining error.
+Terminal parents (failed/completed/cancelled) do not constrain children, which
+matches reserve-time policy for follow-ups under a finished task. Immutable
+lane, session, and global caps still stop expansion with no fallback route.
+
 ## Verification
 
 VerifierAgent records verification requirements for every mutation route and

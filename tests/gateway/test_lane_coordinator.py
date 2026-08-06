@@ -958,6 +958,190 @@ def test_recalculate_budget_expands_a_live_reservation_within_lane_policy(
     assert revised.budget.revisions[-1]["accounting_reservation_id"] == "reservation_forecast"
 
 
+def test_recalculate_budget_expands_parent_envelope_for_child_growth(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Child forecast growth must add into the active parent reservation."""
+    parent = coordinator.reserve(
+        normalized_intent="parent envelope",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-parent-envelope",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=40,
+        requested_output_tokens=40,
+    )
+    coordinator.start(parent)
+    child = coordinator.reserve(
+        normalized_intent="child coding",
+        lane_id=LaneId.CODING,
+        session_id=parent.execution.session_id,
+        workspace_id=parent.execution.workspace_id,
+        repository_id=parent.execution.repository_id,
+        parent_task_id=parent.execution.task_id,
+        root_task_id=parent.execution.root_task_id,
+        requested_input_tokens=30,
+        requested_output_tokens=30,
+        task_type="single",
+    )
+    coordinator.start(child)
+
+    revised_child = coordinator.recalculate_budget(
+        child.execution.task_id,
+        forecast_input_tokens=500,
+        forecast_output_tokens=400,
+        forecast_cost=0.02,
+        reason="provider-call forecast",
+    )
+    revised_parent = coordinator.inspect_task(parent.execution.task_id)
+
+    assert revised_child.budget.reserved_tokens >= 900
+    assert revised_parent.budget.reserved_tokens >= revised_child.budget.reserved_tokens
+    assert any(
+        item.get("reason") == "parent envelope for child recalculation"
+        for item in revised_parent.budget.revisions
+    )
+
+
+def test_reserve_expands_parent_when_child_needs_more_than_remaining(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Child reservation grows the parent envelope instead of hard-failing."""
+    parent = coordinator.reserve(
+        normalized_intent="small parent",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-reserve-envelope",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=20,
+        requested_output_tokens=20,
+    )
+    coordinator.start(parent)
+
+    child = coordinator.reserve(
+        normalized_intent="large child",
+        lane_id=LaneId.CODING,
+        session_id=parent.execution.session_id,
+        workspace_id=parent.execution.workspace_id,
+        repository_id=parent.execution.repository_id,
+        parent_task_id=parent.execution.task_id,
+        root_task_id=parent.execution.root_task_id,
+        requested_input_tokens=200,
+        requested_output_tokens=200,
+        task_type="single",
+    )
+
+    revised_parent = coordinator.inspect_task(parent.execution.task_id)
+    assert child.execution.budget.reserved_tokens == 400
+    assert revised_parent.budget.reserved_tokens >= 400
+    assert any(
+        item.get("reason") == "parent envelope for child reservation"
+        for item in revised_parent.budget.revisions
+    )
+
+
+def test_recalculate_budget_under_terminal_parent_does_not_block(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Follow-ups under a failed parent must not fail parent-remaining checks."""
+    parent = coordinator.reserve(
+        normalized_intent="failed parent",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-terminal-parent",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=30,
+        requested_output_tokens=30,
+    )
+    coordinator.start(parent)
+    coordinator.finish(
+        parent.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior multi-task child failed",
+    )
+    # Terminal parents skip remaining checks at reserve time.
+    child = coordinator.reserve(
+        normalized_intent="follow-up under failed parent",
+        lane_id=LaneId.CODING,
+        session_id=parent.execution.session_id,
+        workspace_id=parent.execution.workspace_id,
+        repository_id=parent.execution.repository_id,
+        parent_task_id=parent.execution.task_id,
+        root_task_id=parent.execution.root_task_id,
+        requested_input_tokens=100,
+        requested_output_tokens=100,
+        task_type="single",
+    )
+    coordinator.start(child)
+
+    revised = coordinator.recalculate_budget(
+        child.execution.task_id,
+        forecast_input_tokens=800,
+        forecast_output_tokens=600,
+        forecast_cost=None,
+        reason="provider-call forecast",
+    )
+
+    assert revised.budget.reserved_tokens >= 1400
+
+
+def test_recalculate_budget_expands_nested_ancestors(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Grandchild growth expands parent and multi-task-style root ancestors."""
+    root = coordinator.reserve(
+        normalized_intent="compound root",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-nested-ancestors",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=50,
+        requested_output_tokens=50,
+        task_type="multi_task_root",
+    )
+    coordinator.start(root)
+    mid = coordinator.reserve(
+        normalized_intent="mid child",
+        lane_id=LaneId.CODING,
+        session_id=root.execution.session_id,
+        workspace_id=root.execution.workspace_id,
+        repository_id=root.execution.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=40,
+        requested_output_tokens=40,
+        task_type="multi_task_child",
+    )
+    coordinator.start(mid)
+    leaf = coordinator.reserve(
+        normalized_intent="nested leaf",
+        lane_id=LaneId.CODING,
+        session_id=root.execution.session_id,
+        workspace_id=root.execution.workspace_id,
+        repository_id=root.execution.repository_id,
+        parent_task_id=mid.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=30,
+        requested_output_tokens=30,
+        task_type="single",
+    )
+    coordinator.start(leaf)
+
+    revised_leaf = coordinator.recalculate_budget(
+        leaf.execution.task_id,
+        forecast_input_tokens=700,
+        forecast_output_tokens=500,
+        forecast_cost=0.03,
+        reason="provider-call forecast",
+    )
+    revised_mid = coordinator.inspect_task(mid.execution.task_id)
+    revised_root = coordinator.inspect_task(root.execution.task_id)
+
+    assert revised_leaf.budget.reserved_tokens >= 1200
+    assert revised_mid.budget.reserved_tokens >= revised_leaf.budget.reserved_tokens
+    assert revised_root.budget.reserved_tokens >= revised_mid.budget.reserved_tokens
+
+
 def test_child_agent_reserves_and_consumes_parent_budget(coordinator: LaneCoordinator) -> None:
     parent = _reserve(coordinator, LaneId.RESEARCH, intent="parent research")
     child = coordinator.reserve(
