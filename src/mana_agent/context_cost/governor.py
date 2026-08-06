@@ -242,6 +242,41 @@ class ContextCostGovernor:
             for key in self.metrics:
                 self.metrics[key] = 0.0 if "cost" in key else 0
 
+    def ensure_admission_budget(self, *, required_tokens: int | None = None) -> int | None:
+        """Ensure a new chat message can admit another full task-sized run.
+
+        ``mana_routing_task_token_budget`` is a per-task policy. Sequential
+        follow-up and extend messages in one session must each receive a fresh
+        task-sized admission envelope. Prior completed work must not leave
+        ``task_token_remaining`` / ``session_token_remaining`` at 0 and block
+        the next message with ``effective limit is 0``.
+        """
+        configured = _positive_or_none(
+            getattr(self.settings, "mana_routing_task_token_budget", None)
+        )
+        needed = max(int(required_tokens or 0), int(configured or 0))
+        if needed <= 0:
+            return self._implementation_tokens_remaining()
+        with self._lock:
+            if self.ledger.token_limit is None:
+                return None
+            reserve = self.ledger.children.get("verification:reserved")
+            reserved_remaining = 0
+            if reserve is not None and reserve.remaining_tokens is not None:
+                reserved_remaining = max(0, int(reserve.remaining_tokens))
+            # Implementation remaining is session remaining minus the still-held
+            # verification carve-out. Expand the session limit so a full new
+            # task budget fits after that carve-out.
+            required_session_remaining = needed + reserved_remaining
+            current_remaining = max(
+                0, int(self.ledger.token_limit) - int(self.ledger.tokens_used)
+            )
+            if current_remaining < required_session_remaining:
+                self.ledger.token_limit = int(self.ledger.token_limit) + (
+                    required_session_remaining - current_remaining
+                )
+            return self._implementation_tokens_remaining()
+
     def _model_profile(self, provider: str, model: str) -> Any | None:
         normalized_provider = str(provider or "").casefold()
         normalized_model = str(model or "")

@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed multi-message session budgets so follow-up and extend messages recalculate
+  admission instead of inheriting a depleted prior-turn residual of 0. The context
+  cost governor expands the session ledger to a fresh per-task
+  `MANA_ROUTING_TASK_TOKEN_BUDGET` envelope on each user message; gateway preflight
+  estimates refresh that envelope before sizing; live lane reservations are
+  recalculated from the new forecast for follow-up, expand, retry, and resume
+  paths. `MANA_LANE_SESSION_TOKEN_BUDGET` / `MANA_LANE_GLOBAL_TOKEN_BUDGET` of `0`
+  remain unlimited (no longer coerced to `1`). Follow-up classification remains
+  deployed on the gateway process_turn path. Missing capacity still fails closed
+  with no model fallback.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py::test_ensure_admission_budget_refreshes_depleted_session_for_followup_message tests/gateway/test_multi_task_orchestration.py::test_execution_token_estimate_refreshes_budget_for_followup_message tests/gateway/test_capsule_identity.py::test_lane_token_budget_zero_means_unlimited tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py -q`.
+
 - Fixed context-cost admission so sequential model calls under one lane-task
   identity no longer reuse a finalized accounting operation id. Gateway routes
   pin `step_id=after_routing` for the whole execution, so search (and other

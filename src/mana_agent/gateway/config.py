@@ -129,15 +129,18 @@ class ChatGatewayConfig:
                 str(key): max(1, int(value))
                 for key, value in (self.lane_provider_limits or {}).items()
             },
+            # 0 means unlimited (product policy); only positive values cap lanes.
             lane_session_token_budget=(
-                max(1, int(self.lane_session_token_budget))
-                if self.lane_session_token_budget is not None
-                else None
+                None
+                if self.lane_session_token_budget is None
+                or int(self.lane_session_token_budget) <= 0
+                else max(1, int(self.lane_session_token_budget))
             ),
             lane_global_token_budget=(
-                max(1, int(self.lane_global_token_budget))
-                if self.lane_global_token_budget is not None
-                else None
+                None
+                if self.lane_global_token_budget is None
+                or int(self.lane_global_token_budget) <= 0
+                else max(1, int(self.lane_global_token_budget))
             ),
             session_id=self.session_id,
             memory_user_id=str(self.memory_user_id or "").strip(),

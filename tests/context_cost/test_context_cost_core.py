@@ -83,6 +83,35 @@ def test_parent_child_budget_allocation_and_consumption() -> None:
         parent.allocate_child("candidate", token_limit=800)
 
 
+def test_ensure_admission_budget_refreshes_depleted_session_for_followup_message() -> None:
+    """Sequential messages must not inherit an effective remaining of 0."""
+    governor = ContextCostGovernor(
+        session_id="session-followup",
+        settings=settings(
+            mana_context_governor_mode="enforce",
+            mana_routing_task_token_budget=1_000,
+        ),
+    )
+    # Simulate a completed first message that fully spent the task-sized ledger.
+    governor.ledger.tokens_used = int(governor.ledger.token_limit or 0)
+    assert governor._implementation_tokens_remaining() == 0
+
+    remaining = governor.ensure_admission_budget()
+    assert remaining is not None
+    assert remaining >= 1_000
+    assert governor._implementation_tokens_remaining() >= 1_000
+
+    # A second follow-up estimate must not hard-fail with effective limit 0.
+    estimate = governor.estimate_execution(
+        provider="test-provider",
+        model="test-model",
+        components={"user_request": "follow up with more detail"},
+        requested_output_tokens=64,
+    )
+    assert estimate.total_tokens > 0
+    assert estimate.effective_total_limit >= estimate.total_tokens
+
+
 def test_task_usage_keeps_actual_and_estimated_costs_separate() -> None:
     governor = ContextCostGovernor(session_id="s", settings=settings())
     governor.register_model_profiles((

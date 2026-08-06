@@ -292,6 +292,87 @@ def test_multi_task_capacity_estimate_ignores_depleted_session_remaining(
     assert estimate.profile.context_window == 8_192
 
 
+def test_execution_token_estimate_refreshes_budget_for_followup_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second/third session messages must recalculate admission budget before sizing."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from mana_agent.context_cost.governor import ContextCostGovernor
+    from mana_agent.context_cost.profiles import (
+        ModelIdentity,
+        ModelTokenProfile,
+        ModelTokenProfileResolver,
+    )
+    from mana_agent.context_cost.store import AccountingStore
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lanes import LaneId, default_lane_contracts
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    settings = SimpleNamespace(
+        mana_context_governor_enabled=True,
+        mana_context_governor_mode="enforce",
+        mana_routing_task_token_budget=500,
+        mana_routing_session_cost_budget=None,
+        mana_routing_verification_reserve_ratio=0.15,
+        mana_context_cost_log_enabled=False,
+        mana_context_cost_log_retention_days=30,
+        mana_context_artifact_retention_days=30,
+        mana_context_unknown_model_policy="conservative",
+        mana_context_unknown_model_context_window=8_192,
+        mana_context_unknown_model_max_output_tokens=1_024,
+        mana_context_estimation_safety_margin_ratio=0.05,
+        mana_context_default_output_ratio=0.20,
+        mana_context_historical_prediction_enabled=False,
+    )
+    governor = ContextCostGovernor(session_id="session-multi-msg", settings=settings)
+    profile = ModelTokenProfile(
+        ModelIdentity("fixture", "followup-model"),
+        context_window=8_192,
+        max_output_tokens=1_024,
+        input_price_per_million=Decimal("1"),
+        output_price_per_million=Decimal("2"),
+        supports_usage_reporting=True,
+        source="test",
+        confidence="high",
+    )
+    governor.profile_resolver = ModelTokenProfileResolver((profile,))
+    governor.accounting = governor.accounting.__class__(
+        governor.profile_resolver,
+        store=AccountingStore(tmp_path / "accounting-followup"),
+        safety_margin_ratio=Decimal("0.05"),
+        historical_prediction_enabled=False,
+    )
+    # Fully spend the first-message task envelope so remaining is 0.
+    governor.ledger.tokens_used = int(governor.ledger.token_limit or 0)
+    assert governor._implementation_tokens_remaining() == 0
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.config = SimpleNamespace(agent_max_steps=6)
+    gateway._lane_coordinator = SimpleNamespace(
+        select_lane=lambda **_kwargs: LaneId.RESEARCH,
+        contracts=default_lane_contracts(),
+    )
+    gateway._stack = SimpleNamespace(context_cost_governor=governor)
+
+    decision = SimpleNamespace(
+        provider="fixture",
+        selected_model="followup-model",
+        estimated_output_tokens=128,
+        expected_model_calls=1,
+    )
+    estimate = gateway._execution_token_estimate(
+        entry_route="search",
+        execution_decision=decision,
+        request_text="follow up: expand the previous answer with more detail",
+        session_id="session-multi-msg",
+    )
+    assert estimate.total_tokens > 0
+    assert estimate.effective_total_limit >= estimate.total_tokens
+    assert governor._implementation_tokens_remaining() >= 500
+
+
 def test_multi_task_parent_envelope_expands_for_parallel_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

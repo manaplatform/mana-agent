@@ -3222,7 +3222,12 @@ class AgentChatGateway:
         session_id: str = "",
         context_components: Mapping[str, Any] | None = None,
     ):
-        """Estimate the final selected model against the route's serialized payload."""
+        """Estimate the final selected model against the route's serialized payload.
+
+        Preflight reservation sizing uses model/lane capacity after the session
+        ledger has been refreshed for this message. Sequential follow-ups must
+        not inherit a depleted prior-turn residual of 0 as their effective limit.
+        """
         lane_id = self._lane_coordinator.select_lane(entry_route=entry_route)
         components: dict[str, Any] = {
             "user_request": request_text,
@@ -3256,6 +3261,9 @@ class AgentChatGateway:
             })
             tool_count = len(tools)
             expected_calls = max(1, int(self.config.agent_max_steps))
+        # Refresh the per-task admission envelope before sizing this message so
+        # prior turn consumption cannot force effective limit 0.
+        self._stack.context_cost_governor.ensure_admission_budget()
         return self._stack.context_cost_governor.estimate_execution(
             provider=execution_decision.provider,
             model=execution_decision.selected_model,
@@ -3268,6 +3276,47 @@ class AgentChatGateway:
             execution_kind="gateway_route",
             tool_count=tool_count,
             lane_policy_limit=self._lane_coordinator.contracts[lane_id].token_budget,
+        )
+
+    def _recalculate_reservation_for_message(
+        self,
+        task_id: str,
+        *,
+        execution_estimate: Any,
+        reason: str,
+    ) -> None:
+        """Recompute an active lane reservation from a follow-up/extend forecast."""
+        forecast_cost = (
+            None
+            if execution_estimate.estimated_cost is None
+            else float(execution_estimate.estimated_cost)
+        )
+        try:
+            execution = self._lane_coordinator.inspect_task(task_id)
+        except LaneCoordinatorError:
+            return
+        if execution.parent_task_id and execution.state in ACTIVE_LANE_STATES:
+            required = max(
+                0,
+                int(execution_estimate.input_tokens) + int(execution_estimate.output_tokens),
+            )
+            try:
+                self._ensure_multi_task_parent_budget(
+                    execution.parent_task_id,
+                    required_child_tokens=required,
+                    child_estimated_cost=forecast_cost,
+                    revising_task_id=task_id,
+                )
+            except LaneCoordinatorError:
+                # Parent expansion is best-effort for non-multi-task parents;
+                # recalculate_budget still applies the child forecast under caps.
+                pass
+        self._lane_coordinator.recalculate_budget(
+            task_id,
+            forecast_input_tokens=int(execution_estimate.input_tokens),
+            forecast_output_tokens=int(execution_estimate.output_tokens),
+            forecast_cost=forecast_cost,
+            reason=reason,
         )
 
     def _multi_task_capacity_estimate(
@@ -3425,6 +3474,10 @@ class AgentChatGateway:
             metadata={"user_message_id": user_message_id, "turn_state": "received"},
         )
         try:
+            # Each user message (including follow-ups and extends) needs a fresh
+            # per-task admission envelope. Prior turn consumption must not leave
+            # effective remaining at 0 for this session's next message.
+            self._stack.context_cost_governor.ensure_admission_budget()
             state = self._session(session_id)
             conversation_id = str(state.get("conversation_id") or session_id)
             state["_turn_record"] = turn_record
@@ -4180,6 +4233,17 @@ class AgentChatGateway:
                             },
                         )
                     else:
+                        # Follow-up, expand, retry, resume, and second+ messages
+                        # recalculate the live reservation from this turn's
+                        # forecast so exhausted prior usage cannot block work.
+                        self._recalculate_reservation_for_message(
+                            reservation.execution.task_id,
+                            execution_estimate=execution_estimate,
+                            reason=(
+                                f"message budget recalculation "
+                                f"({relation_type or ('retry' if recovered_task else 'new')})"
+                            ),
+                        )
                         self._lane_coordinator.start(reservation)
                         options["_lane_task_id"] = reservation.execution.task_id
                         self._stack.context_cost_governor.set_execution_identity(
@@ -4389,6 +4453,21 @@ class AgentChatGateway:
                         payload={
                             "route": entry_decision.route,
                             "checkpoint_resume": "blocked",
+                        },
+                    )
+                except ModelContextLimitError as exc:
+                    result = ChatTurnResult(
+                        answer=(
+                            f"Gateway execution failed: {exc}. "
+                            "No direct model fallback was executed."
+                        ),
+                        error="context_budget_blocked",
+                        mode="context-budget-blocked",
+                        payload={
+                            "route": entry_decision.route,
+                            "required": exc.required,
+                            "effective_limit": exc.effective_limit,
+                            "deficit": exc.deficit,
                         },
                     )
                 except LaneCoordinatorError as exc:
