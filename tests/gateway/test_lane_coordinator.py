@@ -1088,7 +1088,11 @@ def test_recalculate_budget_under_terminal_parent_does_not_block(
 def test_recalculate_budget_expands_nested_ancestors(
     coordinator: LaneCoordinator,
 ) -> None:
-    """Grandchild growth expands parent and multi-task-style root ancestors."""
+    """Grandchild growth expands parent and multi-task-style root ancestors.
+
+    Mid stays reserved (queued) rather than started so two coding tasks do not
+    contend on the same repository-write lock for the whole lane timeout.
+    """
     root = coordinator.reserve(
         normalized_intent="compound root",
         lane_id=LaneId.RESEARCH,
@@ -1112,7 +1116,7 @@ def test_recalculate_budget_expands_nested_ancestors(
         requested_output_tokens=40,
         task_type="multi_task_child",
     )
-    coordinator.start(mid)
+    # Do not start mid: a second coding start would block on mid's write lock.
     leaf = coordinator.reserve(
         normalized_intent="nested leaf",
         lane_id=LaneId.CODING,

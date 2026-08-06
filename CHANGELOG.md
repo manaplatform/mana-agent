@@ -11,7 +11,9 @@ All notable repository changes should be recorded here.
   reserve-time child admission when the child needs more than the parent’s
   current remaining envelope. Terminal (failed/completed/cancelled) parents no
   longer block child recalculation, matching reserve-time policy. Session, global,
-  and lane caps still fail closed with no fallback route.
+  and lane caps still fail closed with no fallback route. Nested-ancestor coverage
+  avoids starting two coding tasks under the same repository-write lock so the
+  suite does not hang on lane lock wait.
   - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/gateway/test_multi_task_orchestration.py -q`.
 
 - Fixed multi-task budget coordination so compound children can reserve and run
