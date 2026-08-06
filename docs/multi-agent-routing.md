@@ -88,6 +88,15 @@ child status and never reports full success after partial completion. `/tasks`,
 root/child identities. No second task store, scheduler, frontend path, or public
 orchestration entry point is introduced.
 
+Multi-task budget coordination is parent-envelope based: after decomposition the
+root reserves capacity for orchestration plus every planned child, then expands
+that envelope before each child lane reservation so siblings do not starve under
+a goal-only parent budget. Child preflight sizing uses model and optional lane
+capacity only; depleted shared session remaining from parent planning does not
+hard-fail child admission. Actual provider calls still pass through the session
+context governor. Missing or insufficient parent envelope capacity fails closed
+as a blocked multi-task budget decision with no fallback route.
+
 ## Verification
 
 VerifierAgent records verification requirements for every mutation route and

@@ -220,3 +220,168 @@ def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> N
     assert calls == ["unfinished"]
     assert results[0].status == "completed"
     assert results[0].result == "already done"
+
+
+def test_multi_task_capacity_estimate_ignores_depleted_session_remaining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compound children must size against model capacity, not parent planning spend."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from mana_agent.context_cost.accounting import (
+        ModelContextLimitError,
+        ModelTokenAccountingService,
+        TokenEstimationRequest,
+    )
+    from mana_agent.context_cost.profiles import (
+        ModelIdentity,
+        ModelTokenProfile,
+        ModelTokenProfileResolver,
+    )
+    from mana_agent.context_cost.store import AccountingStore
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lanes import LaneId, default_lane_contracts
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    profile = ModelTokenProfile(
+        ModelIdentity("fixture", "capacity-model"),
+        context_window=8_192,
+        max_output_tokens=1_024,
+        input_price_per_million=Decimal("1"),
+        output_price_per_million=Decimal("2"),
+        supports_usage_reporting=True,
+        source="test",
+        confidence="high",
+    )
+    accounting = ModelTokenAccountingService(
+        ModelTokenProfileResolver((profile,)),
+        store=AccountingStore(tmp_path / "accounting"),
+        safety_margin_ratio=Decimal("0.05"),
+    )
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = SimpleNamespace(
+        select_lane=lambda **_kwargs: LaneId.RESEARCH,
+        contracts=default_lane_contracts(),
+    )
+    gateway._stack = SimpleNamespace(
+        context_cost_governor=SimpleNamespace(accounting=accounting)
+    )
+
+    # Shared session remaining is intentionally too small for a normal estimate.
+    with pytest.raises(ModelContextLimitError, match="effective limit is 50"):
+        accounting.estimate(
+            TokenEstimationRequest(
+                model_identity=ModelIdentity("fixture", "capacity-model"),
+                components={"user_request": "create assets " * 20},
+                requested_output_tokens=256,
+                task_token_remaining=50,
+                session_token_remaining=50,
+            )
+        )
+
+    estimate = gateway._multi_task_capacity_estimate(
+        provider="fixture",
+        model="capacity-model",
+        request_text="create assets " * 20,
+        entry_route="coding",
+        expected_model_calls=1,
+        requested_output_tokens=256,
+    )
+    assert estimate.total_tokens > 50
+    assert estimate.profile.context_window == 8_192
+
+
+def test_multi_task_parent_envelope_expands_for_parallel_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root multi-task reservation must grow so sibling children can both reserve."""
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lane_coordinator import LaneCoordinator
+    from mana_agent.gateway.lanes import LaneId
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root_path = tmp_path / "repo"
+    root_path.mkdir()
+    coordinator = LaneCoordinator(root_path)
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+    gateway._multi_task_budget_lock = threading.Lock()
+
+    board = coordinator.taskboard
+    root_task = board.create_task(title="Compound", user_request="Do A and B")
+    first_task = board.create_child_task(
+        root_task.task_id,
+        title="A",
+        user_request="Do A",
+        decomposition_local_id="a",
+        acceptance_criteria=["A done"],
+    )
+    second_task = board.create_child_task(
+        root_task.task_id,
+        title="B",
+        user_request="Do B",
+        decomposition_local_id="b",
+        acceptance_criteria=["B done"],
+    )
+
+    # Intentionally under-size the root the way the pre-fix path did (goal-only).
+    root = coordinator.reserve(
+        normalized_intent="Do A and B",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-multi",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        requested_input_tokens=64,
+        requested_output_tokens=100,
+        task_type="multi_task_root",
+        taskboard_task_id=root_task.task_id,
+    )
+    coordinator.start(root)
+
+    with gateway._multi_task_budget_lock:
+        gateway._ensure_multi_task_parent_budget(
+            root.execution.task_id,
+            child_input_tokens=200,
+            child_output_tokens=300,
+            child_estimated_cost=None,
+        )
+        first = coordinator.reserve(
+            normalized_intent="Do A",
+            lane_id=LaneId.CODING,
+            session_id="session-multi",
+            workspace_id=board.store.workspace_id,
+            repository_id=board.store.repository_id,
+            parent_task_id=root.execution.task_id,
+            root_task_id=root.execution.root_task_id,
+            requested_input_tokens=200,
+            requested_output_tokens=300,
+            task_type="multi_task_child",
+            taskboard_task_id=first_task.task_id,
+        )
+        gateway._ensure_multi_task_parent_budget(
+            root.execution.task_id,
+            child_input_tokens=250,
+            child_output_tokens=350,
+            child_estimated_cost=None,
+        )
+        second = coordinator.reserve(
+            normalized_intent="Do B",
+            lane_id=LaneId.MEDIA,
+            session_id="session-multi",
+            workspace_id=board.store.workspace_id,
+            repository_id=board.store.repository_id,
+            parent_task_id=root.execution.task_id,
+            root_task_id=root.execution.root_task_id,
+            requested_input_tokens=250,
+            requested_output_tokens=350,
+            task_type="multi_task_child",
+            taskboard_task_id=second_task.task_id,
+        )
+
+    parent = coordinator.inspect_task(root.execution.task_id)
+    assert first.execution.budget.reserved_tokens == 500
+    assert second.execution.budget.reserved_tokens == 600
+    assert parent.budget.reserved_tokens >= 500 + 600
+    assert parent.budget.revisions
+    assert parent.budget.revisions[-1]["reason"] == "multi-task child budget envelope"

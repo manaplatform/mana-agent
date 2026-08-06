@@ -48,11 +48,14 @@ from mana_agent.gateway.entry_routing import (
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.lane_coordinator import (
+    LaneBudgetError,
     LaneCoordinator,
     LaneCoordinatorError,
     LaneReservation,
 )
-from mana_agent.gateway.lanes import LaneId, LaneTaskState, select_lane
+from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneId, LaneTaskState, select_lane
+from mana_agent.context_cost.accounting import ModelContextLimitError, TokenEstimationRequest
+from mana_agent.context_cost.profiles import ModelIdentity
 from mana_agent.gateway.routing import GatewayRoutingError
 from mana_agent.gateway.artifact_routing import (
     artifact_handler_availability,
@@ -641,6 +644,7 @@ class AgentChatGateway:
         self._active: set[str] = set()
         self._async_turn_lock = asyncio.Lock()
         self._multi_task_route_lock = threading.Lock()
+        self._multi_task_budget_lock = threading.Lock()
         self._chat_session_id: str | None = None
         self._history_store = ChatSessionHistory()
 
@@ -3265,6 +3269,88 @@ class AgentChatGateway:
             lane_policy_limit=self._lane_coordinator.contracts[lane_id].token_budget,
         )
 
+    def _multi_task_capacity_estimate(
+        self,
+        *,
+        provider: str,
+        model: str,
+        request_text: str,
+        entry_route: str,
+        expected_model_calls: int = 1,
+        requested_output_tokens: int | None = None,
+        context_components: Mapping[str, Any] | None = None,
+        tool_count: int = 0,
+    ):
+        """Size multi-task work against model/lane capacity only.
+
+        Compound children draw from the root multi-task envelope. Preflight
+        sizing must not hard-fail on parent planning depletion of the shared
+        session ledger; actual provider calls still pass through the governor.
+        """
+        lane_id = self._lane_coordinator.select_lane(entry_route=entry_route)
+        components: dict[str, Any] = {
+            "user_request": request_text,
+            **dict(context_components or {}),
+        }
+        return self._stack.context_cost_governor.accounting.estimate(
+            TokenEstimationRequest(
+                model_identity=ModelIdentity(provider or "unknown", model),
+                components=components,
+                route=entry_route,
+                lane=lane_id.value,
+                expected_model_calls=max(1, int(expected_model_calls or 1)),
+                requested_output_tokens=requested_output_tokens,
+                execution_kind="multi_task_capacity",
+                tool_count=max(0, int(tool_count)),
+                lane_policy_limit=self._lane_coordinator.contracts[lane_id].token_budget,
+            )
+        )
+
+    def _ensure_multi_task_parent_budget(
+        self,
+        parent_task_id: str,
+        *,
+        child_input_tokens: int,
+        child_output_tokens: int,
+        child_estimated_cost: float | None,
+    ) -> None:
+        """Grow the multi-task root envelope so the next child reservation fits."""
+        parent = self._lane_coordinator.inspect_task(parent_task_id)
+        sibling_reserved = sum(
+            execution.budget.reserved_tokens
+            for execution in self._lane_coordinator.executions
+            if execution.parent_task_id == parent_task_id
+            and execution.state in ACTIVE_LANE_STATES
+        )
+        child_total = max(0, int(child_input_tokens)) + max(0, int(child_output_tokens))
+        needed_total = parent.budget.consumed_tokens + sibling_reserved + child_total
+        if needed_total <= parent.budget.reserved_tokens:
+            return
+        current_output = max(
+            parent.budget.reserved_output_tokens,
+            parent.budget.consumed_output_tokens,
+        )
+        target_input = max(
+            parent.budget.reserved_input_tokens,
+            needed_total - current_output,
+        )
+        forecast_input = max(0, target_input - parent.budget.consumed_input_tokens)
+        forecast_output = max(0, current_output - parent.budget.consumed_output_tokens)
+        forecast_cost = None
+        if child_estimated_cost is not None or parent.budget.estimated_cost_known:
+            forecast_cost = max(
+                0.0,
+                float(parent.budget.estimated_cost)
+                + max(0.0, float(child_estimated_cost or 0.0)),
+            )
+        self._lane_coordinator.recalculate_budget(
+            parent_task_id,
+            forecast_input_tokens=forecast_input,
+            forecast_output_tokens=forecast_output,
+            forecast_cost=forecast_cost,
+            reason="multi-task child budget envelope",
+        )
+
     def latest_routing_decision(
         self, *, session_id: str = "", task_id: str = ""
     ) -> dict[str, Any] | None:
@@ -4607,32 +4693,94 @@ class AgentChatGateway:
                 maximum_concurrency=orchestrator.maximum_concurrency,
             )
         )
-        root_estimate = self._execution_token_estimate(
-            entry_route="multi_task",
-            execution_decision=root_model_decision,
-            request_text=plan.goal,
-            session_id=context.session_id,
+        try:
+            root_capacity = self._multi_task_capacity_estimate(
+                provider=root_model_decision.provider,
+                model=root_model_decision.selected_model,
+                request_text=plan.goal,
+                entry_route="multi_task",
+                expected_model_calls=max(
+                    1, int(getattr(root_model_decision, "expected_model_calls", 1) or 1)
+                ),
+                requested_output_tokens=max(
+                    1, int(getattr(root_model_decision, "estimated_output_tokens", 1) or 1)
+                ),
+            )
+            child_capacities = [
+                self._multi_task_capacity_estimate(
+                    provider=root_model_decision.provider,
+                    model=root_model_decision.selected_model,
+                    request_text=item.request,
+                    entry_route="multi_task",
+                    expected_model_calls=max(
+                        1, int(getattr(root_model_decision, "expected_model_calls", 1) or 1)
+                    ),
+                    requested_output_tokens=max(
+                        1,
+                        int(getattr(root_model_decision, "estimated_output_tokens", 1) or 1),
+                    ),
+                )
+                for item in plan.tasks
+            ]
+        except ModelContextLimitError as exc:
+            board.update_status(root_task.task_id, TaskStatus.FAILED, reason=str(exc))
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: multi_task_budget. No fallback action was executed. "
+                    f"Reason: compound request does not fit model capacity ({exc})."
+                ),
+                error="multi_task_budget_exceeded",
+                mode="route-multi-task-error",
+                decision=decision,
+                payload={"route": "multi_task", "root_task_id": root_task.task_id},
+            )
+        envelope_input = root_capacity.input_tokens + sum(
+            item.input_tokens for item in child_capacities
         )
-        root_reservation = self._lane_coordinator.reserve(
-            normalized_intent=plan.goal,
-            lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
-            session_id=context.session_id,
-            workspace_id=board.store.workspace_id,
-            repository_id=board.store.repository_id,
-            model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
-            requested_input_tokens=root_estimate.input_tokens,
-            requested_output_tokens=root_estimate.output_tokens,
-            estimated_cost=(None if root_estimate.estimated_cost is None else float(root_estimate.estimated_cost)),
-            model_context_window=root_estimate.profile.context_window,
-            model_max_output_tokens=root_estimate.profile.max_output_tokens,
-            estimate_confidence=root_estimate.confidence,
-            estimate_source=root_estimate.profile.source,
-            capabilities=(),
-            routing_decision_id=root_model_decision.decision_id,
-            provider=root_model_decision.provider,
-            task_type="multi_task_root",
-            taskboard_task_id=root_task.task_id,
+        envelope_output = root_capacity.output_tokens + sum(
+            item.output_tokens for item in child_capacities
         )
+        envelope_cost_values = [
+            item.estimated_cost
+            for item in (root_capacity, *child_capacities)
+            if item.estimated_cost is not None
+        ]
+        envelope_cost = (
+            float(sum(envelope_cost_values)) if envelope_cost_values else None
+        )
+        try:
+            root_reservation = self._lane_coordinator.reserve(
+                normalized_intent=plan.goal,
+                lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
+                session_id=context.session_id,
+                workspace_id=board.store.workspace_id,
+                repository_id=board.store.repository_id,
+                model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
+                requested_input_tokens=envelope_input,
+                requested_output_tokens=envelope_output,
+                estimated_cost=envelope_cost,
+                model_context_window=root_capacity.profile.context_window,
+                model_max_output_tokens=root_capacity.profile.max_output_tokens,
+                estimate_confidence=root_capacity.confidence,
+                estimate_source=root_capacity.profile.source,
+                capabilities=(),
+                routing_decision_id=root_model_decision.decision_id,
+                provider=root_model_decision.provider,
+                task_type="multi_task_root",
+                taskboard_task_id=root_task.task_id,
+            )
+        except LaneBudgetError as exc:
+            board.update_status(root_task.task_id, TaskStatus.FAILED, reason=str(exc))
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: multi_task_budget. No fallback action was executed. "
+                    f"Reason: compound request cannot reserve a parent budget envelope ({exc})."
+                ),
+                error="multi_task_budget_exceeded",
+                mode="route-multi-task-error",
+                decision=decision,
+                payload={"route": "multi_task", "root_task_id": root_task.task_id},
+            )
         self._lane_coordinator.start(root_reservation)
 
         def execute_child(item: Any, child_task_id: str) -> MultiTaskChildResult:
@@ -4651,45 +4799,61 @@ class AgentChatGateway:
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
             )
-            with self._multi_task_route_lock:
-                child_decision = self._entry_router.route(
-                    user_prompt=item.request,
+            try:
+                with self._multi_task_route_lock:
+                    child_decision = self._entry_router.route(
+                        user_prompt=item.request,
+                        context=child_context,
+                    )
+                if child_decision.route == "multi_task":
+                    raise MultiTaskError(
+                        f"Child {item.local_id!r} was not atomic: recursive multi_task routing is not allowed."
+                    )
+                child_task = board.get_task(child_task_id)
+                prerequisite_results: list[str] = []
+                for dependency_id in child_task.depends_on:
+                    dependency = board.get_task(dependency_id)
+                    if dependency.result_summary:
+                        prerequisite_results.append(
+                            f"{dependency.title}:\n{dependency.result_summary}"
+                        )
+                execution_item = item.model_copy(
+                    update={
+                        "request": (
+                            item.request
+                            if not prerequisite_results
+                            else item.request
+                            + "\n\nValidated prerequisite results:\n\n"
+                            + "\n\n".join(prerequisite_results)
+                        )
+                    }
+                )
+                return self._execute_validated_child_route(
+                    item=execution_item,
+                    child_task_id=child_task_id,
+                    root_lane_task_id=root_reservation.execution.task_id,
+                    decision=child_decision,
                     context=child_context,
+                    state=state,
+                    ask_service=ask_service,
+                    sink=sink,
+                    options=dict(options),
                 )
-            if child_decision.route == "multi_task":
-                raise MultiTaskError(
-                    f"Child {item.local_id!r} was not atomic: recursive multi_task routing is not allowed."
+            except (ModelContextLimitError, LaneBudgetError) as exc:
+                board.update_status(
+                    child_task_id,
+                    TaskStatus.BLOCKED,
+                    reason=str(exc),
                 )
-            child_task = board.get_task(child_task_id)
-            prerequisite_results: list[str] = []
-            for dependency_id in child_task.depends_on:
-                dependency = board.get_task(dependency_id)
-                if dependency.result_summary:
-                    prerequisite_results.append(
-                        f"{dependency.title}:\n{dependency.result_summary}"
-                    )
-            execution_item = item.model_copy(
-                update={
-                    "request": (
-                        item.request
-                        if not prerequisite_results
-                        else item.request
-                        + "\n\nValidated prerequisite results:\n\n"
-                        + "\n\n".join(prerequisite_results)
-                    )
-                }
-            )
-            return self._execute_validated_child_route(
-                item=execution_item,
-                child_task_id=child_task_id,
-                root_lane_task_id=root_reservation.execution.task_id,
-                decision=child_decision,
-                context=child_context,
-                state=state,
-                ask_service=ask_service,
-                sink=sink,
-                options=dict(options),
-            )
+                child_task = board.get_task(child_task_id)
+                return MultiTaskChildResult(
+                    local_id=item.local_id,
+                    task_id=child_task_id,
+                    title=item.title,
+                    route=child_task.entry_route,
+                    status="blocked",
+                    blocker=str(exc),
+                )
 
         results = orchestrator.execute(
             root_task_id=root_task.task_id,
@@ -4913,37 +5077,56 @@ class AgentChatGateway:
             "remote_execution": ("remote_ssh_execute",),
             "server": ("server",),
         }.get(decision.route, ())
-        execution_estimate = self._execution_token_estimate(
-            entry_route=decision.route,
-            execution_decision=execution_decision,
-            request_text=item.request,
-            session_id=context.session_id,
+        decision_calls = max(
+            1, int(getattr(execution_decision, "expected_model_calls", 1) or 1)
         )
-        reservation = self._lane_coordinator.reserve(
-            normalized_intent=item.request,
-            lane_id=lane_id,
-            session_id=context.session_id,
-            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
-            repository_id=self._lane_coordinator.taskboard.store.repository_id,
-            target_files=[str(value) for value in options.get("target_files", [])],
-            parent_task_id=root_lane_task_id,
-            root_task_id=self._lane_coordinator.inspect_task(
-                root_lane_task_id
-            ).root_task_id,
-            model=f"{execution_decision.provider}/{execution_decision.selected_model}",
-            requested_input_tokens=execution_estimate.input_tokens,
-            requested_output_tokens=execution_estimate.output_tokens,
-            estimated_cost=(None if execution_estimate.estimated_cost is None else float(execution_estimate.estimated_cost)),
-            model_context_window=execution_estimate.profile.context_window,
-            model_max_output_tokens=execution_estimate.profile.max_output_tokens,
-            estimate_confidence=execution_estimate.confidence,
-            estimate_source=execution_estimate.profile.source,
-            capabilities=capabilities,
-            routing_decision_id=execution_decision.decision_id,
+        total_output = max(1, int(execution_decision.estimated_output_tokens))
+        per_call_output = max(1, (total_output + decision_calls - 1) // decision_calls)
+        execution_estimate = self._multi_task_capacity_estimate(
             provider=execution_decision.provider,
-            task_type="multi_task_child",
-            taskboard_task_id=child_task_id,
+            model=execution_decision.selected_model,
+            request_text=item.request,
+            entry_route=decision.route,
+            expected_model_calls=decision_calls,
+            requested_output_tokens=per_call_output,
         )
+        child_cost = (
+            None
+            if execution_estimate.estimated_cost is None
+            else float(execution_estimate.estimated_cost)
+        )
+        with self._multi_task_budget_lock:
+            self._ensure_multi_task_parent_budget(
+                root_lane_task_id,
+                child_input_tokens=execution_estimate.input_tokens,
+                child_output_tokens=execution_estimate.output_tokens,
+                child_estimated_cost=child_cost,
+            )
+            reservation = self._lane_coordinator.reserve(
+                normalized_intent=item.request,
+                lane_id=lane_id,
+                session_id=context.session_id,
+                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                target_files=[str(value) for value in options.get("target_files", [])],
+                parent_task_id=root_lane_task_id,
+                root_task_id=self._lane_coordinator.inspect_task(
+                    root_lane_task_id
+                ).root_task_id,
+                model=f"{execution_decision.provider}/{execution_decision.selected_model}",
+                requested_input_tokens=execution_estimate.input_tokens,
+                requested_output_tokens=execution_estimate.output_tokens,
+                estimated_cost=child_cost,
+                model_context_window=execution_estimate.profile.context_window,
+                model_max_output_tokens=execution_estimate.profile.max_output_tokens,
+                estimate_confidence=execution_estimate.confidence,
+                estimate_source=execution_estimate.profile.source,
+                capabilities=capabilities,
+                routing_decision_id=execution_decision.decision_id,
+                provider=execution_decision.provider,
+                task_type="multi_task_child",
+                taskboard_task_id=child_task_id,
+            )
         self._lane_coordinator.taskboard.update_orchestration(
             child_task_id,
             entry_route=decision.route,
