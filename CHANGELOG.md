@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed context-cost admission so sequential model calls under one lane-task
+  identity no longer reuse a finalized accounting operation id. Gateway routes
+  pin `step_id=after_routing` for the whole execution, so search (and other
+  multi-call routes) previously failed after the first provider call with
+  `accounting operation 'call-…' was already finalized`. The governor now
+  allocates the next free ordinal call id when the stable identity is already
+  reserved, reconciled, or released.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py::test_sequential_model_calls_under_same_task_identity_get_fresh_call_ids tests/context_cost/test_context_cost_core.py::test_released_model_call_id_is_not_reused_for_later_admission tests/gateway/test_turn_engine_search.py -q`.
+
 - Fixed required-source public/GitHub search execution so the second model
   decision only produces a compact query for the already selected search tool.
   The previous full routing-schema pass frequently returned invalid
