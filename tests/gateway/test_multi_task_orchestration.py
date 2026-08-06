@@ -342,8 +342,7 @@ def test_multi_task_parent_envelope_expands_for_parallel_children(
     with gateway._multi_task_budget_lock:
         gateway._ensure_multi_task_parent_budget(
             root.execution.task_id,
-            child_input_tokens=200,
-            child_output_tokens=300,
+            required_child_tokens=500,
             child_estimated_cost=None,
         )
         first = coordinator.reserve(
@@ -361,8 +360,7 @@ def test_multi_task_parent_envelope_expands_for_parallel_children(
         )
         gateway._ensure_multi_task_parent_budget(
             root.execution.task_id,
-            child_input_tokens=250,
-            child_output_tokens=350,
+            required_child_tokens=600,
             child_estimated_cost=None,
         )
         second = coordinator.reserve(
@@ -385,3 +383,114 @@ def test_multi_task_parent_envelope_expands_for_parallel_children(
     assert parent.budget.reserved_tokens >= 500 + 600
     assert parent.budget.revisions
     assert parent.budget.revisions[-1]["reason"] == "multi-task child budget envelope"
+
+
+def test_multi_task_mid_run_forecast_expands_parent_before_child_recalc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider-call forecasts for multi-task children must grow the parent envelope."""
+    from mana_agent.execution_supervisor.models import BudgetForecast
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lane_coordinator import LaneCoordinator
+    from mana_agent.gateway.lanes import LaneId
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root_path = tmp_path / "repo"
+    root_path.mkdir()
+    coordinator = LaneCoordinator(root_path)
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+    gateway._multi_task_budget_lock = threading.Lock()
+
+    board = coordinator.taskboard
+    root_task = board.create_task(title="Compound", user_request="assets and logo")
+    child_task = board.create_child_task(
+        root_task.task_id,
+        title="Create project assets",
+        user_request="create assets",
+        decomposition_local_id="create_project_assets",
+        acceptance_criteria=["assets exist"],
+    )
+
+    root = coordinator.reserve(
+        normalized_intent="assets and logo",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-recalc",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        requested_input_tokens=100,
+        requested_output_tokens=100,
+        task_type="multi_task_root",
+        taskboard_task_id=root_task.task_id,
+    )
+    coordinator.start(root)
+    # Sibling already holds most of the parent remaining capacity.
+    sibling_task = board.create_child_task(
+        root_task.task_id,
+        title="Create project logo",
+        user_request="create logo",
+        decomposition_local_id="create_project_logo",
+        acceptance_criteria=["logo exists"],
+    )
+    gateway._ensure_multi_task_parent_budget(
+        root.execution.task_id,
+        required_child_tokens=150,
+        child_estimated_cost=None,
+    )
+    sibling = coordinator.reserve(
+        normalized_intent="create logo",
+        lane_id=LaneId.MEDIA,
+        session_id="session-recalc",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=50,
+        requested_output_tokens=100,
+        task_type="multi_task_child",
+        taskboard_task_id=sibling_task.task_id,
+    )
+    coordinator.start(sibling)
+
+    gateway._ensure_multi_task_parent_budget(
+        root.execution.task_id,
+        required_child_tokens=120,
+        child_estimated_cost=None,
+    )
+    child = coordinator.reserve(
+        normalized_intent="create assets",
+        lane_id=LaneId.CODING,
+        session_id="session-recalc",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=40,
+        requested_output_tokens=80,
+        task_type="multi_task_child",
+        taskboard_task_id=child_task.task_id,
+    )
+    coordinator.start(child)
+
+    # Real Codex/coding forecast far exceeds the provisional multi-task child reserve.
+    gateway._recalculate_active_lane_budget(
+        BudgetForecast(
+            task_id=child.execution.task_id,
+            forecast_input_tokens=2_000,
+            forecast_output_tokens=1_500,
+            forecast_cost=0.05,
+            accounting_reservation_id="reservation_coding_call",
+            reason="provider-call forecast",
+        )
+    )
+
+    revised_child = coordinator.inspect_task(child.execution.task_id)
+    parent = coordinator.inspect_task(root.execution.task_id)
+    assert revised_child.budget.reserved_tokens >= 3_500
+    assert parent.budget.reserved_tokens >= (
+        sibling.execution.budget.reserved_tokens + revised_child.budget.reserved_tokens
+    )
+    assert any(
+        item.get("reason") == "multi-task child budget envelope"
+        for item in parent.budget.revisions
+    )

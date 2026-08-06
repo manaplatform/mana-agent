@@ -91,11 +91,14 @@ orchestration entry point is introduced.
 Multi-task budget coordination is parent-envelope based: after decomposition the
 root reserves capacity for orchestration plus every planned child, then expands
 that envelope before each child lane reservation so siblings do not starve under
-a goal-only parent budget. Child preflight sizing uses model and optional lane
-capacity only; depleted shared session remaining from parent planning does not
-hard-fail child admission. Actual provider calls still pass through the session
-context governor. Missing or insufficient parent envelope capacity fails closed
-as a blocked multi-task budget decision with no fallback route.
+a goal-only parent budget. When a live multi-task child revises its reservation
+from a real provider-call forecast (coding/Codex, media, etc.), the same parent
+envelope is expanded first so mid-run growth is not rejected by parent-remaining
+checks. Child preflight sizing uses model and optional lane capacity only;
+depleted shared session remaining from parent planning does not hard-fail child
+admission. Actual provider calls still pass through the session context
+governor. Missing or insufficient parent envelope capacity fails closed as a
+blocked multi-task budget decision with no fallback route.
 
 ## Verification
 

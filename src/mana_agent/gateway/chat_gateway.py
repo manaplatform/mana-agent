@@ -3310,20 +3310,30 @@ class AgentChatGateway:
         self,
         parent_task_id: str,
         *,
-        child_input_tokens: int,
-        child_output_tokens: int,
-        child_estimated_cost: float | None,
+        required_child_tokens: int,
+        child_estimated_cost: float | None = None,
+        revising_task_id: str = "",
     ) -> None:
-        """Grow the multi-task root envelope so the next child reservation fits."""
+        """Grow the multi-task root envelope so a child reserve/recalc fits.
+
+        ``required_child_tokens`` is the full token total the target child needs
+        after the change. Active siblings keep their current reservations; the
+        revising child (when provided) is excluded so its previous reservation is
+        not double-counted against the new requirement.
+        """
         parent = self._lane_coordinator.inspect_task(parent_task_id)
         sibling_reserved = sum(
             execution.budget.reserved_tokens
             for execution in self._lane_coordinator.executions
             if execution.parent_task_id == parent_task_id
             and execution.state in ACTIVE_LANE_STATES
+            and execution.task_id != revising_task_id
         )
-        child_total = max(0, int(child_input_tokens)) + max(0, int(child_output_tokens))
-        needed_total = parent.budget.consumed_tokens + sibling_reserved + child_total
+        needed_total = (
+            parent.budget.consumed_tokens
+            + sibling_reserved
+            + max(0, int(required_child_tokens))
+        )
         if needed_total <= parent.budget.reserved_tokens:
             return
         current_output = max(
@@ -4539,6 +4549,44 @@ class AgentChatGateway:
             LaneTaskState.HANDOFF, LaneTaskState.VERIFYING,
         }:
             return
+        # Multi-task children often need more tokens at first real model call than
+        # the provisional reservation. Expand the parent envelope first so the
+        # lane coordinator's parent-remaining check does not abort a live child
+        # that already owns a validated route (e.g. Codex coding after media).
+        if execution.parent_task_id and execution.task_type == "multi_task_child":
+            try:
+                self._lane_coordinator.inspect_task(execution.parent_task_id)
+            except LaneCoordinatorError:
+                pass
+            else:
+                budget = execution.budget
+                next_input = max(
+                    budget.reserved_input_tokens,
+                    budget.consumed_input_tokens
+                    + max(0, int(forecast.forecast_input_tokens)),
+                )
+                next_output = max(
+                    budget.reserved_output_tokens,
+                    budget.consumed_output_tokens
+                    + max(0, int(forecast.forecast_output_tokens)),
+                )
+                next_total = next_input + next_output
+                with self._multi_task_budget_lock:
+                    self._ensure_multi_task_parent_budget(
+                        execution.parent_task_id,
+                        required_child_tokens=next_total,
+                        child_estimated_cost=forecast.forecast_cost,
+                        revising_task_id=execution.task_id,
+                    )
+                    self._lane_coordinator.recalculate_budget(
+                        task_id=forecast.task_id,
+                        forecast_input_tokens=forecast.forecast_input_tokens,
+                        forecast_output_tokens=forecast.forecast_output_tokens,
+                        forecast_cost=forecast.forecast_cost,
+                        accounting_reservation_id=forecast.accounting_reservation_id,
+                        reason=forecast.reason,
+                    )
+                return
         self._lane_coordinator.recalculate_budget(
             task_id=forecast.task_id,
             forecast_input_tokens=forecast.forecast_input_tokens,
@@ -5098,8 +5146,9 @@ class AgentChatGateway:
         with self._multi_task_budget_lock:
             self._ensure_multi_task_parent_budget(
                 root_lane_task_id,
-                child_input_tokens=execution_estimate.input_tokens,
-                child_output_tokens=execution_estimate.output_tokens,
+                required_child_tokens=(
+                    execution_estimate.input_tokens + execution_estimate.output_tokens
+                ),
                 child_estimated_cost=child_cost,
             )
             reservation = self._lane_coordinator.reserve(

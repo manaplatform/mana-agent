@@ -9,7 +9,11 @@ All notable repository changes should be recorded here.
   the planned children (not only the goal text), expands that envelope before
   each child reservation, and sizes child preflight estimates against model/lane
   capacity rather than the depleted shared session ledger left by parent
-  planning. Budget shortfalls return blocked child status without inventing a
+  planning. Mid-run provider-call forecasts for multi-task children (for example
+  Codex coding after a media sibling already reserved capacity) now expand the
+  parent envelope before the child reservation is revised, so live children are
+  not aborted with “recalculated child budget exceeds the parent remaining
+  budget”. Budget shortfalls return blocked child status without inventing a
   fallback route; non-multi-task modules are unchanged.
   - User verification required: `python -m pytest tests/gateway/test_multi_task_orchestration.py tests/gateway/test_lane_coordinator.py tests/gateway/test_entry_routing.py -q`.
 
