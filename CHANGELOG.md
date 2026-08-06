@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed chat recovery so wall-clock-dead tasks create a new task instead of
+  being retried or resumed under an already elapsed deadline. Recovery candidates
+  expose `deadline_exceeded`; resume/retry/replan exclude those tasks. When the
+  model still targets a deadline-dead identity, the gateway reserves a new task
+  with a fresh deadline and lineage links (`previous` / `supersedes`). Supervisor
+  retry validation and child creation under a dead parent refuse requeue with a
+  clear “create a new task” error. Checkpoint-resume allows `start_fresh` for the
+  same work when no recoverable candidates remain. Coverage asserts successful
+  coding turns with `error is None` (not an empty string).
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py::test_deadline_dead_task_creates_new_task_instead_of_retry tests/gateway/test_checkpoint_resume.py::test_model_may_start_fresh_for_same_work_when_no_recoverable_candidates tests/gateway/test_lane_coordinator.py::test_recovery_candidates_mark_deadline_exceeded_tasks tests/execution_supervisor/test_supervisor_core.py::test_retry_refuses_wall_clock_deadline_dead_task tests/execution_supervisor/test_supervisor_core.py::test_create_child_refuses_deadline_dead_parent -q`.
+
 - Fixed parent/child lane budget growth so recalculating a child reservation
   expands the active parent (and nested ancestors) instead of failing with
   “recalculated child budget exceeds the parent remaining budget”. This covers

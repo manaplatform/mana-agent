@@ -349,3 +349,33 @@ def test_model_cannot_start_new_task_for_same_stable_work() -> None:
             requires_live_data=False,
             candidates=[candidate()],
         )
+
+
+def test_model_may_start_fresh_for_same_work_when_no_recoverable_candidates() -> None:
+    """Deadline-dead prior work leaves an empty candidate set; a new task is required."""
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "fresh-after-deadline",
+                "action": "start_fresh",
+                "task_id": "",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "prior task is wall-clock dead; create a new task identity",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="retry putting the logo in readme.md",
+        route="coding",
+        requires_live_data=False,
+        candidates=[],
+    )
+
+    assert decision.action == "start_fresh"
+    assert decision.same_work is True

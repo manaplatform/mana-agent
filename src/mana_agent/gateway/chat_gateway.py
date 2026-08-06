@@ -21,7 +21,7 @@ import shutil
 import threading
 import uuid
 from dataclasses import asdict, dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -3848,6 +3848,8 @@ class AgentChatGateway:
                         workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                         repository_id=self._lane_coordinator.taskboard.store.repository_id,
                     )
+                    # Status / follow-up classification may still see deadline-dead
+                    # tasks. Resume and retry candidates never include them.
                     recoverable_task_candidates = [
                         item
                         for item in all_recovery_candidates
@@ -3861,6 +3863,7 @@ class AgentChatGateway:
                         item for item in all_recovery_candidates
                         if (
                             str(item.get("state") or "") != LaneTaskState.COMPLETED.value
+                            and not bool(item.get("deadline_exceeded"))
                             and str(item.get("lane") or "") == lane_id.value
                         )
                     ]
@@ -3931,20 +3934,30 @@ class AgentChatGateway:
                                 memory_warning=memory_warning,
                             )
                         if followup.category in {"followup_task", "task_expansion", "task_correction"}:
-                            parent_task_id = followup.related_task_id
-                            previous_task_id = parent_task_id
+                            related_id = followup.related_task_id
                             relation_type = {
                                 "followup_task": "followup",
                                 "task_expansion": "expansion",
                                 "task_correction": "correction",
                             }[followup.category]
+                            previous_task_id = related_id
                             recovery_candidates = []
+                            # Deadline-dead parents cannot host children: they would
+                            # inherit an already-elapsed deadline. Link lineage only.
+                            if related_id and not self._task_wall_clock_deadline_exceeded(
+                                related_id
+                            ):
+                                parent_task_id = related_id
                         elif followup.category in {"retry_request", "resume_request"}:
                             recovery_candidates = [
-                                item for item in recoverable_task_candidates
+                                item
+                                for item in recoverable_task_candidates
                                 if str(item.get("task_id") or "") == followup.related_task_id
+                                and not bool(item.get("deadline_exceeded"))
                             ]
-                            relation_type = "retry" if followup.category == "retry_request" else "resume"
+                            relation_type = (
+                                "retry" if followup.category == "retry_request" else "resume"
+                            )
                             previous_task_id = followup.related_task_id
                         elif followup.category == "new_task":
                             recovery_candidates = []
@@ -3970,7 +3983,36 @@ class AgentChatGateway:
                             f"started. Reason: {resume_decision.reason}"
                         )
                     recovered_task = False
-                    if resume_decision.action == "resume_checkpoint":
+                    recovery_target_id = str(resume_decision.task_id or "")
+                    # Deterministic recovery gate: a wall-clock-dead task cannot be
+                    # requeued. Create a new task with a fresh deadline instead.
+                    force_new_task_for_dead = bool(
+                        recovery_target_id
+                        and resume_decision.action
+                        in {"resume_checkpoint", "retry_task", "replan_task"}
+                        and self._task_wall_clock_deadline_exceeded(recovery_target_id)
+                    )
+                    if force_new_task_for_dead:
+                        if callable(sink):
+                            sink(
+                                "task_deadline_dead",
+                                "Prior task deadline exceeded; creating a new task",
+                                metadata={
+                                    "turn_id": turn_id,
+                                    "user_message_id": user_message_id,
+                                    "dead_task_id": recovery_target_id,
+                                    "prior_action": resume_decision.action,
+                                },
+                            )
+                        previous_task_id = previous_task_id or recovery_target_id
+                        if relation_type == "independent":
+                            relation_type = "retry"
+                        parent_task_id = None
+                        recovery_candidates = []
+                    if (
+                        resume_decision.action == "resume_checkpoint"
+                        and not force_new_task_for_dead
+                    ):
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -4007,7 +4049,7 @@ class AgentChatGateway:
                             }
                         )
                         recovered_task = True
-                    elif resume_decision.action == "retry_task":
+                    elif resume_decision.action == "retry_task" and not force_new_task_for_dead:
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -4027,7 +4069,7 @@ class AgentChatGateway:
                             session_id=session_id,
                         )
                         recovered_task = True
-                    elif resume_decision.action == "replan_task":
+                    elif resume_decision.action == "replan_task" and not force_new_task_for_dead:
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -4048,9 +4090,13 @@ class AgentChatGateway:
                         recovered_task = True
                     else:
                         previous_execution_id = (
-                            str(recovery_candidates[0]["task_id"])
-                            if recovery_candidates
-                            else ""
+                            recovery_target_id
+                            if force_new_task_for_dead
+                            else (
+                                str(recovery_candidates[0]["task_id"])
+                                if recovery_candidates
+                                else previous_task_id
+                            )
                         )
                         reservation = self._lane_coordinator.reserve(
                             normalized_intent=text,
@@ -4073,16 +4119,22 @@ class AgentChatGateway:
                             parent_task_id=parent_task_id,
                             previous_execution_id=previous_execution_id,
                             derived_from_execution_id=(
-                                previous_execution_id if resume_decision.same_work else ""
+                                previous_execution_id
+                                if (resume_decision.same_work or force_new_task_for_dead)
+                                else ""
                             ),
                             supersedes_execution_id=(
                                 previous_execution_id
-                                if previous_execution_id and not resume_decision.same_work
+                                if previous_execution_id
+                                and (
+                                    force_new_task_for_dead
+                                    or not resume_decision.same_work
+                                )
                                 else ""
                             ),
                             trigger_turn_id=turn_id,
                             relation_type=relation_type,
-                            previous_task_id=previous_task_id,
+                            previous_task_id=previous_task_id or previous_execution_id,
                             user_message_id=user_message_id,
                         )
                         turn_record.created_task_ids = [reservation.execution.task_id]
@@ -4091,16 +4143,27 @@ class AgentChatGateway:
                         if callable(sink):
                             sink(
                                 "task_linked" if parent_task_id else "task_created",
-                                "Task linked" if parent_task_id else "Task created",
+                                (
+                                    "Task linked"
+                                    if parent_task_id
+                                    else (
+                                        "New task created after deadline"
+                                        if force_new_task_for_dead
+                                        else "Task created"
+                                    )
+                                ),
                                 metadata={
                                     "turn_id": turn_id,
                                     "user_message_id": user_message_id,
                                     "task_id": reservation.execution.task_id,
                                     "parent_task_id": parent_task_id or "",
                                     "relation_type": relation_type,
+                                    "supersedes_execution_id": previous_execution_id
+                                    if force_new_task_for_dead
+                                    else "",
                                 },
                             )
-                        if recovery_candidates:
+                        if recovery_candidates or force_new_task_for_dead:
                             self._lane_coordinator.taskboard.add_decision(
                                 reservation.execution.taskboard_task_id,
                                 resume_decision.decision_id,
@@ -5373,6 +5436,15 @@ class AgentChatGateway:
                     pass
                 return
 
+    def _task_wall_clock_deadline_exceeded(self, task_id: str) -> bool:
+        """Return True when the durable task's wall-clock deadline has elapsed."""
+        if not task_id:
+            return False
+        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
+        if task is None:
+            return False
+        return task.wall_clock_deadline_exceeded()
+
     def _recovery_candidates(
         self,
         *,
@@ -5397,6 +5469,7 @@ class AgentChatGateway:
             key=lambda item: item.updated_at,
             reverse=True,
         )
+        now = datetime.now(timezone.utc)
         for task in durable_tasks:
             execution = executions.get(task.task_id)
             selected_lane = (
@@ -5413,7 +5486,8 @@ class AgentChatGateway:
                 continue
             checkpoint = None
             checkpoint_error = ""
-            if task.checkpoint_id:
+            deadline_exceeded = task.wall_clock_deadline_exceeded(now)
+            if task.checkpoint_id and not deadline_exceeded:
                 try:
                     checkpoint = supervisor.resume_checkpoint(task.task_id)
                 except ExecutionSupervisorError as exc:
@@ -5430,6 +5504,8 @@ class AgentChatGateway:
                 "repository_id": task.repository_id,
                 "state": task.state.value,
                 "updated_at": task.updated_at.isoformat(),
+                "deadline_at": task.deadline_at.isoformat() if task.deadline_at else "",
+                "deadline_exceeded": deadline_exceeded,
                 "failure_reason": redact_text(task.failure_reason),
                 "side_effect_classification": task.side_effect_classification.value,
                 "irreversible_side_effect_started": task.irreversible_side_effect_started,

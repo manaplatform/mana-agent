@@ -569,6 +569,113 @@ def test_gateway_recovery_handoff_uses_validated_recovery_decisions(
     assert recovery_calls[0][2] == session_id
 
 
+def test_deadline_dead_task_creates_new_task_instead_of_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wall-clock-dead tasks must not be requeued; the gateway creates a new task."""
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    coding = _CodingAgent()
+    gateway, _chat, _ask = _gateway(tmp_path, _RouteModel("coding"), coding_agent=coding)
+    session_id = gateway.create_session(frontend="test")
+    prior = gateway._lane_coordinator.reserve(
+        normalized_intent="put logo in readme.md at first center",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(prior)
+    checkpoint_id = gateway._lane_coordinator.checkpoint(
+        prior.execution.task_id, boundary="before-deadline"
+    )
+    gateway._lane_coordinator.finish(
+        prior.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="task wall-clock deadline exceeded",
+    )
+    durable = gateway._lane_coordinator.execution_supervisor.store.get_task(
+        prior.execution.task_id
+    )
+
+    def expire(task):
+        task.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        task.failure_reason = "task wall-clock deadline exceeded"
+        task.updated_at = datetime.now(timezone.utc)
+
+    gateway._lane_coordinator.execution_supervisor.store.update_task(
+        durable.task_id, expire
+    )
+
+    monkeypatch.setattr(gateway, "_recall_task_capsules", lambda **_kwargs: "")
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *_args, **_kwargs: FollowupClassification(
+            decision_id="followup-deadline",
+            category="retry_request",
+            related_task_id=prior.execution.task_id,
+            safe_to_continue=True,
+            reason="User repeated the same logo request.",
+        ),
+    )
+    # Model still asks to resume the dead task; gateway must create a new one.
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        lambda *_args, **_kwargs: CheckpointResumeDecision(
+            decision_id="resume-dead-decision",
+            action="resume_checkpoint",
+            task_id=prior.execution.task_id,
+            checkpoint_id=checkpoint_id,
+            same_work=True,
+            fresh_data_required=False,
+            checkpoint_still_valid=True,
+            side_effects_safe_to_repeat=True,
+            safe_to_continue=True,
+            reason="same work should continue",
+        ),
+    )
+    recovery_calls: list[Any] = []
+    original_resume = gateway._lane_coordinator.resume_checkpoint
+
+    def record_resume(task_id: str, *, decision: Any, session_id: str) -> Any:
+        recovery_calls.append(task_id)
+        return original_resume(task_id, decision=decision, session_id=session_id)
+
+    monkeypatch.setattr(gateway._lane_coordinator, "resume_checkpoint", record_resume)
+    reserved: list[str] = []
+    original_reserve = gateway._lane_coordinator.reserve
+
+    def record_reserve(**kwargs: Any) -> Any:
+        reservation = original_reserve(**kwargs)
+        reserved.append(reservation.execution.task_id)
+        return reservation
+
+    monkeypatch.setattr(gateway._lane_coordinator, "reserve", record_reserve)
+
+    result = gateway.process_turn(
+        session_id,
+        "put logo in readme.md at first center",
+    )
+
+    # Successful coding turns leave error as None (not "").
+    assert not result.error
+    assert result.used_coding_agent is True
+    assert recovery_calls == []
+    assert reserved
+    assert reserved[0] != prior.execution.task_id
+    new_task = gateway._lane_coordinator.execution_supervisor.store.get_task(reserved[0])
+    assert new_task.deadline_at is not None
+    assert new_task.deadline_at > datetime.now(timezone.utc)
+    assert new_task.previous_task_id == prior.execution.task_id or (
+        new_task.supersedes_execution_id == prior.execution.task_id
+        or new_task.derived_from_execution_id == prior.execution.task_id
+    )
+
+
 def test_uploaded_spreadsheet_routes_to_artifact_lane_without_coding_agent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     upload = tmp_path / "uploads" / "test.xls"

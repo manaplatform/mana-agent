@@ -132,6 +132,47 @@ def test_recovery_candidates_include_failed_task_from_another_session(
     assert [item["task_id"] for item in candidates] == [reservation.execution.task_id]
     assert candidates[0]["session_id"] == "session-before-restart"
     assert candidates[0]["completion_contract"]
+    assert candidates[0]["deadline_exceeded"] is False
+
+
+def test_recovery_candidates_mark_deadline_exceeded_tasks(
+    coordinator: LaneCoordinator,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    reservation = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="put logo in readme",
+        session="session-deadline",
+    )
+    coordinator.start(reservation)
+    coordinator.finish(
+        reservation.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="task wall-clock deadline exceeded",
+    )
+
+    def expire(task):
+        task.deadline_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        task.updated_at = datetime.now(timezone.utc)
+
+    coordinator.execution_supervisor.store.update_task(
+        reservation.execution.task_id, expire
+    )
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+
+    candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-deadline",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+
+    assert candidates[0]["task_id"] == reservation.execution.task_id
+    assert candidates[0]["deadline_exceeded"] is True
+    assert candidates[0]["checkpoint_id"] == ""
 
 
 def test_exposes_supervisor_store_for_human_inbox_branch_controller(

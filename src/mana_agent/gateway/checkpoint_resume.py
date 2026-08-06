@@ -70,22 +70,28 @@ the task identity and goal remain the same but its incomplete plan needs a model
 before it can safely continue. When uncertain, select
 stop rather than guessing.
 
-When incomplete work is the same, does not require fresh data, and is safe to continue, you must
-select resume_checkpoint, retry_task, or replan_task for the applicable candidate; do not select start_fresh. Select
-start_fresh only when the work is different or fresh data is required. If the work is the same but
-cannot safely resume or repeat, select stop.
+When incomplete work is the same, does not require fresh data, and is safe to continue, and a
+recoverable candidate is listed, you must select resume_checkpoint, retry_task, or replan_task for
+the applicable candidate; do not select start_fresh. Select start_fresh when the work is different,
+fresh data is required, or recovery_candidates is empty. An empty candidate list means prior
+attempts for this work are not recoverable (including wall-clock deadline-dead tasks); start_fresh
+then creates a new task identity with a fresh deadline. If the work is the same but a listed
+candidate cannot safely resume or repeat, select stop rather than inventing a non-listed task id.
 
 Completed results are returned only by the caller after it has already classified the turn as a
 duplicate or status request; this decision boundary must never select or reuse a completed result.
-Do not resume or retry a completed task. A requested downstream action, including an operation on a
-live external provider, must select start_fresh so it receives its own task identity and approval.
+Do not resume or retry a completed task. Never resume or retry a task whose wall-clock deadline has
+elapsed; those tasks are excluded from recovery_candidates and require start_fresh. A requested
+downstream action, including an operation on a live external provider, must select start_fresh so it
+receives its own task identity and approval.
 
 For resume_checkpoint, copy one exact candidate task_id and checkpoint_id and set same_work,
 checkpoint_still_valid, side_effects_safe_to_repeat, and safe_to_continue true and
 fresh_data_required false. For start_fresh or stop, leave task_id and checkpoint_id empty. For
 retry_task or replan_task, copy an exact candidate task_id, leave checkpoint_id empty, set same_work,
 side_effects_safe_to_repeat, and safe_to_continue true, and set fresh_data_required false. Set
-safe_to_continue true for start_fresh and false for stop. Return strict JSON matching the supplied
+safe_to_continue true for start_fresh and false for stop. When recovery_candidates is empty and the
+work is the same, start_fresh with same_work true is valid. Return strict JSON matching the supplied
 schema.
 """
 
@@ -208,6 +214,7 @@ class CheckpointResumeDecider:
                 output.action == "start_fresh"
                 and output.same_work
                 and not output.fresh_data_required
+                and candidates
             ):
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "

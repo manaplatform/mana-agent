@@ -376,6 +376,38 @@ def test_retry_budget_backoff_and_idempotency_safety(runtime):
         supervisor.retry(unsafe.task_id, decision(unsafe.task_id))
 
 
+def test_retry_refuses_wall_clock_deadline_dead_task(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        deadline_at=clock() + timedelta(seconds=5),
+    )
+    running(supervisor, task)
+    supervisor.transition(
+        task.task_id,
+        ExecutionState.FAILED,
+        reason="task wall-clock deadline exceeded",
+    )
+    clock.advance(10)
+
+    with pytest.raises(RetrySafetyError, match="create a new task instead of retrying"):
+        supervisor.retry(task.task_id, decision(task.task_id))
+
+
+def test_create_child_refuses_deadline_dead_parent(runtime):
+    supervisor, clock, tmp_path = runtime
+    parent = create(
+        supervisor,
+        tmp_path,
+        deadline_at=clock() + timedelta(seconds=5),
+    )
+    clock.advance(10)
+
+    with pytest.raises(BudgetExceededError, match="create a new root task"):
+        create(supervisor, tmp_path, parent_task_id=parent.task_id)
+
+
 def test_task_creation_records_provenance_and_ambiguous_actions_block_retry(runtime):
     supervisor, _clock, tmp_path = runtime
     task = create(supervisor, tmp_path)

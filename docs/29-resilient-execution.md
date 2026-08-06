@@ -194,6 +194,13 @@ Parent progress supports `fail_fast`, `wait_all`, `best_effort`,
 deadline (defaulting to the existing routing task timeout). Status always reports active blockers and whether the deadline has
 elapsed, preventing an invisible indefinite wait.
 
+When a task’s wall-clock deadline has already elapsed, recovery must not requeue
+that task identity. Retry, checkpoint resume, and replan refuse deadline-dead
+tasks; chat/gateway recovery creates a **new** task with a fresh deadline (and
+lineage links) instead of failing the turn with `task wall-clock deadline
+exceeded` on a dead retry. Children also cannot be attached under a deadline-dead
+parent, which would inherit an already-elapsed deadline.
+
 Cancellation propagates child-first and uses a cooperative cancellation state.
 Logs, checkpoints, partial artifacts, and escrow are retained. A task that has
 entered an explicitly marked irreversible side-effect phase remains active with
