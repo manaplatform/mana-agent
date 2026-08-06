@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed required-source public/GitHub search execution so the second model
+  decision only produces a compact query for the already selected search tool.
+  The previous full routing-schema pass frequently returned invalid
+  `web_search.query` decisions and failed closed before Tavily ran. The new
+  dedicated search-operation decision uses a query-only contract, normalizes
+  common model payload shapes without inventing a query, and still stops with
+  no alternate source when the model omits, overlongs, or cannot supply a query.
+  - User verification required: `python -m pytest tests/gateway/test_turn_engine_search.py tests/gateway/test_entry_routing.py::test_required_search_source_uses_constrained_operation_decision -q`.
+
 - Fixed chat recovery so wall-clock-dead tasks create a new task instead of
   being retried or resumed under an already elapsed deadline. Recovery candidates
   expose `deadline_exceeded`; resume/retry/replan exclude those tasks. When the

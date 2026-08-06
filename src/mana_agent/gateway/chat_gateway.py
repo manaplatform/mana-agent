@@ -63,6 +63,7 @@ from mana_agent.gateway.artifact_routing import (
 )
 from mana_agent.gateway.turn_engine import (
     ChatTurnResult,
+    SearchOperationDecisionError,
     _serialize_tool_traces,
     _conversation_prompt,
     agent_decision_llm,
@@ -6137,6 +6138,14 @@ class AgentChatGateway:
                     root=self.root,
                     required_tool=required_tool,
                     memory_context=_conversation_prompt(state, text),
+                )
+            except SearchOperationDecisionError as exc:
+                return ChatTurnResult(
+                    answer=str(exc),
+                    error="search_operation_decision_failed",
+                    mode="route-tool-error",
+                    decision=decision,
+                    payload={"route": decision.route},
                 )
             except Exception as exc:
                 return ChatTurnResult(
