@@ -10,8 +10,11 @@ All notable repository changes should be recorded here.
   multi-call routes) previously failed after the first provider call with
   `accounting operation 'call-…' was already finalized`. The governor now
   allocates the next free ordinal call id when the stable identity is already
-  reserved, reconciled, or released.
-  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py::test_sequential_model_calls_under_same_task_identity_get_fresh_call_ids tests/context_cost/test_context_cost_core.py::test_released_model_call_id_is_not_reused_for_later_admission tests/gateway/test_turn_engine_search.py -q`.
+  reserved, reconciled, or released. The finalized-id handler is ordered after
+  `ModelContextLimitError` handling because that error is a `ValueError`
+  subclass; catching `ValueError` first previously leaked raw context-limit
+  errors instead of `ContextBudgetExceeded` / observe-mode admission.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py::test_enforce_mode_blocks_before_provider_and_protects_required_segments tests/context_cost/test_context_cost_core.py::test_observe_mode_records_task_budget_overrun_without_blocking tests/context_cost/test_context_cost_core.py::test_sequential_model_calls_under_same_task_identity_get_fresh_call_ids tests/context_cost/test_context_cost_core.py::test_released_model_call_id_is_not_reused_for_later_admission tests/gateway/test_turn_engine_search.py -q`.
 
 - Fixed required-source public/GitHub search execution so the second model
   decision only produces a compact query for the already selected search tool.

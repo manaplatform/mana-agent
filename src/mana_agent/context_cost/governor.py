@@ -407,15 +407,9 @@ class ContextCostGovernor:
                     attempt_id=str(identity.get("attempt_id") or ""),
                 )
                 break
-            except ValueError as exc:
-                # Stable identities reuse step/task keys across multiple provider
-                # calls (search-operation decision, answer synthesis, etc.). When
-                # a prior call already finalized that operation id, allocate the
-                # next free ordinal instead of failing the whole route.
-                if "already finalized" not in str(exc).casefold():
-                    raise
-                call_id = self._next_model_call_id(call_id)
             except ModelContextLimitError as exc:
+                # Must be caught before ValueError: ModelContextLimitError is a
+                # ValueError subclass used for budget/context capacity failures.
                 removable_index = next(
                     (
                         index for index, segment in enumerate(compacted)
@@ -446,13 +440,13 @@ class ContextCostGovernor:
                                 attempt_id=str(identity.get("attempt_id") or ""),
                             )
                             break
+                        except ModelContextLimitError:
+                            pass
                         except ValueError as observe_exc:
                             if "already finalized" not in str(observe_exc).casefold():
                                 raise
                             call_id = self._next_model_call_id(call_id)
                             continue
-                        except ModelContextLimitError:
-                            pass
                     resolved = self.profile_resolver.resolve(
                         ModelIdentity(resolved_provider, model)
                     )
@@ -492,6 +486,14 @@ class ContextCostGovernor:
                     raise ContextBudgetExceeded(decision) from exc
                 removed_for_fit.append(compacted[removable_index])
                 compacted = compacted[:removable_index] + compacted[removable_index + 1:]
+            except ValueError as exc:
+                # Stable identities reuse step/task keys across multiple provider
+                # calls (search-operation decision, answer synthesis, etc.). When
+                # a prior call already finalized that operation id, allocate the
+                # next free ordinal instead of failing the whole route.
+                if "already finalized" not in str(exc).casefold():
+                    raise
+                call_id = self._next_model_call_id(call_id)
         token_estimate = accounting_reservation.estimate
         window = token_estimate.profile.context_window
         if context_window is not None and int(context_window) != window:
