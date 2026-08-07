@@ -74,9 +74,12 @@ decision compares the complete new request with candidate intent and progress.
 It selects `resume_checkpoint`, `retry_task`, `return_verified`, `reverify`,
 `start_fresh`, or `stop` and
 records same-work, freshness, checkpoint-validity, repeat-safety, and
-continuation-safety judgments. `retry_task` reuses the exact durable task ID
-when the work is stable and equivalent but no valid checkpoint exists; the new
-attempt restarts the unfinished request under that existing identity.
+continuation-safety judgments. `resume_checkpoint` continues exact saved progress
+when the checkpoint remains valid. `retry_task` reuses the exact durable task ID
+when the work is stable and equivalent and a full restart under that identity is
+appropriate—including when a checkpoint is listed but should not be continued;
+the decision must leave `checkpoint_id` empty. `replan_task` likewise keeps the
+task identity while authorizing a revised plan before the next attempt.
 Current or account-backed information such as prices, mailbox state, calendar
 state, news, weather, availability, and remote state must be fetched through a
 fresh execution rather than restored from stale checkpoint evidence. The

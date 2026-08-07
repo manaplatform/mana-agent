@@ -93,6 +93,11 @@ so routes that depend on process-local identity—especially `computer`—do not
 with “authenticated client context” errors merely because they run on a thread-pool
 worker. Identity is never synthesized for a missing parent scope.
 
+Stopped multi-task roots that still list a checkpoint may be recovered with
+`retry_task` or `replan_task` under the same durable task ID (decision
+`checkpoint_id` empty), not only via `resume_checkpoint`. That avoids rejecting
+a valid same-work restart when partial progress should not continue.
+
 Multi-task budget coordination is parent-envelope based: after decomposition the
 root reserves capacity for orchestration plus every planned child, then expands
 that envelope before each child lane reservation so siblings do not starve under

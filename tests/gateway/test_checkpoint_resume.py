@@ -295,6 +295,96 @@ def test_model_may_retry_same_stable_task_without_checkpoint() -> None:
     assert decision.task_id == "task_existing"
 
 
+def test_model_may_retry_same_task_even_when_a_checkpoint_is_listed() -> None:
+    """A full same-task restart is valid; checkpoint_id on the decision must stay empty."""
+    checkpointed = candidate()
+    checkpointed["checkpoint_available"] = True
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "retry-despite-checkpoint",
+                "action": "retry_task",
+                "task_id": "task_existing",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "restart the failed compound goal under its existing task identity",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="retry the five-step recovery task",
+        route="multi_task",
+        requires_live_data=False,
+        candidates=[checkpointed],
+    )
+
+    assert decision.action == "retry_task"
+    assert decision.task_id == "task_existing"
+    assert decision.checkpoint_id == ""
+
+
+def test_model_may_replan_same_task_even_when_a_checkpoint_is_listed() -> None:
+    checkpointed = candidate()
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "replan-despite-checkpoint",
+                "action": "replan_task",
+                "task_id": "task_existing",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "revise the plan then restart under the same identity",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="retry the recovery steps with a corrected plan",
+        route="multi_task",
+        requires_live_data=False,
+        candidates=[checkpointed],
+    )
+
+    assert decision.action == "replan_task"
+    assert decision.checkpoint_id == ""
+
+
+def test_retry_or_replan_must_not_carry_a_checkpoint_id() -> None:
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "retry-with-checkpoint-id",
+                "action": "retry_task",
+                "task_id": "task_existing",
+                "checkpoint_id": "checkpoint_existing",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "retry but also copied the checkpoint",
+            }
+        )
+    )
+
+    with pytest.raises(CheckpointResumeError, match="leave checkpoint_id empty"):
+        decider.decide(
+            current_request="retry the same repository refactor",
+            route="coding",
+            requires_live_data=False,
+            candidates=[candidate()],
+        )
+
+
 def test_live_data_route_cannot_retry_old_task_without_checkpoint() -> None:
     retry_candidate = candidate()
     retry_candidate["checkpoint_id"] = ""

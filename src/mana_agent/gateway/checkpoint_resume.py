@@ -64,11 +64,13 @@ mailboxes and email checks, calendars, news, weather, availability, account stat
 state, search results, and similarly time-sensitive facts normally require start_fresh. Decide this
 semantically from the supplied request and route evidence; do not use keyword matching. Repository
 editing or analysis may resume only when the candidate evidence shows that its checkpoint remains
-valid for the current request. Select retry_task when it is the same stable work and repeating its
-unfinished actions is safe, but the candidate has no reusable checkpoint. Select replan_task when
-the task identity and goal remain the same but its incomplete plan needs a model-selected revision
-before it can safely continue. When uncertain, select
-stop rather than guessing.
+valid for the current request. Prefer resume_checkpoint when checkpoint_available is true and the
+saved progress should continue. Select retry_task when it is the same stable work and repeating its
+unfinished actions is safe under the existing task identity—even if a checkpoint is listed—because a
+full restart under that identity is safer or more appropriate than continuing partial progress.
+Select replan_task when the task identity and goal remain the same but its incomplete plan needs a
+model-selected revision before it can safely continue. When uncertain, select stop rather than
+guessing.
 
 When incomplete work is the same, does not require fresh data, and is safe to continue, and a
 recoverable candidate is listed, you must select resume_checkpoint, retry_task, or replan_task for
@@ -88,11 +90,12 @@ receives its own task identity and approval.
 For resume_checkpoint, copy one exact candidate task_id and checkpoint_id and set same_work,
 checkpoint_still_valid, side_effects_safe_to_repeat, and safe_to_continue true and
 fresh_data_required false. For start_fresh or stop, leave task_id and checkpoint_id empty. For
-retry_task or replan_task, copy an exact candidate task_id, leave checkpoint_id empty, set same_work,
-side_effects_safe_to_repeat, and safe_to_continue true, and set fresh_data_required false. Set
-safe_to_continue true for start_fresh and false for stop. When recovery_candidates is empty and the
-work is the same, start_fresh with same_work true is valid. Return strict JSON matching the supplied
-schema.
+retry_task or replan_task, copy an exact non-completed candidate task_id, leave checkpoint_id empty
+(even when the candidate lists a checkpoint—these actions intentionally do not resume that
+checkpoint), set same_work, side_effects_safe_to_repeat, and safe_to_continue true, and set
+fresh_data_required false. Set safe_to_continue true for start_fresh and false for stop. When
+recovery_candidates is empty and the work is the same, start_fresh with same_work true is valid.
+Return strict JSON matching the supplied schema.
 """
 
 
@@ -158,11 +161,13 @@ class CheckpointResumeDecider:
             if str(item.get("checkpoint_id") or "")
             and str(item.get("state") or "") != "completed"
         }
+        # Same-task restart/replan may target any non-completed offered task,
+        # including ones that still list a checkpoint. Those actions intentionally
+        # leave checkpoint_id empty so partial progress is not resumed.
         retryable_task_ids = {
             str(item["task_id"])
             for item in candidates
-            if not str(item.get("checkpoint_id") or "")
-            and str(item.get("state") or "") != "completed"
+            if str(item.get("state") or "") != "completed"
         }
         if output.action == "resume_checkpoint":
             if (output.task_id, output.checkpoint_id) not in candidate_pairs:
@@ -183,10 +188,16 @@ class CheckpointResumeDecider:
                     "Reason: checkpoint reuse safety fields are inconsistent."
                 )
         elif output.action in {"retry_task", "replan_task"}:
-            if output.task_id not in retryable_task_ids or output.checkpoint_id:
+            if output.task_id not in retryable_task_ids:
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
-                    "Reason: retry_task or replan_task must select one offered task without a checkpoint ID."
+                    "Reason: retry_task or replan_task must select one offered non-completed task."
+                )
+            if output.checkpoint_id:
+                raise CheckpointResumeError(
+                    "Model decision failed: checkpoint_resume. No task was resumed or started. "
+                    "Reason: retry_task or replan_task must leave checkpoint_id empty; "
+                    "use resume_checkpoint to continue saved progress."
                 )
             if not (
                 output.same_work

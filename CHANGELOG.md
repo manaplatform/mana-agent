@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed checkpoint-resume validation so `retry_task` and `replan_task` may
+  select any offered non-completed stopped task even when that candidate still
+  lists a checkpoint. Same-task restart intentionally leaves `checkpoint_id`
+  empty; filling a checkpoint ID on retry/replan still fails closed and
+  `resume_checkpoint` remains the only way to continue saved progress. This
+  unblocks recovery after failed multi-task or other checkpointed work when the
+  model correctly reuses the task identity with `retry_task` instead of
+  `resume_checkpoint`.
+  - User verification required:
+    `python -m pytest tests/gateway/test_checkpoint_resume.py -q`
+    and
+    `python -m pytest tests/gateway/test_entry_routing.py -k checkpoint_resume -q`.
+
 - Fixed multi-task child execution so worker threads inherit the parent turn’s
   ContextVars (authenticated computer-client identity, evals, event sinks).
   Compound goals that route a child to `computer` (for example sequential
