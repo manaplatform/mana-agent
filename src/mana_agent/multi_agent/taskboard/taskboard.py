@@ -344,10 +344,17 @@ class TaskBoard:
         self.save()
 
     def reopen(self, task_id: str, *, reason: str) -> None:
+        """Requeue a stopped task so the same identity can continue incomplete work.
+
+        FAILED, BLOCKED, and CANCELLED children of a multi-task job may reopen under
+        a validated same-task recovery decision so the job can restart from its first
+        incomplete step without inventing a new root identity.
+        """
         task = self.get_task(task_id)
-        if task.status is not TaskStatus.FAILED:
+        if task.status not in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}:
             raise ValueError(f"task {task_id} is not in a reopenable state")
         task.status = TaskStatus.QUEUED
+        task.blockers = []
         task.updated_at = utc_now()
         self._record("task.reopened", {"task_id": task_id, "reason": reason})
         self.save()

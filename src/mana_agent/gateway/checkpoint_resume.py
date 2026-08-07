@@ -57,6 +57,15 @@ class CheckpointResumeDecision:
 CHECKPOINT_RESUME_PROMPT = """You decide whether a new user request may resume one durable checkpoint.
 Return a decision only, never answer the user.
 
+Chat turns auto-select durable work without requiring /tasks. Use this decision matrix:
+1) same incomplete work with a still-valid checkpoint → resume_checkpoint (continue saved progress)
+2) same work that failed or was interrupted, side effects safe to repeat → retry_task (same task id)
+3) same work whose multi-task/job plan was blocked, reverted, or must restart incomplete steps →
+   replan_task (same task id, leave checkpoint_id empty so the job restarts from its first
+   incomplete step; completed children may remain complete)
+4) different work, live/fresh data required, or recovery_candidates empty → start_fresh (new task)
+5) same work but no listed candidate is safe → stop (never invent a task id)
+
 Compare the complete current request with every candidate's original normalized intent and progress.
 Select resume_checkpoint only when it is the same work, the saved progress is still applicable, and
 continuing will not substitute stale state for information that must be fetched again. Prices,
@@ -69,7 +78,9 @@ saved progress should continue. Select retry_task when it is the same stable wor
 unfinished actions is safe under the existing task identity—even if a checkpoint is listed—because a
 full restart under that identity is safer or more appropriate than continuing partial progress.
 Select replan_task when the task identity and goal remain the same but its incomplete plan needs a
-model-selected revision before it can safely continue. When uncertain, select stop rather than
+model-selected revision before it can safely continue, including blocked multi-task roots and
+reverted compound jobs that should start again from the first incomplete step. Candidates may
+report lane_state blocked/paused/waiting for such jobs. When uncertain, select stop rather than
 guessing.
 
 When incomplete work is the same, does not require fresh data, and is safe to continue, and a

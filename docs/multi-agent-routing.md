@@ -98,9 +98,16 @@ Stopped multi-task roots that still list a checkpoint may be recovered with
 `checkpoint_id` empty), not only via `resume_checkpoint`. That avoids rejecting
 a valid same-work restart when partial progress should not continue. When the
 lane projection is missing but the durable supervisor task remains, recovery
-rehydrates the gateway row before requeue. Blocked multi-task roots are eligible
-for the same validated retry path. The `/task` control command does not create
-tasks (`/task create` is rejected as a reserved verb, not a task ID).
+rehydrates the gateway row before requeue. Blocked multi-task roots (lane
+`blocked`, supervisor often `waiting` without a human-inbox wait) are recovery
+candidates so a later chat turn can auto-select them without `/tasks`. Chat
+turns use this decision matrix: existing checkpointed work → resume; failed
+safe work → retry; blocked/reverted multi-task job → replan/retry under the
+same root and reopen incomplete children so the job restarts from the first
+unfinished step; otherwise create a new task. The `/task` control command does
+not create tasks (`/task create`, `/task Execute`, and other reserved verbs or
+non-id tokens are rejected). `/task cancel|pause|resume|retry|replan` may omit
+the id only when exactly one candidate is available.
 
 Multi-task budget coordination is parent-envelope based: after decomposition the
 root reserves capacity for orchestration plus every planned child, then expands

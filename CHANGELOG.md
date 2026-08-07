@@ -4,6 +4,26 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed gateway task control and chat-turn auto recovery so messages do not
+  require `/tasks` to select work:
+  - `/task Execute` (and other reserved verbs / non-id tokens) no longer raise
+    `Unknown gateway task: Execute`; they return usage that points operators to
+    `/tasks`, chat-turn auto-select, and `mana-agent tasks recover`.
+  - `/task cancel|pause|resume|retry|replan` accept an optional id and
+    auto-select only when exactly one recoverable/active candidate exists.
+  - Operator `retry` / `replan` control builds a validated recovery decision;
+    `resume` of stopped work becomes a same-task retry.
+  - Recovery candidates now include blocked multi-task roots (supervisor
+    `waiting` without a human-inbox wait) and lane blocked/paused projections.
+  - Retryable lane states include `waiting` and `paused` after rehydration.
+  - Multi-task chat turns run checkpoint-resume before creating a new root:
+    resume / retry / replan reuse the root; replan/retry reopen incomplete
+    children so the job restarts from the first unfinished step.
+  - Checkpoint-resume prompt documents the full decision matrix
+    (resume → retry → replan/restart job → start_fresh → stop).
+  - User verification required:
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_task_control_rejects_execute_verb_instead_of_unknown_task_id tests/gateway/test_chat_gateway.py::test_task_control_rejects_non_task_id_tokens tests/gateway/test_chat_gateway.py::test_task_control_auto_selects_single_recoverable_task_for_retry tests/gateway/test_lane_coordinator.py::test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait tests/gateway/test_lane_coordinator.py::test_blocked_multi_task_root_can_be_retried_with_validated_decision tests/gateway/test_checkpoint_resume.py -q`.
+
 - Added **task-wide computer approval** so one trusted approval can cover a whole
   durable task lineage of safe filesystem creates/moves/renames:
   - New `ApprovalScope.TASK` multi-use grant bound to `root_task_id` (multi-task

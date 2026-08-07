@@ -135,6 +135,45 @@ def test_recovery_candidates_include_failed_task_from_another_session(
     assert candidates[0]["deadline_exceeded"] is False
 
 
+def test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Blocked multi-task roots leave supervisor WAITING and must still auto-recover."""
+    reservation = _reserve(
+        coordinator,
+        LaneId.RESEARCH,
+        intent="compound job with child failure",
+        session="session-multi",
+    )
+    coordinator.start(reservation)
+    coordinator.mark_blocked(
+        reservation.execution.task_id,
+        reason="one or more child tasks failed",
+    )
+    # Surface multi-task identity on the taskboard root for recovery filtering.
+    board_task = coordinator.taskboard.get_task(reservation.execution.taskboard_task_id)
+    board_task.entry_route = "multi_task"
+    board_task.child_task_ids = ["child_placeholder"]
+    coordinator.taskboard.save()
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+
+    candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-multi",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+
+    assert any(item["task_id"] == reservation.execution.task_id for item in candidates)
+    match = next(
+        item for item in candidates if item["task_id"] == reservation.execution.task_id
+    )
+    assert match["waiting_for_human"] is False
+    assert match["lane_state"] == LaneTaskState.BLOCKED.value
+    assert match["entry_route"] == "multi_task"
+
+
 def test_recovery_candidates_mark_deadline_exceeded_tasks(
     coordinator: LaneCoordinator,
 ) -> None:

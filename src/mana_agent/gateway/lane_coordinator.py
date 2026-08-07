@@ -1757,6 +1757,11 @@ class LaneCoordinator:
             # Multi-task roots often finish as BLOCKED when children fail or wait;
             # a validated same-task recovery decision may requeue them.
             LaneTaskState.BLOCKED,
+            # mark_blocked / pause leave the durable supervisor in WAITING; after
+            # rehydration the lane projection is WAITING/PAUSED and must still be
+            # recoverable under a validated same-task decision.
+            LaneTaskState.WAITING,
+            LaneTaskState.PAUSED,
         }
     )
 
