@@ -8062,11 +8062,17 @@ class AgentChatGateway:
                 task = self._lane_coordinator.execution_supervisor.store.get_task(lane_task_id)
                 from mana_agent.runtime_context import DurableExecutionContext
                 execution_scope = DurableExecutionContext(
-                    task_id=task.task_id, branch_id=task.task_id,
-                    parent_task_id=task.parent_task_id, checkpoint_id=checkpoint_id,
-                    execution_attempt_id=task.attempt_id, session_id=context.session_id,
-                    conversation_id=context.conversation_id, turn_id=context.turn_id,
-                    source_decision_id=source_decision_id, originating_agent_id="model_tool",
+                    task_id=task.task_id,
+                    branch_id=task.task_id,
+                    parent_task_id=task.parent_task_id or "",
+                    root_task_id=task.root_task_id or task.task_id,
+                    checkpoint_id=checkpoint_id,
+                    execution_attempt_id=task.attempt_id,
+                    session_id=context.session_id,
+                    conversation_id=context.conversation_id,
+                    turn_id=context.turn_id,
+                    source_decision_id=source_decision_id,
+                    originating_agent_id="model_tool",
                 )
             from contextlib import nullcontext
             with (

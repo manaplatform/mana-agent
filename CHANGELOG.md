@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Added **task-wide computer approval** so one trusted approval can cover a whole
+  durable task lineage of safe filesystem creates/moves/renames:
+  - New `ApprovalScope.TASK` multi-use grant bound to `root_task_id` (multi-task
+    children share the parent root), tool `computer`, and the
+    `filesystem.mkdir|copy|move|rename` family.
+  - Policy selects task scope for those ops when a durable task lineage is
+    present; trash, recording, system power, and other computer ops stay
+    single-use.
+  - First approval issues the task grant; later compatible actions under the
+    same root reuse it without a new inbox prompt until expiry/invalidation.
+  - Durable execution context now carries `root_task_id` into computer tools;
+    approval required payloads advertise `transactional_action.task`.
+  - User verification required:
+    `python -m pytest tests/test_computer_control.py::test_task_wide_computer_filesystem_approval_covers_later_ops_in_lineage tests/test_computer_control.py::test_computer_action_uses_durable_exact_approval_and_initializes_audit tests/transactional_actions/test_policy_gated_actions.py::test_computer_filesystem_policy_selects_task_wide_scope_when_lineage_present tests/transactional_actions/test_policy_gated_actions.py -q`.
+
 - Fixed gateway task control and recovery coordination for stopped durable work:
   - `/task create` (and other reserved verbs) no longer raise
     `Unknown gateway task: create`; they return usage that points operators to

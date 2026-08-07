@@ -331,12 +331,26 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
                 inbox_item_id=exc.inbox_item_id,
             )
             decision = exc.action.policy_decision.model_dump(mode="json") if exc.action.policy_decision else {}
+            required_scope = str(
+                (exc.action.policy_decision.required_approval_scope.value
+                 if exc.action.policy_decision and exc.action.policy_decision.required_approval_scope
+                 else "action_once")
+            )
+            task_wide = required_scope == "task"
             return {
                 "ok": False,
                 "error_code": "transactional_approval_required",
-                "message": "This exact computer action is waiting for approval in the active local TUI or dashboard.",
+                "message": (
+                    "This computer filesystem action is waiting for task-wide approval in the "
+                    "active local TUI or dashboard. After approval, later compatible file and "
+                    "folder creates under the same durable task will not re-prompt."
+                    if task_wide
+                    else "This exact computer action is waiting for approval in the active local TUI or dashboard."
+                ),
                 "permission_request_id": exc.inbox_item_id,
-                "permission_scope": "transactional_action.once",
+                "permission_scope": (
+                    "transactional_action.task" if task_wide else "transactional_action.once"
+                ),
                 "action_id": exc.action.action_id,
                 "transaction_id": exc.action.transaction_id,
                 "inbox_item_id": exc.inbox_item_id,
@@ -345,6 +359,7 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
                 "policy_decision": decision,
                 "risk_effect_labels": exc.action.approval_effect_labels(),
                 "transactional_action_approval": True,
+                "task_wide_approval": task_wide,
             }
         except ComputerControlError as exc:
             stored = runtime.store.action_for_idempotency_key(adapter.build_intent().idempotency_key)

@@ -146,6 +146,106 @@ def test_computer_action_uses_durable_exact_approval_and_initializes_audit(tmp_p
     assert len(fake.executed) == 1
 
 
+def test_task_wide_computer_filesystem_approval_covers_later_ops_in_lineage(
+    tmp_path: Path,
+) -> None:
+    """One approval under a multi-task root covers later mkdir/rename/move/copy."""
+    from mana_agent.runtime_context import DurableExecutionContext
+    from mana_agent.transactional_actions.models import ApprovalScope
+
+    config = settings(
+        tmp_path,
+        allowed_paths={str(tmp_path)},
+        permissions={spec.permission_scope: "ask" for spec in ACTION_SPECS.values()},
+    )
+    fake = FakeComputerControlProvider()
+    control = service(tmp_path, provider=fake, config=config)
+    state = tmp_path / "transactional"
+    gateway = ActionGateway(
+        store=ActionStore(state),
+        policy=ActionPolicy(
+            PolicyConfig(
+                workspace_roots=(tmp_path,),
+                allow_task_wide_computer_approval=True,
+            )
+        ),
+        approvals=ApprovalRegistry(state / "approvals"),
+    )
+
+    def filesystem_adapter(operation: str, path: Path, *, task_id: str, key: str):
+        decision = f"decision:{operation}:{path.name}"
+        computer = action(
+            operation,
+            target=ComputerTarget(path=str(path)),
+            timeout=5,
+        ).model_copy(
+            update={
+                "source_decision_id": decision,
+                "execution_context": DurableExecutionContext(
+                    task_id=task_id,
+                    parent_task_id="task_root",
+                    root_task_id="task_root",
+                    source_decision_id=decision,
+                ),
+            }
+        )
+        return ComputerActionAdapter(
+            action=computer,
+            session_id="session-1",
+            client_type="tui",
+            service=control,
+        )
+
+    first_path = tmp_path / "resilient-recovery"
+    first = filesystem_adapter(
+        "filesystem.mkdir", first_path, task_id="task_child_1", key="mkdir-1"
+    )
+    with pytest.raises(ApprovalRequired) as pending:
+        gateway.execute(first)
+    assert pending.value.action.policy_decision is not None
+    assert (
+        pending.value.action.policy_decision.required_approval_scope
+        is ApprovalScope.TASK
+    )
+    approval_id = gateway.approve(pending.value.action.action_id, approved_by="local-user")
+    grant = gateway.approvals.get(approval_id)
+    assert grant is not None
+    assert grant.scope is ApprovalScope.TASK
+    assert grant.task_scope_id == "task_root"
+    assert "filesystem.mkdir" in grant.allowed_operations
+    first_outcome = gateway.execute(first, approval_id=approval_id)
+    assert first_outcome.action.state.value == "committed"
+    # Task-wide grant remains multi-use after the first consumption.
+    reloaded = gateway.approvals.get(approval_id)
+    assert reloaded is not None
+    assert reloaded.consumed_at is None
+    assert reloaded.use_count >= 1
+
+    # Second child under the same multi-task root reuses the grant — no new inbox.
+    second_path = tmp_path / "resilient-recovery" / "step1-dir"
+    second = filesystem_adapter(
+        "filesystem.mkdir", second_path, task_id="task_child_2", key="mkdir-2"
+    )
+    second_outcome = gateway.execute(second)
+    assert second_outcome.action.state.value == "committed"
+    assert second_outcome.action.action_id != first_outcome.action.action_id
+    assert len(fake.executed) == 2
+
+    # High-risk filesystem.trash still requires a fresh single-use approval.
+    trash_target = tmp_path / "resilient-recovery" / "doomed"
+    trash_target.mkdir(parents=True, exist_ok=True)
+    trash = filesystem_adapter(
+        "filesystem.trash", trash_target, task_id="task_child_3", key="trash-1"
+    )
+    with pytest.raises(ApprovalRequired) as trash_pending:
+        gateway.execute(trash)
+    assert trash_pending.value.action.policy_decision is not None
+    assert (
+        trash_pending.value.action.policy_decision.required_approval_scope
+        is ApprovalScope.ACTION_ONCE
+    )
+
+
 def test_recording_destination_is_redacted_from_action_intent_and_kept_protected(tmp_path: Path) -> None:
     destination = tmp_path / "private-recording.mov"
     adapter = ComputerActionAdapter(

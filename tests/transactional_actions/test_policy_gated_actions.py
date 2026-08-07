@@ -99,6 +99,47 @@ def test_conflicting_idempotency_key_is_rejected(tmp_path: Path) -> None:
         action_gateway.execute(file_adapter(tmp_path, operation="edit", content="changed\n"))
 
 
+def test_computer_filesystem_policy_selects_task_wide_scope_when_lineage_present() -> None:
+    from mana_agent.transactional_actions.task_scope import task_scope_id_for_action
+
+    policy = ActionPolicy(PolicyConfig(allow_task_wide_computer_approval=True))
+    action = ActionIntent(
+        parent_task_id="task_child",
+        actor="computer_control",
+        originating_agent="model_tool",
+        tool_name="computer",
+        operation_name="filesystem.mkdir",
+        target_resources=["/workspace/resilient-recovery"],
+        normalized_arguments={
+            "computer_action": {"operation": "filesystem.mkdir"},
+            "session_id": "session-1",
+            "client_type": "tui",
+            "source_decision_id": "decision-mkdir",
+            "execution_context": {
+                "task_id": "task_child",
+                "parent_task_id": "task_root",
+                "root_task_id": "task_root",
+                "source_decision_id": "decision-mkdir",
+            },
+        },
+        requested_capabilities=["computer.files.write"],
+        expected_side_effects=["computer control: filesystem.mkdir"],
+        data_disclosure=DataDisclosure.NONE,
+        blast_radius=BlastRadius.SINGLE_RESOURCE,
+        reversibility=Reversibility.UNKNOWN,
+        idempotency_key="computer-mkdir-policy-key",
+        verification_plan=["record the computer-control provider completion receipt"],
+    )
+    decision = policy.evaluate(action)
+    assert decision.outcome is PolicyOutcome.REQUIRE_APPROVAL
+    assert decision.required_approval_scope is ApprovalScope.TASK
+    assert task_scope_id_for_action(action) == "task_root"
+
+    trash = action.model_copy(update={"operation_name": "filesystem.trash", "idempotency_key": "trash-key"})
+    trash_decision = policy.evaluate(trash)
+    assert trash_decision.required_approval_scope is ApprovalScope.ACTION_ONCE
+
+
 def test_delete_requires_exact_single_use_approval(tmp_path: Path) -> None:
     target = tmp_path / "sample.txt"
     target.write_text("recoverable\n", encoding="utf-8")
