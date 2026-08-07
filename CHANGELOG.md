@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed multi-task child execution so worker threads inherit the parent turn’s
+  ContextVars (authenticated computer-client identity, evals, event sinks).
+  Compound goals that route a child to `computer` (for example sequential
+  workspace directory/file creation) no longer fail with
+  `Computer decision scope requires an authenticated client context` solely
+  because `ThreadPoolExecutor` workers dropped the parent scope; dependents
+  blocked on that prerequisite can proceed after a successful computer child.
+  Missing parent identity still fails closed with no fallback client.
+  - User verification required:
+    `python -m pytest tests/gateway/test_multi_task_orchestration.py::test_worker_threads_inherit_parent_contextvars_for_computer_client tests/gateway/test_multi_task_orchestration.py -q`
+    and
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_computer_route_without_typed_tool_outcome_records_notice tests/test_computer_control.py -q`.
+
 - Patched CodeQL high/medium findings across dashboard API, gateway, Codex
   runtime, auto-chat classifiers, live canvas/chat JS, and CI:
   - Reflected XSS: dashboard live-chat/live-canvas HTML embeds IDs through a

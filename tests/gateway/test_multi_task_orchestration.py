@@ -177,6 +177,66 @@ def test_approval_wait_keeps_dependents_queued_for_safe_resume(tmp_path: Path) -
     assert board.get_task(by_id["dependent"].task_id).status == TaskStatus.QUEUED
 
 
+def test_worker_threads_inherit_parent_contextvars_for_computer_client(
+    tmp_path: Path,
+) -> None:
+    """Computer route children must see the authenticated parent-turn client.
+
+    Multi-task children run on a ThreadPoolExecutor. Without explicit ContextVar
+    propagation, computer_decision_scope fails with:
+    'Computer decision scope requires an authenticated client context.'
+    """
+    from mana_agent.integrations.computer_control.context import (
+        computer_client_scope,
+        computer_decision_scope,
+        current_computer_client,
+    )
+
+    board = TaskBoard(tmp_path)
+    root = _root(board)
+    plan = _plan(_item("directory"), _item("file", depends_on=["directory"]))
+    orchestrator = MultiTaskOrchestrator(llm=object(), taskboard=board)
+    observed: list[tuple[str, str | None, str | None]] = []
+
+    def execute(item: MultiTaskItem, task_id: str) -> MultiTaskChildResult:
+        client = current_computer_client()
+        session_id = client.session_id if client is not None else None
+        client_type = client.client_type if client is not None else None
+        # Mirror the computer route entry: decision scope requires client identity.
+        with computer_decision_scope(f"{item.local_id}:computer-entry-decision"):
+            scoped = current_computer_client()
+            observed.append(
+                (
+                    item.local_id,
+                    session_id,
+                    scoped.session_id if scoped is not None else None,
+                )
+            )
+            assert scoped is not None
+            assert scoped.client_type == "tui"
+            assert f"{item.local_id}:computer-entry-decision" in scoped.allowed_decision_ids
+        return MultiTaskChildResult(
+            item.local_id, task_id, item.title, "computer", "completed", result="ok"
+        )
+
+    with computer_client_scope("session-1", "tui", workspace_root=str(tmp_path)):
+        results = orchestrator.execute(
+            root_task_id=root.task_id, plan=plan, execute_child=execute
+        )
+        # Child decision scopes must not leak allowed_decision_ids into the parent.
+        parent_client = current_computer_client()
+        assert parent_client is not None
+        assert parent_client.session_id == "session-1"
+        assert parent_client.client_type == "tui"
+        assert parent_client.allowed_decision_ids == frozenset()
+
+    assert [item.status for item in results] == ["completed", "completed"]
+    assert observed == [
+        ("directory", "session-1", "session-1"),
+        ("file", "session-1", "session-1"),
+    ]
+
+
 def test_resume_materialization_does_not_duplicate_persisted_children(tmp_path: Path) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)

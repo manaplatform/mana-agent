@@ -88,6 +88,11 @@ child status and never reports full success after partial completion. `/tasks`,
 root/child identities. No second task store, scheduler, frontend path, or public
 orchestration entry point is introduced.
 
+Child workers inherit the parent turn’s ContextVars (via `contextvars.copy_context`)
+so routes that depend on process-local identity—especially `computer`—do not fail
+with “authenticated client context” errors merely because they run on a thread-pool
+worker. Identity is never synthesized for a missing parent scope.
+
 Multi-task budget coordination is parent-envelope based: after decomposition the
 root reserves capacity for orchestration plus every planned child, then expands
 that envelope before each child lane reservation so siblings do not starve under
