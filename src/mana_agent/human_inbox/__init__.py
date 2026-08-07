@@ -58,6 +58,9 @@ def _reconcile_transactional_action(item: InboxItem) -> None:
             transaction_binding = transaction.binding_digest() if transaction is not None else ""
         if approvals.find_valid(action, transaction_binding_digest=transaction_binding) is None:
             scope = action.policy_decision.required_approval_scope if action.policy_decision else ApprovalScope.ACTION_ONCE
+            # Task-wide grants cover later compatible computer filesystem actions
+            # under the same durable task lineage; transaction grants remain
+            # plan-bound; action_once stays single-use.
             approvals.issue(
                 action,
                 approved_by=item.response_actor_id,

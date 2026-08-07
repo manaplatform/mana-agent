@@ -42,6 +42,17 @@ test("bindings and JSON pointer updates are deterministic", () => {
   assert.equal(canvas.resolve({ path: "/project/priority" }, model, {}), "high");
 });
 
+test("JSON pointer updates reject prototype-polluting keys", () => {
+  const base = { project: { priority: "low" } };
+  const polluted = canvas.updatePath(base, "/__proto__/polluted", "yes");
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(polluted.polluted, undefined);
+  const viaConstructor = canvas.updatePath(base, "/constructor/prototype/polluted", "yes");
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(viaConstructor.constructor === Object || viaConstructor.constructor === undefined, true);
+  assert.equal(canvas.resolve({ path: "/__proto__/polluted" }, polluted, {}), undefined);
+});
+
 test("abandoned empty surfaces expire into a retry state", () => {
   const surface = { created_at: "2026-01-01T00:00:00Z", components: [] };
   assert.equal(canvas.generationExpired(surface, 30, Date.parse("2026-01-01T00:00:29Z")), false);

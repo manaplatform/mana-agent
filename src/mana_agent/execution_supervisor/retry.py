@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from typing import Iterable
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
@@ -38,11 +39,16 @@ class RetryPolicy:
         decision: RecoveryDecision,
         *,
         actions: Iterable[ActionRecord] = (),
+        now: datetime | None = None,
     ) -> None:
         if decision.task_id != task.task_id:
             raise RetrySafetyError("recovery decision task does not match the execution task")
         if not decision.safe_to_continue:
             raise RetrySafetyError("recovery decision did not authorize continued execution")
+        if task.wall_clock_deadline_exceeded(now):
+            raise RetrySafetyError(
+                "task wall-clock deadline exceeded; create a new task instead of retrying"
+            )
         if decision.action not in {
             RecoveryAction.RETRY,
             RecoveryAction.RESUME_CHECKPOINT,

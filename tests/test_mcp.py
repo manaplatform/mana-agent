@@ -7,6 +7,12 @@ from fastapi.testclient import TestClient
 
 from mana_agent.analysis.models import AskResponseWithTrace
 from mana_agent.mcp.client import ExceptionGroup, McpClient
+from mana_agent.mcp.display import (
+    extract_mcp_text_content,
+    format_mcp_completion_message,
+    format_mcp_result_preview,
+    is_documentation_mcp_operation,
+)
 from mana_agent.mcp.tools import discovered_mcp_langchain_tools, mcp_model_tool_name
 from mana_agent.mcp.config import McpConfigError, McpServerConfig, load_mcp_servers, load_mcp_token, parse_mcp_server_json, save_mcp_server, save_mcp_token
 from mana_agent.mcp.server import protected_http_app
@@ -60,6 +66,61 @@ def test_mcp_queue_job_uses_namespaced_tool(monkeypatch, tmp_path):
 
 def test_mcp_model_tool_name_is_openai_compatible():
     assert mcp_model_tool_name("context7", "query-docs") == "mcp__context7__query-docs"
+
+
+def test_mcp_display_extracts_documentation_text_without_envelope_noise():
+    result = {
+        "ok": True,
+        "content": [
+            {
+                "annotations": None,
+                "meta": None,
+                "text": (
+                    "Available Libraries:\n\n"
+                    "- Title: LangChain\n"
+                    "- Context7-compatible library ID: /websites/langchain"
+                ),
+                "type": "text",
+            }
+        ],
+        "duration_ms": 4718.15,
+        "is_error": False,
+        "server_id": "context7",
+        "structured_content": None,
+        "tool_name": "resolve-library-id",
+        "transport": "stdio",
+    }
+    text = extract_mcp_text_content(result)
+    assert "Available Libraries:" in text
+    assert "LangChain" in text
+    assert is_documentation_mcp_operation("resolve-library-id")
+    assert is_documentation_mcp_operation("query-docs")
+    assert not is_documentation_mcp_operation("authorize")
+
+    message = format_mcp_completion_message(
+        provider_id="context7",
+        operation_name="resolve-library-id",
+        result=result,
+    )
+    assert "mcp.context7.resolve-library-id" in message
+    assert "Documentation (untrusted data):" in message
+    assert "Available Libraries:" in message
+    assert "```json" not in message
+    assert '"annotations"' not in message
+    assert "4718.15 ms" in message
+    assert format_mcp_result_preview(result).startswith("Available Libraries:")
+
+
+def test_mcp_display_falls_back_to_compact_json_without_text_content():
+    result = {"ok": True, "server_id": "demo", "tool_name": "ping", "payload": {"status": "up"}}
+    message = format_mcp_completion_message(
+        provider_id="demo",
+        operation_name="ping",
+        result=result,
+    )
+    assert "Provider result (untrusted data):" in message
+    assert "```json" in message
+    assert '"status": "up"' in message
 
 
 def test_mcp_client_reports_the_concrete_task_group_failure():

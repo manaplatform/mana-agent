@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from urllib.parse import urlencode
+
+from mana_agent.utils.html_embed import require_safe_id, script_json
 
 
 def live_canvas_html(
@@ -17,12 +18,14 @@ def live_canvas_html(
     height: int = 760,
     generation_timeout_seconds: int = 30,
 ) -> str:
+    session_id = require_safe_id(conversation_id, field="conversation_id")
+    safe_surface = require_safe_id(surface_id, field="surface_id") if surface_id else ""
     script = Path(__file__).with_name("live_canvas.js").read_text(encoding="utf-8")
     config = {
         "mountId": "mana-live-canvas",
-        "sessionId": conversation_id,
+        "sessionId": session_id,
         "root": str(root),
-        "surfaceId": surface_id,
+        "surfaceId": safe_surface,
         "apiBase": api_base.rstrip("/"),
         "wsBase": api_base.rstrip("/")
         .replace("https://", "wss://")
@@ -31,7 +34,7 @@ def live_canvas_html(
         "height": height,
         "generationTimeoutSeconds": max(1, int(generation_timeout_seconds)),
     }
-    safe = json.dumps(config, ensure_ascii=False).replace("</", "<\\/")
+    safe = script_json(config)
     return (
         '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" '
         'content="width=device-width,initial-scale=1"></head><body style="margin:0">'

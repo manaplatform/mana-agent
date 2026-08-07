@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from mana_agent.api.exceptions import ManaApiError
 from mana_agent.api.services.job_service import ApiJobStore
+from mana_agent.utils.path_safety import env_allowed_roots, resolve_within_allowed_roots
 from mana_agent.workspaces.impact import ImpactService
 from mana_agent.workspaces.models import WorkspaceSearchRequest
 from mana_agent.workspaces.paths import repository_index_dir
@@ -55,19 +55,22 @@ class ImpactRequest(BaseModel):
 
 
 def _allowed_roots() -> list[Path]:
-    raw = str(os.getenv("MANA_WORKSPACE_ALLOWED_ROOTS") or "")
-    values = [item.strip() for item in re.split(r"[," + re.escape(os.pathsep) + r"]", raw) if item.strip()]
-    return [Path(item).expanduser().resolve() for item in values]
+    return env_allowed_roots()
 
 
 def _authorize_path(raw: str) -> Path:
-    path = Path(raw).expanduser().resolve()
     allowed = _allowed_roots()
     if not allowed:
-        raise ManaApiError(403, "Workspace path API is disabled until MANA_WORKSPACE_ALLOWED_ROOTS is configured.")
-    if not any(path == root or root in path.parents for root in allowed):
-        raise ManaApiError(403, "Path is outside MANA_WORKSPACE_ALLOWED_ROOTS.")
-    return path
+        raise ManaApiError(
+            403,
+            "Workspace path API is disabled until MANA_WORKSPACE_ALLOWED_ROOTS is configured.",
+        )
+    try:
+        return resolve_within_allowed_roots(raw, allowed, require_allowlist=True)
+    except PermissionError as exc:
+        raise ManaApiError(403, "Path is outside MANA_WORKSPACE_ALLOWED_ROOTS.") from exc
+    except ValueError as exc:
+        raise ManaApiError(400, "Invalid path.") from exc
 
 
 def _require_mutation_token(authorization: str | None) -> None:
@@ -147,16 +150,27 @@ def search(workspace_id: str, payload: SearchRequest) -> dict:
     if payload.mode == "semantic":
         from mana_agent.commands.cli_internal import Settings, build_search_service
 
-        semantic = build_search_service(Settings())
-    return WorkspaceSearchService(semantic=semantic).search(
-        WorkspaceSearchRequest(
-            workspace_id=workspace_id,
-            query=payload.query,
-            mode=payload.mode,
-            repository_ids=payload.repository_ids,
-            limit=payload.limit,
+        try:
+            semantic = build_search_service(Settings())
+        except Exception as exc:
+            # Do not expose provider/config exception details to the client.
+            raise ManaApiError(500, "Semantic search is unavailable.") from exc
+    try:
+        return WorkspaceSearchService(semantic=semantic).search(
+            WorkspaceSearchRequest(
+                workspace_id=workspace_id,
+                query=payload.query,
+                mode=payload.mode,
+                repository_ids=payload.repository_ids,
+                limit=payload.limit,
+            )
         )
-    )
+    except FileNotFoundError as exc:
+        raise ManaApiError(404, "Workspace not found.") from exc
+    except PermissionError as exc:
+        raise ManaApiError(403, "Search is not permitted for the requested repositories.") from exc
+    except Exception as exc:
+        raise ManaApiError(500, "Workspace search failed.") from exc
 
 
 @router.post("/workspaces/{workspace_id}/impact")

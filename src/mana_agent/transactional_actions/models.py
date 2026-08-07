@@ -99,6 +99,10 @@ class PolicyOutcome(str, Enum):
 class ApprovalScope(str, Enum):
     ACTION_ONCE = "action_once"
     TRANSACTION = "transaction"
+    # Multi-use grant under one durable task lineage (e.g. multi-task root).
+    # Subsequent compatible computer filesystem actions reuse it without a new
+    # human prompt until expiry or invalidation.
+    TASK = "task"
 
 
 class TransactionalRequestState(str, Enum):

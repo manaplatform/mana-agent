@@ -16,12 +16,13 @@ import asyncio
 import getpass
 import json
 import logging
+import re
 import shlex
 import shutil
 import threading
 import uuid
 from dataclasses import asdict, dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -48,11 +49,14 @@ from mana_agent.gateway.entry_routing import (
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.lane_coordinator import (
+    LaneBudgetError,
     LaneCoordinator,
     LaneCoordinatorError,
     LaneReservation,
 )
-from mana_agent.gateway.lanes import LaneId, LaneTaskState, select_lane
+from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneId, LaneTaskState, select_lane
+from mana_agent.context_cost.accounting import ModelContextLimitError, TokenEstimationRequest
+from mana_agent.context_cost.profiles import ModelIdentity
 from mana_agent.gateway.routing import GatewayRoutingError
 from mana_agent.gateway.artifact_routing import (
     artifact_handler_availability,
@@ -60,6 +64,7 @@ from mana_agent.gateway.artifact_routing import (
 )
 from mana_agent.gateway.turn_engine import (
     ChatTurnResult,
+    SearchOperationDecisionError,
     _serialize_tool_traces,
     _conversation_prompt,
     agent_decision_llm,
@@ -132,6 +137,52 @@ from mana_agent.media.errors import MediaError
 
 logger = logging.getLogger(__name__)
 _REMOTE_OUTPUT_LIMIT = 65_536
+
+# Durable gateway task IDs look like task_YYYYMMDD_NNNNNN (and reserved
+# supervisor/lane projections may reuse the same prefix). Control commands
+# must never treat English verbs such as "Execute" as task IDs.
+_GATEWAY_TASK_ID_RE = re.compile(r"^task_\d{8}_\d+$")
+
+_TASK_CONTROL_USAGE = (
+    "Usage: /task <id> | /task cancel|pause|resume|retry|replan [id]. "
+    "Omit the id only when exactly one recoverable or paused task is available. "
+    "Normal chat turns auto-select (resume/retry/replan) or create tasks without /tasks."
+)
+
+# Operator verbs that are never task IDs. Durable work is created by chat turns.
+_RESERVED_TASK_CONTROL_VERBS = frozenset(
+    {
+        "create",
+        "list",
+        "recover",
+        "retry",
+        "replan",
+        "status",
+        "tree",
+        "logs",
+        "artefacts",
+        "artifacts",
+        "help",
+        "new",
+        "execute",
+        "start",
+        "run",
+        "continue",
+        "restart",
+        "open",
+        "show",
+        "get",
+        "info",
+        "inspect",
+        "describe",
+        "select",
+        "pick",
+        "auto",
+        "cancel",
+        "pause",
+        "resume",
+    }
+)
 
 
 def _remote_job_output(job: Any, *, limit: int = _REMOTE_OUTPUT_LIMIT) -> str:
@@ -641,6 +692,7 @@ class AgentChatGateway:
         self._active: set[str] = set()
         self._async_turn_lock = asyncio.Lock()
         self._multi_task_route_lock = threading.Lock()
+        self._multi_task_budget_lock = threading.Lock()
         self._chat_session_id: str | None = None
         self._history_store = ChatSessionHistory()
 
@@ -895,7 +947,12 @@ class AgentChatGateway:
         from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
         from mana_agent.chat.history import get_history
 
-        result_preview = self._transactional_result_preview(result)
+        if str(action.tool_name) == "mcp":
+            from mana_agent.mcp.display import format_mcp_result_preview
+
+            result_preview = format_mcp_result_preview(result)
+        else:
+            result_preview = self._transactional_result_preview(result)
         status = (
             "success"
             if event_type == "action.committed"
@@ -927,7 +984,7 @@ class AgentChatGateway:
         if event_type == "action.committed" and action.tool_name == "mcp":
             get_history().add(
                 AssistantMessageEvent(
-                    content=self._mcp_completion_message(action, result_preview),
+                    content=self._mcp_completion_message(action, result),
                     turn_id=str(action.parent_task_id),
                 )
             )
@@ -956,16 +1013,18 @@ class AgentChatGateway:
         return encoded if len(encoded) <= limit else encoded[:limit] + "… [truncated]"
 
     @staticmethod
-    def _mcp_completion_message(action: Any, result_preview: str) -> str:
+    def _mcp_completion_message(
+        action: Any,
+        result: dict[str, Any] | None,
+    ) -> str:
         """Create a deterministic user-visible receipt for an approved MCP action."""
+        from mana_agent.mcp.display import format_mcp_completion_message
+
         provider_id = str(action.normalized_arguments.get("provider_id") or "")
-        target = f"mcp.{provider_id}.{action.operation_name}".strip(".")
-        if not result_preview:
-            return f"Approved MCP action completed: `{target}`. The provider returned no displayable result."
-        return (
-            f"Approved MCP action completed: `{target}`.\n\n"
-            "Provider result (untrusted data):\n"
-            f"```json\n{result_preview}\n```"
+        return format_mcp_completion_message(
+            provider_id=provider_id,
+            operation_name=str(action.operation_name or ""),
+            result=result,
         )
 
     @staticmethod
@@ -2867,19 +2926,60 @@ class AgentChatGateway:
         if command != "/task":
             return None
         if len(parts) < 2:
-            return "Usage: /task <id> | /task cancel|pause|resume <id>"
+            return _TASK_CONTROL_USAGE
         action = parts[1].lower()
-        if action in {"cancel", "pause", "resume"}:
-            if len(parts) < 3:
-                return f"Usage: /task {action} <id>"
-            task_id = parts[2]
-            payload = {
-                "cancel": lambda: self.cancel_task(task_id),
-                "pause": lambda: self.pause_task(task_id),
-                "resume": lambda: self.resume_task(task_id),
-            }[action]()
+        control_actions = {"cancel", "pause", "resume", "retry", "replan"}
+        if action in control_actions:
+            raw_id = parts[2] if len(parts) >= 3 else ""
+            try:
+                task_id = self._resolve_task_control_id(
+                    action=action,
+                    raw_id=raw_id,
+                    session_id=session_id,
+                )
+            except LaneCoordinatorError as exc:
+                return f"Gateway task control failed: {exc}"
+            try:
+                if action == "cancel":
+                    payload = self.cancel_task(task_id)
+                elif action == "pause":
+                    payload = self.pause_task(task_id)
+                elif action == "resume":
+                    payload = self.resume_task(task_id)
+                elif action == "retry":
+                    payload = self.retry_task_control(task_id, session_id=session_id)
+                else:
+                    payload = self.replan_task_control(task_id, session_id=session_id)
+            except LaneCoordinatorError as exc:
+                return f"Gateway task control failed: {exc}"
             return json.dumps(payload, indent=2, default=str)
-        return json.dumps(self.inspect_task(parts[1]), indent=2, default=str)
+        # Reserved verbs are not task IDs. Operators often type /task create or
+        # /task Execute by analogy with other CLIs; durable tasks are created by
+        # chat turns (which auto-select resume/retry/replan or create).
+        if action in _RESERVED_TASK_CONTROL_VERBS:
+            return (
+                f"/{command} {parts[1]!r} is not a gateway task ID. "
+                f"{_TASK_CONTROL_USAGE} "
+                "Use /tasks to list active tasks, or mana-agent tasks recover for "
+                "supervisor recovery. New work is created by sending a chat turn "
+                "(no /task create or /task execute)."
+            )
+        candidate_id = parts[1]
+        if not _GATEWAY_TASK_ID_RE.fullmatch(candidate_id):
+            return (
+                f"/{command} {candidate_id!r} is not a gateway task ID. "
+                f"{_TASK_CONTROL_USAGE} "
+                "Use /tasks to list known task IDs, or send a normal chat message "
+                "so the gateway can auto-select or create a durable task."
+            )
+        try:
+            return json.dumps(self.inspect_task(candidate_id), indent=2, default=str)
+        except LaneCoordinatorError as exc:
+            return (
+                f"Gateway task control failed: {exc}. "
+                "Use /tasks to list known task IDs, or send a chat message to "
+                "auto-select (resume/retry/replan) or create a task."
+            )
 
     def send(self, session_id: str, text: str) -> str:
         """Synchronous send — full process_turn when stack is rich, else ask."""
@@ -3072,6 +3172,25 @@ class AgentChatGateway:
         return asdict(self._lane_coordinator.pause(task_id, reason=reason))
 
     def resume_task(self, task_id: str) -> dict[str, Any]:
+        """Resume a paused/waiting task, or same-task retry when already stopped."""
+        try:
+            execution = self._lane_coordinator.ensure_recoverable_execution(task_id)
+        except LaneCoordinatorError:
+            execution = self._lane_coordinator.inspect_task(task_id)
+        if execution.state is LaneTaskState.PAUSED:
+            return asdict(self._lane_coordinator.resume(task_id))
+        if execution.state in {
+            LaneTaskState.FAILED,
+            LaneTaskState.INTERRUPTED,
+            LaneTaskState.TIMED_OUT,
+            LaneTaskState.BUDGET_EXHAUSTED,
+            LaneTaskState.REJECTED,
+            LaneTaskState.BLOCKED,
+            LaneTaskState.WAITING,
+        }:
+            # Operator "resume" of stopped work is a same-task retry: continue
+            # under the existing durable identity when safe.
+            return self.retry_task_control(task_id, session_id=execution.session_id)
         return asdict(self._lane_coordinator.resume(task_id))
 
     def cancel_task(
@@ -3083,6 +3202,184 @@ class AgentChatGateway:
             else (self._lane_coordinator.cancel_task(task_id).task_id,)
         )
         return {"task_id": task_id, "cancelled_task_ids": list(cancelled)}
+
+    def retry_task_control(self, task_id: str, *, session_id: str = "") -> dict[str, Any]:
+        """Operator-authorized same-task retry through the lane recovery path."""
+        decision = RecoveryDecision(
+            decision_id=f"operator-gateway:retry:{task_id}:{uuid.uuid4().hex[:12]}",
+            task_id=task_id,
+            action=RecoveryAction.RETRY,
+            retry_category=RetryCategory.MODEL,
+            reason="operator requested same-task retry from gateway /task control",
+            same_task_retry_authorized=True,
+            safe_to_continue=True,
+        )
+        reservation = self._lane_coordinator.retry_task(
+            task_id,
+            decision=decision,
+            session_id=session_id or self._lane_coordinator.inspect_task(task_id).session_id,
+        )
+        self._prepare_multi_task_job_restart(task_id)
+        return {
+            **asdict(reservation.execution),
+            "recovery_action": "retry_task",
+            "decision_id": decision.decision_id,
+        }
+
+    def replan_task_control(self, task_id: str, *, session_id: str = "") -> dict[str, Any]:
+        """Operator-authorized same-task replan that restarts incomplete job steps."""
+        decision = RecoveryDecision(
+            decision_id=f"operator-gateway:replan:{task_id}:{uuid.uuid4().hex[:12]}",
+            task_id=task_id,
+            action=RecoveryAction.REPLAN,
+            retry_category=RetryCategory.REPLAN,
+            reason="operator requested same-task replan from gateway /task control",
+            safe_to_continue=True,
+        )
+        reservation = self._lane_coordinator.replan_task(
+            task_id,
+            decision=decision,
+            session_id=session_id or self._lane_coordinator.inspect_task(task_id).session_id,
+        )
+        self._prepare_multi_task_job_restart(task_id)
+        return {
+            **asdict(reservation.execution),
+            "recovery_action": "replan_task",
+            "decision_id": decision.decision_id,
+        }
+
+    def _resolve_task_control_id(
+        self,
+        *,
+        action: str,
+        raw_id: str,
+        session_id: str,
+    ) -> str:
+        """Resolve an explicit task id or auto-select when exactly one candidate exists."""
+        token = str(raw_id or "").strip()
+        if token:
+            if token.lower() in _RESERVED_TASK_CONTROL_VERBS or not _GATEWAY_TASK_ID_RE.fullmatch(
+                token
+            ):
+                raise LaneCoordinatorError(
+                    f"{token!r} is not a gateway task ID. {_TASK_CONTROL_USAGE} "
+                    "Use /tasks to list known task IDs."
+                )
+            return token
+        candidates = self._control_auto_select_candidates(
+            action=action, session_id=session_id
+        )
+        if len(candidates) == 1:
+            return str(candidates[0]["task_id"])
+        if not candidates:
+            raise LaneCoordinatorError(
+                f"No recoverable task is available for /task {action}. "
+                "Send a chat message to create new work, or use /tasks to inspect tasks."
+            )
+        listed = ", ".join(
+            f"{item['task_id']}({item.get('state') or item.get('lane_state') or '?'})"
+            for item in candidates[:8]
+        )
+        raise LaneCoordinatorError(
+            f"Multiple recoverable tasks match /task {action}; pass an explicit id. "
+            f"Candidates: {listed}. Use /tasks to list known task IDs."
+        )
+
+    def _control_auto_select_candidates(
+        self, *, action: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Return recoverable tasks for operator control auto-select (no guessing)."""
+        rows: list[dict[str, Any]] = []
+        if action == "pause":
+            for execution in self._lane_coordinator.list_tasks(
+                active_only=True, session_id=session_id
+            ):
+                if execution.state in {
+                    LaneTaskState.QUEUED,
+                    LaneTaskState.RUNNING,
+                    LaneTaskState.WAITING,
+                }:
+                    rows.append(
+                        {
+                            "task_id": execution.task_id,
+                            "state": execution.state.value,
+                            "lane_state": execution.state.value,
+                        }
+                    )
+            return rows
+        if action == "cancel":
+            for execution in self._lane_coordinator.list_tasks(
+                active_only=True, session_id=session_id
+            ):
+                rows.append(
+                    {
+                        "task_id": execution.task_id,
+                        "state": execution.state.value,
+                        "lane_state": execution.state.value,
+                    }
+                )
+            return rows
+        # resume / retry / replan: durable recoverable work
+        for item in self._recovery_candidates(
+            lane_id=None,
+            session_id=session_id,
+            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+            repository_id=self._lane_coordinator.taskboard.store.repository_id,
+        ):
+            state = str(item.get("state") or "")
+            lane_state = str(item.get("lane_state") or "")
+            if state == ExecutionState.COMPLETED.value or lane_state == LaneTaskState.COMPLETED.value:
+                continue
+            if bool(item.get("deadline_exceeded")):
+                continue
+            if bool(item.get("waiting_for_human")):
+                continue
+            if session_id and str(item.get("session_id") or "") not in {"", session_id}:
+                # Prefer the active session when one is bound, but still allow
+                # cross-session recovery when the only matches are elsewhere.
+                continue
+            rows.append(item)
+        if not rows and session_id:
+            # Fall back to workspace-scoped recoverable tasks when the session
+            # has none; still requires exactly one candidate to auto-select.
+            for item in self._recovery_candidates(
+                lane_id=None,
+                session_id="",
+                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+            ):
+                state = str(item.get("state") or "")
+                if state == ExecutionState.COMPLETED.value:
+                    continue
+                if bool(item.get("deadline_exceeded")) or bool(item.get("waiting_for_human")):
+                    continue
+                rows.append(item)
+        return rows
+
+    def _prepare_multi_task_job_restart(self, root_task_id: str) -> None:
+        """Reopen incomplete multi-task children so the job can start from the first pending step."""
+        board = self._lane_coordinator.taskboard
+        try:
+            root = board.get_task(root_task_id)
+        except KeyError:
+            return
+        if str(root.entry_route or "") != "multi_task" and not root.child_task_ids:
+            return
+        from mana_agent.multi_agent.core.types import TaskStatus
+
+        for child_id in list(root.child_task_ids or []):
+            try:
+                child = board.get_task(child_id)
+            except KeyError:
+                continue
+            if child.status in {
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            }:
+                board.reopen(child_id, reason="same-task job restart after recovery")
+            # DONE/SKIPPED children remain complete so partial progress is kept
+            # when restarting only the failed/reverted steps of a compound job.
 
     def reprioritize_task(self, task_id: str, priority: str) -> dict[str, Any]:
         from mana_agent.gateway.lanes import LanePriority
@@ -3217,7 +3514,12 @@ class AgentChatGateway:
         session_id: str = "",
         context_components: Mapping[str, Any] | None = None,
     ):
-        """Estimate the final selected model against the route's serialized payload."""
+        """Estimate the final selected model against the route's serialized payload.
+
+        Preflight reservation sizing uses model/lane capacity after the session
+        ledger has been refreshed for this message. Sequential follow-ups must
+        not inherit a depleted prior-turn residual of 0 as their effective limit.
+        """
         lane_id = self._lane_coordinator.select_lane(entry_route=entry_route)
         components: dict[str, Any] = {
             "user_request": request_text,
@@ -3251,6 +3553,9 @@ class AgentChatGateway:
             })
             tool_count = len(tools)
             expected_calls = max(1, int(self.config.agent_max_steps))
+        # Refresh the per-task admission envelope before sizing this message so
+        # prior turn consumption cannot force effective limit 0.
+        self._stack.context_cost_governor.ensure_admission_budget()
         return self._stack.context_cost_governor.estimate_execution(
             provider=execution_decision.provider,
             model=execution_decision.selected_model,
@@ -3263,6 +3568,139 @@ class AgentChatGateway:
             execution_kind="gateway_route",
             tool_count=tool_count,
             lane_policy_limit=self._lane_coordinator.contracts[lane_id].token_budget,
+        )
+
+    def _recalculate_reservation_for_message(
+        self,
+        task_id: str,
+        *,
+        execution_estimate: Any,
+        reason: str,
+    ) -> None:
+        """Recompute an active lane reservation from a follow-up/extend forecast."""
+        forecast_cost = (
+            None
+            if execution_estimate.estimated_cost is None
+            else float(execution_estimate.estimated_cost)
+        )
+        try:
+            execution = self._lane_coordinator.inspect_task(task_id)
+        except LaneCoordinatorError:
+            return
+        if execution.parent_task_id and execution.state in ACTIVE_LANE_STATES:
+            required = max(
+                0,
+                int(execution_estimate.input_tokens) + int(execution_estimate.output_tokens),
+            )
+            try:
+                self._ensure_multi_task_parent_budget(
+                    execution.parent_task_id,
+                    required_child_tokens=required,
+                    child_estimated_cost=forecast_cost,
+                    revising_task_id=task_id,
+                )
+            except LaneCoordinatorError:
+                # Parent expansion is best-effort for non-multi-task parents;
+                # recalculate_budget still applies the child forecast under caps.
+                pass
+        self._lane_coordinator.recalculate_budget(
+            task_id,
+            forecast_input_tokens=int(execution_estimate.input_tokens),
+            forecast_output_tokens=int(execution_estimate.output_tokens),
+            forecast_cost=forecast_cost,
+            reason=reason,
+        )
+
+    def _multi_task_capacity_estimate(
+        self,
+        *,
+        provider: str,
+        model: str,
+        request_text: str,
+        entry_route: str,
+        expected_model_calls: int = 1,
+        requested_output_tokens: int | None = None,
+        context_components: Mapping[str, Any] | None = None,
+        tool_count: int = 0,
+    ):
+        """Size multi-task work against model/lane capacity only.
+
+        Compound children draw from the root multi-task envelope. Preflight
+        sizing must not hard-fail on parent planning depletion of the shared
+        session ledger; actual provider calls still pass through the governor.
+        """
+        lane_id = self._lane_coordinator.select_lane(entry_route=entry_route)
+        components: dict[str, Any] = {
+            "user_request": request_text,
+            **dict(context_components or {}),
+        }
+        return self._stack.context_cost_governor.accounting.estimate(
+            TokenEstimationRequest(
+                model_identity=ModelIdentity(provider or "unknown", model),
+                components=components,
+                route=entry_route,
+                lane=lane_id.value,
+                expected_model_calls=max(1, int(expected_model_calls or 1)),
+                requested_output_tokens=requested_output_tokens,
+                execution_kind="multi_task_capacity",
+                tool_count=max(0, int(tool_count)),
+                lane_policy_limit=self._lane_coordinator.contracts[lane_id].token_budget,
+            )
+        )
+
+    def _ensure_multi_task_parent_budget(
+        self,
+        parent_task_id: str,
+        *,
+        required_child_tokens: int,
+        child_estimated_cost: float | None = None,
+        revising_task_id: str = "",
+    ) -> None:
+        """Grow the multi-task root envelope so a child reserve/recalc fits.
+
+        ``required_child_tokens`` is the full token total the target child needs
+        after the change. Active siblings keep their current reservations; the
+        revising child (when provided) is excluded so its previous reservation is
+        not double-counted against the new requirement.
+        """
+        parent = self._lane_coordinator.inspect_task(parent_task_id)
+        sibling_reserved = sum(
+            execution.budget.reserved_tokens
+            for execution in self._lane_coordinator.executions
+            if execution.parent_task_id == parent_task_id
+            and execution.state in ACTIVE_LANE_STATES
+            and execution.task_id != revising_task_id
+        )
+        needed_total = (
+            parent.budget.consumed_tokens
+            + sibling_reserved
+            + max(0, int(required_child_tokens))
+        )
+        if needed_total <= parent.budget.reserved_tokens:
+            return
+        current_output = max(
+            parent.budget.reserved_output_tokens,
+            parent.budget.consumed_output_tokens,
+        )
+        target_input = max(
+            parent.budget.reserved_input_tokens,
+            needed_total - current_output,
+        )
+        forecast_input = max(0, target_input - parent.budget.consumed_input_tokens)
+        forecast_output = max(0, current_output - parent.budget.consumed_output_tokens)
+        forecast_cost = None
+        if child_estimated_cost is not None or parent.budget.estimated_cost_known:
+            forecast_cost = max(
+                0.0,
+                float(parent.budget.estimated_cost)
+                + max(0.0, float(child_estimated_cost or 0.0)),
+            )
+        self._lane_coordinator.recalculate_budget(
+            parent_task_id,
+            forecast_input_tokens=forecast_input,
+            forecast_output_tokens=forecast_output,
+            forecast_cost=forecast_cost,
+            reason="multi-task child budget envelope",
         )
 
     def latest_routing_decision(
@@ -3328,6 +3766,10 @@ class AgentChatGateway:
             metadata={"user_message_id": user_message_id, "turn_state": "received"},
         )
         try:
+            # Each user message (including follow-ups and extends) needs a fresh
+            # per-task admission envelope. Prior turn consumption must not leave
+            # effective remaining at 0 for this session's next message.
+            self._stack.context_cost_governor.ensure_admission_budget()
             state = self._session(session_id)
             conversation_id = str(state.get("conversation_id") or session_id)
             state["_turn_record"] = turn_record
@@ -3482,15 +3924,49 @@ class AgentChatGateway:
                         },
                     )
                 if entry_decision.route == "multi_task":
-                    result = self._execute_multi_task_route(
-                        decision=entry_decision,
-                        context=route_context,
-                        text=text,
-                        state=state,
-                        ask_service=ask_service,
-                        sink=sink,
-                        options=dict(options),
-                    )
+                    try:
+                        result = self._recover_or_execute_multi_task(
+                            decision=entry_decision,
+                            context=route_context,
+                            text=text,
+                            state=state,
+                            ask_service=ask_service,
+                            sink=sink,
+                            options=dict(options),
+                            turn_id=turn_id,
+                            user_message_id=user_message_id,
+                        )
+                    except CheckpointResumeError as exc:
+                        result = ChatTurnResult(
+                            answer=str(exc),
+                            error=exc.code,
+                            mode=(
+                                "checkpoint-resume-budget-blocked"
+                                if exc.code == "context_budget_blocked"
+                                else "checkpoint-resume-error"
+                            ),
+                            payload={
+                                "route": "multi_task",
+                                "checkpoint_resume": "blocked",
+                            },
+                        )
+                    except FollowupClassificationError as exc:
+                        result = ChatTurnResult(
+                            answer=str(exc),
+                            error="followup_classification_invalid",
+                            mode="followup-classification-error",
+                            payload={"route": "multi_task"},
+                        )
+                    except LaneCoordinatorError as exc:
+                        result = ChatTurnResult(
+                            answer=(
+                                f"Gateway lane coordination failed: {exc}. "
+                                "No agent action was executed."
+                            ),
+                            error=getattr(exc, "code", "lane_coordinator_error"),
+                            mode="lane-error",
+                            payload={"route": "multi_task"},
+                        )
                     return self._finalize_turn_result(
                         result=result,
                         session_id=session_id,
@@ -3752,6 +4228,8 @@ class AgentChatGateway:
                         workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                         repository_id=self._lane_coordinator.taskboard.store.repository_id,
                     )
+                    # Status / follow-up classification may still see deadline-dead
+                    # tasks. Resume and retry candidates never include them.
                     recoverable_task_candidates = [
                         item
                         for item in all_recovery_candidates
@@ -3765,6 +4243,7 @@ class AgentChatGateway:
                         item for item in all_recovery_candidates
                         if (
                             str(item.get("state") or "") != LaneTaskState.COMPLETED.value
+                            and not bool(item.get("deadline_exceeded"))
                             and str(item.get("lane") or "") == lane_id.value
                         )
                     ]
@@ -3835,20 +4314,30 @@ class AgentChatGateway:
                                 memory_warning=memory_warning,
                             )
                         if followup.category in {"followup_task", "task_expansion", "task_correction"}:
-                            parent_task_id = followup.related_task_id
-                            previous_task_id = parent_task_id
+                            related_id = followup.related_task_id
                             relation_type = {
                                 "followup_task": "followup",
                                 "task_expansion": "expansion",
                                 "task_correction": "correction",
                             }[followup.category]
+                            previous_task_id = related_id
                             recovery_candidates = []
+                            # Deadline-dead parents cannot host children: they would
+                            # inherit an already-elapsed deadline. Link lineage only.
+                            if related_id and not self._task_wall_clock_deadline_exceeded(
+                                related_id
+                            ):
+                                parent_task_id = related_id
                         elif followup.category in {"retry_request", "resume_request"}:
                             recovery_candidates = [
-                                item for item in recoverable_task_candidates
+                                item
+                                for item in recoverable_task_candidates
                                 if str(item.get("task_id") or "") == followup.related_task_id
+                                and not bool(item.get("deadline_exceeded"))
                             ]
-                            relation_type = "retry" if followup.category == "retry_request" else "resume"
+                            relation_type = (
+                                "retry" if followup.category == "retry_request" else "resume"
+                            )
                             previous_task_id = followup.related_task_id
                         elif followup.category == "new_task":
                             recovery_candidates = []
@@ -3874,7 +4363,36 @@ class AgentChatGateway:
                             f"started. Reason: {resume_decision.reason}"
                         )
                     recovered_task = False
-                    if resume_decision.action == "resume_checkpoint":
+                    recovery_target_id = str(resume_decision.task_id or "")
+                    # Deterministic recovery gate: a wall-clock-dead task cannot be
+                    # requeued. Create a new task with a fresh deadline instead.
+                    force_new_task_for_dead = bool(
+                        recovery_target_id
+                        and resume_decision.action
+                        in {"resume_checkpoint", "retry_task", "replan_task"}
+                        and self._task_wall_clock_deadline_exceeded(recovery_target_id)
+                    )
+                    if force_new_task_for_dead:
+                        if callable(sink):
+                            sink(
+                                "task_deadline_dead",
+                                "Prior task deadline exceeded; creating a new task",
+                                metadata={
+                                    "turn_id": turn_id,
+                                    "user_message_id": user_message_id,
+                                    "dead_task_id": recovery_target_id,
+                                    "prior_action": resume_decision.action,
+                                },
+                            )
+                        previous_task_id = previous_task_id or recovery_target_id
+                        if relation_type == "independent":
+                            relation_type = "retry"
+                        parent_task_id = None
+                        recovery_candidates = []
+                    if (
+                        resume_decision.action == "resume_checkpoint"
+                        and not force_new_task_for_dead
+                    ):
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -3911,7 +4429,7 @@ class AgentChatGateway:
                             }
                         )
                         recovered_task = True
-                    elif resume_decision.action == "retry_task":
+                    elif resume_decision.action == "retry_task" and not force_new_task_for_dead:
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -3930,8 +4448,9 @@ class AgentChatGateway:
                             decision=recovery_decision,
                             session_id=session_id,
                         )
+                        self._prepare_multi_task_job_restart(resume_decision.task_id)
                         recovered_task = True
-                    elif resume_decision.action == "replan_task":
+                    elif resume_decision.action == "replan_task" and not force_new_task_for_dead:
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -3949,12 +4468,17 @@ class AgentChatGateway:
                             decision=recovery_decision,
                             session_id=session_id,
                         )
+                        self._prepare_multi_task_job_restart(resume_decision.task_id)
                         recovered_task = True
                     else:
                         previous_execution_id = (
-                            str(recovery_candidates[0]["task_id"])
-                            if recovery_candidates
-                            else ""
+                            recovery_target_id
+                            if force_new_task_for_dead
+                            else (
+                                str(recovery_candidates[0]["task_id"])
+                                if recovery_candidates
+                                else previous_task_id
+                            )
                         )
                         reservation = self._lane_coordinator.reserve(
                             normalized_intent=text,
@@ -3977,16 +4501,22 @@ class AgentChatGateway:
                             parent_task_id=parent_task_id,
                             previous_execution_id=previous_execution_id,
                             derived_from_execution_id=(
-                                previous_execution_id if resume_decision.same_work else ""
+                                previous_execution_id
+                                if (resume_decision.same_work or force_new_task_for_dead)
+                                else ""
                             ),
                             supersedes_execution_id=(
                                 previous_execution_id
-                                if previous_execution_id and not resume_decision.same_work
+                                if previous_execution_id
+                                and (
+                                    force_new_task_for_dead
+                                    or not resume_decision.same_work
+                                )
                                 else ""
                             ),
                             trigger_turn_id=turn_id,
                             relation_type=relation_type,
-                            previous_task_id=previous_task_id,
+                            previous_task_id=previous_task_id or previous_execution_id,
                             user_message_id=user_message_id,
                         )
                         turn_record.created_task_ids = [reservation.execution.task_id]
@@ -3995,16 +4525,27 @@ class AgentChatGateway:
                         if callable(sink):
                             sink(
                                 "task_linked" if parent_task_id else "task_created",
-                                "Task linked" if parent_task_id else "Task created",
+                                (
+                                    "Task linked"
+                                    if parent_task_id
+                                    else (
+                                        "New task created after deadline"
+                                        if force_new_task_for_dead
+                                        else "Task created"
+                                    )
+                                ),
                                 metadata={
                                     "turn_id": turn_id,
                                     "user_message_id": user_message_id,
                                     "task_id": reservation.execution.task_id,
                                     "parent_task_id": parent_task_id or "",
                                     "relation_type": relation_type,
+                                    "supersedes_execution_id": previous_execution_id
+                                    if force_new_task_for_dead
+                                    else "",
                                 },
                             )
-                        if recovery_candidates:
+                        if recovery_candidates or force_new_task_for_dead:
                             self._lane_coordinator.taskboard.add_decision(
                                 reservation.execution.taskboard_task_id,
                                 resume_decision.decision_id,
@@ -4020,6 +4561,17 @@ class AgentChatGateway:
                             },
                         )
                     else:
+                        # Follow-up, expand, retry, resume, and second+ messages
+                        # recalculate the live reservation from this turn's
+                        # forecast so exhausted prior usage cannot block work.
+                        self._recalculate_reservation_for_message(
+                            reservation.execution.task_id,
+                            execution_estimate=execution_estimate,
+                            reason=(
+                                f"message budget recalculation "
+                                f"({relation_type or ('retry' if recovered_task else 'new')})"
+                            ),
+                        )
                         self._lane_coordinator.start(reservation)
                         options["_lane_task_id"] = reservation.execution.task_id
                         self._stack.context_cost_governor.set_execution_identity(
@@ -4229,6 +4781,21 @@ class AgentChatGateway:
                         payload={
                             "route": entry_decision.route,
                             "checkpoint_resume": "blocked",
+                        },
+                    )
+                except ModelContextLimitError as exc:
+                    result = ChatTurnResult(
+                        answer=(
+                            f"Gateway execution failed: {exc}. "
+                            "No direct model fallback was executed."
+                        ),
+                        error="context_budget_blocked",
+                        mode="context-budget-blocked",
+                        payload={
+                            "route": entry_decision.route,
+                            "required": exc.required,
+                            "effective_limit": exc.effective_limit,
+                            "deficit": exc.deficit,
                         },
                     )
                 except LaneCoordinatorError as exc:
@@ -4453,6 +5020,44 @@ class AgentChatGateway:
             LaneTaskState.HANDOFF, LaneTaskState.VERIFYING,
         }:
             return
+        # Multi-task children often need more tokens at first real model call than
+        # the provisional reservation. Expand the parent envelope first so the
+        # lane coordinator's parent-remaining check does not abort a live child
+        # that already owns a validated route (e.g. Codex coding after media).
+        if execution.parent_task_id and execution.task_type == "multi_task_child":
+            try:
+                self._lane_coordinator.inspect_task(execution.parent_task_id)
+            except LaneCoordinatorError:
+                pass
+            else:
+                budget = execution.budget
+                next_input = max(
+                    budget.reserved_input_tokens,
+                    budget.consumed_input_tokens
+                    + max(0, int(forecast.forecast_input_tokens)),
+                )
+                next_output = max(
+                    budget.reserved_output_tokens,
+                    budget.consumed_output_tokens
+                    + max(0, int(forecast.forecast_output_tokens)),
+                )
+                next_total = next_input + next_output
+                with self._multi_task_budget_lock:
+                    self._ensure_multi_task_parent_budget(
+                        execution.parent_task_id,
+                        required_child_tokens=next_total,
+                        child_estimated_cost=forecast.forecast_cost,
+                        revising_task_id=execution.task_id,
+                    )
+                    self._lane_coordinator.recalculate_budget(
+                        task_id=forecast.task_id,
+                        forecast_input_tokens=forecast.forecast_input_tokens,
+                        forecast_output_tokens=forecast.forecast_output_tokens,
+                        forecast_cost=forecast.forecast_cost,
+                        accounting_reservation_id=forecast.accounting_reservation_id,
+                        reason=forecast.reason,
+                    )
+                return
         self._lane_coordinator.recalculate_budget(
             task_id=forecast.task_id,
             forecast_input_tokens=forecast.forecast_input_tokens,
@@ -4473,6 +5078,182 @@ class AgentChatGateway:
         )
         return usage
 
+    def _recover_or_execute_multi_task(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        state: dict[str, Any],
+        ask_service: Any,
+        sink: Any,
+        options: dict[str, Any],
+        turn_id: str,
+        user_message_id: str,
+    ) -> ChatTurnResult:
+        """Auto-select multi-task recovery or create a fresh compound root.
+
+        Decision matrix (model-validated via checkpoint_resume):
+        - same incomplete work with checkpoint → resume_checkpoint
+        - same failed/blocked work safe to repeat → retry_task
+        - same work but plan/job steps reverted → replan_task (restart from first
+          incomplete child)
+        - different work / no recoverable candidate → start_fresh (create new root)
+        """
+        all_recovery = self._recovery_candidates(
+            lane_id=None,
+            session_id=context.session_id,
+            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+            repository_id=self._lane_coordinator.taskboard.store.repository_id,
+        )
+        multi_candidates = [
+            item
+            for item in all_recovery
+            if (
+                str(item.get("entry_route") or "") == "multi_task"
+                or str(item.get("task_type") or "") in {"multi_task_root", "multi_task"}
+                or bool(item.get("child_task_ids"))
+            )
+            and str(item.get("state") or "") != ExecutionState.COMPLETED.value
+            and str(item.get("lane_state") or "") != LaneTaskState.COMPLETED.value
+            and not bool(item.get("deadline_exceeded"))
+            and not bool(item.get("waiting_for_human"))
+        ]
+        if not multi_candidates:
+            return self._execute_multi_task_route(
+                decision=decision,
+                context=context,
+                text=text,
+                state=state,
+                ask_service=ask_service,
+                sink=sink,
+                options=options,
+            )
+        with self._stack.context_cost_governor.scoped_execution_identity(
+            turn_id=turn_id,
+            agent_id="main",
+            step_id=f"checkpoint_resume_multi:{uuid.uuid4().hex}",
+            route="multi_task",
+            lane="research",
+            execution_kind="checkpoint_resume",
+        ):
+            resume_decision = CheckpointResumeDecider(self._entry_router.llm).decide(
+                current_request=text,
+                route="multi_task",
+                requires_live_data=decision.requires_live_data,
+                candidates=multi_candidates,
+            )
+        if resume_decision.action == "stop":
+            raise CheckpointResumeError(
+                "Model decision stopped multi-task recovery. No compound task was "
+                f"resumed or started. Reason: {resume_decision.reason}"
+            )
+        if resume_decision.action == "start_fresh":
+            return self._execute_multi_task_route(
+                decision=decision,
+                context=context,
+                text=text,
+                state=state,
+                ask_service=ask_service,
+                sink=sink,
+                options=options,
+            )
+        recovery_target = resume_decision.task_id
+        if self._task_wall_clock_deadline_exceeded(recovery_target):
+            if callable(sink):
+                sink(
+                    "task_deadline_dead",
+                    "Prior multi-task deadline exceeded; creating a new compound root",
+                    metadata={
+                        "turn_id": turn_id,
+                        "user_message_id": user_message_id,
+                        "dead_task_id": recovery_target,
+                        "prior_action": resume_decision.action,
+                    },
+                )
+            return self._execute_multi_task_route(
+                decision=decision,
+                context=context,
+                text=text,
+                state=state,
+                ask_service=ask_service,
+                sink=sink,
+                options=options,
+            )
+        selected_model = ""
+        if resume_decision.action == "resume_checkpoint":
+            recovery_decision = RecoveryDecision(
+                decision_id=resume_decision.decision_id,
+                task_id=recovery_target,
+                action=RecoveryAction.RESUME_CHECKPOINT,
+                retry_category=RetryCategory.MODEL,
+                reason=resume_decision.reason,
+                selected_model=selected_model,
+                resume_checkpoint_id=resume_decision.checkpoint_id,
+                safe_to_continue=resume_decision.safe_to_continue,
+            )
+            self._lane_coordinator.resume_checkpoint(
+                recovery_target,
+                decision=recovery_decision,
+                session_id=context.session_id,
+            )
+        elif resume_decision.action == "retry_task":
+            recovery_decision = RecoveryDecision(
+                decision_id=resume_decision.decision_id,
+                task_id=recovery_target,
+                action=RecoveryAction.RETRY,
+                retry_category=RetryCategory.MODEL,
+                reason=resume_decision.reason,
+                selected_model=selected_model,
+                same_task_retry_authorized=True,
+                safe_to_continue=resume_decision.safe_to_continue,
+            )
+            self._lane_coordinator.retry_task(
+                recovery_target,
+                decision=recovery_decision,
+                session_id=context.session_id,
+            )
+            self._prepare_multi_task_job_restart(recovery_target)
+        else:
+            recovery_decision = RecoveryDecision(
+                decision_id=resume_decision.decision_id,
+                task_id=recovery_target,
+                action=RecoveryAction.REPLAN,
+                retry_category=RetryCategory.REPLAN,
+                reason=resume_decision.reason,
+                selected_model=selected_model,
+                safe_to_continue=resume_decision.safe_to_continue,
+            )
+            self._lane_coordinator.replan_task(
+                recovery_target,
+                decision=recovery_decision,
+                session_id=context.session_id,
+            )
+            self._prepare_multi_task_job_restart(recovery_target)
+        if callable(sink):
+            sink(
+                "multi_task_recovered",
+                f"Multi-task {resume_decision.action} under existing root",
+                metadata={
+                    "turn_id": turn_id,
+                    "user_message_id": user_message_id,
+                    "task_id": recovery_target,
+                    "action": resume_decision.action,
+                    "decision_id": resume_decision.decision_id,
+                },
+            )
+        return self._execute_multi_task_route(
+            decision=decision,
+            context=context,
+            text=text,
+            state=state,
+            ask_service=ask_service,
+            sink=sink,
+            options=options,
+            reuse_root_task_id=recovery_target,
+            recovery_action=resume_decision.action,
+        )
+
     def _execute_multi_task_route(
         self,
         *,
@@ -4483,6 +5264,8 @@ class AgentChatGateway:
         ask_service: Any,
         sink: Any,
         options: dict[str, Any],
+        reuse_root_task_id: str = "",
+        recovery_action: str = "",
     ) -> ChatTurnResult:
         from mana_agent.multi_agent.core.types import TaskStatus
         from mana_agent.multi_agent.runtime.multi_task_orchestrator import (
@@ -4493,58 +5276,78 @@ class AgentChatGateway:
 
         board = self._lane_coordinator.taskboard
         normalized_request = " ".join(text.split())
-        for execution in self._lane_coordinator.executions:
-            if execution.parent_task_id or execution.session_id != context.session_id:
-                continue
-            if execution.state not in {
-                LaneTaskState.ROUTING,
-                LaneTaskState.QUEUED,
-                LaneTaskState.RUNNING,
-                LaneTaskState.WAITING,
-                LaneTaskState.BLOCKED,
-                LaneTaskState.PAUSED,
+        if not reuse_root_task_id:
+            for execution in self._lane_coordinator.executions:
+                if execution.parent_task_id or execution.session_id != context.session_id:
+                    continue
+                if execution.state not in {
+                    LaneTaskState.ROUTING,
+                    LaneTaskState.QUEUED,
+                    LaneTaskState.RUNNING,
+                    LaneTaskState.WAITING,
+                    LaneTaskState.BLOCKED,
+                    LaneTaskState.PAUSED,
+                }:
+                    continue
+                persisted = board.get_task(execution.taskboard_task_id)
+                if persisted.entry_route != "multi_task":
+                    continue
+                if " ".join(persisted.normalized_goal.split()) != normalized_request:
+                    continue
+                return ChatTurnResult(
+                    answer=(
+                        "An equivalent compound request is already persisted in the gateway. "
+                        f"Current progress: {persisted.aggregate_progress or execution.state.value}."
+                    ),
+                    mode="lane-duplicate",
+                    decision=decision,
+                    payload={
+                        "route": "multi_task",
+                        "root_task_id": persisted.task_id,
+                        "root_lane_task_id": execution.task_id,
+                        "overall_status": execution.state.value,
+                        "progress": persisted.aggregate_progress,
+                        "duplicate": True,
+                    },
+                )
+        if reuse_root_task_id:
+            root_task = board.get_task(reuse_root_task_id)
+            if root_task.status in {
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
             }:
-                continue
-            persisted = board.get_task(execution.taskboard_task_id)
-            if persisted.entry_route != "multi_task":
-                continue
-            if " ".join(persisted.normalized_goal.split()) != normalized_request:
-                continue
-            return ChatTurnResult(
-                answer=(
-                    "An equivalent compound request is already persisted in the gateway. "
-                    f"Current progress: {persisted.aggregate_progress or execution.state.value}."
-                ),
-                mode="lane-duplicate",
-                decision=decision,
-                payload={
-                    "route": "multi_task",
-                    "root_task_id": persisted.task_id,
-                    "root_lane_task_id": execution.task_id,
-                    "overall_status": execution.state.value,
-                    "progress": persisted.aggregate_progress,
-                    "duplicate": True,
-                },
+                board.reopen(
+                    root_task.task_id,
+                    reason=f"multi-task {recovery_action or 'recovery'} under existing root",
+                )
+            board.update_orchestration(
+                root_task.task_id,
+                entry_route="multi_task",
+                owning_lane="research",
+                routing_evidence=decision.to_dict(),
+                aggregate_progress=root_task.aggregate_progress or "0/? completed",
             )
-        root_task = board.create_task(
-            title=f"Compound request: {text[:120]}",
-            user_request=text,
-            normalized_goal=text,
-            owner_agent_id="gateway:multi_task",
-            action_type="gateway:multi_task",
-            workspace_id=board.store.workspace_id,
-            session_id=context.session_id,
-            repository_ids=[board.store.repository_id],
-            primary_repository_id=board.store.repository_id,
-        )
-        board.update_orchestration(
-            root_task.task_id,
-            entry_route="multi_task",
-            owning_lane="research",
-            routing_evidence=decision.to_dict(),
-            aggregate_progress="0/? completed",
-        )
-        board.update_status(root_task.task_id, TaskStatus.PLANNING)
+        else:
+            root_task = board.create_task(
+                title=f"Compound request: {text[:120]}",
+                user_request=text,
+                normalized_goal=text,
+                owner_agent_id="gateway:multi_task",
+                action_type="gateway:multi_task",
+                workspace_id=board.store.workspace_id,
+                session_id=context.session_id,
+                repository_ids=[board.store.repository_id],
+                primary_repository_id=board.store.repository_id,
+            )
+            board.update_orchestration(
+                root_task.task_id,
+                entry_route="multi_task",
+                owning_lane="research",
+                routing_evidence=decision.to_dict(),
+                aggregate_progress="0/? completed",
+            )
+            board.update_status(root_task.task_id, TaskStatus.PLANNING)
         self._stack.context_cost_governor.set_execution_identity(
             turn_id=context.turn_id,
             task_id=root_task.task_id,
@@ -4607,33 +5410,115 @@ class AgentChatGateway:
                 maximum_concurrency=orchestrator.maximum_concurrency,
             )
         )
-        root_estimate = self._execution_token_estimate(
-            entry_route="multi_task",
-            execution_decision=root_model_decision,
-            request_text=plan.goal,
-            session_id=context.session_id,
+        try:
+            root_capacity = self._multi_task_capacity_estimate(
+                provider=root_model_decision.provider,
+                model=root_model_decision.selected_model,
+                request_text=plan.goal,
+                entry_route="multi_task",
+                expected_model_calls=max(
+                    1, int(getattr(root_model_decision, "expected_model_calls", 1) or 1)
+                ),
+                requested_output_tokens=max(
+                    1, int(getattr(root_model_decision, "estimated_output_tokens", 1) or 1)
+                ),
+            )
+            child_capacities = [
+                self._multi_task_capacity_estimate(
+                    provider=root_model_decision.provider,
+                    model=root_model_decision.selected_model,
+                    request_text=item.request,
+                    entry_route="multi_task",
+                    expected_model_calls=max(
+                        1, int(getattr(root_model_decision, "expected_model_calls", 1) or 1)
+                    ),
+                    requested_output_tokens=max(
+                        1,
+                        int(getattr(root_model_decision, "estimated_output_tokens", 1) or 1),
+                    ),
+                )
+                for item in plan.tasks
+            ]
+        except ModelContextLimitError as exc:
+            board.update_status(root_task.task_id, TaskStatus.FAILED, reason=str(exc))
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: multi_task_budget. No fallback action was executed. "
+                    f"Reason: compound request does not fit model capacity ({exc})."
+                ),
+                error="multi_task_budget_exceeded",
+                mode="route-multi-task-error",
+                decision=decision,
+                payload={"route": "multi_task", "root_task_id": root_task.task_id},
+            )
+        envelope_input = root_capacity.input_tokens + sum(
+            item.input_tokens for item in child_capacities
         )
-        root_reservation = self._lane_coordinator.reserve(
-            normalized_intent=plan.goal,
-            lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
-            session_id=context.session_id,
-            workspace_id=board.store.workspace_id,
-            repository_id=board.store.repository_id,
-            model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
-            requested_input_tokens=root_estimate.input_tokens,
-            requested_output_tokens=root_estimate.output_tokens,
-            estimated_cost=(None if root_estimate.estimated_cost is None else float(root_estimate.estimated_cost)),
-            model_context_window=root_estimate.profile.context_window,
-            model_max_output_tokens=root_estimate.profile.max_output_tokens,
-            estimate_confidence=root_estimate.confidence,
-            estimate_source=root_estimate.profile.source,
-            capabilities=(),
-            routing_decision_id=root_model_decision.decision_id,
-            provider=root_model_decision.provider,
-            task_type="multi_task_root",
-            taskboard_task_id=root_task.task_id,
+        envelope_output = root_capacity.output_tokens + sum(
+            item.output_tokens for item in child_capacities
         )
-        self._lane_coordinator.start(root_reservation)
+        envelope_cost_values = [
+            item.estimated_cost
+            for item in (root_capacity, *child_capacities)
+            if item.estimated_cost is not None
+        ]
+        envelope_cost = (
+            float(sum(envelope_cost_values)) if envelope_cost_values else None
+        )
+        try:
+            if reuse_root_task_id:
+                # Recovery already requeued the durable root under its existing
+                # lane identity; reuse that projection instead of treating it as
+                # a duplicate of new work.
+                existing_root = self._lane_coordinator.ensure_recoverable_execution(
+                    reuse_root_task_id
+                )
+                if existing_root.state not in {
+                    LaneTaskState.QUEUED,
+                    LaneTaskState.ROUTING,
+                    LaneTaskState.RUNNING,
+                }:
+                    existing_root = self._lane_coordinator.transition(
+                        reuse_root_task_id,
+                        LaneTaskState.QUEUED,
+                        reason=f"multi-task {recovery_action or 'recovery'} requeue",
+                    )
+                root_reservation = LaneReservation(existing_root, duplicate=False)
+            else:
+                root_reservation = self._lane_coordinator.reserve(
+                    normalized_intent=plan.goal,
+                    lane_id=self._lane_coordinator.select_lane(entry_route="multi_task"),
+                    session_id=context.session_id,
+                    workspace_id=board.store.workspace_id,
+                    repository_id=board.store.repository_id,
+                    model=f"{root_model_decision.provider}/{root_model_decision.selected_model}",
+                    requested_input_tokens=envelope_input,
+                    requested_output_tokens=envelope_output,
+                    estimated_cost=envelope_cost,
+                    model_context_window=root_capacity.profile.context_window,
+                    model_max_output_tokens=root_capacity.profile.max_output_tokens,
+                    estimate_confidence=root_capacity.confidence,
+                    estimate_source=root_capacity.profile.source,
+                    capabilities=(),
+                    routing_decision_id=root_model_decision.decision_id,
+                    provider=root_model_decision.provider,
+                    task_type="multi_task_root",
+                    taskboard_task_id=root_task.task_id,
+                )
+        except LaneBudgetError as exc:
+            board.update_status(root_task.task_id, TaskStatus.FAILED, reason=str(exc))
+            return ChatTurnResult(
+                answer=(
+                    "Model decision failed: multi_task_budget. No fallback action was executed. "
+                    f"Reason: compound request cannot reserve a parent budget envelope ({exc})."
+                ),
+                error="multi_task_budget_exceeded",
+                mode="route-multi-task-error",
+                decision=decision,
+                payload={"route": "multi_task", "root_task_id": root_task.task_id},
+            )
+        if not root_reservation.duplicate:
+            self._lane_coordinator.start(root_reservation)
 
         def execute_child(item: Any, child_task_id: str) -> MultiTaskChildResult:
             child_context = EntryRouteContext(
@@ -4651,45 +5536,61 @@ class AgentChatGateway:
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
             )
-            with self._multi_task_route_lock:
-                child_decision = self._entry_router.route(
-                    user_prompt=item.request,
+            try:
+                with self._multi_task_route_lock:
+                    child_decision = self._entry_router.route(
+                        user_prompt=item.request,
+                        context=child_context,
+                    )
+                if child_decision.route == "multi_task":
+                    raise MultiTaskError(
+                        f"Child {item.local_id!r} was not atomic: recursive multi_task routing is not allowed."
+                    )
+                child_task = board.get_task(child_task_id)
+                prerequisite_results: list[str] = []
+                for dependency_id in child_task.depends_on:
+                    dependency = board.get_task(dependency_id)
+                    if dependency.result_summary:
+                        prerequisite_results.append(
+                            f"{dependency.title}:\n{dependency.result_summary}"
+                        )
+                execution_item = item.model_copy(
+                    update={
+                        "request": (
+                            item.request
+                            if not prerequisite_results
+                            else item.request
+                            + "\n\nValidated prerequisite results:\n\n"
+                            + "\n\n".join(prerequisite_results)
+                        )
+                    }
+                )
+                return self._execute_validated_child_route(
+                    item=execution_item,
+                    child_task_id=child_task_id,
+                    root_lane_task_id=root_reservation.execution.task_id,
+                    decision=child_decision,
                     context=child_context,
+                    state=state,
+                    ask_service=ask_service,
+                    sink=sink,
+                    options=dict(options),
                 )
-            if child_decision.route == "multi_task":
-                raise MultiTaskError(
-                    f"Child {item.local_id!r} was not atomic: recursive multi_task routing is not allowed."
+            except (ModelContextLimitError, LaneBudgetError) as exc:
+                board.update_status(
+                    child_task_id,
+                    TaskStatus.BLOCKED,
+                    reason=str(exc),
                 )
-            child_task = board.get_task(child_task_id)
-            prerequisite_results: list[str] = []
-            for dependency_id in child_task.depends_on:
-                dependency = board.get_task(dependency_id)
-                if dependency.result_summary:
-                    prerequisite_results.append(
-                        f"{dependency.title}:\n{dependency.result_summary}"
-                    )
-            execution_item = item.model_copy(
-                update={
-                    "request": (
-                        item.request
-                        if not prerequisite_results
-                        else item.request
-                        + "\n\nValidated prerequisite results:\n\n"
-                        + "\n\n".join(prerequisite_results)
-                    )
-                }
-            )
-            return self._execute_validated_child_route(
-                item=execution_item,
-                child_task_id=child_task_id,
-                root_lane_task_id=root_reservation.execution.task_id,
-                decision=child_decision,
-                context=child_context,
-                state=state,
-                ask_service=ask_service,
-                sink=sink,
-                options=dict(options),
-            )
+                child_task = board.get_task(child_task_id)
+                return MultiTaskChildResult(
+                    local_id=item.local_id,
+                    task_id=child_task_id,
+                    title=item.title,
+                    route=child_task.entry_route,
+                    status="blocked",
+                    blocker=str(exc),
+                )
 
         results = orchestrator.execute(
             root_task_id=root_task.task_id,
@@ -4913,37 +5814,57 @@ class AgentChatGateway:
             "remote_execution": ("remote_ssh_execute",),
             "server": ("server",),
         }.get(decision.route, ())
-        execution_estimate = self._execution_token_estimate(
-            entry_route=decision.route,
-            execution_decision=execution_decision,
-            request_text=item.request,
-            session_id=context.session_id,
+        decision_calls = max(
+            1, int(getattr(execution_decision, "expected_model_calls", 1) or 1)
         )
-        reservation = self._lane_coordinator.reserve(
-            normalized_intent=item.request,
-            lane_id=lane_id,
-            session_id=context.session_id,
-            workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
-            repository_id=self._lane_coordinator.taskboard.store.repository_id,
-            target_files=[str(value) for value in options.get("target_files", [])],
-            parent_task_id=root_lane_task_id,
-            root_task_id=self._lane_coordinator.inspect_task(
-                root_lane_task_id
-            ).root_task_id,
-            model=f"{execution_decision.provider}/{execution_decision.selected_model}",
-            requested_input_tokens=execution_estimate.input_tokens,
-            requested_output_tokens=execution_estimate.output_tokens,
-            estimated_cost=(None if execution_estimate.estimated_cost is None else float(execution_estimate.estimated_cost)),
-            model_context_window=execution_estimate.profile.context_window,
-            model_max_output_tokens=execution_estimate.profile.max_output_tokens,
-            estimate_confidence=execution_estimate.confidence,
-            estimate_source=execution_estimate.profile.source,
-            capabilities=capabilities,
-            routing_decision_id=execution_decision.decision_id,
+        total_output = max(1, int(execution_decision.estimated_output_tokens))
+        per_call_output = max(1, (total_output + decision_calls - 1) // decision_calls)
+        execution_estimate = self._multi_task_capacity_estimate(
             provider=execution_decision.provider,
-            task_type="multi_task_child",
-            taskboard_task_id=child_task_id,
+            model=execution_decision.selected_model,
+            request_text=item.request,
+            entry_route=decision.route,
+            expected_model_calls=decision_calls,
+            requested_output_tokens=per_call_output,
         )
+        child_cost = (
+            None
+            if execution_estimate.estimated_cost is None
+            else float(execution_estimate.estimated_cost)
+        )
+        with self._multi_task_budget_lock:
+            self._ensure_multi_task_parent_budget(
+                root_lane_task_id,
+                required_child_tokens=(
+                    execution_estimate.input_tokens + execution_estimate.output_tokens
+                ),
+                child_estimated_cost=child_cost,
+            )
+            reservation = self._lane_coordinator.reserve(
+                normalized_intent=item.request,
+                lane_id=lane_id,
+                session_id=context.session_id,
+                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                target_files=[str(value) for value in options.get("target_files", [])],
+                parent_task_id=root_lane_task_id,
+                root_task_id=self._lane_coordinator.inspect_task(
+                    root_lane_task_id
+                ).root_task_id,
+                model=f"{execution_decision.provider}/{execution_decision.selected_model}",
+                requested_input_tokens=execution_estimate.input_tokens,
+                requested_output_tokens=execution_estimate.output_tokens,
+                estimated_cost=child_cost,
+                model_context_window=execution_estimate.profile.context_window,
+                model_max_output_tokens=execution_estimate.profile.max_output_tokens,
+                estimate_confidence=execution_estimate.confidence,
+                estimate_source=execution_estimate.profile.source,
+                capabilities=capabilities,
+                routing_decision_id=execution_decision.decision_id,
+                provider=execution_decision.provider,
+                task_type="multi_task_child",
+                taskboard_task_id=child_task_id,
+            )
         self._lane_coordinator.taskboard.update_orchestration(
             child_task_id,
             entry_route=decision.route,
@@ -5141,6 +6062,15 @@ class AgentChatGateway:
                     pass
                 return
 
+    def _task_wall_clock_deadline_exceeded(self, task_id: str) -> bool:
+        """Return True when the durable task's wall-clock deadline has elapsed."""
+        if not task_id:
+            return False
+        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
+        if task is None:
+            return False
+        return task.wall_clock_deadline_exceeded()
+
     def _recovery_candidates(
         self,
         *,
@@ -5149,14 +6079,37 @@ class AgentChatGateway:
         workspace_id: str,
         repository_id: str,
     ) -> list[dict[str, Any]]:
+        """List durable tasks eligible for chat-turn auto resume/retry/replan/status.
+
+        Includes:
+        - failed / budget-exhausted / completed (status reuse) supervisor records
+        - waiting supervisor records that are *not* human-inbox waits (blocked
+          multi-task roots after child failure or job revert)
+        - lane projections that are blocked/paused/failed even when the durable
+          state is still waiting
+
+        Excludes active leased/running work and human-inbox waits (those resume
+        only through the durable inbox claim path).
+        """
         candidates: list[dict[str, Any]] = []
         supervisor = self._lane_coordinator.execution_supervisor
-        candidate_states = {
+        # Durable supervisor states (not lane-only labels such as interrupted).
+        recoverable_supervisor_states = {
+            ExecutionState.FAILED,
+            ExecutionState.BUDGET_EXHAUSTED,
+            ExecutionState.COMPLETED,
+            ExecutionState.WAITING,
+            ExecutionState.PENDING_BUDGET_DECISION,
+        }
+        recoverable_lane_states = {
             LaneTaskState.FAILED,
             LaneTaskState.INTERRUPTED,
             LaneTaskState.TIMED_OUT,
             LaneTaskState.BUDGET_EXHAUSTED,
             LaneTaskState.REJECTED,
+            LaneTaskState.BLOCKED,
+            LaneTaskState.PAUSED,
+            LaneTaskState.WAITING,
             LaneTaskState.COMPLETED,
         }
         executions = {item.task_id: item for item in self._lane_coordinator.executions}
@@ -5165,6 +6118,8 @@ class AgentChatGateway:
             key=lambda item: item.updated_at,
             reverse=True,
         )
+        now = datetime.now(timezone.utc)
+        seen: set[str] = set()
         for task in durable_tasks:
             execution = executions.get(task.task_id)
             selected_lane = (
@@ -5172,20 +6127,53 @@ class AgentChatGateway:
                 if execution is not None
                 else str(task.assigned_agent).removeprefix("lane:")
             )
+            waiting_for_human = bool(getattr(task, "waiting_inbox_item_id", "") or "")
+            lane_state = execution.state if execution is not None else None
+            supervisor_recoverable = task.state in recoverable_supervisor_states
+            lane_recoverable = (
+                lane_state is not None and lane_state in recoverable_lane_states
+            )
+            # Human-inbox waits are not chat-turn recovery candidates.
+            if waiting_for_human and task.state is ExecutionState.WAITING:
+                supervisor_recoverable = False
             if (
                 (lane_id is not None and selected_lane != lane_id and selected_lane != lane_id.value)
-                or task.state.value not in {item.value for item in candidate_states}
+                or not (supervisor_recoverable or lane_recoverable)
                 or task.workspace_id != workspace_id
                 or task.repository_id != repository_id
             ):
                 continue
+            if session_id and task.session_id and task.session_id != session_id:
+                # Prefer same-session rows; workspace-scoped callers pass "".
+                # Cross-session recovery is still available via empty session_id.
+                pass
             checkpoint = None
             checkpoint_error = ""
-            if task.checkpoint_id:
+            deadline_exceeded = task.wall_clock_deadline_exceeded(now)
+            if task.checkpoint_id and not deadline_exceeded and not waiting_for_human:
                 try:
                     checkpoint = supervisor.resume_checkpoint(task.task_id)
                 except ExecutionSupervisorError as exc:
                     checkpoint_error = redact_text(str(exc))
+            try:
+                board_task = self._lane_coordinator.taskboard.get_task(
+                    execution.taskboard_task_id if execution is not None else task.task_id
+                )
+                entry_route = str(board_task.entry_route or "")
+                task_type = (
+                    str(execution.task_type or "")
+                    if execution is not None
+                    else str(getattr(task, "task_type", "") or "")
+                )
+                child_task_ids = list(board_task.child_task_ids or [])
+            except KeyError:
+                entry_route = ""
+                task_type = (
+                    str(execution.task_type or "")
+                    if execution is not None
+                    else str(getattr(task, "task_type", "") or "")
+                )
+                child_task_ids = []
             candidate = {
                 "task_id": task.task_id,
                 "checkpoint_id": checkpoint.checkpoint_id if checkpoint else "",
@@ -5197,7 +6185,14 @@ class AgentChatGateway:
                 "workspace_id": task.workspace_id,
                 "repository_id": task.repository_id,
                 "state": task.state.value,
+                "lane_state": lane_state.value if lane_state is not None else "",
+                "waiting_for_human": waiting_for_human,
+                "entry_route": entry_route,
+                "task_type": task_type,
+                "child_task_ids": child_task_ids,
                 "updated_at": task.updated_at.isoformat(),
+                "deadline_at": task.deadline_at.isoformat() if task.deadline_at else "",
+                "deadline_exceeded": deadline_exceeded,
                 "failure_reason": redact_text(task.failure_reason),
                 "side_effect_classification": task.side_effect_classification.value,
                 "irreversible_side_effect_started": task.irreversible_side_effect_started,
@@ -5227,8 +6222,63 @@ class AgentChatGateway:
                 ],
             }
             candidates.append(candidate)
+            seen.add(task.task_id)
             if len(candidates) >= 20:
                 break
+        # Lane-only projections that lost durable visibility still matter when
+        # the supervisor row is missing after partial materialization; rehydrate
+        # path handles that at recovery time.
+        if len(candidates) < 20:
+            for execution in self._lane_coordinator.executions:
+                if execution.task_id in seen:
+                    continue
+                if execution.state not in recoverable_lane_states:
+                    continue
+                if (
+                    execution.workspace_id != workspace_id
+                    or execution.repository_id != repository_id
+                ):
+                    continue
+                if lane_id is not None and execution.owning_lane != lane_id:
+                    continue
+                candidates.append(
+                    {
+                        "task_id": execution.task_id,
+                        "checkpoint_id": execution.checkpoint_id or "",
+                        "checkpoint_available": bool(execution.checkpoint_id),
+                        "checkpoint_error": "",
+                        "normalized_intent": redact_text(execution.normalized_intent),
+                        "lane": execution.owning_lane.value,
+                        "session_id": execution.session_id,
+                        "workspace_id": execution.workspace_id,
+                        "repository_id": execution.repository_id,
+                        "state": execution.state.value,
+                        "lane_state": execution.state.value,
+                        "waiting_for_human": False,
+                        "entry_route": "",
+                        "task_type": execution.task_type,
+                        "child_task_ids": [],
+                        "updated_at": execution.updated_at,
+                        "deadline_at": "",
+                        "deadline_exceeded": False,
+                        "failure_reason": redact_text(execution.error),
+                        "side_effect_classification": SideEffectClassification.UNKNOWN.value,
+                        "irreversible_side_effect_started": False,
+                        "completed_steps": [],
+                        "pending_steps": [],
+                        "resume_payload_fields": [],
+                        "generated_files": [],
+                        "verification_status": "",
+                        "completion_contract": [],
+                        "target_resources": list(execution.target_files),
+                        "important_constraints": [],
+                        "field_provenance": {},
+                        "retry_budget_remaining": {},
+                        "action_states": [],
+                    }
+                )
+                if len(candidates) >= 20:
+                    break
         return candidates
 
     def _execute_entry_route(
@@ -5829,6 +6879,14 @@ class AgentChatGateway:
                     root=self.root,
                     required_tool=required_tool,
                     memory_context=_conversation_prompt(state, text),
+                )
+            except SearchOperationDecisionError as exc:
+                return ChatTurnResult(
+                    answer=str(exc),
+                    error="search_operation_decision_failed",
+                    mode="route-tool-error",
+                    decision=decision,
+                    payload={"route": decision.route},
                 )
             except Exception as exc:
                 return ChatTurnResult(
@@ -7627,11 +8685,17 @@ class AgentChatGateway:
                 task = self._lane_coordinator.execution_supervisor.store.get_task(lane_task_id)
                 from mana_agent.runtime_context import DurableExecutionContext
                 execution_scope = DurableExecutionContext(
-                    task_id=task.task_id, branch_id=task.task_id,
-                    parent_task_id=task.parent_task_id, checkpoint_id=checkpoint_id,
-                    execution_attempt_id=task.attempt_id, session_id=context.session_id,
-                    conversation_id=context.conversation_id, turn_id=context.turn_id,
-                    source_decision_id=source_decision_id, originating_agent_id="model_tool",
+                    task_id=task.task_id,
+                    branch_id=task.task_id,
+                    parent_task_id=task.parent_task_id or "",
+                    root_task_id=task.root_task_id or task.task_id,
+                    checkpoint_id=checkpoint_id,
+                    execution_attempt_id=task.attempt_id,
+                    session_id=context.session_id,
+                    conversation_id=context.conversation_id,
+                    turn_id=context.turn_id,
+                    source_decision_id=source_decision_id,
+                    originating_agent_id="model_tool",
                 )
             from contextlib import nullcontext
             with (

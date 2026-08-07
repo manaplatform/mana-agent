@@ -51,7 +51,7 @@ Run `mana-agent doctor --only routing/models --json` to inspect enforcement, can
 
 The existing gateway lane coordinator is the authoritative task-control service. Each record carries its routing decision, provider/model, parent/children, ownership/locks, progress, tool activity, verification, budgets, evidence, cancellation, errors, and result. Validated states cover creation, routing, queuing, running, waiting, blocking, pausing, cancellation, verification, winner selection, application, and terminal outcomes. Restart recovery never automatically repeats completed work; interrupted write tasks require revalidation.
 
-CLI and TUI share the gateway commands `/route`, `/route explain`, `/tasks`, `/task <id>`, `/task cancel|pause|resume <id>`, `/budget`, `/candidates`, and `/models health`. These commands mutate task state only through validated gateway operations.
+CLI and TUI share the gateway commands `/route`, `/route explain`, `/tasks`, `/task <id>`, `/task cancel|pause|resume|retry|replan [id]`, `/budget`, `/candidates`, and `/models health`. These commands mutate task state only through validated gateway operations. Omitting the task id auto-selects only when exactly one recoverable or active candidate exists; reserved verbs such as `create` or `Execute` are never treated as task ids. Normal chat turns auto-select resume/retry/replan or create a new durable task without requiring `/tasks`.
 
 ## Configuration
 

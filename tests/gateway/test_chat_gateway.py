@@ -521,7 +521,23 @@ def test_resumed_mcp_action_surfaces_its_result_in_chat_history(
         title="Approved MCP action completed",
         action=action,
         inbox_item_id="inbox_context7",
-        result={"ok": True, "content": [{"type": "text", "text": "FastAPI docs"}]},
+        result={
+            "ok": True,
+            "content": [
+                {
+                    "type": "text",
+                    "text": "FastAPI docs",
+                    "annotations": None,
+                    "meta": None,
+                }
+            ],
+            "duration_ms": 12.5,
+            "is_error": False,
+            "server_id": "context7",
+            "structured_content": None,
+            "tool_name": "query-docs",
+            "transport": "stdio",
+        },
     )
 
     assistant_messages = [
@@ -530,11 +546,15 @@ def test_resumed_mcp_action_surfaces_its_result_in_chat_history(
     activity_events = [
         event for event in history.get_events() if isinstance(event, CodingActivityEvent)
     ]
+    content = assistant_messages[-1].content
     assert assistant_messages[-1].turn_id == "task_context7"
-    assert "mcp.context7.query-docs" in assistant_messages[-1].content
-    assert "FastAPI docs" in assistant_messages[-1].content
-    assert activity_events[-1].activity["output_preview"]
-    assert emitted[-1]["output_preview"]
+    assert "mcp.context7.query-docs" in content
+    assert "Documentation (untrusted data):" in content
+    assert "FastAPI docs" in content
+    assert "```json" not in content
+    assert '"annotations"' not in content
+    assert activity_events[-1].activity["output_preview"] == "FastAPI docs"
+    assert emitted[-1]["output_preview"] == "FastAPI docs"
 
 
 def test_capability_error_records_terminal_computer_notice(tmp_path: Path, monkeypatch) -> None:
@@ -620,6 +640,133 @@ def test_computer_route_without_typed_tool_outcome_records_notice(tmp_path: Path
     assert records[0].inbox_item_id.startswith("inbox_")
     item = gateway.human_inbox_service.repository.get(records[0].inbox_item_id)
     assert item.request_type is InboxRequestType.NOTICE
+
+
+def test_task_control_rejects_create_verb_instead_of_unknown_task_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+
+    message = gateway.handle_control_command("/task create", session_id=session_id)
+
+    assert message is not None
+    assert "not a gateway task ID" in message
+    assert "Unknown gateway task: create" not in message
+    assert "/task <id>" in message
+
+
+def test_task_control_rejects_execute_verb_instead_of_unknown_task_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """/task Execute must not be treated as inspect of task id 'Execute'."""
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+
+    message = gateway.handle_control_command("/task Execute", session_id=session_id)
+
+    assert message is not None
+    assert "not a gateway task ID" in message
+    assert "Unknown gateway task: Execute" not in message
+    assert "auto-select" in message.lower() or "chat" in message.lower()
+
+
+def test_task_control_rejects_non_task_id_tokens(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+
+    message = gateway.handle_control_command("/task DoSomething", session_id=session_id)
+
+    assert message is not None
+    assert "not a gateway task ID" in message
+    assert "Unknown gateway task: DoSomething" not in message
+
+
+def test_task_control_unknown_id_returns_actionable_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+
+    message = gateway.handle_control_command(
+        "/task task_20990101_000001", session_id=session_id
+    )
+
+    assert message is not None
+    assert "Gateway task control failed" in message
+    assert "task_20990101_000001" in message
+    assert "Use /tasks to list" in message
+
+
+def test_task_control_auto_selects_single_recoverable_task_for_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mana_agent.gateway.lanes import LaneId, LaneTaskState
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+    reservation = gateway._lane_coordinator.reserve(
+        normalized_intent="recoverable coding work",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gateway._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gateway._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    gateway._lane_coordinator.start(reservation)
+    gateway._lane_coordinator.finish(
+        reservation.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="worker failed",
+    )
+    monkeypatch.setattr(
+        gateway._lane_coordinator.execution_supervisor,
+        "retry",
+        lambda task_id, decision: gateway._lane_coordinator.execution_supervisor.store.get_task(
+            task_id
+        ),
+    )
+    monkeypatch.setattr(
+        gateway._lane_coordinator.execution_supervisor,
+        "release_retry",
+        lambda task_id: gateway._lane_coordinator.execution_supervisor.store.get_task(
+            task_id
+        ),
+    )
+
+    message = gateway.handle_control_command("/task retry", session_id=session_id)
+
+    assert message is not None
+    assert "Gateway task control failed" not in message
+    payload = json.loads(message)
+    assert payload["task_id"] == reservation.execution.task_id
+    assert payload["recovery_action"] == "retry_task"
+    assert gateway._lane_coordinator.inspect_task(reservation.execution.task_id).state is (
+        LaneTaskState.QUEUED
+    )
 
 
 def test_gateway_creates_session_and_simple_send(tmp_path: Path, monkeypatch) -> None:

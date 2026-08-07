@@ -94,17 +94,37 @@
     return state;
   }
 
+  function isUnsafeKey(token) {
+    return token === "__proto__" || token === "constructor" || token === "prototype";
+  }
+
   function updatePath(model, pointer, value) {
     if (!pointer || pointer === "/") return clone(value || {});
     const result = clone(model || {});
     const tokens = pointer.slice(1).split("/").map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+    if (tokens.some(isUnsafeKey)) return result;
     let cursor = result;
     for (const token of tokens.slice(0, -1)) {
-      if (!cursor[token] || typeof cursor[token] !== "object") cursor[token] = {};
+      if (isUnsafeKey(token)) return result;
+      const existing = Object.prototype.hasOwnProperty.call(cursor, token) ? cursor[token] : undefined;
+      if (!existing || typeof existing !== "object") {
+        const next = Object.create(null);
+        Object.defineProperty(cursor, token, { value: next, writable: true, enumerable: true, configurable: true });
+      }
       cursor = cursor[token];
     }
     const leaf = tokens[tokens.length - 1];
-    if (value === undefined) delete cursor[leaf]; else cursor[leaf] = clone(value);
+    if (isUnsafeKey(leaf) || !leaf) return result;
+    if (value === undefined) {
+      if (Object.prototype.hasOwnProperty.call(cursor, leaf)) delete cursor[leaf];
+    } else {
+      Object.defineProperty(cursor, leaf, {
+        value: clone(value),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
     return result;
   }
 
@@ -113,7 +133,10 @@
     const pointer = text(value.path);
     const source = pointer.startsWith("/") ? model : local;
     const tokens = pointer.replace(/^\//, "").split("/").filter(Boolean).map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
-    return tokens.reduce((current, token) => current == null ? undefined : current[token], source);
+    return tokens.reduce((current, token) => {
+      if (current == null || isUnsafeKey(token) || !Object.prototype.hasOwnProperty.call(current, token)) return undefined;
+      return current[token];
+    }, source);
   }
 
   function actionFor(component, family) {

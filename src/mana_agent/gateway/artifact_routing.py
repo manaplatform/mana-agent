@@ -92,10 +92,33 @@ def artifact_handler_availability(evidence: dict[str, Any]) -> tuple[bool, str]:
 def _reference(value: object, *, root: Path, provenance: str) -> ArtifactReference:
     payload = value if isinstance(value, dict) else {"path": str(value)}
     path_text = str(payload.get("path") or payload.get("filename") or payload.get("name") or "").strip()
-    filename = Path(path_text).name
+    filename = Path(path_text).name if path_text else ""
     mime_type = str(payload.get("mime_type") or payload.get("mime") or "").strip().lower()
-    extension = Path(filename).suffix.lower()
-    resolved = Path(path_text).expanduser().resolve() if path_text else None
-    repository_member = bool(resolved and (resolved == root or root in resolved.parents))
-    family = next((handler.family for handler in ARTIFACT_HANDLERS if extension in handler.extensions or any(mime_type.startswith(prefix) for prefix in handler.mime_prefixes)), None)
-    return ArtifactReference(path=path_text, filename=filename, mime_type=mime_type, provenance=provenance, repository_member=repository_member, extension=extension, family=family)
+    extension = Path(filename).suffix.lower() if filename else ""
+    repository_member = False
+    if path_text and "\x00" not in path_text:
+        # Confinement check only — never open or follow uncontrolled paths.
+        from mana_agent.utils.path_safety import resolve_under_base
+
+        try:
+            _resolved, repository_member = resolve_under_base(path_text, root)
+        except ValueError:
+            repository_member = False
+    family = next(
+        (
+            handler.family
+            for handler in ARTIFACT_HANDLERS
+            if extension in handler.extensions
+            or any(mime_type.startswith(prefix) for prefix in handler.mime_prefixes)
+        ),
+        None,
+    )
+    return ArtifactReference(
+        path=path_text,
+        filename=filename,
+        mime_type=mime_type,
+        provenance=provenance,
+        repository_member=repository_member,
+        extension=extension,
+        family=family,
+    )

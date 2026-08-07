@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from mana_agent.multi_agent.routing.agent_decision import (
     AgentDecision,
     AgentDecisionEngine,
-    agent_tool_descriptions,
 )
 from mana_agent.multi_agent.runtime.agent_session import route_for_turn
 from mana_agent.multi_agent.runtime.auto_chat import (
@@ -34,6 +36,31 @@ from mana_agent.search.router import SearchRouter
 from mana_agent.workspaces.preparation import RepositoryPreparationError
 
 logger = logging.getLogger(__name__)
+
+_SEARCH_OPERATION_MAX_QUERY_CHARS = 400
+
+SEARCH_OPERATION_PROMPT = """You are Mana-Agent's search-operation decision layer.
+The routing layer has already selected the external search tool named in
+required_tool. Your only job is to produce the compact public search query for
+that tool. Do not select a different tool, route, or information source.
+
+Return JSON only with this schema:
+{
+  "query": "compact standalone public search query",
+  "reasoning_summary": "short reason for this query",
+  "github_kind": "repositories|code|issues",
+  "repo": "owner/name or empty string"
+}
+
+Rules:
+- query is required, non-empty, and at most 400 characters.
+- query must be a self-contained search string suitable for the selected tool.
+- Do not paste conversation transcripts, file paths, secrets, API keys, tokens,
+  or private local data into query.
+- Do not refuse the search or choose a different tool; the route is already fixed.
+- github_kind and repo apply only when required_tool is github_search; otherwise
+  omit them or leave them empty.
+"""
 
 
 class SearchOperationDecisionError(RuntimeError):
@@ -58,8 +85,72 @@ def is_valid_search_operation_decision(
         and not decision.code_editing_needed
         and decision.flow_action == "none"
         and query
-        and len(query) <= 400
+        and len(query) <= _SEARCH_OPERATION_MAX_QUERY_CHARS
     )
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    stripped = str(text or "").strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?", "", stripped).strip()
+        stripped = re.sub(r"```$", "", stripped).strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end >= start:
+        stripped = stripped[start : end + 1]
+    data = json.loads(stripped)
+    return data if isinstance(data, dict) else {}
+
+
+def _message_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        return " ".join(
+            str(part.get("text", part)) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "")
+
+
+def _extract_search_operation_query(
+    data: dict[str, Any],
+    *,
+    required_tool: str,
+) -> tuple[str, dict[str, Any]]:
+    """Mechanically normalize common model payload shapes into a query + extras.
+
+    This does not invent a query when the model omitted one. It only unwraps
+    equivalent structures the model may emit for the already-selected tool.
+    """
+    extras: dict[str, Any] = {}
+    query = str(data.get("query") or "").strip()
+
+    tool_inputs = data.get("tool_inputs")
+    if not query and isinstance(tool_inputs, dict):
+        nested = tool_inputs.get(required_tool)
+        if isinstance(nested, dict):
+            query = str(nested.get("query") or "").strip()
+            extras.update({key: value for key, value in nested.items() if key != "query"})
+        elif isinstance(nested, str):
+            query = nested.strip()
+        if not query:
+            query = str(tool_inputs.get("query") or "").strip()
+
+    if not query:
+        nested = data.get(required_tool)
+        if isinstance(nested, dict):
+            query = str(nested.get("query") or "").strip()
+            extras.update({key: value for key, value in nested.items() if key != "query"})
+        elif isinstance(nested, str):
+            query = nested.strip()
+
+    if required_tool == "github_search":
+        if data.get("github_kind") is not None:
+            extras["github_kind"] = data.get("github_kind")
+        if data.get("repo") is not None:
+            extras["repo"] = data.get("repo")
+
+    return query, extras
 
 
 def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
@@ -139,38 +230,106 @@ def decide_search_operation(
     required_tool: str,
     memory_context: str = "",
 ) -> AgentDecision:
-    """Obtain the exact model decision needed to execute one selected search source."""
+    """Obtain the model-selected query for an already routed search source.
+
+    The entry/route decision has already chosen ``web_search`` or
+    ``github_search``. This second decision only produces the compact query for
+    that fixed tool. Missing, empty, overlong, or unparsable model outputs fail
+    closed with no alternate source and no static query fallback.
+    """
     if required_tool not in {"web_search", "github_search"}:
         raise ValueError(f"unsupported search operation tool: {required_tool}")
-    tool_descriptions = [
-        description
-        for description in agent_tool_descriptions()
-        if description.get("name") == required_tool
-    ]
-    if len(tool_descriptions) != 1:
+
+    llm = agent_decision_llm(ask_service)
+    if llm is None or not hasattr(llm, "invoke"):
         raise SearchOperationDecisionError(
             f"Model decision failed: {required_tool}.query. "
-            "No search was executed because the selected search operation is unavailable."
+            "No search was executed because the search-operation model was unavailable."
         )
-    operation_constraint = (
-        "Create exactly one external-search operation for the already selected source. "
-        f'Select only "{required_tool}" and provide its non-empty "query" input as a '
-        "compact standalone search query of at most 400 characters. "
-        "Set intent=web_research, web_search_needed=true, repo_context_needed=false, "
-        "code_editing_needed=false, and flow_action=none."
+
+    payload = {
+        "user_request": str(question or "").strip(),
+        "required_tool": required_tool,
+        "repo_context": f"Repository root: {root}",
+        "memory_context": str(memory_context or ""),
+        "max_query_chars": _SEARCH_OPERATION_MAX_QUERY_CHARS,
+    }
+    if not payload["user_request"]:
+        raise SearchOperationDecisionError(
+            f"Model decision failed: {required_tool}.query. "
+            "No search was executed because the user request was empty."
+        )
+
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(content=SEARCH_OPERATION_PROMPT),
+                HumanMessage(
+                    content=json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                ),
+            ]
+        )
+        data = _extract_json_object(_message_text(response))
+    except SearchOperationDecisionError:
+        raise
+    except Exception as exc:
+        raise SearchOperationDecisionError(
+            f"Model decision failed: {required_tool}.query. "
+            f"No search was executed because the search-operation decision was invalid. "
+            f"Reason: {exc}"
+        ) from exc
+
+    query, extras = _extract_search_operation_query(data, required_tool=required_tool)
+    if not query:
+        raise SearchOperationDecisionError(
+            f"Model decision failed: {required_tool}.query. "
+            "No search was executed because the selected operation did not include a query."
+        )
+    if len(query) > _SEARCH_OPERATION_MAX_QUERY_CHARS:
+        raise SearchOperationDecisionError(
+            f"Model decision failed: {required_tool}.query. "
+            "No search was executed because the selected query exceeds the provider's "
+            f"{_SEARCH_OPERATION_MAX_QUERY_CHARS}-character limit."
+        )
+
+    tool_input: dict[str, Any] = {"query": query}
+    if required_tool == "github_search":
+        kind = str(extras.get("github_kind") or "repositories").strip().lower()
+        if kind not in {"repositories", "code", "issues"}:
+            kind = "repositories"
+        tool_input["github_kind"] = kind
+        repo = str(extras.get("repo") or "").strip()
+        if repo:
+            tool_input["repo"] = repo
+
+    confidence_raw = data.get("confidence", 0.9)
+    try:
+        confidence = max(0.0, min(1.0, float(confidence_raw if confidence_raw is not None else 0.9)))
+    except (TypeError, ValueError):
+        confidence = 0.9
+
+    decision = AgentDecision(
+        intent="web_research",
+        confidence=confidence,
+        selected_tools=[required_tool],
+        tool_inputs={required_tool: tool_input},
+        repo_context_needed=False,
+        web_search_needed=True,
+        code_editing_needed=False,
+        flow_action="none",
+        reasoning_summary=str(
+            data.get("reasoning_summary") or "Model-selected search query."
+        )[:500],
+        source="model",
+        verifier_passed=True,
+        verifier_summary="search operation query validated",
     )
-    engine = AgentDecisionEngine(
-        llm=agent_decision_llm(ask_service),
-        tool_descriptions=tool_descriptions,
-        enable_fallback=False,
-    )
-    return engine.decide(
-        user_request=question,
-        repo_context=f"Repository root: {root}",
-        memory_context=memory_context,
-        command_hint="search_operation",
-        operation_constraint=operation_constraint,
-    )
+    if not is_valid_search_operation_decision(decision, required_tool=required_tool):
+        raise SearchOperationDecisionError(
+            f"Model decision failed: {required_tool}.query. "
+            "No search was executed because the required search-operation decision was invalid."
+        )
+    return decision
 
 
 def auto_chat_mode_from_agent_decision(
@@ -381,9 +540,10 @@ def run_web_research_answer(
             raise SearchOperationDecisionError(
                 "Model decision failed: web_search.query. No search was executed because the selected operation did not include a query."
             )
-        if len(web_query) > 400:
+        if len(web_query) > _SEARCH_OPERATION_MAX_QUERY_CHARS:
             raise SearchOperationDecisionError(
-                "Model decision failed: web_search.query. No search was executed because the selected query exceeds the provider's 400-character limit."
+                "Model decision failed: web_search.query. No search was executed because the selected query exceeds the provider's "
+                f"{_SEARCH_OPERATION_MAX_QUERY_CHARS}-character limit."
             )
         queries.append(SearchQuery(query=web_query, target="web"))
     github_input = decision.tool_inputs.get("github_search") or {}

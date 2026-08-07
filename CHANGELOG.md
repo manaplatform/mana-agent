@@ -2,6 +2,201 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-07
+
+- Fixed gateway task control and chat-turn auto recovery so messages do not
+  require `/tasks` to select work:
+  - `/task Execute` (and other reserved verbs / non-id tokens) no longer raise
+    `Unknown gateway task: Execute`; they return usage that points operators to
+    `/tasks`, chat-turn auto-select, and `mana-agent tasks recover`.
+  - `/task cancel|pause|resume|retry|replan` accept an optional id and
+    auto-select only when exactly one recoverable/active candidate exists.
+  - Operator `retry` / `replan` control builds a validated recovery decision;
+    `resume` of stopped work becomes a same-task retry.
+  - Recovery candidates now include blocked multi-task roots (supervisor
+    `waiting` without a human-inbox wait) and lane blocked/paused projections.
+  - Retryable lane states include `waiting` and `paused` after rehydration.
+  - Multi-task chat turns run checkpoint-resume before creating a new root:
+    resume / retry / replan reuse the root; replan/retry reopen incomplete
+    children so the job restarts from the first unfinished step.
+  - Checkpoint-resume prompt documents the full decision matrix
+    (resume → retry → replan/restart job → start_fresh → stop).
+  - User verification required:
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_task_control_rejects_execute_verb_instead_of_unknown_task_id tests/gateway/test_chat_gateway.py::test_task_control_rejects_non_task_id_tokens tests/gateway/test_chat_gateway.py::test_task_control_auto_selects_single_recoverable_task_for_retry tests/gateway/test_lane_coordinator.py::test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait tests/gateway/test_lane_coordinator.py::test_blocked_multi_task_root_can_be_retried_with_validated_decision tests/gateway/test_checkpoint_resume.py -q`.
+
+- Added **task-wide computer approval** so one trusted approval can cover a whole
+  durable task lineage of safe filesystem creates/moves/renames:
+  - New `ApprovalScope.TASK` multi-use grant bound to `root_task_id` (multi-task
+    children share the parent root), tool `computer`, and the
+    `filesystem.mkdir|copy|move|rename` family.
+  - Policy selects task scope for those ops when a durable task lineage is
+    present; trash, recording, system power, and other computer ops stay
+    single-use.
+  - First approval issues the task grant; later compatible actions under the
+    same root reuse it without a new inbox prompt until expiry/invalidation.
+  - Durable execution context now carries `root_task_id` into computer tools;
+    approval required payloads advertise `transactional_action.task`.
+  - User verification required:
+    `python -m pytest tests/test_computer_control.py::test_task_wide_computer_filesystem_approval_covers_later_ops_in_lineage tests/test_computer_control.py::test_computer_action_uses_durable_exact_approval_and_initializes_audit tests/transactional_actions/test_policy_gated_actions.py::test_computer_filesystem_policy_selects_task_wide_scope_when_lineage_present tests/transactional_actions/test_policy_gated_actions.py -q`.
+
+- Fixed gateway task control and recovery coordination for stopped durable work:
+  - `/task create` (and other reserved verbs) no longer raise
+    `Unknown gateway task: create`; they return usage that points operators to
+    `/tasks`, chat-turn task creation, and `mana-agent tasks recover`.
+  - Unknown real task IDs return an actionable control error instead of an
+    uncaught lane exception.
+  - Validated `retry_task` / `replan_task` / `resume_checkpoint` rehydrate a
+    missing lane projection from the durable supervisor record so recovery does
+    not fail solely because the in-memory/gateway projection was dropped.
+  - Blocked multi-task roots are retryable under an authorized same-task
+    recovery decision (children often leave the parent `BLOCKED` rather than
+    `FAILED`).
+  - User verification required:
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_task_control_rejects_create_verb_instead_of_unknown_task_id tests/gateway/test_chat_gateway.py::test_task_control_unknown_id_returns_actionable_message tests/gateway/test_lane_coordinator.py::test_retry_rehydrates_missing_lane_projection_from_supervisor tests/gateway/test_lane_coordinator.py::test_blocked_multi_task_root_can_be_retried_with_validated_decision -q`.
+
+- Fixed checkpoint-resume validation so `retry_task` and `replan_task` may
+  select any offered non-completed stopped task even when that candidate still
+  lists a checkpoint. Same-task restart intentionally leaves `checkpoint_id`
+  empty; filling a checkpoint ID on retry/replan still fails closed and
+  `resume_checkpoint` remains the only way to continue saved progress. This
+  unblocks recovery after failed multi-task or other checkpointed work when the
+  model correctly reuses the task identity with `retry_task` instead of
+  `resume_checkpoint`.
+  - User verification required:
+    `python -m pytest tests/gateway/test_checkpoint_resume.py -q`
+    and
+    `python -m pytest tests/gateway/test_entry_routing.py -k checkpoint_resume -q`.
+
+- Fixed multi-task child execution so worker threads inherit the parent turn’s
+  ContextVars (authenticated computer-client identity, evals, event sinks).
+  Compound goals that route a child to `computer` (for example sequential
+  workspace directory/file creation) no longer fail with
+  `Computer decision scope requires an authenticated client context` solely
+  because `ThreadPoolExecutor` workers dropped the parent scope; dependents
+  blocked on that prerequisite can proceed after a successful computer child.
+  Missing parent identity still fails closed with no fallback client.
+  - User verification required:
+    `python -m pytest tests/gateway/test_multi_task_orchestration.py::test_worker_threads_inherit_parent_contextvars_for_computer_client tests/gateway/test_multi_task_orchestration.py -q`
+    and
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_computer_route_without_typed_tool_outcome_records_notice tests/test_computer_control.py -q`.
+
+- Patched CodeQL high/medium findings across dashboard API, gateway, Codex
+  runtime, auto-chat classifiers, live canvas/chat JS, and CI:
+  - Reflected XSS: dashboard live-chat/live-canvas HTML embeds IDs through a
+    strict allowlist and JSON script embedding that Unicode-escapes `<>&`.
+  - Path injection: shared `path_safety` confinement (`startswith` after
+    resolve) for workspace roots, conversation/analyze roots, artifact
+    membership checks, and computer-control allowed paths.
+  - Clear-text credential storage: Codex runtime writes config TOML only after
+    stripping the API key; the key stays in the child environment only.
+  - Weak sensitive hashing: Codex credential/runtime fingerprints use PBKDF2-HMAC
+    instead of raw SHA-256 on the API key.
+  - ReDoS: bounded input length and linear path/follow-up regexes in
+    `small_direct_edit` and `auto_chat`.
+  - Exception exposure: workspace search and several API handlers return generic
+    client errors instead of raw exception text.
+  - Prototype pollution: live canvas JSON-pointer updates reject
+    `__proto__` / `constructor` / `prototype` keys.
+  - postMessage: live chat targets an explicit parent origin (same-origin or
+    loopback referrer), not `*`.
+  - CI: workflow sets `permissions: contents: read`.
+  - User verification required:
+    `python -m pytest tests/test_api_conversations.py tests/test_canvas.py tests/test_codex_runtime.py tests/test_auto_chat.py tests/test_small_direct_edit.py tests/test_dashboard_live_chat.py -q`
+    and `node --test tests/dashboard/live_canvas_reducer.test.mjs`.
+
+- Improved approved MCP chat output so documentation-style provider results
+  (for example Context7 `query-docs` / `resolve-library-id`) show extracted
+  text content instead of the raw transport envelope JSON. Doc-oriented
+  operations are labeled **Documentation (untrusted data)** with a compact
+  status line; non-text results still fall back to compact JSON. Activity
+  previews use the same extracted text. Presentation only; no routing or
+  fallback behavior was added.
+  - User verification required: `python -m pytest tests/test_mcp.py tests/gateway/test_chat_gateway.py::test_resumed_mcp_action_surfaces_its_result_in_chat_history -q`.
+
+- Bumped security-sensitive dependency floors to clear open Dependabot alerts for
+  `cryptography`, `langchain`, and `langchain-openai`:
+  - `cryptography>=49.0.0,<51.0` (path-building DoS, SECT subgroup validation,
+    OpenSSL wheel CVEs, DNS name-constraint / wildcard verifier issues).
+  - `langchain>=1.3.9,<2.0.0` (path traversal / sandbox escape in file-search
+    middleware and loaders).
+  - `langchain-openai>=1.1.14,<2.0.0` with `openai>=2.26.0,<3.0.0` (image token
+    counting SSRF DNS-rebinding fix; OpenAI SDK major floor required by the
+    patched partner package).
+  - `langchain-community` remains on the `>=0.3.27,<0.4.0` line for FAISS
+    stability. Updated `tools_run.py` to import `BaseCallbackHandler` from
+    `langchain_core` because `langchain.callbacks` is gone in LangChain 1.x.
+  - User verification required: `python -m pip install -U -e .` then
+    `python -m pytest tests/test_package_version.py tests/test_llm_compatibility.py tests/remote_execution/test_reverse_worker_protocol.py -q`.
+
+- Fixed multi-message session budgets so follow-up and extend messages recalculate
+  admission instead of inheriting a depleted prior-turn residual of 0. The context
+  cost governor expands the session ledger to a fresh per-task
+  `MANA_ROUTING_TASK_TOKEN_BUDGET` envelope on each user message; gateway preflight
+  estimates refresh that envelope before sizing; live lane reservations are
+  recalculated from the new forecast for follow-up, expand, retry, and resume
+  paths. `MANA_LANE_SESSION_TOKEN_BUDGET` / `MANA_LANE_GLOBAL_TOKEN_BUDGET` of `0`
+  remain unlimited (no longer coerced to `1`). Follow-up classification remains
+  deployed on the gateway process_turn path. Missing capacity still fails closed
+  with no model fallback.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py::test_ensure_admission_budget_refreshes_depleted_session_for_followup_message tests/gateway/test_multi_task_orchestration.py::test_execution_token_estimate_refreshes_budget_for_followup_message tests/gateway/test_capsule_identity.py::test_lane_token_budget_zero_means_unlimited tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py -q`.
+
+- Fixed context-cost admission so sequential model calls under one lane-task
+  identity no longer reuse a finalized accounting operation id. Gateway routes
+  pin `step_id=after_routing` for the whole execution, so search (and other
+  multi-call routes) previously failed after the first provider call with
+  `accounting operation 'call-…' was already finalized`. The governor now
+  allocates the next free ordinal call id when the stable identity is already
+  reserved, reconciled, or released. The finalized-id handler is ordered after
+  `ModelContextLimitError` handling because that error is a `ValueError`
+  subclass; catching `ValueError` first previously leaked raw context-limit
+  errors instead of `ContextBudgetExceeded` / observe-mode admission.
+  - User verification required: `python -m pytest tests/context_cost/test_context_cost_core.py::test_enforce_mode_blocks_before_provider_and_protects_required_segments tests/context_cost/test_context_cost_core.py::test_observe_mode_records_task_budget_overrun_without_blocking tests/context_cost/test_context_cost_core.py::test_sequential_model_calls_under_same_task_identity_get_fresh_call_ids tests/context_cost/test_context_cost_core.py::test_released_model_call_id_is_not_reused_for_later_admission tests/gateway/test_turn_engine_search.py -q`.
+
+- Fixed required-source public/GitHub search execution so the second model
+  decision only produces a compact query for the already selected search tool.
+  The previous full routing-schema pass frequently returned invalid
+  `web_search.query` decisions and failed closed before Tavily ran. The new
+  dedicated search-operation decision uses a query-only contract, normalizes
+  common model payload shapes without inventing a query, and still stops with
+  no alternate source when the model omits, overlongs, or cannot supply a query.
+  - User verification required: `python -m pytest tests/gateway/test_turn_engine_search.py tests/gateway/test_entry_routing.py::test_required_search_source_uses_constrained_operation_decision -q`.
+
+- Fixed chat recovery so wall-clock-dead tasks create a new task instead of
+  being retried or resumed under an already elapsed deadline. Recovery candidates
+  expose `deadline_exceeded`; resume/retry/replan exclude those tasks. When the
+  model still targets a deadline-dead identity, the gateway reserves a new task
+  with a fresh deadline and lineage links (`previous` / `supersedes`). Supervisor
+  retry validation and child creation under a dead parent refuse requeue with a
+  clear “create a new task” error. Checkpoint-resume allows `start_fresh` for the
+  same work when no recoverable candidates remain. Coverage asserts successful
+  coding turns with `error is None` (not an empty string).
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py::test_deadline_dead_task_creates_new_task_instead_of_retry tests/gateway/test_checkpoint_resume.py::test_model_may_start_fresh_for_same_work_when_no_recoverable_candidates tests/gateway/test_lane_coordinator.py::test_recovery_candidates_mark_deadline_exceeded_tasks tests/execution_supervisor/test_supervisor_core.py::test_retry_refuses_wall_clock_deadline_dead_task tests/execution_supervisor/test_supervisor_core.py::test_create_child_refuses_deadline_dead_parent -q`.
+
+- Fixed parent/child lane budget growth so recalculating a child reservation
+  expands the active parent (and nested ancestors) instead of failing with
+  “recalculated child budget exceeds the parent remaining budget”. This covers
+  multi-task children, nested coding follow-ups under a parent lane task, and
+  reserve-time child admission when the child needs more than the parent’s
+  current remaining envelope. Terminal (failed/completed/cancelled) parents no
+  longer block child recalculation, matching reserve-time policy. Session, global,
+  and lane caps still fail closed with no fallback route. Nested-ancestor coverage
+  avoids starting two coding tasks under the same repository-write lock so the
+  suite does not hang on lane lock wait.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/gateway/test_multi_task_orchestration.py -q`.
+
+- Fixed multi-task budget coordination so compound children can reserve and run
+  under a real parent envelope. The multi-task root now reserves capacity for
+  the planned children (not only the goal text), expands that envelope before
+  each child reservation, and sizes child preflight estimates against model/lane
+  capacity rather than the depleted shared session ledger left by parent
+  planning. Mid-run provider-call forecasts for multi-task children (for example
+  Codex coding after a media sibling already reserved capacity) now expand the
+  parent envelope before the child reservation is revised, so live children are
+  not aborted with “recalculated child budget exceeds the parent remaining
+  budget”. Budget shortfalls return blocked child status without inventing a
+  fallback route; non-multi-task modules are unchanged.
+  - User verification required: `python -m pytest tests/gateway/test_multi_task_orchestration.py tests/gateway/test_lane_coordinator.py tests/gateway/test_entry_routing.py -q`.
+
 ## 2026-08-06
 
 - Corrected Windows human-inbox signing-key publication. After the existing

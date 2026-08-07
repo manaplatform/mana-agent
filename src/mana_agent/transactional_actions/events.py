@@ -30,8 +30,23 @@ def event_payload(event_type: str, action: ActionIntent, **details: Any) -> dict
             "action_id": action.action_id,
             "inbox_item_id": action.inbox_item_id,
             "permission_request_id": action.inbox_item_id if approval_event else "",
-            "permission_scope": "transactional_action.once" if event_type == "action.approval.required" else "",
+            "permission_scope": (
+                (
+                    "transactional_action.task"
+                    if action.policy_decision
+                    and action.policy_decision.required_approval_scope
+                    and action.policy_decision.required_approval_scope.value == "task"
+                    else "transactional_action.once"
+                )
+                if event_type == "action.approval.required"
+                else ""
+            ),
             "transactional_action_approval": event_type == "action.approval.required",
+            "task_wide_approval": bool(
+                action.policy_decision
+                and action.policy_decision.required_approval_scope
+                and action.policy_decision.required_approval_scope.value == "task"
+            ),
             "transaction_id": action.transaction_id,
             "parent_task_id": action.parent_task_id,
             "tool_name": action.tool_name,

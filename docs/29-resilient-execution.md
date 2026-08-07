@@ -74,9 +74,12 @@ decision compares the complete new request with candidate intent and progress.
 It selects `resume_checkpoint`, `retry_task`, `return_verified`, `reverify`,
 `start_fresh`, or `stop` and
 records same-work, freshness, checkpoint-validity, repeat-safety, and
-continuation-safety judgments. `retry_task` reuses the exact durable task ID
-when the work is stable and equivalent but no valid checkpoint exists; the new
-attempt restarts the unfinished request under that existing identity.
+continuation-safety judgments. `resume_checkpoint` continues exact saved progress
+when the checkpoint remains valid. `retry_task` reuses the exact durable task ID
+when the work is stable and equivalent and a full restart under that identity is
+appropriate—including when a checkpoint is listed but should not be continued;
+the decision must leave `checkpoint_id` empty. `replan_task` likewise keeps the
+task identity while authorizing a revised plan before the next attempt.
 Current or account-backed information such as prices, mailbox state, calendar
 state, news, weather, availability, and remote state must be fetched through a
 fresh execution rather than restored from stale checkpoint evidence. The
@@ -193,6 +196,13 @@ Parent progress supports `fail_fast`, `wait_all`, `best_effort`,
 `minimum_success_count`, and `dependency_graph` policies plus an absolute
 deadline (defaulting to the existing routing task timeout). Status always reports active blockers and whether the deadline has
 elapsed, preventing an invisible indefinite wait.
+
+When a task’s wall-clock deadline has already elapsed, recovery must not requeue
+that task identity. Retry, checkpoint resume, and replan refuse deadline-dead
+tasks; chat/gateway recovery creates a **new** task with a fresh deadline (and
+lineage links) instead of failing the turn with `task wall-clock deadline
+exceeded` on a dead retry. Children also cannot be attached under a deadline-dead
+parent, which would inherit an already-elapsed deadline.
 
 Cancellation propagates child-first and uses a cooperative cancellation state.
 Logs, checkpoints, partial artifacts, and escrow are retained. A task that has

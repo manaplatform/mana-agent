@@ -132,6 +132,86 @@ def test_recovery_candidates_include_failed_task_from_another_session(
     assert [item["task_id"] for item in candidates] == [reservation.execution.task_id]
     assert candidates[0]["session_id"] == "session-before-restart"
     assert candidates[0]["completion_contract"]
+    assert candidates[0]["deadline_exceeded"] is False
+
+
+def test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Blocked multi-task roots leave supervisor WAITING and must still auto-recover."""
+    reservation = _reserve(
+        coordinator,
+        LaneId.RESEARCH,
+        intent="compound job with child failure",
+        session="session-multi",
+    )
+    coordinator.start(reservation)
+    coordinator.mark_blocked(
+        reservation.execution.task_id,
+        reason="one or more child tasks failed",
+    )
+    # Surface multi-task identity on the taskboard root for recovery filtering.
+    board_task = coordinator.taskboard.get_task(reservation.execution.taskboard_task_id)
+    board_task.entry_route = "multi_task"
+    board_task.child_task_ids = ["child_placeholder"]
+    coordinator.taskboard.save()
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+
+    candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-multi",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+
+    assert any(item["task_id"] == reservation.execution.task_id for item in candidates)
+    match = next(
+        item for item in candidates if item["task_id"] == reservation.execution.task_id
+    )
+    assert match["waiting_for_human"] is False
+    assert match["lane_state"] == LaneTaskState.BLOCKED.value
+    assert match["entry_route"] == "multi_task"
+
+
+def test_recovery_candidates_mark_deadline_exceeded_tasks(
+    coordinator: LaneCoordinator,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    reservation = _reserve(
+        coordinator,
+        LaneId.CODING,
+        intent="put logo in readme",
+        session="session-deadline",
+    )
+    coordinator.start(reservation)
+    coordinator.finish(
+        reservation.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="task wall-clock deadline exceeded",
+    )
+
+    def expire(task):
+        task.deadline_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        task.updated_at = datetime.now(timezone.utc)
+
+    coordinator.execution_supervisor.store.update_task(
+        reservation.execution.task_id, expire
+    )
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+
+    candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-deadline",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+
+    assert candidates[0]["task_id"] == reservation.execution.task_id
+    assert candidates[0]["deadline_exceeded"] is True
+    assert candidates[0]["checkpoint_id"] == ""
 
 
 def test_exposes_supervisor_store_for_human_inbox_branch_controller(
@@ -378,6 +458,77 @@ def test_same_task_retry_uses_validated_recovery_decision_and_supervisor_retry(
     assert retried.execution.task_id == task_id
     assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
     assert retry_calls == [(task_id, decision)]
+
+
+def test_retry_rehydrates_missing_lane_projection_from_supervisor(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="recover missing projection")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="process exited")
+    # Drop only the lane projection; the durable supervisor record remains.
+    del coordinator._executions[task_id]
+    with pytest.raises(LaneCoordinatorError, match="Unknown gateway task"):
+        coordinator.inspect_task(task_id)
+
+    decision = RecoveryDecision(
+        decision_id="rehydrate-retry-decision",
+        task_id=task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="The durable task still exists and is safe to retry.",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "retry",
+        lambda task_id, decision: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "release_retry",
+        lambda task_id: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+
+    retried = coordinator.retry_task(task_id, decision=decision, session_id="session-1")
+
+    assert retried.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+
+
+def test_blocked_multi_task_root_can_be_retried_with_validated_decision(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.RESEARCH, intent="compound filesystem steps")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    coordinator.mark_blocked(task_id, reason="one or more child tasks failed")
+    decision = RecoveryDecision(
+        decision_id="blocked-root-retry",
+        task_id=task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="Retry the blocked multi-task root under its existing identity.",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "retry",
+        lambda task_id, decision: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "release_retry",
+        lambda task_id: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+
+    retried = coordinator.retry_task(task_id, decision=decision, session_id="session-1")
+
+    assert retried.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
 
 
 def test_explicit_taskboard_root_and_child_keep_their_persisted_lineage(
@@ -956,6 +1107,194 @@ def test_recalculate_budget_expands_a_live_reservation_within_lane_policy(
 
     assert revised.budget.reserved_tokens == 125
     assert revised.budget.revisions[-1]["accounting_reservation_id"] == "reservation_forecast"
+
+
+def test_recalculate_budget_expands_parent_envelope_for_child_growth(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Child forecast growth must add into the active parent reservation."""
+    parent = coordinator.reserve(
+        normalized_intent="parent envelope",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-parent-envelope",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=40,
+        requested_output_tokens=40,
+    )
+    coordinator.start(parent)
+    child = coordinator.reserve(
+        normalized_intent="child coding",
+        lane_id=LaneId.CODING,
+        session_id=parent.execution.session_id,
+        workspace_id=parent.execution.workspace_id,
+        repository_id=parent.execution.repository_id,
+        parent_task_id=parent.execution.task_id,
+        root_task_id=parent.execution.root_task_id,
+        requested_input_tokens=30,
+        requested_output_tokens=30,
+        task_type="single",
+    )
+    coordinator.start(child)
+
+    revised_child = coordinator.recalculate_budget(
+        child.execution.task_id,
+        forecast_input_tokens=500,
+        forecast_output_tokens=400,
+        forecast_cost=0.02,
+        reason="provider-call forecast",
+    )
+    revised_parent = coordinator.inspect_task(parent.execution.task_id)
+
+    assert revised_child.budget.reserved_tokens >= 900
+    assert revised_parent.budget.reserved_tokens >= revised_child.budget.reserved_tokens
+    assert any(
+        item.get("reason") == "parent envelope for child recalculation"
+        for item in revised_parent.budget.revisions
+    )
+
+
+def test_reserve_expands_parent_when_child_needs_more_than_remaining(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Child reservation grows the parent envelope instead of hard-failing."""
+    parent = coordinator.reserve(
+        normalized_intent="small parent",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-reserve-envelope",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=20,
+        requested_output_tokens=20,
+    )
+    coordinator.start(parent)
+
+    child = coordinator.reserve(
+        normalized_intent="large child",
+        lane_id=LaneId.CODING,
+        session_id=parent.execution.session_id,
+        workspace_id=parent.execution.workspace_id,
+        repository_id=parent.execution.repository_id,
+        parent_task_id=parent.execution.task_id,
+        root_task_id=parent.execution.root_task_id,
+        requested_input_tokens=200,
+        requested_output_tokens=200,
+        task_type="single",
+    )
+
+    revised_parent = coordinator.inspect_task(parent.execution.task_id)
+    assert child.execution.budget.reserved_tokens == 400
+    assert revised_parent.budget.reserved_tokens >= 400
+    assert any(
+        item.get("reason") == "parent envelope for child reservation"
+        for item in revised_parent.budget.revisions
+    )
+
+
+def test_recalculate_budget_under_terminal_parent_does_not_block(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Follow-ups under a failed parent must not fail parent-remaining checks."""
+    parent = coordinator.reserve(
+        normalized_intent="failed parent",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-terminal-parent",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=30,
+        requested_output_tokens=30,
+    )
+    coordinator.start(parent)
+    coordinator.finish(
+        parent.execution.task_id,
+        state=LaneTaskState.FAILED,
+        error="prior multi-task child failed",
+    )
+    # Terminal parents skip remaining checks at reserve time.
+    child = coordinator.reserve(
+        normalized_intent="follow-up under failed parent",
+        lane_id=LaneId.CODING,
+        session_id=parent.execution.session_id,
+        workspace_id=parent.execution.workspace_id,
+        repository_id=parent.execution.repository_id,
+        parent_task_id=parent.execution.task_id,
+        root_task_id=parent.execution.root_task_id,
+        requested_input_tokens=100,
+        requested_output_tokens=100,
+        task_type="single",
+    )
+    coordinator.start(child)
+
+    revised = coordinator.recalculate_budget(
+        child.execution.task_id,
+        forecast_input_tokens=800,
+        forecast_output_tokens=600,
+        forecast_cost=None,
+        reason="provider-call forecast",
+    )
+
+    assert revised.budget.reserved_tokens >= 1400
+
+
+def test_recalculate_budget_expands_nested_ancestors(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Grandchild growth expands parent and multi-task-style root ancestors.
+
+    Mid stays reserved (queued) rather than started so two coding tasks do not
+    contend on the same repository-write lock for the whole lane timeout.
+    """
+    root = coordinator.reserve(
+        normalized_intent="compound root",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-nested-ancestors",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=50,
+        requested_output_tokens=50,
+        task_type="multi_task_root",
+    )
+    coordinator.start(root)
+    mid = coordinator.reserve(
+        normalized_intent="mid child",
+        lane_id=LaneId.CODING,
+        session_id=root.execution.session_id,
+        workspace_id=root.execution.workspace_id,
+        repository_id=root.execution.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=40,
+        requested_output_tokens=40,
+        task_type="multi_task_child",
+    )
+    # Do not start mid: a second coding start would block on mid's write lock.
+    leaf = coordinator.reserve(
+        normalized_intent="nested leaf",
+        lane_id=LaneId.CODING,
+        session_id=root.execution.session_id,
+        workspace_id=root.execution.workspace_id,
+        repository_id=root.execution.repository_id,
+        parent_task_id=mid.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=30,
+        requested_output_tokens=30,
+        task_type="single",
+    )
+    coordinator.start(leaf)
+
+    revised_leaf = coordinator.recalculate_budget(
+        leaf.execution.task_id,
+        forecast_input_tokens=700,
+        forecast_output_tokens=500,
+        forecast_cost=0.03,
+        reason="provider-call forecast",
+    )
+    revised_mid = coordinator.inspect_task(mid.execution.task_id)
+    revised_root = coordinator.inspect_task(root.execution.task_id)
+
+    assert revised_leaf.budget.reserved_tokens >= 1200
+    assert revised_mid.budget.reserved_tokens >= revised_leaf.budget.reserved_tokens
+    assert revised_root.budget.reserved_tokens >= revised_mid.budget.reserved_tokens
 
 
 def test_child_agent_reserves_and_consumes_parent_budget(coordinator: LaneCoordinator) -> None:

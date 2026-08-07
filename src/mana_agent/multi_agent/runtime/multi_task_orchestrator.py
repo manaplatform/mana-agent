@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -304,7 +305,17 @@ class MultiTaskOrchestrator:
                         continue
                     if len(running) >= self.maximum_concurrency:
                         break
-                    future = pool.submit(execute_child, item, mapping[local_id])
+                    # ThreadPoolExecutor workers do not inherit ContextVars.
+                    # Propagate the parent turn context so authenticated
+                    # computer-client identity, evals, event sinks, and other
+                    # process-local scopes remain available to child routes.
+                    parent_context = contextvars.copy_context()
+                    future = pool.submit(
+                        parent_context.run,
+                        execute_child,
+                        item,
+                        mapping[local_id],
+                    )
                     running[future] = local_id
                     pending.remove(local_id)
                     made_progress = True

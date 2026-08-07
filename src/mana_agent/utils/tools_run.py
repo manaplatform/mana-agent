@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from rich.live import Live
 from rich.text import Text
-from langchain.callbacks.base import BaseCallbackHandler
+from langchain_core.callbacks.base import BaseCallbackHandler
 
 
 @dataclass

@@ -242,6 +242,41 @@ class ContextCostGovernor:
             for key in self.metrics:
                 self.metrics[key] = 0.0 if "cost" in key else 0
 
+    def ensure_admission_budget(self, *, required_tokens: int | None = None) -> int | None:
+        """Ensure a new chat message can admit another full task-sized run.
+
+        ``mana_routing_task_token_budget`` is a per-task policy. Sequential
+        follow-up and extend messages in one session must each receive a fresh
+        task-sized admission envelope. Prior completed work must not leave
+        ``task_token_remaining`` / ``session_token_remaining`` at 0 and block
+        the next message with ``effective limit is 0``.
+        """
+        configured = _positive_or_none(
+            getattr(self.settings, "mana_routing_task_token_budget", None)
+        )
+        needed = max(int(required_tokens or 0), int(configured or 0))
+        if needed <= 0:
+            return self._implementation_tokens_remaining()
+        with self._lock:
+            if self.ledger.token_limit is None:
+                return None
+            reserve = self.ledger.children.get("verification:reserved")
+            reserved_remaining = 0
+            if reserve is not None and reserve.remaining_tokens is not None:
+                reserved_remaining = max(0, int(reserve.remaining_tokens))
+            # Implementation remaining is session remaining minus the still-held
+            # verification carve-out. Expand the session limit so a full new
+            # task budget fits after that carve-out.
+            required_session_remaining = needed + reserved_remaining
+            current_remaining = max(
+                0, int(self.ledger.token_limit) - int(self.ledger.tokens_used)
+            )
+            if current_remaining < required_session_remaining:
+                self.ledger.token_limit = int(self.ledger.token_limit) + (
+                    required_session_remaining - current_remaining
+                )
+            return self._implementation_tokens_remaining()
+
     def _model_profile(self, provider: str, model: str) -> Any | None:
         normalized_provider = str(provider or "").casefold()
         normalized_model = str(model or "")
@@ -361,20 +396,14 @@ class ContextCostGovernor:
         )
         turn_id, task_id, agent_id = str(identity["turn_id"] or ""), str(identity["task_id"] or ""), str(identity["agent_id"] or "main")
         subagent_id, step_id = identity["subagent_id"], str(identity["step_id"] or "")
-        stable_parts = (
-            self.session_id,
-            turn_id,
-            task_id,
-            str(identity.get("attempt_id") or ""),
-            step_id,
-            str(agent_id),
-            str(provider),
-            str(model),
-        )
-        call_id = (
-            "call-" + hashlib.sha256("\0".join(stable_parts).encode()).hexdigest()[:32]
-            if any(stable_parts[1:5])
-            else f"call-{uuid.uuid4().hex}"
+        call_id = self._allocate_model_call_id(
+            turn_id=turn_id,
+            task_id=task_id,
+            attempt_id=str(identity.get("attempt_id") or ""),
+            step_id=step_id,
+            agent_id=str(agent_id),
+            provider=str(provider),
+            model=str(model),
         )
         profile = profile or self._model_profile(provider, model)
         compacted = (
@@ -414,6 +443,8 @@ class ContextCostGovernor:
                 )
                 break
             except ModelContextLimitError as exc:
+                # Must be caught before ValueError: ModelContextLimitError is a
+                # ValueError subclass used for budget/context capacity failures.
                 removable_index = next(
                     (
                         index for index, segment in enumerate(compacted)
@@ -446,6 +477,11 @@ class ContextCostGovernor:
                             break
                         except ModelContextLimitError:
                             pass
+                        except ValueError as observe_exc:
+                            if "already finalized" not in str(observe_exc).casefold():
+                                raise
+                            call_id = self._next_model_call_id(call_id)
+                            continue
                     resolved = self.profile_resolver.resolve(
                         ModelIdentity(resolved_provider, model)
                     )
@@ -485,6 +521,14 @@ class ContextCostGovernor:
                     raise ContextBudgetExceeded(decision) from exc
                 removed_for_fit.append(compacted[removable_index])
                 compacted = compacted[:removable_index] + compacted[removable_index + 1:]
+            except ValueError as exc:
+                # Stable identities reuse step/task keys across multiple provider
+                # calls (search-operation decision, answer synthesis, etc.). When
+                # a prior call already finalized that operation id, allocate the
+                # next free ordinal instead of failing the whole route.
+                if "already finalized" not in str(exc).casefold():
+                    raise
+                call_id = self._next_model_call_id(call_id)
         token_estimate = accounting_reservation.estimate
         window = token_estimate.profile.context_window
         if context_window is not None and int(context_window) != window:
@@ -751,6 +795,8 @@ class ContextCostGovernor:
         with self._lock:
             reservation = self._reservations.pop(reservation_id, None)
             accounting_reservation = self._accounting_reservations.pop(reservation_id, None)
+            # Released operation ids must not be reused for a later distinct call.
+            self._reconciled_call_ids.add(str(reservation_id))
         if accounting_reservation is not None:
             self.accounting.release(accounting_reservation, reason=reason)
         if reservation is None:
@@ -764,6 +810,62 @@ class ContextCostGovernor:
             "reason": reason,
         })
         self.logger.write(metadata)
+
+    def _allocate_model_call_id(
+        self,
+        *,
+        turn_id: str,
+        task_id: str,
+        attempt_id: str,
+        step_id: str,
+        agent_id: str,
+        provider: str,
+        model: str,
+    ) -> str:
+        """Allocate a call id that is unique for this sequential model admission.
+
+        Identity fields intentionally make retries of the *same* logical call
+        stable, but one gateway task often issues several provider calls under
+        the same turn/task/step scope (routing, search-operation query, answer
+        synthesis). Each admission must receive a free operation id.
+        """
+        stable_parts = (
+            self.session_id,
+            turn_id,
+            task_id,
+            attempt_id,
+            step_id,
+            agent_id,
+            provider,
+            model,
+        )
+        if not any(stable_parts[1:5]):
+            return f"call-{uuid.uuid4().hex}"
+        base = "call-" + hashlib.sha256("\0".join(stable_parts).encode()).hexdigest()[:32]
+        return self._next_free_model_call_id(base)
+
+    def _next_model_call_id(self, call_id: str) -> str:
+        """Return the next ordinal form of a stable call id (call-abc → call-abc:1)."""
+        base, separator, suffix = str(call_id).rpartition(":")
+        if separator and suffix.isdigit():
+            return self._next_free_model_call_id(base, start=int(suffix) + 1)
+        return self._next_free_model_call_id(str(call_id), start=1)
+
+    def _next_free_model_call_id(self, base_call_id: str, *, start: int = 0) -> str:
+        with self._lock:
+            sequence = max(0, int(start))
+            while sequence < 512:
+                candidate = base_call_id if sequence == 0 else f"{base_call_id}:{sequence}"
+                if (
+                    candidate not in self._reconciled_call_ids
+                    and candidate not in self._accounting_reservations
+                    and candidate not in self._reservations
+                ):
+                    return candidate
+                sequence += 1
+        raise RuntimeError(
+            f"unable to allocate a free accounting call id for base {base_call_id!r}"
+        )
 
     def before_tool_call(
         self,

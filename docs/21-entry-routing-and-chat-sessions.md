@@ -14,6 +14,8 @@ One root TaskBoard item holds the complete goal and aggregate progress. Each chi
 
 The validated dependency DAG uses a bounded worker pool and the existing lane coordinator. Ready children may run concurrently, but lane capacity and repository/workspace/file locks remain authoritative; overlapping or unknown repository mutations serialize. A failed or blocked prerequisite blocks its dependents without preventing independent children from finishing. Cancellation propagates through the existing task tree, and persisted decomposition IDs prevent resume or event reprocessing from recreating children.
 
+Worker-pool submissions copy the parent turn’s `contextvars` into each child so authenticated computer-client identity, evaluation recorders, and process-local event sinks remain available. Computer children therefore enter `computer_decision_scope` with the same frontend identity the parent `process_turn()` established; missing identity still fails closed rather than inventing a client.
+
 The root result reports every child as completed, blocked, failed, skipped, cancelled, or awaiting approval, plus aggregate progress and partial-completion warnings. `DONE` requires all required children to complete or be intentionally skipped; blocked or approval-waiting children make the root `BLOCKED`, an unrecoverable execution failure makes it `FAILED`, and cancellation makes it `CANCELLED`.
 
 ## Artifact creation

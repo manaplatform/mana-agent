@@ -217,10 +217,20 @@ class ActionGateway:
                         self.inbox_service.supersede_for_action(action.action_id)
                         raise PermissionError("action material changed after the human decision")
                     if inbox_item is not None and inbox_item.status is InboxStatus.APPROVED:
+                        scope = (
+                            action.policy_decision.required_approval_scope
+                            if action.policy_decision is not None
+                            else ApprovalScope.ACTION_ONCE
+                        )
                         pending_grant = self.approvals.issue(
                             action,
                             approved_by=inbox_item.response_actor_id,
-                            ttl_seconds=max(1, int((inbox_item.expires_at - utc_now()).total_seconds())),
+                            ttl_seconds=max(
+                                1,
+                                int((inbox_item.expires_at - utc_now()).total_seconds()),
+                            ),
+                            scope=scope or ApprovalScope.ACTION_ONCE,
+                            transaction_binding_digest=transaction_binding,
                         )
                     elif inbox_item is not None and inbox_item.status in {
                         InboxStatus.DENIED,
@@ -359,10 +369,22 @@ class ActionGateway:
                 comment=f"Submitted through trusted legacy principal {approved_by}.",
                 current_action_digest=action.approval_digest(),
             ))
+        binding = self._transaction_binding(action)
+        scope = (
+            action.policy_decision.required_approval_scope
+            if action.policy_decision is not None
+            else ApprovalScope.ACTION_ONCE
+        )
         grant = self.approvals.find_valid(
             action,
-            transaction_binding_digest=self._transaction_binding(action),
-        ) or self.approvals.issue(action, approved_by=approved_by, ttl_seconds=ttl_seconds)
+            transaction_binding_digest=binding,
+        ) or self.approvals.issue(
+            action,
+            approved_by=approved_by,
+            ttl_seconds=ttl_seconds,
+            scope=scope or ApprovalScope.ACTION_ONCE,
+            transaction_binding_digest=binding,
+        )
         self._emit(
             "action.approval.granted",
             action,

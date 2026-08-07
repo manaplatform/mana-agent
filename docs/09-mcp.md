@@ -16,6 +16,13 @@ Create `~/.mana/mcp.toml` (or set `MANA_MCP_CONFIG_PATH`):
 Imported tools are namespaced as `mcp.<server_id>.<tool_name>`. Invalid
 configuration or failed discovery disables that provider; no local substitute is used.
 
+Approved MCP results surface in chat as readable text when the provider returns
+content blocks (for example Context7 documentation or library lists). The
+message is labeled **Documentation** for doc-oriented operations such as
+`query-docs` / `resolve-library-id`, still marked as untrusted provider data.
+Non-text envelopes fall back to compact JSON. Presentation never invents
+content or substitutes a local answer when the provider fails.
+
 For a remote bearer token, run `mana-agent mcp token-set` with no server id.
 Use arrow keys and Enter to select a configured MCP server, then enter the
 hidden token. Supplying a server id remains available for scripts. Tokens are

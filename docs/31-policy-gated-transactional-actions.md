@@ -25,7 +25,13 @@ The deterministic policy evaluates normalized adapter data. Its outcomes are `al
 
 Narrow infrastructure exceptions are typed policy rules rather than bypasses. The workspace coordinator may create a verified managed worktree, and may merge or remove it only with its existing validated explicit-intent checks. A persisted verification queue job may execute a bounded command and commit from an exit-status/output-hash receipt. Validated task Git workflows may perform local staging, branch, and commit operations; remote writes still require exact approval. These contexts are injected by internal coordinators and are not exposed as model tool arguments.
 
-An approval is single-use and bound to the action ID, transaction ID, normalized intent, preview digest, policy fingerprint, scope, and expiration. A material action, preview, transaction, or policy change invalidates it. A narrow transaction approval issues one separately consumable grant per awaiting action, with every grant additionally bound to the exact durable transaction plan; it is not ambient approval for later actions.
+An approval is bound to the policy fingerprint, scope, and expiration. Scope is one of:
+
+- `action_once` — single-use grant for one exact action (binding + preview digests).
+- `transaction` — plan-bound grant for one action inside a durable multi-action transaction.
+- `task` — multi-use grant for compatible computer filesystem mutations under one durable task lineage (prefer the multi-task **root**). After the first trusted approval, later `filesystem.mkdir` / `copy` / `move` / `rename` actions under that root reuse the grant without a new human prompt until expiry or invalidation. High-risk computer ops (trash, screen recording, system power) stay `action_once`.
+
+A material action, preview, transaction, or policy change invalidates exact single-use grants. Task-wide grants are not ambient session permission: they require a durable task identity, stay confined to the approved operation family and permission scopes, and expire with the approval TTL.
 
 ## Previews
 

@@ -88,6 +88,48 @@ child status and never reports full success after partial completion. `/tasks`,
 root/child identities. No second task store, scheduler, frontend path, or public
 orchestration entry point is introduced.
 
+Child workers inherit the parent turn’s ContextVars (via `contextvars.copy_context`)
+so routes that depend on process-local identity—especially `computer`—do not fail
+with “authenticated client context” errors merely because they run on a thread-pool
+worker. Identity is never synthesized for a missing parent scope.
+
+Stopped multi-task roots that still list a checkpoint may be recovered with
+`retry_task` or `replan_task` under the same durable task ID (decision
+`checkpoint_id` empty), not only via `resume_checkpoint`. That avoids rejecting
+a valid same-work restart when partial progress should not continue. When the
+lane projection is missing but the durable supervisor task remains, recovery
+rehydrates the gateway row before requeue. Blocked multi-task roots (lane
+`blocked`, supervisor often `waiting` without a human-inbox wait) are recovery
+candidates so a later chat turn can auto-select them without `/tasks`. Chat
+turns use this decision matrix: existing checkpointed work → resume; failed
+safe work → retry; blocked/reverted multi-task job → replan/retry under the
+same root and reopen incomplete children so the job restarts from the first
+unfinished step; otherwise create a new task. The `/task` control command does
+not create tasks (`/task create`, `/task Execute`, and other reserved verbs or
+non-id tokens are rejected). `/task cancel|pause|resume|retry|replan` may omit
+the id only when exactly one candidate is available.
+
+Multi-task budget coordination is parent-envelope based: after decomposition the
+root reserves capacity for orchestration plus every planned child, then expands
+that envelope before each child lane reservation so siblings do not starve under
+a goal-only parent budget. When a live multi-task child revises its reservation
+from a real provider-call forecast (coding/Codex, media, etc.), the same parent
+envelope is expanded first so mid-run growth is not rejected by parent-remaining
+checks. Child preflight sizing uses model and optional lane capacity only;
+depleted shared session remaining from parent planning does not hard-fail child
+admission. Actual provider calls still pass through the session context
+governor. Missing or insufficient parent envelope capacity fails closed as a
+blocked multi-task budget decision with no fallback route.
+
+Lane-coordinator parent envelopes apply to every parent/child lane relationship,
+not only multi-task: `reserve` and `recalculate_budget` grow the active parent
+(and active ancestors) so the child’s required total plus active sibling
+reservations fit under the parent reserved budget. Child growth therefore adds
+into the parent envelope rather than aborting with a parent-remaining error.
+Terminal parents (failed/completed/cancelled) do not constrain children, which
+matches reserve-time policy for follow-ups under a finished task. Immutable
+lane, session, and global caps still stop expansion with no fallback route.
+
 ## Verification
 
 VerifierAgent records verification requirements for every mutation route and

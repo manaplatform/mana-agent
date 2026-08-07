@@ -772,15 +772,33 @@ class LaneCoordinator:
                 estimate_confidence=estimate_confidence,
                 estimate_source=estimate_source,
             )
-            self._assert_budget(contract, session_id, budget)
             if parent_task_id:
                 parent = self._executions.get(parent_task_id)
                 if parent is None:
                     raise LaneBudgetError("parent task budget is unavailable")
-                if parent.state not in {LaneTaskState.COMPLETED, LaneTaskState.FAILED, LaneTaskState.CANCELLED}:
-                    remaining = max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens)
-                    if budget.reserved_tokens > remaining:
-                        raise LaneBudgetError("child reservation exceeds the parent task's remaining budget")
+                # Grow the active parent (and ancestors) before the child is
+                # charged against session/global caps, so the expanded parent
+                # envelope is included in the subsequent budget assertion.
+                # Terminal parents do not constrain children (same policy as
+                # recalculate_budget). Hard-fail only when expansion exceeds a
+                # real lane/session/global cap.
+                if parent.state not in {
+                    LaneTaskState.COMPLETED,
+                    LaneTaskState.FAILED,
+                    LaneTaskState.CANCELLED,
+                }:
+                    self._ensure_parent_envelope_for_child_locked(
+                        child_task_id=None,
+                        parent_task_id=parent_task_id,
+                        required_child_tokens=budget.reserved_tokens,
+                        child_estimated_cost=(
+                            float(budget.estimated_cost)
+                            if budget.estimated_cost_known
+                            else None
+                        ),
+                        reason="parent envelope for child reservation",
+                    )
+            self._assert_budget(contract, session_id, budget)
             if taskboard_task_id:
                 task = self.taskboard.get_task(taskboard_task_id)
                 expected_parent = self._executions[parent_task_id].taskboard_task_id if parent_task_id else None
@@ -1342,7 +1360,13 @@ class LaneCoordinator:
         accounting_reservation_id: str = "",
         reason: str = "provider-call forecast",
     ) -> LaneExecution:
-        """Atomically grow a reservation only when every immutable cap admits it."""
+        """Atomically grow a reservation only when every immutable cap admits it.
+
+        When the task has an active parent, the parent (and active ancestors)
+        reserved envelope is expanded first so child growth adds into the parent
+        budget instead of failing with "recalculated child budget exceeds the
+        parent remaining budget". Terminal parents do not constrain children.
+        """
         with self._condition:
             execution = self._executions[task_id]
             if execution.state not in ACTIVE_LANE_STATES:
@@ -1364,23 +1388,36 @@ class LaneCoordinator:
                 raise LaneBudgetError("recalculated budget exceeds the global token limit")
             if execution.parent_task_id and execution.parent_task_id in self._executions:
                 parent = self._executions[execution.parent_task_id]
-                if next_total > max(0, parent.budget.reserved_tokens - parent.budget.consumed_tokens):
-                    raise LaneBudgetError("recalculated child budget exceeds the parent remaining budget")
+                if parent.state not in {
+                    LaneTaskState.COMPLETED,
+                    LaneTaskState.FAILED,
+                    LaneTaskState.CANCELLED,
+                }:
+                    self._ensure_parent_envelope_for_child_locked(
+                        child_task_id=task_id,
+                        parent_task_id=execution.parent_task_id,
+                        required_child_tokens=next_total,
+                        child_estimated_cost=forecast_cost,
+                        reason="parent envelope for child recalculation",
+                    )
             if next_total <= budget.reserved_tokens and next_cost <= budget.estimated_cost:
                 return execution
             previous_total = budget.reserved_tokens
-            self.execution_supervisor.revise_budget(
-                task_id,
-                token_budget=next_total,
-                estimated_cost=(next_cost if forecast_cost is not None else None),
-                reason=reason,
-                evidence={
-                    "forecast_input_tokens": max(0, int(forecast_input_tokens)),
-                    "forecast_output_tokens": max(0, int(forecast_output_tokens)),
-                    "forecast_cost": forecast_cost,
-                    "accounting_reservation_id": accounting_reservation_id,
-                },
-            )
+            try:
+                self.execution_supervisor.revise_budget(
+                    task_id,
+                    token_budget=next_total,
+                    estimated_cost=(next_cost if forecast_cost is not None else None),
+                    reason=reason,
+                    evidence={
+                        "forecast_input_tokens": max(0, int(forecast_input_tokens)),
+                        "forecast_output_tokens": max(0, int(forecast_output_tokens)),
+                        "forecast_cost": forecast_cost,
+                        "accounting_reservation_id": accounting_reservation_id,
+                    },
+                )
+            except BudgetExceededError as exc:
+                raise LaneBudgetError(str(exc)) from exc
             budget.reserved_input_tokens = next_input
             budget.reserved_output_tokens = next_output
             budget.estimated_cost = next_cost
@@ -1399,6 +1436,219 @@ class LaneCoordinator:
             self._persist_locked()
             self.emit("budget.recalculated", task_id=task_id, lane_id=execution.owning_lane, budget=asdict(budget))
             return execution
+
+    def _ensure_parent_envelope_for_child_locked(
+        self,
+        *,
+        child_task_id: str | None,
+        parent_task_id: str,
+        required_child_tokens: int,
+        child_estimated_cost: float | None = None,
+        reason: str = "parent envelope for child budget",
+    ) -> None:
+        """Grow parent (and active ancestors) so required_child_tokens fits.
+
+        ``required_child_tokens`` is the full post-change total for the target
+        child. Active siblings keep their current reservations; the revising
+        child (when provided) is excluded so its previous reservation is not
+        double-counted. Terminal parents are not expanded and do not block.
+
+        Must be called while holding ``self._condition``.
+        """
+        parent_id: str | None = parent_task_id
+        revising_id = str(child_task_id or "")
+        required = max(0, int(required_child_tokens))
+        cost = child_estimated_cost
+        seen: set[str] = set()
+
+        while parent_id and parent_id in self._executions and parent_id not in seen:
+            seen.add(parent_id)
+            parent = self._executions[parent_id]
+            if parent.state in {
+                LaneTaskState.COMPLETED,
+                LaneTaskState.FAILED,
+                LaneTaskState.CANCELLED,
+            }:
+                # Terminal parents do not constrain live children (matches reserve).
+                return
+
+            sibling_reserved = sum(
+                item.budget.reserved_tokens
+                for item in self._executions.values()
+                if item.parent_task_id == parent_id
+                and item.state in ACTIVE_LANE_STATES
+                and item.task_id != revising_id
+            )
+            needed_total = (
+                parent.budget.consumed_tokens
+                + sibling_reserved
+                + required
+            )
+            if needed_total <= parent.budget.reserved_tokens:
+                return
+
+            # Expand ancestors first so the parent's new total still fits.
+            grandparent_id = parent.parent_task_id
+            if grandparent_id and grandparent_id in self._executions:
+                grandparent = self._executions[grandparent_id]
+                if grandparent.state not in {
+                    LaneTaskState.COMPLETED,
+                    LaneTaskState.FAILED,
+                    LaneTaskState.CANCELLED,
+                }:
+                    self._ensure_parent_envelope_for_child_locked(
+                        child_task_id=parent_id,
+                        parent_task_id=grandparent_id,
+                        required_child_tokens=needed_total,
+                        child_estimated_cost=cost,
+                        reason=reason,
+                    )
+
+            self._grow_execution_reservation_locked(
+                parent_id,
+                target_total_tokens=needed_total,
+                additional_cost=cost,
+                reason=reason,
+                evidence={
+                    "for_child_task_id": revising_id or "",
+                    "required_child_tokens": required,
+                },
+            )
+            return
+
+    def _grow_execution_reservation_locked(
+        self,
+        task_id: str,
+        *,
+        target_total_tokens: int,
+        additional_cost: float | None,
+        reason: str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Increase one execution's reserved tokens/cost under lane/session/global caps.
+
+        Must be called while holding ``self._condition``.
+        """
+        execution = self._executions[task_id]
+        budget = execution.budget
+        target = max(
+            0,
+            int(target_total_tokens),
+            budget.reserved_tokens,
+            budget.consumed_tokens,
+        )
+        current_output = max(
+            budget.reserved_output_tokens,
+            budget.consumed_output_tokens,
+        )
+        target_input = max(budget.reserved_input_tokens, target - current_output)
+        if target_input + current_output < target:
+            current_output = target - target_input
+        next_total = target_input + current_output
+        next_cost = budget.estimated_cost
+        cost_known = budget.estimated_cost_known
+        if additional_cost is not None or budget.estimated_cost_known:
+            next_cost = max(
+                0.0,
+                float(budget.estimated_cost)
+                + max(0.0, float(additional_cost or 0.0)),
+            )
+            cost_known = additional_cost is not None or budget.estimated_cost_known
+        if next_total <= budget.reserved_tokens and (
+            additional_cost is None or next_cost <= budget.estimated_cost
+        ):
+            return
+
+        contract = self.contracts[execution.owning_lane]
+        if contract.token_budget is not None and next_total > contract.token_budget:
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the lane token limit"
+            )
+        if contract.cost_budget is not None and (
+            not cost_known or next_cost > contract.cost_budget
+        ):
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the lane cost limit"
+            )
+        active = [
+            item
+            for item in self._executions.values()
+            if item.state in ACTIVE_LANE_STATES and item.task_id != task_id
+        ]
+        if self.session_token_budget is not None and (
+            sum(
+                item.budget.reserved_tokens
+                for item in active
+                if item.session_id == execution.session_id
+            )
+            + next_total
+            > self.session_token_budget
+        ):
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the session token limit"
+            )
+        if self.global_token_budget is not None and (
+            sum(item.budget.reserved_tokens for item in active) + next_total
+            > self.global_token_budget
+        ):
+            raise LaneBudgetError(
+                "parent envelope expansion exceeds the global token limit"
+            )
+
+        previous_total = budget.reserved_tokens
+        try:
+            self.execution_supervisor.revise_budget(
+                task_id,
+                token_budget=next_total,
+                estimated_cost=(next_cost if cost_known else None),
+                reason=reason,
+                evidence=dict(evidence or {}),
+            )
+        except BudgetExceededError as exc:
+            raise LaneBudgetError(str(exc)) from exc
+
+        budget.reserved_input_tokens = target_input
+        budget.reserved_output_tokens = current_output
+        budget.estimated_cost = next_cost
+        budget.estimated_cost_known = cost_known
+        budget.revisions.append(
+            {
+                "reason": reason,
+                "previous_reserved_tokens": previous_total,
+                "revised_reserved_tokens": next_total,
+                "forecast_input_tokens": max(
+                    0, target_input - budget.consumed_input_tokens
+                ),
+                "forecast_output_tokens": max(
+                    0, current_output - budget.consumed_output_tokens
+                ),
+                "forecast_cost": (next_cost if cost_known else None),
+                "accounting_reservation_id": "",
+                "at": _iso(),
+                **{
+                    key: value
+                    for key, value in dict(evidence or {}).items()
+                    if key
+                    not in {
+                        "reason",
+                        "previous_reserved_tokens",
+                        "revised_reserved_tokens",
+                        "forecast_input_tokens",
+                        "forecast_output_tokens",
+                        "forecast_cost",
+                        "accounting_reservation_id",
+                        "at",
+                    }
+                },
+            }
+        )
+        execution.updated_at = _iso()
+        self.emit(
+            "budget.recalculated",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+            budget=asdict(budget),
+        )
 
     def transition(
         self,
@@ -1497,6 +1747,130 @@ class LaneCoordinator:
         except KeyError as exc:
             raise LaneCoordinatorError(f"Unknown gateway task: {task_id}") from exc
 
+    _RETRYABLE_LANE_STATES = frozenset(
+        {
+            LaneTaskState.FAILED,
+            LaneTaskState.INTERRUPTED,
+            LaneTaskState.TIMED_OUT,
+            LaneTaskState.BUDGET_EXHAUSTED,
+            LaneTaskState.REJECTED,
+            # Multi-task roots often finish as BLOCKED when children fail or wait;
+            # a validated same-task recovery decision may requeue them.
+            LaneTaskState.BLOCKED,
+            # mark_blocked / pause leave the durable supervisor in WAITING; after
+            # rehydration the lane projection is WAITING/PAUSED and must still be
+            # recoverable under a validated same-task decision.
+            LaneTaskState.WAITING,
+            LaneTaskState.PAUSED,
+        }
+    )
+
+    def _lane_state_for_supervisor(self, state: SupervisorState) -> LaneTaskState:
+        return {
+            SupervisorState.FAILED: LaneTaskState.FAILED,
+            SupervisorState.CANCELLED: LaneTaskState.CANCELLED,
+            SupervisorState.BUDGET_EXHAUSTED: LaneTaskState.BUDGET_EXHAUSTED,
+            SupervisorState.COMPLETED: LaneTaskState.COMPLETED,
+            SupervisorState.RETRY_SCHEDULED: LaneTaskState.QUEUED,
+            SupervisorState.REPLANNING: LaneTaskState.QUEUED,
+            SupervisorState.QUEUED: LaneTaskState.QUEUED,
+            SupervisorState.WAITING: LaneTaskState.WAITING,
+            SupervisorState.RUNNING: LaneTaskState.INTERRUPTED,
+            SupervisorState.LEASED: LaneTaskState.INTERRUPTED,
+            SupervisorState.CHECKPOINTING: LaneTaskState.INTERRUPTED,
+            SupervisorState.CANCELLING: LaneTaskState.CANCELLING,
+            SupervisorState.PENDING_BUDGET_DECISION: LaneTaskState.PENDING_BUDGET_DECISION,
+            SupervisorState.COMPLETED_PENDING_VERIFICATION: LaneTaskState.VERIFYING,
+            SupervisorState.CREATED: LaneTaskState.FAILED,
+        }.get(state, LaneTaskState.FAILED)
+
+    def ensure_recoverable_execution(self, task_id: str) -> LaneExecution:
+        """Return the lane projection, rehydrating it from the supervisor when needed.
+
+        Recovery candidates are listed from the durable supervisor store. After a
+        process restart, projection loss, or multi-task partial materialization,
+        a durable task may exist without a live lane row. Validated recovery must
+        not fail with an opaque unknown-task error when the supervisor record is
+        present and recoverable.
+        """
+        existing = self._executions.get(task_id)
+        if existing is not None:
+            return existing
+        durable = self.execution_supervisor.store.get_task_or_none(task_id)
+        if durable is None:
+            raise LaneCoordinatorError(f"Unknown gateway task: {task_id}")
+        if durable.state in {
+            SupervisorState.RUNNING,
+            SupervisorState.LEASED,
+            SupervisorState.CHECKPOINTING,
+            SupervisorState.CANCELLING,
+        }:
+            raise LaneCoordinatorError(
+                f"durable task {task_id} is still active in the supervisor and cannot "
+                "be rehydrated for recovery yet"
+            )
+        agent = str(durable.assigned_agent or "")
+        lane_token = agent.removeprefix("lane:") if agent.startswith("lane:") else agent
+        try:
+            lane_id = LaneId(lane_token) if lane_token else LaneId.RESEARCH
+        except ValueError:
+            lane_id = LaneId.RESEARCH
+        execution = LaneExecution(
+            task_id=task_id,
+            root_task_id=str(durable.root_task_id or task_id),
+            parent_task_id=durable.parent_task_id,
+            owning_lane=lane_id,
+            state=self._lane_state_for_supervisor(durable.state),
+            normalized_intent=str(durable.normalized_intent or ""),
+            repository_id=str(durable.repository_id or ""),
+            workspace_id=str(durable.workspace_id or ""),
+            session_id=str(durable.session_id or ""),
+            target_files=list(durable.target_resources or []),
+            priority=self.contracts[lane_id].default_priority,
+            budget=LaneBudget(
+                reserved_input_tokens=max(0, int(durable.token_budget or 0)),
+                reserved_output_tokens=0,
+                estimated_cost=float(durable.estimated_cost or 0.0),
+                estimated_cost_known=bool(durable.estimated_cost_known),
+                model_context_window=int(durable.model_context_window or 0),
+                model_max_output_tokens=int(durable.model_max_output_tokens or 0),
+                estimate_confidence=str(durable.token_estimate_confidence or ""),
+                estimate_source=str(durable.token_estimate_source or ""),
+            ),
+            taskboard_task_id=task_id,
+            model=str(durable.assigned_model or ""),
+            provider=str(durable.runtime_provider or ""),
+            routing_decision_id=str(durable.routing_decision_id or ""),
+            task_type=str(durable.task_type or "single"),
+            checkpoint_id=str(durable.checkpoint_id or ""),
+            error=str(durable.failure_reason or ""),
+            trigger_turn_id=str(durable.trigger_turn_id or ""),
+            relation_type=str(durable.relation_type or "independent"),
+            previous_task_id=str(durable.previous_task_id or ""),
+            lane_history=[
+                {
+                    "lane_id": lane_id.value,
+                    "state": "rehydrated",
+                    "at": _iso(),
+                    "reason": "rehydrated from durable supervisor for recovery",
+                }
+            ],
+        )
+        with self._condition:
+            # Another recovery path may have projected the same task.
+            existing = self._executions.get(task_id)
+            if existing is not None:
+                return existing
+            self._executions[task_id] = execution
+            self._persist_locked()
+        self.emit(
+            "lane.rehydrated",
+            task_id=task_id,
+            lane_id=lane_id,
+            reason="supervisor projection restored for recovery",
+        )
+        return execution
+
     def resume_checkpoint(
         self,
         task_id: str,
@@ -1505,7 +1879,7 @@ class LaneCoordinator:
         session_id: str,
     ) -> LaneReservation:
         """Requeue the exact checkpoint selected by a validated model decision."""
-        execution = self.inspect_task(task_id)
+        execution = self.ensure_recoverable_execution(task_id)
         durable = self.execution_supervisor.store.get_task(task_id)
         if not durable.checkpoint_id or durable.checkpoint_id != decision.resume_checkpoint_id:
             raise LaneCoordinatorError(
@@ -1537,14 +1911,8 @@ class LaneCoordinator:
             raise LaneCoordinatorError(
                 "same-task retry requires an explicit authorized retry decision"
             )
-        execution = self.inspect_task(task_id)
-        if execution.state not in {
-            LaneTaskState.FAILED,
-            LaneTaskState.INTERRUPTED,
-            LaneTaskState.TIMED_OUT,
-            LaneTaskState.BUDGET_EXHAUSTED,
-            LaneTaskState.REJECTED,
-        }:
+        execution = self.ensure_recoverable_execution(task_id)
+        if execution.state not in self._RETRYABLE_LANE_STATES:
             raise LaneCoordinatorError("model-selected task is not in a retryable stopped state")
         return self._retry_existing_task(
             execution,
@@ -1564,14 +1932,8 @@ class LaneCoordinator:
         """Requeue the same stopped task after a model-selected plan revision."""
         if decision.action is not RecoveryAction.REPLAN:
             raise LaneCoordinatorError("same-task replan requires an explicit replan decision")
-        execution = self.inspect_task(task_id)
-        if execution.state not in {
-            LaneTaskState.FAILED,
-            LaneTaskState.INTERRUPTED,
-            LaneTaskState.TIMED_OUT,
-            LaneTaskState.BUDGET_EXHAUSTED,
-            LaneTaskState.REJECTED,
-        }:
+        execution = self.ensure_recoverable_execution(task_id)
+        if execution.state not in self._RETRYABLE_LANE_STATES:
             raise LaneCoordinatorError("model-selected task is not in a replannable stopped state")
         return self._retry_existing_task(
             execution,

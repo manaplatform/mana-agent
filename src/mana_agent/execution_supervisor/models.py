@@ -354,6 +354,22 @@ class TaskRecord(StrictModel):
     human_resume_claim_ids: list[str] = Field(default_factory=list)
     human_wait_started_at: datetime | None = None
 
+    def wall_clock_deadline_exceeded(self, now: datetime | None = None) -> bool:
+        """Return True when the absolute wall-clock deadline has already elapsed.
+
+        Deadline-dead tasks must not be requeued. Callers create a new task with a
+        fresh deadline instead of retrying or resuming the expired identity.
+        """
+        if self.deadline_at is None:
+            return False
+        clock = now or utc_now()
+        deadline = self.deadline_at
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        if clock.tzinfo is None:
+            clock = clock.replace(tzinfo=timezone.utc)
+        return deadline <= clock
+
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":
         if self.schema_version < 7:

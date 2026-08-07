@@ -14,6 +14,11 @@ from mana_agent.api.exceptions import ManaApiError
 from mana_agent.api.services.job_service import ApiJobStore
 from mana_agent.services.execution_event_hub import get_execution_event_hub
 from mana_agent.ui.streamlit_helpers import find_mana_root, list_analysis_artifacts, safe_read_json
+from mana_agent.utils.path_safety import (
+    env_allowed_roots,
+    resolve_user_path,
+    resolve_within_allowed_roots,
+)
 from mana_agent.workspaces.paths import repository_analysis_dir, repository_id_for_path
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -33,18 +38,48 @@ class RepositoryAnalyzeRequest(BaseModel):
     root: str | None = None
 
 
+def _local_default_roots() -> list[Path]:
+    import tempfile
+
+    candidates = [
+        Path.home(),
+        Path.cwd(),
+        find_mana_root(),
+        Path(tempfile.gettempdir()),
+    ]
+    roots: list[Path] = []
+    for item in candidates:
+        try:
+            roots.append(item.resolve(strict=False))
+        except OSError:
+            continue
+    return roots
+
+
+def _authorize_root_path(raw: str) -> Path:
+    allowed = env_allowed_roots() or _local_default_roots()
+    try:
+        return resolve_within_allowed_roots(raw, allowed, require_allowlist=True)
+    except PermissionError as exc:
+        raise ManaApiError(403, "Path is outside the configured allowlist.") from exc
+    except ValueError as exc:
+        raise ManaApiError(400, "Invalid path.") from exc
+
+
 def _repo_root(repository_id: str, root: str | None = None) -> Path:
     if root:
-        return find_mana_root(Path(root).expanduser().resolve())
+        return find_mana_root(_authorize_root_path(root))
     try:
         repo = WorkspaceService().store.get_repository(repository_id)
-        return Path(repo.canonical_path).expanduser().resolve()
+        return resolve_user_path(repo.canonical_path)
     except FileNotFoundError:
         # Compatibility path-id repositories may not be registered yet.
         path = find_mana_root()
         if repository_id_for_path(path) == repository_id:
             return path
         raise ManaApiError(404, "Repository not found.")
+    except ValueError as exc:
+        raise ManaApiError(400, "Invalid repository path.") from exc
 
 
 @router.post("/repositories/{repository_id}/analyze", status_code=202)
@@ -145,7 +180,7 @@ def start_repository_analyze(
                     conversation_id=conversation_id,
                     execution_id=execution_id,
                     repository_id=resolved_id,
-                    message=str(exc),
+                    message="Analyze failed.",
                     status="failed",
                     metadata={"tool_name": "analyze"},
                 )

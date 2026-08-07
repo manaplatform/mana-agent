@@ -83,6 +83,35 @@ def test_parent_child_budget_allocation_and_consumption() -> None:
         parent.allocate_child("candidate", token_limit=800)
 
 
+def test_ensure_admission_budget_refreshes_depleted_session_for_followup_message() -> None:
+    """Sequential messages must not inherit an effective remaining of 0."""
+    governor = ContextCostGovernor(
+        session_id="session-followup",
+        settings=settings(
+            mana_context_governor_mode="enforce",
+            mana_routing_task_token_budget=1_000,
+        ),
+    )
+    # Simulate a completed first message that fully spent the task-sized ledger.
+    governor.ledger.tokens_used = int(governor.ledger.token_limit or 0)
+    assert governor._implementation_tokens_remaining() == 0
+
+    remaining = governor.ensure_admission_budget()
+    assert remaining is not None
+    assert remaining >= 1_000
+    assert governor._implementation_tokens_remaining() >= 1_000
+
+    # A second follow-up estimate must not hard-fail with effective limit 0.
+    estimate = governor.estimate_execution(
+        provider="test-provider",
+        model="test-model",
+        components={"user_request": "follow up with more detail"},
+        requested_output_tokens=64,
+    )
+    assert estimate.total_tokens > 0
+    assert estimate.effective_total_limit >= estimate.total_tokens
+
+
 def test_task_usage_keeps_actual_and_estimated_costs_separate() -> None:
     governor = ContextCostGovernor(session_id="s", settings=settings())
     governor.register_model_profiles((
@@ -275,6 +304,110 @@ def test_logger_redacts_and_retention_cleanup_is_best_effort(tmp_path: Path) -> 
     old.write_text("{}\n", encoding="utf-8")
     assert logger.cleanup() == 1
     assert not old.exists()
+
+
+def test_sequential_model_calls_under_same_task_identity_get_fresh_call_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lane tasks pin step_id (for example after_routing) for many provider calls.
+
+    Search routes issue a query-decision call and a later answer-synthesis call
+    under that same identity. Each must get a free accounting operation id.
+    """
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    governor = ContextCostGovernor(
+        session_id="session-search",
+        repository_id="repo",
+        workspace_id="workspace",
+        settings=settings(
+            mana_context_governor_mode="observe",
+            mana_context_unknown_model_context_window=8_000,
+            mana_context_unknown_model_max_output_tokens=1_000,
+        ),
+    )
+    register_priced_test_model(
+        governor,
+        context_window=8_000,
+        max_output_tokens=1_000,
+    )
+    governor.set_execution_identity(
+        turn_id="turn-1",
+        task_id="task_20260807_000002",
+        attempt_id="attempt-1",
+        step_id="after_routing",
+        route="search",
+        lane="research",
+        execution_kind="gateway_route",
+    )
+    segment = ContextSegment(
+        "user",
+        "check what is hermes agent.",
+        8,
+        protected=True,
+        source_id="user:1",
+    )
+
+    first_id, _ = governor.before_model_call(
+        [segment],
+        model="test",
+        provider="test-provider",
+    )
+    governor.record_model_call(
+        first_id,
+        usage={"input_tokens": 20, "output_tokens": 10},
+        provider="test-provider",
+        model="test",
+    )
+
+    second_id, _ = governor.before_model_call(
+        [segment],
+        model="test",
+        provider="test-provider",
+    )
+    assert second_id != first_id
+    assert second_id.startswith(first_id) or second_id.startswith(f"{first_id}:")
+    governor.record_model_call(
+        second_id,
+        usage={"input_tokens": 30, "output_tokens": 15},
+        provider="test-provider",
+        model="test",
+    )
+
+    third_id, _ = governor.before_model_call(
+        [segment],
+        model="test",
+        provider="test-provider",
+    )
+    assert third_id not in {first_id, second_id}
+
+
+def test_released_model_call_id_is_not_reused_for_later_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    governor = ContextCostGovernor(
+        session_id="session-release",
+        settings=settings(
+            mana_context_governor_mode="observe",
+            mana_context_unknown_model_context_window=8_000,
+            mana_context_unknown_model_max_output_tokens=1_000,
+        ),
+    )
+    register_priced_test_model(
+        governor,
+        context_window=8_000,
+        max_output_tokens=1_000,
+    )
+    governor.set_execution_identity(
+        turn_id="turn-release",
+        task_id="task-release",
+        step_id="after_routing",
+    )
+    segment = ContextSegment("user", "prompt", 2, protected=True, source_id="user:1")
+    first_id, _ = governor.before_model_call([segment], model="test", provider="test-provider")
+    governor.release_reservation(first_id, reason="provider failed before usage")
+    second_id, _ = governor.before_model_call([segment], model="test", provider="test-provider")
+    assert second_id != first_id
 
 
 def test_parallel_model_reservations_cannot_spend_the_same_budget(

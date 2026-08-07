@@ -339,6 +339,11 @@ class ExecutionSupervisor:
         selected_deadline = deadline_at or (
             self.clock() + timedelta(seconds=self.config.default_task_deadline_seconds)
         )
+        if parent is not None and parent.wall_clock_deadline_exceeded(self.clock()):
+            raise BudgetExceededError(
+                "parent task wall-clock deadline exceeded; create a new root task "
+                "instead of attaching a child under the dead parent"
+            )
         if (
             parent is not None
             and parent.state is not ExecutionState.COMPLETED
@@ -1516,6 +1521,7 @@ class ExecutionSupervisor:
             task,
             decision,
             actions=self.store.actions_for_task(task_id),
+            now=self.clock(),
         )
         checkpoint = None
         if decision.action == RecoveryAction.RESUME_CHECKPOINT:

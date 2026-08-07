@@ -13,6 +13,7 @@ class DurableExecutionContext(BaseModel):
     task_id: str = ""
     branch_id: str = ""
     parent_task_id: str = ""
+    root_task_id: str = ""
     checkpoint_id: str = ""
     execution_attempt_id: str = ""
     session_id: str = ""
@@ -25,6 +26,7 @@ class DurableExecutionContext(BaseModel):
         "task_id",
         "branch_id",
         "parent_task_id",
+        "root_task_id",
         "checkpoint_id",
         "execution_attempt_id",
         "session_id",
@@ -42,6 +44,8 @@ class DurableExecutionContext(BaseModel):
         return {
             "task_id": self.task_id,
             "branch_id": self.branch_id,
+            "parent_task_id": self.parent_task_id,
+            "root_task_id": self.root_task_id,
             "checkpoint_id": self.checkpoint_id,
             "execution_attempt_id": self.execution_attempt_id,
             "session_id": self.session_id,

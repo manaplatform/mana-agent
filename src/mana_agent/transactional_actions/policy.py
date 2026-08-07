@@ -21,6 +21,7 @@ from .models import (
     StrictModel,
     utc_now,
 )
+from .task_scope import computer_task_wide_eligible
 
 
 class PolicyScope(StrictModel):
@@ -40,6 +41,9 @@ class PolicyConfig(StrictModel):
     allow_insecure_http: bool = False
     allow_safe_workspace_file_writes: bool = True
     allow_narrow_transaction_approval: bool = True
+    # After one trusted approval, compatible computer filesystem creates/moves
+    # under the same durable task lineage may proceed without re-prompting.
+    allow_task_wide_computer_approval: bool = True
     safe_shell_executables: tuple[str, ...] = ("git", "python", "python3", "pytest", "ruff", "mypy")
     secret_argument_names: tuple[str, ...] = (
         "authorization", "api_key", "apikey", "password", "secret", "token", "credential"
@@ -67,21 +71,30 @@ class ActionPolicy:
             reason_codes=codes,
             explanation=explanation,
             matched_rules=rules,
-            required_approval_scope=(
-                ApprovalScope.TRANSACTION
-                if outcome is PolicyOutcome.REQUIRE_APPROVAL
-                and action.transaction_id
-                and self.config.allow_narrow_transaction_approval
-                else ApprovalScope.ACTION_ONCE
-                if outcome is PolicyOutcome.REQUIRE_APPROVAL
-                else None
-            ),
+            required_approval_scope=self._approval_scope(outcome, action),
             policy_fingerprint=self.config.fingerprint(),
             decided_at=now,
             expires_at=min(action.expires_at, now + timedelta(seconds=self.config.approval_ttl_seconds)),
             assigned_reviewer_type=self.config.approval_reviewer_type,
             assigned_reviewer_id=self.config.approval_reviewer_id,
         )
+
+    def _approval_scope(
+        self, outcome: PolicyOutcome, action: ActionIntent
+    ) -> ApprovalScope | None:
+        if outcome is not PolicyOutcome.REQUIRE_APPROVAL:
+            return None
+        if (
+            action.transaction_id
+            and self.config.allow_narrow_transaction_approval
+        ):
+            return ApprovalScope.TRANSACTION
+        if (
+            self.config.allow_task_wide_computer_approval
+            and computer_task_wide_eligible(action)
+        ):
+            return ApprovalScope.TASK
+        return ApprovalScope.ACTION_ONCE
 
     def _classify(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
         scope_decision = self._scoped_policy(action)
@@ -104,12 +117,7 @@ class ActionPolicy:
         if action.tool_name == "api_integration":
             return self._api_integration(action)
         if action.tool_name == "computer":
-            return (
-                PolicyOutcome.REQUIRE_APPROVAL,
-                ["computer_control"],
-                "Computer-control actions require exact approval.",
-                ["approve_computer_control"],
-            )
+            return self._computer(action)
         if action.tool_name == "mcp":
             return (
                 PolicyOutcome.REQUIRE_APPROVAL,
@@ -118,6 +126,28 @@ class ActionPolicy:
                 ["approve_external_mcp_operation"],
             )
         return PolicyOutcome.DENY, ["unclassified_tool"], "No policy rule safely classifies this tool.", ["default_deny"]
+
+    def _computer(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
+        if (
+            self.config.allow_task_wide_computer_approval
+            and computer_task_wide_eligible(action)
+        ):
+            return (
+                PolicyOutcome.REQUIRE_APPROVAL,
+                ["computer_control_task_wide"],
+                (
+                    "Computer filesystem mutations under this durable task require one "
+                    "task-wide approval; later compatible creates/moves/renames in the "
+                    "same task lineage reuse that approval until it expires."
+                ),
+                ["approve_computer_control_task"],
+            )
+        return (
+            PolicyOutcome.REQUIRE_APPROVAL,
+            ["computer_control"],
+            "Computer-control actions require exact approval.",
+            ["approve_computer_control"],
+        )
 
     def _canvas(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
         allowed_operations = {

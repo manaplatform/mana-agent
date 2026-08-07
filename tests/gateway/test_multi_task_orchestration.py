@@ -177,6 +177,66 @@ def test_approval_wait_keeps_dependents_queued_for_safe_resume(tmp_path: Path) -
     assert board.get_task(by_id["dependent"].task_id).status == TaskStatus.QUEUED
 
 
+def test_worker_threads_inherit_parent_contextvars_for_computer_client(
+    tmp_path: Path,
+) -> None:
+    """Computer route children must see the authenticated parent-turn client.
+
+    Multi-task children run on a ThreadPoolExecutor. Without explicit ContextVar
+    propagation, computer_decision_scope fails with:
+    'Computer decision scope requires an authenticated client context.'
+    """
+    from mana_agent.integrations.computer_control.context import (
+        computer_client_scope,
+        computer_decision_scope,
+        current_computer_client,
+    )
+
+    board = TaskBoard(tmp_path)
+    root = _root(board)
+    plan = _plan(_item("directory"), _item("file", depends_on=["directory"]))
+    orchestrator = MultiTaskOrchestrator(llm=object(), taskboard=board)
+    observed: list[tuple[str, str | None, str | None]] = []
+
+    def execute(item: MultiTaskItem, task_id: str) -> MultiTaskChildResult:
+        client = current_computer_client()
+        session_id = client.session_id if client is not None else None
+        client_type = client.client_type if client is not None else None
+        # Mirror the computer route entry: decision scope requires client identity.
+        with computer_decision_scope(f"{item.local_id}:computer-entry-decision"):
+            scoped = current_computer_client()
+            observed.append(
+                (
+                    item.local_id,
+                    session_id,
+                    scoped.session_id if scoped is not None else None,
+                )
+            )
+            assert scoped is not None
+            assert scoped.client_type == "tui"
+            assert f"{item.local_id}:computer-entry-decision" in scoped.allowed_decision_ids
+        return MultiTaskChildResult(
+            item.local_id, task_id, item.title, "computer", "completed", result="ok"
+        )
+
+    with computer_client_scope("session-1", "tui", workspace_root=str(tmp_path)):
+        results = orchestrator.execute(
+            root_task_id=root.task_id, plan=plan, execute_child=execute
+        )
+        # Child decision scopes must not leak allowed_decision_ids into the parent.
+        parent_client = current_computer_client()
+        assert parent_client is not None
+        assert parent_client.session_id == "session-1"
+        assert parent_client.client_type == "tui"
+        assert parent_client.allowed_decision_ids == frozenset()
+
+    assert [item.status for item in results] == ["completed", "completed"]
+    assert observed == [
+        ("directory", "session-1", "session-1"),
+        ("file", "session-1", "session-1"),
+    ]
+
+
 def test_resume_materialization_does_not_duplicate_persisted_children(tmp_path: Path) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
@@ -220,3 +280,358 @@ def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> N
     assert calls == ["unfinished"]
     assert results[0].status == "completed"
     assert results[0].result == "already done"
+
+
+def test_multi_task_capacity_estimate_ignores_depleted_session_remaining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compound children must size against model capacity, not parent planning spend."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from mana_agent.context_cost.accounting import (
+        ModelContextLimitError,
+        ModelTokenAccountingService,
+        TokenEstimationRequest,
+    )
+    from mana_agent.context_cost.profiles import (
+        ModelIdentity,
+        ModelTokenProfile,
+        ModelTokenProfileResolver,
+    )
+    from mana_agent.context_cost.store import AccountingStore
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lanes import LaneId, default_lane_contracts
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    profile = ModelTokenProfile(
+        ModelIdentity("fixture", "capacity-model"),
+        context_window=8_192,
+        max_output_tokens=1_024,
+        input_price_per_million=Decimal("1"),
+        output_price_per_million=Decimal("2"),
+        supports_usage_reporting=True,
+        source="test",
+        confidence="high",
+    )
+    accounting = ModelTokenAccountingService(
+        ModelTokenProfileResolver((profile,)),
+        store=AccountingStore(tmp_path / "accounting"),
+        safety_margin_ratio=Decimal("0.05"),
+    )
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = SimpleNamespace(
+        select_lane=lambda **_kwargs: LaneId.RESEARCH,
+        contracts=default_lane_contracts(),
+    )
+    gateway._stack = SimpleNamespace(
+        context_cost_governor=SimpleNamespace(accounting=accounting)
+    )
+
+    # Shared session remaining is intentionally too small for a normal estimate.
+    with pytest.raises(ModelContextLimitError, match="effective limit is 50"):
+        accounting.estimate(
+            TokenEstimationRequest(
+                model_identity=ModelIdentity("fixture", "capacity-model"),
+                components={"user_request": "create assets " * 20},
+                requested_output_tokens=256,
+                task_token_remaining=50,
+                session_token_remaining=50,
+            )
+        )
+
+    estimate = gateway._multi_task_capacity_estimate(
+        provider="fixture",
+        model="capacity-model",
+        request_text="create assets " * 20,
+        entry_route="coding",
+        expected_model_calls=1,
+        requested_output_tokens=256,
+    )
+    assert estimate.total_tokens > 50
+    assert estimate.profile.context_window == 8_192
+
+
+def test_execution_token_estimate_refreshes_budget_for_followup_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second/third session messages must recalculate admission budget before sizing."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from mana_agent.context_cost.governor import ContextCostGovernor
+    from mana_agent.context_cost.profiles import (
+        ModelIdentity,
+        ModelTokenProfile,
+        ModelTokenProfileResolver,
+    )
+    from mana_agent.context_cost.store import AccountingStore
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lanes import LaneId, default_lane_contracts
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    settings = SimpleNamespace(
+        mana_context_governor_enabled=True,
+        mana_context_governor_mode="enforce",
+        mana_routing_task_token_budget=500,
+        mana_routing_session_cost_budget=None,
+        mana_routing_verification_reserve_ratio=0.15,
+        mana_context_cost_log_enabled=False,
+        mana_context_cost_log_retention_days=30,
+        mana_context_artifact_retention_days=30,
+        mana_context_unknown_model_policy="conservative",
+        mana_context_unknown_model_context_window=8_192,
+        mana_context_unknown_model_max_output_tokens=1_024,
+        mana_context_estimation_safety_margin_ratio=0.05,
+        mana_context_default_output_ratio=0.20,
+        mana_context_historical_prediction_enabled=False,
+    )
+    governor = ContextCostGovernor(session_id="session-multi-msg", settings=settings)
+    profile = ModelTokenProfile(
+        ModelIdentity("fixture", "followup-model"),
+        context_window=8_192,
+        max_output_tokens=1_024,
+        input_price_per_million=Decimal("1"),
+        output_price_per_million=Decimal("2"),
+        supports_usage_reporting=True,
+        source="test",
+        confidence="high",
+    )
+    governor.profile_resolver = ModelTokenProfileResolver((profile,))
+    governor.accounting = governor.accounting.__class__(
+        governor.profile_resolver,
+        store=AccountingStore(tmp_path / "accounting-followup"),
+        safety_margin_ratio=Decimal("0.05"),
+        historical_prediction_enabled=False,
+    )
+    # Fully spend the first-message task envelope so remaining is 0.
+    governor.ledger.tokens_used = int(governor.ledger.token_limit or 0)
+    assert governor._implementation_tokens_remaining() == 0
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.config = SimpleNamespace(agent_max_steps=6)
+    gateway._lane_coordinator = SimpleNamespace(
+        select_lane=lambda **_kwargs: LaneId.RESEARCH,
+        contracts=default_lane_contracts(),
+    )
+    gateway._stack = SimpleNamespace(context_cost_governor=governor)
+
+    decision = SimpleNamespace(
+        provider="fixture",
+        selected_model="followup-model",
+        estimated_output_tokens=128,
+        expected_model_calls=1,
+    )
+    estimate = gateway._execution_token_estimate(
+        entry_route="search",
+        execution_decision=decision,
+        request_text="follow up: expand the previous answer with more detail",
+        session_id="session-multi-msg",
+    )
+    assert estimate.total_tokens > 0
+    assert estimate.effective_total_limit >= estimate.total_tokens
+    assert governor._implementation_tokens_remaining() >= 500
+
+
+def test_multi_task_parent_envelope_expands_for_parallel_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root multi-task reservation must grow so sibling children can both reserve."""
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lane_coordinator import LaneCoordinator
+    from mana_agent.gateway.lanes import LaneId
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root_path = tmp_path / "repo"
+    root_path.mkdir()
+    coordinator = LaneCoordinator(root_path)
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+    gateway._multi_task_budget_lock = threading.Lock()
+
+    board = coordinator.taskboard
+    root_task = board.create_task(title="Compound", user_request="Do A and B")
+    first_task = board.create_child_task(
+        root_task.task_id,
+        title="A",
+        user_request="Do A",
+        decomposition_local_id="a",
+        acceptance_criteria=["A done"],
+    )
+    second_task = board.create_child_task(
+        root_task.task_id,
+        title="B",
+        user_request="Do B",
+        decomposition_local_id="b",
+        acceptance_criteria=["B done"],
+    )
+
+    # Intentionally under-size the root the way the pre-fix path did (goal-only).
+    root = coordinator.reserve(
+        normalized_intent="Do A and B",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-multi",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        requested_input_tokens=64,
+        requested_output_tokens=100,
+        task_type="multi_task_root",
+        taskboard_task_id=root_task.task_id,
+    )
+    coordinator.start(root)
+
+    with gateway._multi_task_budget_lock:
+        gateway._ensure_multi_task_parent_budget(
+            root.execution.task_id,
+            required_child_tokens=500,
+            child_estimated_cost=None,
+        )
+        first = coordinator.reserve(
+            normalized_intent="Do A",
+            lane_id=LaneId.CODING,
+            session_id="session-multi",
+            workspace_id=board.store.workspace_id,
+            repository_id=board.store.repository_id,
+            parent_task_id=root.execution.task_id,
+            root_task_id=root.execution.root_task_id,
+            requested_input_tokens=200,
+            requested_output_tokens=300,
+            task_type="multi_task_child",
+            taskboard_task_id=first_task.task_id,
+        )
+        gateway._ensure_multi_task_parent_budget(
+            root.execution.task_id,
+            required_child_tokens=600,
+            child_estimated_cost=None,
+        )
+        second = coordinator.reserve(
+            normalized_intent="Do B",
+            lane_id=LaneId.MEDIA,
+            session_id="session-multi",
+            workspace_id=board.store.workspace_id,
+            repository_id=board.store.repository_id,
+            parent_task_id=root.execution.task_id,
+            root_task_id=root.execution.root_task_id,
+            requested_input_tokens=250,
+            requested_output_tokens=350,
+            task_type="multi_task_child",
+            taskboard_task_id=second_task.task_id,
+        )
+
+    parent = coordinator.inspect_task(root.execution.task_id)
+    assert first.execution.budget.reserved_tokens == 500
+    assert second.execution.budget.reserved_tokens == 600
+    assert parent.budget.reserved_tokens >= 500 + 600
+    assert parent.budget.revisions
+    assert parent.budget.revisions[-1]["reason"] == "multi-task child budget envelope"
+
+
+def test_multi_task_mid_run_forecast_expands_parent_before_child_recalc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider-call forecasts for multi-task children must grow the parent envelope."""
+    from mana_agent.execution_supervisor.models import BudgetForecast
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.lane_coordinator import LaneCoordinator
+    from mana_agent.gateway.lanes import LaneId
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root_path = tmp_path / "repo"
+    root_path.mkdir()
+    coordinator = LaneCoordinator(root_path)
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+    gateway._multi_task_budget_lock = threading.Lock()
+
+    board = coordinator.taskboard
+    root_task = board.create_task(title="Compound", user_request="assets and logo")
+    child_task = board.create_child_task(
+        root_task.task_id,
+        title="Create project assets",
+        user_request="create assets",
+        decomposition_local_id="create_project_assets",
+        acceptance_criteria=["assets exist"],
+    )
+
+    root = coordinator.reserve(
+        normalized_intent="assets and logo",
+        lane_id=LaneId.RESEARCH,
+        session_id="session-recalc",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        requested_input_tokens=100,
+        requested_output_tokens=100,
+        task_type="multi_task_root",
+        taskboard_task_id=root_task.task_id,
+    )
+    coordinator.start(root)
+    # Sibling already holds most of the parent remaining capacity.
+    sibling_task = board.create_child_task(
+        root_task.task_id,
+        title="Create project logo",
+        user_request="create logo",
+        decomposition_local_id="create_project_logo",
+        acceptance_criteria=["logo exists"],
+    )
+    gateway._ensure_multi_task_parent_budget(
+        root.execution.task_id,
+        required_child_tokens=150,
+        child_estimated_cost=None,
+    )
+    sibling = coordinator.reserve(
+        normalized_intent="create logo",
+        lane_id=LaneId.MEDIA,
+        session_id="session-recalc",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=50,
+        requested_output_tokens=100,
+        task_type="multi_task_child",
+        taskboard_task_id=sibling_task.task_id,
+    )
+    coordinator.start(sibling)
+
+    gateway._ensure_multi_task_parent_budget(
+        root.execution.task_id,
+        required_child_tokens=120,
+        child_estimated_cost=None,
+    )
+    child = coordinator.reserve(
+        normalized_intent="create assets",
+        lane_id=LaneId.CODING,
+        session_id="session-recalc",
+        workspace_id=board.store.workspace_id,
+        repository_id=board.store.repository_id,
+        parent_task_id=root.execution.task_id,
+        root_task_id=root.execution.root_task_id,
+        requested_input_tokens=40,
+        requested_output_tokens=80,
+        task_type="multi_task_child",
+        taskboard_task_id=child_task.task_id,
+    )
+    coordinator.start(child)
+
+    # Real Codex/coding forecast far exceeds the provisional multi-task child reserve.
+    gateway._recalculate_active_lane_budget(
+        BudgetForecast(
+            task_id=child.execution.task_id,
+            forecast_input_tokens=2_000,
+            forecast_output_tokens=1_500,
+            forecast_cost=0.05,
+            accounting_reservation_id="reservation_coding_call",
+            reason="provider-call forecast",
+        )
+    )
+
+    revised_child = coordinator.inspect_task(child.execution.task_id)
+    parent = coordinator.inspect_task(root.execution.task_id)
+    assert revised_child.budget.reserved_tokens >= 3_500
+    assert parent.budget.reserved_tokens >= (
+        sibling.execution.budget.reserved_tokens + revised_child.budget.reserved_tokens
+    )
+    assert any(
+        item.get("reason") == "multi-task child budget envelope"
+        for item in parent.budget.revisions
+    )
