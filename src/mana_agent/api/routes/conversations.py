@@ -14,6 +14,11 @@ from mana_agent.api.exceptions import ManaApiError
 from mana_agent.services.conversation_service import ConversationService
 from mana_agent.services.execution_event_hub import get_execution_event_hub
 from mana_agent.ui.streamlit_helpers import find_mana_root
+from mana_agent.utils.path_safety import (
+    env_allowed_roots,
+    resolve_user_path,
+    resolve_within_allowed_roots,
+)
 from mana_agent.workspaces.paths import repository_id_for_path
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -26,17 +31,52 @@ def _require_mutation_token(authorization: str | None) -> None:
         raise ManaApiError(401, "A valid API bearer token is required.")
 
 
+def _local_default_roots() -> list[Path]:
+    """Trusted bases when MANA_WORKSPACE_ALLOWED_ROOTS is unset (local dashboard)."""
+    import tempfile
+
+    candidates = [
+        Path.home(),
+        Path.cwd(),
+        find_mana_root(),
+        Path(tempfile.gettempdir()),
+    ]
+    roots: list[Path] = []
+    for item in candidates:
+        try:
+            roots.append(item.resolve(strict=False))
+        except OSError:
+            continue
+    return roots
+
+
+def _authorize_root_path(raw: str) -> Path:
+    """Resolve a user-supplied repository root under the configured allowlist."""
+    allowed = env_allowed_roots() or _local_default_roots()
+    try:
+        return resolve_within_allowed_roots(raw, allowed, require_allowlist=True)
+    except PermissionError as exc:
+        raise ManaApiError(403, "Path is outside the configured allowlist.") from exc
+    except ValueError as exc:
+        raise ManaApiError(400, "Invalid path.") from exc
+
+
 def _resolve_root(
     root: str | None = None, repository_id: str | None = None
 ) -> tuple[Path, str]:
     if repository_id:
         try:
             repo = WorkspaceService().store.get_repository(repository_id)
-            path = Path(repo.canonical_path).expanduser().resolve()
+            path = resolve_user_path(repo.canonical_path)
             return path, repository_id
         except FileNotFoundError as exc:
             raise ManaApiError(404, "Repository not found.") from exc
-    path = find_mana_root(Path(root).expanduser().resolve() if root else None)
+        except ValueError as exc:
+            raise ManaApiError(400, "Invalid repository path.") from exc
+    if root:
+        path = find_mana_root(_authorize_root_path(root))
+    else:
+        path = find_mana_root(None)
     return path, repository_id_for_path(path)
 
 
@@ -116,24 +156,30 @@ def dashboard_live_chat(
     from mana_agent.dashboard.components.live_chat import live_chat_html
 
     base = str(request.base_url).rstrip("/")
-    html = live_chat_html(
-        conversation_id=conversation_id,
-        root=service.root,
-        api_base=base,
-        messages=payload["messages"],
-        events=payload["events"],
-        height=max(320, min(int(height or 680), 1200)),
-    )
+    try:
+        html = live_chat_html(
+            conversation_id=conversation_id,
+            root=service.root,
+            api_base=base,
+            messages=payload["messages"],
+            events=payload["events"],
+            height=max(320, min(int(height or 680), 1200)),
+        )
+    except ValueError as exc:
+        raise ManaApiError(400, str(exc)) from exc
     return HTMLResponse(
-        html,
+        content=html,
         headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
                 "default-src 'none'; script-src 'unsafe-inline'; "
                 "style-src 'unsafe-inline'; connect-src 'self' ws: wss:; "
-                "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
+                "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*; "
+                "base-uri 'none'"
             ),
             "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "SAMEORIGIN",
         },
     )
 
@@ -226,9 +272,10 @@ def send_message(
     except FileNotFoundError as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
     except ValueError as exc:
-        raise ManaApiError(422, str(exc)) from exc
+        # Do not reflect raw exception text to the client.
+        raise ManaApiError(422, "Message was rejected.") from exc
     except Exception as exc:  # noqa: BLE001
-        raise ManaApiError(500, "Chat execution failed.", error=str(exc)) from exc
+        raise ManaApiError(500, "Chat execution failed.", error="execution_failed") from exc
     return {"ok": True, **result}
 
 

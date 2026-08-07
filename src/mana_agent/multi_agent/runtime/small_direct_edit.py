@@ -17,13 +17,15 @@ _BROAD_RE = re.compile(
     re.IGNORECASE,
 )
 _VERSION_RE = re.compile(r"\bv?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b")
+# Linear path matcher: single bounded character class (no nested quantifiers).
 _PATH_RE = re.compile(
-    r"(?P<path>(?:[\w.()@+-]+/)*[\w.()@+-]+\.(?:md|markdown|rst|txt|toml|json|ya?ml|py|ts|tsx|js|jsx))",
+    r"(?P<path>[\w.()@+/-]{1,240}\.(?:md|markdown|rst|txt|toml|json|ya?ml|py|ts|tsx|js|jsx))",
     re.IGNORECASE,
 )
 _README_VERSION_LINE_RE = re.compile(
     r"^(?P<prefix>.*?\bCurrent documented version:\s+\*\*v?)(?P<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?P<suffix>\*\*\..*)$"
 )
+_MAX_REQUEST_SCAN = 4000
 _DOC_SUFFIXES = {".md", ".markdown", ".rst", ".txt"}
 _DOC_BASENAMES = {"readme", "changelog", "license"}
 
@@ -63,16 +65,25 @@ def _is_docs_only(path: str) -> bool:
 
 
 def _extract_explicit_path(request: str) -> str | None:
-    for match in _PATH_RE.finditer(str(request or "")):
+    text = str(request or "")[:_MAX_REQUEST_SCAN]
+    for match in _PATH_RE.finditer(text):
         raw = _normalize_user_path(match.group("path"))
-        if raw and not raw.startswith("-"):
-            return raw
+        if not raw or raw.startswith("-") or ".." in raw.split("/"):
+            continue
+        # Reject absolute or traversal-looking matches; only relative repo paths.
+        if raw.startswith("/") or ":/" in raw or raw.startswith("~"):
+            continue
+        return raw
     return None
 
 
 def _extract_new_value(request: str) -> str | None:
-    text = str(request or "")
-    to_match = re.search(r"\b(?:to|as|=)\s+(v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b", text, re.IGNORECASE)
+    text = str(request or "")[:_MAX_REQUEST_SCAN]
+    to_match = re.search(
+        r"\b(?:to|as|=)\s+(v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b",
+        text,
+        re.IGNORECASE,
+    )
     if to_match:
         return to_match.group(1)
     version_match = _VERSION_RE.search(text)

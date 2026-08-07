@@ -521,7 +521,23 @@ def test_resumed_mcp_action_surfaces_its_result_in_chat_history(
         title="Approved MCP action completed",
         action=action,
         inbox_item_id="inbox_context7",
-        result={"ok": True, "content": [{"type": "text", "text": "FastAPI docs"}]},
+        result={
+            "ok": True,
+            "content": [
+                {
+                    "type": "text",
+                    "text": "FastAPI docs",
+                    "annotations": None,
+                    "meta": None,
+                }
+            ],
+            "duration_ms": 12.5,
+            "is_error": False,
+            "server_id": "context7",
+            "structured_content": None,
+            "tool_name": "query-docs",
+            "transport": "stdio",
+        },
     )
 
     assistant_messages = [
@@ -530,11 +546,15 @@ def test_resumed_mcp_action_surfaces_its_result_in_chat_history(
     activity_events = [
         event for event in history.get_events() if isinstance(event, CodingActivityEvent)
     ]
+    content = assistant_messages[-1].content
     assert assistant_messages[-1].turn_id == "task_context7"
-    assert "mcp.context7.query-docs" in assistant_messages[-1].content
-    assert "FastAPI docs" in assistant_messages[-1].content
-    assert activity_events[-1].activity["output_preview"]
-    assert emitted[-1]["output_preview"]
+    assert "mcp.context7.query-docs" in content
+    assert "Documentation (untrusted data):" in content
+    assert "FastAPI docs" in content
+    assert "```json" not in content
+    assert '"annotations"' not in content
+    assert activity_events[-1].activity["output_preview"] == "FastAPI docs"
+    assert emitted[-1]["output_preview"] == "FastAPI docs"
 
 
 def test_capability_error_records_terminal_computer_notice(tmp_path: Path, monkeypatch) -> None:

@@ -132,8 +132,10 @@ def get_canvas_surface(
             conversation_id, surface_id, after_sequence=after_sequence
         )
     except CanvasStateError as exc:
+        expired = "expired" in str(exc).lower()
         raise ManaApiError(
-            410 if "expired" in str(exc).lower() else 404, str(exc)
+            410 if expired else 404,
+            "Canvas surface expired." if expired else "Canvas surface not found.",
         ) from exc
     if snapshot.conversation_id != conversation_id:
         raise ManaApiError(403, "Surface does not belong to this conversation.")
@@ -169,7 +171,9 @@ def submit_canvas_action(
             )
         )
     except (CanvasStateError, ValueError) as exc:
-        raise ManaApiError(409, str(exc), error="canvas_action_rejected") from exc
+        raise ManaApiError(
+            409, "Canvas action was rejected.", error="canvas_action_rejected"
+        ) from exc
     return {"ok": True, "result": result.model_dump(mode="json")}
 
 
@@ -191,7 +195,7 @@ def close_canvas_surface(
             correlation_id=payload.correlation_id,
         )
     except CanvasStateError as exc:
-        raise ManaApiError(409, str(exc)) from exc
+        raise ManaApiError(409, "Canvas surface could not be closed.") from exc
     return {"ok": True, "snapshot": snapshot.model_dump(mode="json")}
 
 
@@ -208,16 +212,19 @@ def dashboard_live_canvas(
     path, service = _canvas(root, repository_id)
     from mana_agent.dashboard.components.live_canvas import live_canvas_html
 
-    html = live_canvas_html(
-        conversation_id=conversation_id,
-        root=path,
-        api_base=str(request.base_url).rstrip("/"),
-        surface_id=surface_id,
-        height=max(360, min(int(height or 760), 1400)),
-        generation_timeout_seconds=service.config.generation_timeout_seconds,
-    )
+    try:
+        html = live_canvas_html(
+            conversation_id=conversation_id,
+            root=path,
+            api_base=str(request.base_url).rstrip("/"),
+            surface_id=surface_id,
+            height=max(360, min(int(height or 760), 1400)),
+            generation_timeout_seconds=service.config.generation_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise ManaApiError(400, str(exc)) from exc
     return HTMLResponse(
-        html,
+        content=html,
         headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
@@ -225,9 +232,10 @@ def dashboard_live_canvas(
                 "script-src 'unsafe-inline'; "
                 "style-src 'unsafe-inline'; connect-src 'self' ws: wss:; "
                 "form-action 'none'; frame-ancestors 'self' http://localhost:* "
-                "http://127.0.0.1:*"
+                "http://127.0.0.1:*; base-uri 'none'"
             ),
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "SAMEORIGIN",
         },
     )

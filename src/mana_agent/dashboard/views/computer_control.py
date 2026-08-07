@@ -62,7 +62,14 @@ def render(_root: Path) -> None:
             key=f"computer-permission-{scope}",
         )
     if st.button("Save computer-control settings", type="primary"):
+        from mana_agent.utils.path_safety import parse_absolute_allowed_paths
+
         payload = settings.model_dump()
+        try:
+            parsed_paths = parse_absolute_allowed_paths(allowed_paths.splitlines())
+        except ValueError as exc:
+            st.error(f"Settings were not saved: {exc}")
+            return
         payload.update(
             {
                 "enabled": enabled,
@@ -70,11 +77,7 @@ def render(_root: Path) -> None:
                 "require_local_confirmation_for_high_risk": require_local,
                 "audit_enabled": audit_enabled,
                 "audit_retention_days": int(retention),
-                "allowed_paths": [
-                    Path(line.strip()).expanduser()
-                    for line in allowed_paths.splitlines()
-                    if line.strip()
-                ],
+                "allowed_paths": parsed_paths,
                 "permissions": permission_values,
             }
         )

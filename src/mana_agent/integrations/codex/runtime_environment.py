@@ -53,20 +53,37 @@ class CodexRuntimeEnvironment:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         home = Path(tempfile.mkdtemp(prefix="run-", dir=root))
         home.chmod(0o700)
+        # Keep the secret only in the child environment. The on-disk config is
+        # rendered from non-secret fields so credentials are never written in clear text.
+        api_key = config.api_key
         try:
-            rendered = config.to_toml()
+            from dataclasses import replace
+
+            non_secret = replace(config, api_key="")
+            rendered = non_secret.to_toml()
             tomllib.loads(rendered)
+            if api_key and api_key in rendered:
+                raise CodexConfigurationError(
+                    "Refusing to write Codex configuration that contains credential material."
+                )
             config_path = home / "config.toml"
             config_path.write_text(rendered, encoding="utf-8")
             config_path.chmod(0o600)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             shutil.rmtree(home, ignore_errors=True)
-            raise CodexConfigurationError(f"Unable to create valid isolated Codex configuration: {exc}") from exc
+            raise CodexConfigurationError(
+                "Unable to create valid isolated Codex configuration."
+            ) from exc
+        except CodexConfigurationError:
+            shutil.rmtree(home, ignore_errors=True)
+            raise
         environment = {
-            key: value for key, value in os.environ.copy().items() if key not in _REMOVED_ENVIRONMENT_KEYS
+            key: value
+            for key, value in os.environ.copy().items()
+            if key not in _REMOVED_ENVIRONMENT_KEYS
         }
         environment["CODEX_HOME"] = str(home)
-        environment[RUNTIME_API_KEY_ENV] = config.api_key
+        environment[RUNTIME_API_KEY_ENV] = api_key
         return CodexRuntimeContext(config=config, home=home, environment=environment)
 
 

@@ -4,6 +4,39 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Patched CodeQL high/medium findings across dashboard API, gateway, Codex
+  runtime, auto-chat classifiers, live canvas/chat JS, and CI:
+  - Reflected XSS: dashboard live-chat/live-canvas HTML embeds IDs through a
+    strict allowlist and JSON script embedding that Unicode-escapes `<>&`.
+  - Path injection: shared `path_safety` confinement (`startswith` after
+    resolve) for workspace roots, conversation/analyze roots, artifact
+    membership checks, and computer-control allowed paths.
+  - Clear-text credential storage: Codex runtime writes config TOML only after
+    stripping the API key; the key stays in the child environment only.
+  - Weak sensitive hashing: Codex credential/runtime fingerprints use PBKDF2-HMAC
+    instead of raw SHA-256 on the API key.
+  - ReDoS: bounded input length and linear path/follow-up regexes in
+    `small_direct_edit` and `auto_chat`.
+  - Exception exposure: workspace search and several API handlers return generic
+    client errors instead of raw exception text.
+  - Prototype pollution: live canvas JSON-pointer updates reject
+    `__proto__` / `constructor` / `prototype` keys.
+  - postMessage: live chat targets an explicit parent origin (same-origin or
+    loopback referrer), not `*`.
+  - CI: workflow sets `permissions: contents: read`.
+  - User verification required:
+    `python -m pytest tests/test_api_conversations.py tests/test_canvas.py tests/test_codex_runtime.py tests/test_auto_chat.py tests/test_small_direct_edit.py tests/test_dashboard_live_chat.py -q`
+    and `node --test tests/dashboard/live_canvas_reducer.test.mjs`.
+
+- Improved approved MCP chat output so documentation-style provider results
+  (for example Context7 `query-docs` / `resolve-library-id`) show extracted
+  text content instead of the raw transport envelope JSON. Doc-oriented
+  operations are labeled **Documentation (untrusted data)** with a compact
+  status line; non-text results still fall back to compact JSON. Activity
+  previews use the same extracted text. Presentation only; no routing or
+  fallback behavior was added.
+  - User verification required: `python -m pytest tests/test_mcp.py tests/gateway/test_chat_gateway.py::test_resumed_mcp_action_surfaces_its_result_in_chat_history -q`.
+
 - Bumped security-sensitive dependency floors to clear open Dependabot alerts for
   `cryptography`, `langchain`, and `langchain-openai`:
   - `cryptography>=49.0.0,<51.0` (path-building DoS, SECT subgroup validation,

@@ -91,23 +91,41 @@ VERIFY_TOOLS = ["run_command", "run_script_once", "verify_project", "git_status"
 REVIEW_TOOLS = ["git_status", "git_diff", "git_log", "git_branch", "git_remote", "read_file", "repo_batch_read", "ls", "list_files", "repo_search", "repo_batch_search"]
 
 
+# Linear keyword matchers: fixed alternations with word boundaries, no nested quantifiers.
 _EDIT_RE = re.compile(
-    r"\b(fix|add|implement|change|update|rename|refactor|create|delete|remove|migrate|patch|edit|modify|rewrite|build)\b",
+    r"\b(?:fix|add|implement|change|update|rename|refactor|create|delete|remove|migrate|patch|edit|modify|rewrite|build)\b",
     re.IGNORECASE,
 )
 _PLAN_RE = re.compile(
-    r"\b(plan|prompt|strategy|approach|design|architecture|roadmap|implementation steps|how should we implement)\b",
+    r"\b(?:plan|prompt|strategy|approach|design|architecture|roadmap|implementation steps|how should we implement)\b",
     re.IGNORECASE,
 )
 _EXECUTE_PLAN_RE = re.compile(
-    r"\b(implement|execute|run|apply)\s+(?:the\s+|last\s+|that\s+|current\s+)?plan\b",
+    r"\b(?:implement|execute|run|apply)\s+(?:the\s+|last\s+|that\s+|current\s+)?plan\b",
     re.IGNORECASE,
 )
-_REVIEW_RE = re.compile(r"\b(review|check my changes|inspect diff|what is wrong|quality|code review)\b", re.IGNORECASE)
-_VERIFY_RE = re.compile(r"\b(run tests|verify|run checks|pytest|lint|typecheck|test this|check this)\b", re.IGNORECASE)
-_ANALYZE_RE = re.compile(r"\b(analyze project|analyze module|full analysis|project analysis|report)\b", re.IGNORECASE)
-_ANSWER_RE = re.compile(r"\b(where|what|why|explain|how does|find|locate|show me|which file)\b", re.IGNORECASE)
-_FOLLOWUP_RE = re.compile(r"^\s*(continue|do it|now implement|verify|fix it|proceed|go ahead)\s*[.!]?\s*$", re.IGNORECASE)
+_REVIEW_RE = re.compile(
+    r"\b(?:review|check my changes|inspect diff|what is wrong|quality|code review)\b",
+    re.IGNORECASE,
+)
+_VERIFY_RE = re.compile(
+    r"\b(?:run tests|verify|run checks|pytest|lint|typecheck|test this|check this)\b",
+    re.IGNORECASE,
+)
+_ANALYZE_RE = re.compile(
+    r"\b(?:analyze project|analyze module|full analysis|project analysis|report)\b",
+    re.IGNORECASE,
+)
+_ANSWER_RE = re.compile(
+    r"\b(?:where|what|why|explain|how does|find|locate|show me|which file)\b",
+    re.IGNORECASE,
+)
+# Match already-stripped input; avoid surrounding \s* quantifiers (ReDoS).
+_FOLLOWUP_RE = re.compile(
+    r"^(?:continue|do it|now implement|verify|fix it|proceed|go ahead)[.!]?$",
+    re.IGNORECASE,
+)
+_MAX_CLASSIFY_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -132,7 +150,7 @@ class AutoChatSessionState:
 
 def classify_auto_chat_intent(message: str) -> AutoChatMode:
     """Classify a non-slash chat message into a bounded execution mode."""
-    text = str(message or "").strip()
+    text = str(message or "").strip()[:_MAX_CLASSIFY_CHARS]
     if not text:
         return AutoChatMode.ANSWER_ONLY
     if text.startswith("/"):
@@ -155,11 +173,11 @@ def classify_auto_chat_intent(message: str) -> AutoChatMode:
 
 
 def is_plan_execution_request(message: str) -> bool:
-    return bool(_EXECUTE_PLAN_RE.search(str(message or "")))
+    return bool(_EXECUTE_PLAN_RE.search(str(message or "")[:_MAX_CLASSIFY_CHARS]))
 
 
 def is_followup_auto_message(message: str) -> bool:
-    return bool(_FOLLOWUP_RE.match(str(message or "").strip()))
+    return bool(_FOLLOWUP_RE.match(str(message or "").strip()[:_MAX_CLASSIFY_CHARS]))
 
 
 def resolve_auto_followup(message: str, state: AutoChatSessionState | None) -> str:

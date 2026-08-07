@@ -553,7 +553,23 @@
       reduce(state, { type: "socket", ready: false });
       // Keep the Streamlit shell informed when it later gains a message bridge.
       // The embedded client itself immediately reconnects to the new session.
-      window.parent.postMessage({ type: "mana-live-chat.session-replaced", conversationId: replacementId }, "*");
+      // Restrict target origin: same origin, or the embedding referrer when it is loopback.
+      const parentOrigin = (() => {
+        try {
+          if (document.referrer) {
+            const origin = new URL(document.referrer).origin;
+            const host = new URL(origin).hostname;
+            if (origin === window.location.origin || host === "localhost" || host === "127.0.0.1") {
+              return origin;
+            }
+          }
+        } catch (_error) { /* fall through */ }
+        return window.location.origin;
+      })();
+      window.parent.postMessage(
+        { type: "mana-live-chat.session-replaced", conversationId: replacementId },
+        parentOrigin
+      );
       if (socket) socket.close();
     };
     const connect = () => {

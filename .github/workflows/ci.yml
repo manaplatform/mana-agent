@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# Least-privilege defaults for all jobs (CodeQL: actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}

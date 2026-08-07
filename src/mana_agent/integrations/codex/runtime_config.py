@@ -57,7 +57,16 @@ class CodexRuntimeConfig:
 
     @property
     def credential_fingerprint(self) -> str:
-        return "sha256:" + hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()[:8]
+        # PBKDF2 is used so credential material is not hashed with a general-purpose
+        # digest alone. This value is a non-secret fingerprint for logs/identity only.
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            self.api_key.encode("utf-8"),
+            b"mana-agent-codex-credential-v1",
+            120_000,
+            dklen=16,
+        )
+        return "pbkdf2-sha256:" + digest.hex()[:16]
 
     @property
     def fingerprint(self) -> str:
@@ -74,7 +83,14 @@ class CodexRuntimeConfig:
             sort_keys=True,
             separators=(",", ":"),
         )
-        return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            material.encode("utf-8"),
+            b"mana-agent-codex-runtime-v1",
+            60_000,
+            dklen=16,
+        )
+        return "pbkdf2-sha256:" + digest.hex()[:16]
 
     def to_toml(self) -> str:
         lines = [

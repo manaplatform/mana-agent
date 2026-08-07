@@ -62,7 +62,7 @@ def test_runtime_config_maps_provider_without_persisting_secret() -> None:
         "query_params": {"region": "eu west"},
     }
     assert "mana-secret-key" not in rendered
-    assert runtime.credential_fingerprint.startswith("sha256:")
+    assert runtime.credential_fingerprint.startswith("pbkdf2-sha256:")
     assert "mana-secret-key" not in repr(runtime)
 
 

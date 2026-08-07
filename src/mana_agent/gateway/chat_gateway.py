@@ -900,7 +900,12 @@ class AgentChatGateway:
         from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
         from mana_agent.chat.history import get_history
 
-        result_preview = self._transactional_result_preview(result)
+        if str(action.tool_name) == "mcp":
+            from mana_agent.mcp.display import format_mcp_result_preview
+
+            result_preview = format_mcp_result_preview(result)
+        else:
+            result_preview = self._transactional_result_preview(result)
         status = (
             "success"
             if event_type == "action.committed"
@@ -932,7 +937,7 @@ class AgentChatGateway:
         if event_type == "action.committed" and action.tool_name == "mcp":
             get_history().add(
                 AssistantMessageEvent(
-                    content=self._mcp_completion_message(action, result_preview),
+                    content=self._mcp_completion_message(action, result),
                     turn_id=str(action.parent_task_id),
                 )
             )
@@ -961,16 +966,18 @@ class AgentChatGateway:
         return encoded if len(encoded) <= limit else encoded[:limit] + "… [truncated]"
 
     @staticmethod
-    def _mcp_completion_message(action: Any, result_preview: str) -> str:
+    def _mcp_completion_message(
+        action: Any,
+        result: dict[str, Any] | None,
+    ) -> str:
         """Create a deterministic user-visible receipt for an approved MCP action."""
+        from mana_agent.mcp.display import format_mcp_completion_message
+
         provider_id = str(action.normalized_arguments.get("provider_id") or "")
-        target = f"mcp.{provider_id}.{action.operation_name}".strip(".")
-        if not result_preview:
-            return f"Approved MCP action completed: `{target}`. The provider returned no displayable result."
-        return (
-            f"Approved MCP action completed: `{target}`.\n\n"
-            "Provider result (untrusted data):\n"
-            f"```json\n{result_preview}\n```"
+        return format_mcp_completion_message(
+            provider_id=provider_id,
+            operation_name=str(action.operation_name or ""),
+            result=result,
         )
 
     @staticmethod
