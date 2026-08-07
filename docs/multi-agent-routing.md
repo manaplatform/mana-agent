@@ -96,7 +96,11 @@ worker. Identity is never synthesized for a missing parent scope.
 Stopped multi-task roots that still list a checkpoint may be recovered with
 `retry_task` or `replan_task` under the same durable task ID (decision
 `checkpoint_id` empty), not only via `resume_checkpoint`. That avoids rejecting
-a valid same-work restart when partial progress should not continue.
+a valid same-work restart when partial progress should not continue. When the
+lane projection is missing but the durable supervisor task remains, recovery
+rehydrates the gateway row before requeue. Blocked multi-task roots are eligible
+for the same validated retry path. The `/task` control command does not create
+tasks (`/task create` is rejected as a reserved verb, not a task ID).
 
 Multi-task budget coordination is parent-envelope based: after decomposition the
 root reserves capacity for orchestration plus every planned child, then expands

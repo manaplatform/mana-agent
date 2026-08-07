@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Fixed gateway task control and recovery coordination for stopped durable work:
+  - `/task create` (and other reserved verbs) no longer raise
+    `Unknown gateway task: create`; they return usage that points operators to
+    `/tasks`, chat-turn task creation, and `mana-agent tasks recover`.
+  - Unknown real task IDs return an actionable control error instead of an
+    uncaught lane exception.
+  - Validated `retry_task` / `replan_task` / `resume_checkpoint` rehydrate a
+    missing lane projection from the durable supervisor record so recovery does
+    not fail solely because the in-memory/gateway projection was dropped.
+  - Blocked multi-task roots are retryable under an authorized same-task
+    recovery decision (children often leave the parent `BLOCKED` rather than
+    `FAILED`).
+  - User verification required:
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_task_control_rejects_create_verb_instead_of_unknown_task_id tests/gateway/test_chat_gateway.py::test_task_control_unknown_id_returns_actionable_message tests/gateway/test_lane_coordinator.py::test_retry_rehydrates_missing_lane_projection_from_supervisor tests/gateway/test_lane_coordinator.py::test_blocked_multi_task_root_can_be_retried_with_validated_decision -q`.
+
 - Fixed checkpoint-resume validation so `retry_task` and `replan_task` may
   select any offered non-completed stopped task even when that candidate still
   lists a checkpoint. Same-task restart intentionally leaves `checkpoint_id`

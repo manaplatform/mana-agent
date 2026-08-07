@@ -1747,6 +1747,125 @@ class LaneCoordinator:
         except KeyError as exc:
             raise LaneCoordinatorError(f"Unknown gateway task: {task_id}") from exc
 
+    _RETRYABLE_LANE_STATES = frozenset(
+        {
+            LaneTaskState.FAILED,
+            LaneTaskState.INTERRUPTED,
+            LaneTaskState.TIMED_OUT,
+            LaneTaskState.BUDGET_EXHAUSTED,
+            LaneTaskState.REJECTED,
+            # Multi-task roots often finish as BLOCKED when children fail or wait;
+            # a validated same-task recovery decision may requeue them.
+            LaneTaskState.BLOCKED,
+        }
+    )
+
+    def _lane_state_for_supervisor(self, state: SupervisorState) -> LaneTaskState:
+        return {
+            SupervisorState.FAILED: LaneTaskState.FAILED,
+            SupervisorState.CANCELLED: LaneTaskState.CANCELLED,
+            SupervisorState.BUDGET_EXHAUSTED: LaneTaskState.BUDGET_EXHAUSTED,
+            SupervisorState.COMPLETED: LaneTaskState.COMPLETED,
+            SupervisorState.RETRY_SCHEDULED: LaneTaskState.QUEUED,
+            SupervisorState.REPLANNING: LaneTaskState.QUEUED,
+            SupervisorState.QUEUED: LaneTaskState.QUEUED,
+            SupervisorState.WAITING: LaneTaskState.WAITING,
+            SupervisorState.RUNNING: LaneTaskState.INTERRUPTED,
+            SupervisorState.LEASED: LaneTaskState.INTERRUPTED,
+            SupervisorState.CHECKPOINTING: LaneTaskState.INTERRUPTED,
+            SupervisorState.CANCELLING: LaneTaskState.CANCELLING,
+            SupervisorState.PENDING_BUDGET_DECISION: LaneTaskState.PENDING_BUDGET_DECISION,
+            SupervisorState.COMPLETED_PENDING_VERIFICATION: LaneTaskState.VERIFYING,
+            SupervisorState.CREATED: LaneTaskState.FAILED,
+        }.get(state, LaneTaskState.FAILED)
+
+    def ensure_recoverable_execution(self, task_id: str) -> LaneExecution:
+        """Return the lane projection, rehydrating it from the supervisor when needed.
+
+        Recovery candidates are listed from the durable supervisor store. After a
+        process restart, projection loss, or multi-task partial materialization,
+        a durable task may exist without a live lane row. Validated recovery must
+        not fail with an opaque unknown-task error when the supervisor record is
+        present and recoverable.
+        """
+        existing = self._executions.get(task_id)
+        if existing is not None:
+            return existing
+        durable = self.execution_supervisor.store.get_task_or_none(task_id)
+        if durable is None:
+            raise LaneCoordinatorError(f"Unknown gateway task: {task_id}")
+        if durable.state in {
+            SupervisorState.RUNNING,
+            SupervisorState.LEASED,
+            SupervisorState.CHECKPOINTING,
+            SupervisorState.CANCELLING,
+        }:
+            raise LaneCoordinatorError(
+                f"durable task {task_id} is still active in the supervisor and cannot "
+                "be rehydrated for recovery yet"
+            )
+        agent = str(durable.assigned_agent or "")
+        lane_token = agent.removeprefix("lane:") if agent.startswith("lane:") else agent
+        try:
+            lane_id = LaneId(lane_token) if lane_token else LaneId.RESEARCH
+        except ValueError:
+            lane_id = LaneId.RESEARCH
+        execution = LaneExecution(
+            task_id=task_id,
+            root_task_id=str(durable.root_task_id or task_id),
+            parent_task_id=durable.parent_task_id,
+            owning_lane=lane_id,
+            state=self._lane_state_for_supervisor(durable.state),
+            normalized_intent=str(durable.normalized_intent or ""),
+            repository_id=str(durable.repository_id or ""),
+            workspace_id=str(durable.workspace_id or ""),
+            session_id=str(durable.session_id or ""),
+            target_files=list(durable.target_resources or []),
+            priority=self.contracts[lane_id].default_priority,
+            budget=LaneBudget(
+                reserved_input_tokens=max(0, int(durable.token_budget or 0)),
+                reserved_output_tokens=0,
+                estimated_cost=float(durable.estimated_cost or 0.0),
+                estimated_cost_known=bool(durable.estimated_cost_known),
+                model_context_window=int(durable.model_context_window or 0),
+                model_max_output_tokens=int(durable.model_max_output_tokens or 0),
+                estimate_confidence=str(durable.token_estimate_confidence or ""),
+                estimate_source=str(durable.token_estimate_source or ""),
+            ),
+            taskboard_task_id=task_id,
+            model=str(durable.assigned_model or ""),
+            provider=str(durable.runtime_provider or ""),
+            routing_decision_id=str(durable.routing_decision_id or ""),
+            task_type=str(durable.task_type or "single"),
+            checkpoint_id=str(durable.checkpoint_id or ""),
+            error=str(durable.failure_reason or ""),
+            trigger_turn_id=str(durable.trigger_turn_id or ""),
+            relation_type=str(durable.relation_type or "independent"),
+            previous_task_id=str(durable.previous_task_id or ""),
+            lane_history=[
+                {
+                    "lane_id": lane_id.value,
+                    "state": "rehydrated",
+                    "at": _iso(),
+                    "reason": "rehydrated from durable supervisor for recovery",
+                }
+            ],
+        )
+        with self._condition:
+            # Another recovery path may have projected the same task.
+            existing = self._executions.get(task_id)
+            if existing is not None:
+                return existing
+            self._executions[task_id] = execution
+            self._persist_locked()
+        self.emit(
+            "lane.rehydrated",
+            task_id=task_id,
+            lane_id=lane_id,
+            reason="supervisor projection restored for recovery",
+        )
+        return execution
+
     def resume_checkpoint(
         self,
         task_id: str,
@@ -1755,7 +1874,7 @@ class LaneCoordinator:
         session_id: str,
     ) -> LaneReservation:
         """Requeue the exact checkpoint selected by a validated model decision."""
-        execution = self.inspect_task(task_id)
+        execution = self.ensure_recoverable_execution(task_id)
         durable = self.execution_supervisor.store.get_task(task_id)
         if not durable.checkpoint_id or durable.checkpoint_id != decision.resume_checkpoint_id:
             raise LaneCoordinatorError(
@@ -1787,14 +1906,8 @@ class LaneCoordinator:
             raise LaneCoordinatorError(
                 "same-task retry requires an explicit authorized retry decision"
             )
-        execution = self.inspect_task(task_id)
-        if execution.state not in {
-            LaneTaskState.FAILED,
-            LaneTaskState.INTERRUPTED,
-            LaneTaskState.TIMED_OUT,
-            LaneTaskState.BUDGET_EXHAUSTED,
-            LaneTaskState.REJECTED,
-        }:
+        execution = self.ensure_recoverable_execution(task_id)
+        if execution.state not in self._RETRYABLE_LANE_STATES:
             raise LaneCoordinatorError("model-selected task is not in a retryable stopped state")
         return self._retry_existing_task(
             execution,
@@ -1814,14 +1927,8 @@ class LaneCoordinator:
         """Requeue the same stopped task after a model-selected plan revision."""
         if decision.action is not RecoveryAction.REPLAN:
             raise LaneCoordinatorError("same-task replan requires an explicit replan decision")
-        execution = self.inspect_task(task_id)
-        if execution.state not in {
-            LaneTaskState.FAILED,
-            LaneTaskState.INTERRUPTED,
-            LaneTaskState.TIMED_OUT,
-            LaneTaskState.BUDGET_EXHAUSTED,
-            LaneTaskState.REJECTED,
-        }:
+        execution = self.ensure_recoverable_execution(task_id)
+        if execution.state not in self._RETRYABLE_LANE_STATES:
             raise LaneCoordinatorError("model-selected task is not in a replannable stopped state")
         return self._retry_existing_task(
             execution,

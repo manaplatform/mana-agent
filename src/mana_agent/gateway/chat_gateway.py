@@ -2885,13 +2885,45 @@ class AgentChatGateway:
             if len(parts) < 3:
                 return f"Usage: /task {action} <id>"
             task_id = parts[2]
-            payload = {
-                "cancel": lambda: self.cancel_task(task_id),
-                "pause": lambda: self.pause_task(task_id),
-                "resume": lambda: self.resume_task(task_id),
-            }[action]()
+            try:
+                payload = {
+                    "cancel": lambda: self.cancel_task(task_id),
+                    "pause": lambda: self.pause_task(task_id),
+                    "resume": lambda: self.resume_task(task_id),
+                }[action]()
+            except LaneCoordinatorError as exc:
+                return f"Gateway task control failed: {exc}"
             return json.dumps(payload, indent=2, default=str)
-        return json.dumps(self.inspect_task(parts[1]), indent=2, default=str)
+        # Reserved verbs are not task IDs. Operators often type /task create by
+        # analogy with other CLIs; durable tasks are created by chat turns, not
+        # by this control command.
+        reserved_task_verbs = {
+            "create",
+            "list",
+            "recover",
+            "retry",
+            "status",
+            "tree",
+            "logs",
+            "artefacts",
+            "artifacts",
+            "help",
+            "new",
+        }
+        if action in reserved_task_verbs:
+            return (
+                f"/{command} {parts[1]!r} is not a gateway task ID. "
+                "Usage: /task <id> | /task cancel|pause|resume <id>. "
+                "Use /tasks to list active tasks, or mana-agent tasks recover for "
+                "supervisor recovery. New work is created by sending a chat turn."
+            )
+        try:
+            return json.dumps(self.inspect_task(parts[1]), indent=2, default=str)
+        except LaneCoordinatorError as exc:
+            return (
+                f"Gateway task control failed: {exc}. "
+                "Use /tasks to list known task IDs."
+            )
 
     def send(self, session_id: str, text: str) -> str:
         """Synchronous send — full process_turn when stack is rich, else ask."""

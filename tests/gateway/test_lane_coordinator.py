@@ -421,6 +421,77 @@ def test_same_task_retry_uses_validated_recovery_decision_and_supervisor_retry(
     assert retry_calls == [(task_id, decision)]
 
 
+def test_retry_rehydrates_missing_lane_projection_from_supervisor(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="recover missing projection")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="process exited")
+    # Drop only the lane projection; the durable supervisor record remains.
+    del coordinator._executions[task_id]
+    with pytest.raises(LaneCoordinatorError, match="Unknown gateway task"):
+        coordinator.inspect_task(task_id)
+
+    decision = RecoveryDecision(
+        decision_id="rehydrate-retry-decision",
+        task_id=task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="The durable task still exists and is safe to retry.",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "retry",
+        lambda task_id, decision: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "release_retry",
+        lambda task_id: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+
+    retried = coordinator.retry_task(task_id, decision=decision, session_id="session-1")
+
+    assert retried.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+
+
+def test_blocked_multi_task_root_can_be_retried_with_validated_decision(
+    coordinator: LaneCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = _reserve(coordinator, LaneId.RESEARCH, intent="compound filesystem steps")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    coordinator.mark_blocked(task_id, reason="one or more child tasks failed")
+    decision = RecoveryDecision(
+        decision_id="blocked-root-retry",
+        task_id=task_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="Retry the blocked multi-task root under its existing identity.",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "retry",
+        lambda task_id, decision: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "release_retry",
+        lambda task_id: coordinator.execution_supervisor.store.get_task(task_id),
+    )
+
+    retried = coordinator.retry_task(task_id, decision=decision, session_id="session-1")
+
+    assert retried.execution.task_id == task_id
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.QUEUED
+
+
 def test_explicit_taskboard_root_and_child_keep_their_persisted_lineage(
     coordinator: LaneCoordinator,
 ) -> None:

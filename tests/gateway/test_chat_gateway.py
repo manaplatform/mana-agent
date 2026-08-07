@@ -642,6 +642,44 @@ def test_computer_route_without_typed_tool_outcome_records_notice(tmp_path: Path
     assert item.request_type is InboxRequestType.NOTICE
 
 
+def test_task_control_rejects_create_verb_instead_of_unknown_task_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+
+    message = gateway.handle_control_command("/task create", session_id=session_id)
+
+    assert message is not None
+    assert "not a gateway task ID" in message
+    assert "Unknown gateway task: create" not in message
+    assert "/task <id>" in message
+
+
+def test_task_control_unknown_id_returns_actionable_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False)
+    session_id = gateway.create_session(frontend="test")
+
+    message = gateway.handle_control_command(
+        "/task task_missing_123", session_id=session_id
+    )
+
+    assert message is not None
+    assert "Gateway task control failed" in message
+    assert "task_missing_123" in message
+    assert "Use /tasks to list" in message
+
+
 def test_gateway_creates_session_and_simple_send(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "mana_agent.commands.cli_internal.build_ask_service",
