@@ -39,9 +39,9 @@ def test_fastapi_app_version_matches_package() -> None:
 
 def test_langchain_constraints_are_resolvable_and_consistent() -> None:
     expected = {
-        "langchain>=0.3.27,<1.0.0",
-        "langchain-community>=0.3.27,<1.0.0",
-        "langchain-openai>=0.3.27,<1.0.0",
+        "langchain>=1.3.9,<2.0.0",
+        "langchain-community>=0.3.27,<0.4.0",
+        "langchain-openai>=1.1.14,<2.0.0",
     }
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     package_constraints = {

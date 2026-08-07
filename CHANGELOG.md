@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-07
 
+- Bumped security-sensitive dependency floors to clear open Dependabot alerts for
+  `cryptography`, `langchain`, and `langchain-openai`:
+  - `cryptography>=49.0.0,<51.0` (path-building DoS, SECT subgroup validation,
+    OpenSSL wheel CVEs, DNS name-constraint / wildcard verifier issues).
+  - `langchain>=1.3.9,<2.0.0` (path traversal / sandbox escape in file-search
+    middleware and loaders).
+  - `langchain-openai>=1.1.14,<2.0.0` with `openai>=2.26.0,<3.0.0` (image token
+    counting SSRF DNS-rebinding fix; OpenAI SDK major floor required by the
+    patched partner package).
+  - `langchain-community` remains on the `>=0.3.27,<0.4.0` line for FAISS
+    stability. Updated `tools_run.py` to import `BaseCallbackHandler` from
+    `langchain_core` because `langchain.callbacks` is gone in LangChain 1.x.
+  - User verification required: `python -m pip install -U -e .` then
+    `python -m pytest tests/test_package_version.py tests/test_llm_compatibility.py tests/remote_execution/test_reverse_worker_protocol.py -q`.
+
 - Fixed multi-message session budgets so follow-up and extend messages recalculate
   admission instead of inheriting a depleted prior-turn residual of 0. The context
   cost governor expands the session ledger to a fresh per-task
