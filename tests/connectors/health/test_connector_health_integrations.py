@@ -344,3 +344,73 @@ def test_format_status_report_readable():
     )
     assert "DEGRADED" in text
     assert "FAILED" in text
+
+
+def test_cli_status_probes_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Registration alone stays UNKNOWN; status must probe to leave STARTUP_PENDING."""
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    from typer.testing import CliRunner
+
+    from mana_agent.commands.cli_internal import app
+    from mana_agent.commands import connectors_cli  # noqa: F401
+    from mana_agent.connectors.health.manager import ConnectorHealthManager
+    from mana_agent.connectors.health.models import CapabilitySignal, PathSignals
+
+    class AlwaysHealthy:
+        connector_id = "fake:status"
+        connector_type = "fake"
+
+        def health_capabilities(self):
+            from mana_agent.connectors.health.models import ConnectorHealthCapabilities
+            return ConnectorHealthCapabilities(auth=True, connectivity=True)
+
+        def supported_probe_categories(self):
+            return [ProbeCategory.AUTH, ProbeCategory.CONNECTIVITY]
+
+        def synthetic_probe_mode(self):
+            return SyntheticProbeMode.PASSIVE
+
+        def collect_signals(self):
+            return PathSignals(runtime_alive=True, transport_connected=True, authenticated=CapabilitySignal.OK)
+
+        async def run_probe(self, category, *, mode):
+            return ProbeResult(category=category, outcome=ProbeOutcome.PASSED, message="ok")
+
+        def list_recovery_actions(self, reason_codes):
+            return []
+
+        async def execute_recovery(self, action):
+            return ProbeResult(category=ProbeCategory.AUTH, outcome=ProbeOutcome.PASSED)
+
+        def recent_delivery_receipts(self, *, limit=20):
+            return []
+
+        def is_enabled(self):
+            return True
+
+        def describe(self):
+            return {}
+
+    def fake_bootstrap(**kwargs):
+        from mana_agent.connectors.health import reset_health_manager, get_health_manager
+        from mana_agent.connectors.health.config import ConnectorHealthConfig
+
+        reset_health_manager()
+        manager = ConnectorHealthManager(
+            config=ConnectorHealthConfig(storage_root=str(tmp_path / "connectors"))
+        )
+        manager.start()
+        manager.register(AlwaysHealthy())
+        return manager
+
+    monkeypatch.setattr(connectors_cli, "bootstrap_health_manager", fake_bootstrap)
+    monkeypatch.setattr(connectors_cli, "reset_health_manager", lambda: None)
+
+    # Cached-only stays UNKNOWN
+    no_probe = CliRunner().invoke(app, ["connectors", "status", "--no-probe"])
+    assert no_probe.exit_code == 0
+    assert "UNKNOWN" in no_probe.output or "STARTUP_PENDING" in no_probe.output or "Registered" in no_probe.output
+
+    probed = CliRunner().invoke(app, ["connectors", "status"])
+    assert probed.exit_code == 0
+    assert "HEALTHY" in probed.output

@@ -38,17 +38,37 @@ def _match_reports(manager, name: str):
     ]
 
 
-def _status_impl(name: str, json_output: bool) -> None:
+def _status_impl(name: str, json_output: bool, *, probe: bool = True) -> None:
+    """Show connector health.
+
+    By default runs a live safe probe. Without a probe, every connector stays
+    ``UNKNOWN`` / ``STARTUP_PENDING`` after registration — that is intentional
+    until the path is verified, not a process-alive shortcut.
+    """
     manager = _manager()
     reports = _match_reports(manager, name)
     if name and not reports:
         typer.echo(f"No health report for connector {name!r}. Is it configured and registered?")
         raise typer.Exit(code=1)
-    if json_output:
-        typer.echo(json.dumps([r.model_dump(mode="json") for r in reports], indent=2, default=str))
-        return
     if not reports:
         typer.echo("No connectors registered for health monitoring.")
+        return
+    if probe:
+        probed = []
+        for report in reports:
+            try:
+                probed.append(asyncio.run(manager.probe(report.connector_id, force=True)))
+            except Exception as exc:
+                # Keep the registered snapshot and surface the failure in message.
+                failed = report.model_copy(
+                    update={
+                        "message": f"Probe failed: {type(exc).__name__}: {exc}"[:300],
+                    }
+                )
+                probed.append(failed)
+        reports = probed
+    if json_output:
+        typer.echo(json.dumps([r.model_dump(mode="json") for r in reports], indent=2, default=str))
         return
     typer.echo("\n\n".join(format_status_report(r) for r in reports))
 
@@ -116,19 +136,29 @@ def _recover_impl(name: str, json_output: bool) -> None:
 @connectors_app.command("status")
 def connectors_status(
     name: str = typer.Argument("", help="Optional connector id (gmail, telegram, gmail:account-id)."),
+    probe: bool = typer.Option(
+        True,
+        "--probe/--no-probe",
+        help="Run a live safe probe (default). Use --no-probe for cached registration state only.",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Show connector health — never equates process-alive with online."""
-    _status_impl(name, json_output)
+    _status_impl(name, json_output, probe=probe)
 
 
 @connector_app.command("status")
 def connector_status(
     name: str = typer.Argument("", help="Optional connector id (gmail, telegram, gmail:account-id)."),
+    probe: bool = typer.Option(
+        True,
+        "--probe/--no-probe",
+        help="Run a live safe probe (default). Use --no-probe for cached registration state only.",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Show connector health — never equates process-alive with online."""
-    _status_impl(name, json_output)
+    _status_impl(name, json_output, probe=probe)
 
 
 @connectors_app.command("health")

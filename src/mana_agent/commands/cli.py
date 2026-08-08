@@ -68,18 +68,39 @@ _replace_command("git", _cli_internal.git_command, context_settings={"allow_extr
 _replace_command("continue", _cli_internal.continue_command)
 
 
+def _split_check_ids(values: list[str]) -> list[str]:
+    """Accept repeatable --only/--skip flags and comma-separated lists."""
+    ids: list[str] = []
+    for value in values:
+        for part in str(value or "").split(","):
+            cleaned = part.strip()
+            if cleaned:
+                ids.append(cleaned)
+    return ids
+
+
 @app.command("doctor")
 def doctor_command(
     fix: bool = typer.Option(False, "--fix", help="Apply registered safe repairs."),
     deep: bool = typer.Option(False, "--deep", help="Run additional environment-dependent diagnostics."),
     json_output: bool = typer.Option(False, "--json", help="Emit stable machine-readable JSON."),
     yes: bool = typer.Option(False, "--yes", help="Accept safe repairs without prompting."),
-    only: list[str] = typer.Option([], "--only", help="Run only this stable check ID (repeatable)."),
-    skip: list[str] = typer.Option([], "--skip", help="Skip this stable check ID (repeatable)."),
+    only: list[str] = typer.Option(
+        [],
+        "--only",
+        help="Run only this stable check ID (repeatable or comma-separated).",
+    ),
+    skip: list[str] = typer.Option(
+        [],
+        "--skip",
+        help="Skip this stable check ID (repeatable or comma-separated).",
+    ),
 ) -> None:
     """Diagnose installation and configuration without requiring an LLM."""
     if json_output and fix and not yes:
         raise typer.BadParameter("--json --fix requires --yes because JSON output cannot prompt.")
+    only = _split_check_ids(only)
+    skip = _split_check_ids(skip)
     try:
         preview = run_doctor(deep=deep, only=only, skip=skip)
         should_fix = fix

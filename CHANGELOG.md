@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed connector status and doctor UX for health checks:
+  - `mana-agent connectors status` now runs a live safe probe by default so
+    connectors leave `UNKNOWN` / `STARTUP_PENDING` after registration
+    (`--no-probe` keeps the cached pre-verification snapshot).
+  - `mana-agent doctor --only` / `--skip` accept comma-separated check IDs as
+    well as repeated flags (e.g. `--only connectors/health,connectors/credentials`).
+  - User verification required:
+    `python -m pytest tests/connectors/health/test_connector_health_integrations.py::test_cli_status_probes_by_default tests/test_doctor.py::test_doctor_only_accepts_comma_separated_ids -q`.
+
 - Added **Connector Health and Self-Healing** so connectors are never treated as
   online merely because a process, gateway, or adapter is running:
   - Universal typed health contract (`ConnectorHealthState`, path signals,
