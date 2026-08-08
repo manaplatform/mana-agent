@@ -44,6 +44,9 @@ class PolicyConfig(StrictModel):
     # After one trusted approval, compatible computer filesystem creates/moves
     # under the same durable task lineage may proceed without re-prompting.
     allow_task_wide_computer_approval: bool = True
+    # When true, REQUIRE_APPROVAL outcomes become ALLOW (bench/non-interactive).
+    # DENY outcomes stay deny (secrets, workspace escapes, destructive shell/git).
+    always_approve: bool = False
     safe_shell_executables: tuple[str, ...] = ("git", "python", "python3", "pytest", "ruff", "mypy")
     secret_argument_names: tuple[str, ...] = (
         "authorization", "api_key", "apikey", "password", "secret", "token", "credential"
@@ -66,6 +69,14 @@ class ActionPolicy:
     def evaluate(self, action: ActionIntent) -> PolicyDecision:
         now = utc_now()
         outcome, codes, explanation, rules = self._classify(action)
+        if self.config.always_approve and outcome is PolicyOutcome.REQUIRE_APPROVAL:
+            codes = [*codes, "always_approve"]
+            rules = [*rules, "always_approve"]
+            explanation = (
+                f"{explanation} Always-approve policy mode auto-allowed this action "
+                "without a human inbox grant."
+            )
+            outcome = PolicyOutcome.ALLOW
         return PolicyDecision(
             outcome=outcome,
             reason_codes=codes,

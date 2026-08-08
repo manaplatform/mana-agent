@@ -265,6 +265,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
         "artifact_retention_days": 30,
     },
     "MANA_COMPUTER_CONTROL_ENABLED": False,
+    "MANA_TRANSACTIONAL_ALWAYS_APPROVE": False,
     "computer_control": {
         "enabled": False,
         "provider": "auto",
@@ -538,6 +539,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_BROWSER_ARTIFACT_DIR": "mana_browser_artifact_dir",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": "mana_browser_profile_max_age_days",
     "MANA_COMPUTER_CONTROL_ENABLED": "mana_computer_control_enabled",
+    "MANA_TRANSACTIONAL_ALWAYS_APPROVE": "mana_transactional_always_approve",
     "MANA_CODING_BACKEND": "mana_coding_backend",
     "MANA_CODEX_ENABLED": "mana_codex_enabled",
     "MANA_CODEX_MAX_WORKERS": "mana_codex_max_workers",
@@ -707,6 +709,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
     "media",
     "MANA_COMPUTER_CONTROL_ENABLED",
+    "MANA_TRANSACTIONAL_ALWAYS_APPROVE",
     "computer_control",
     "MANA_CODING_BACKEND",
     "MANA_CODEX_ENABLED",

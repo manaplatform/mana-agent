@@ -1159,6 +1159,14 @@ def _benchmark_config_overrides(
         "MANA_A2A_SERVER_ENABLED": False,
         "MANA_FLEET_ENABLED": False,
         "MANA_WORKER_GATEWAY_ENABLED": False,
+        # Bench isolation: edit the SWE worktree in place (not a nested managed
+        # worktree under ~/.mana/repositories) and auto-allow shell/git
+        # transactional REQUIRE_APPROVAL outcomes so non-interactive runs do not
+        # stall on human inbox grants. DENY (secrets, workspace escapes, etc.)
+        # remains deny.
+        "MANA_MANAGED_WORKTREES_ENABLED": False,
+        "MANA_CODEX_WORKTREE_ISOLATION": False,
+        "MANA_TRANSACTIONAL_ALWAYS_APPROVE": True,
     }
     if timeout_seconds is not None:
         # Keep Codex task timeout aligned with the runner wall clock.

@@ -497,6 +497,11 @@ class Settings(BaseSettings):
     mana_managed_worktrees_enabled: bool = Field(
         default=True, alias="MANA_MANAGED_WORKTREES_ENABLED"
     )
+    # Non-interactive / bench mode: auto-allow transactional REQUIRE_APPROVAL
+    # outcomes (shell, destructive file ops, remote git). DENY stays deny.
+    mana_transactional_always_approve: bool = Field(
+        default=False, alias="MANA_TRANSACTIONAL_ALWAYS_APPROVE"
+    )
     # Empty preserves pre-0.0.19 configurations: Codex when enabled, internal otherwise.
     mana_coding_backend: str = Field(default="", alias="MANA_CODING_BACKEND")
     mana_codex_enabled: bool = Field(default=True, alias="MANA_CODEX_ENABLED")

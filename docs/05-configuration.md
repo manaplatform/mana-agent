@@ -451,6 +451,16 @@ checkout. Explicit merge intent is still required after review
 
 Set `MANA_MANAGED_WORKTREES_ENABLED=false` to preserve the legacy in-checkout coding path.
 
+### Transactional always-approve (bench / non-interactive)
+
+`MANA_TRANSACTIONAL_ALWAYS_APPROVE` (default `false`) converts transactional
+policy `require_approval` outcomes to `allow` so shell, local git mutations, and
+destructive-but-policy-gated file actions do not wait on a human inbox grant.
+`deny` outcomes still fail closed (workspace escapes, secrets, destructive
+shell/git, unclassified tools). The SWE-bench runner enables this automatically
+in each isolated instance `MANA_HOME`. Do not enable it for normal interactive
+operator sessions unless you intentionally want unattended execution.
+
 All LLM credentials, base URLs, chat/planner/tool-worker models, role mappings,
 reasoning options, and provider capability flags are resolved from
 `~/.mana/config.toml` and `~/.mana/secrets.toml`. Shell variables and repository

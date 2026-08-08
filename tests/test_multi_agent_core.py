@@ -32,6 +32,7 @@ from mana_agent.multi_agent.core.types import (
     AgentState,
     AgentRole,
     ExecutionContext,
+    GitIntent,
     MessageType,
     QueueJobStatus,
     QueueJobType,
@@ -943,8 +944,21 @@ def test_git_commit_push_request_queues_git_inspection_and_does_not_repo_search(
     repo = _init_git_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\nchanged\n", encoding="utf-8")
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_commit=True,
+        wants_push=True,
+        target_branch="main",
+        requires_remote=True,
+        risk_level="high",
+    )
 
-    result = main.run_user_request("commit changes and push to main", entrypoint="chat")
+    result = main.run_user_request(
+        "commit changes and push to main",
+        entrypoint="chat",
+        git_intent=intent,
+    )
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -976,8 +990,16 @@ def test_git_push_to_main_inspects_remote_and_blocks_when_behind(tmp_path):
     assert _git(other, "push", "origin", "main").returncode == 0
     assert _git(repo, "fetch", "origin").returncode == 0
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_push=True,
+        target_branch="main",
+        requires_remote=True,
+        risk_level="high",
+    )
 
-    result = main.run_user_request("push to main", entrypoint="chat")
+    result = main.run_user_request("push to main", entrypoint="chat", git_intent=intent)
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -993,8 +1015,14 @@ def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
     repo = _init_git_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\ncommit only\n", encoding="utf-8")
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_commit=True,
+        risk_level="high",
+    )
 
-    result = main.run_user_request("commit", entrypoint="chat")
+    result = main.run_user_request("commit", entrypoint="chat", git_intent=intent)
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -1011,8 +1039,19 @@ def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
 def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
     repo = _init_git_repo(tmp_path / "repo")
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_branch=True,
+        target_branch="feature/git-workflow",
+        risk_level="high",
+    )
 
-    result = main.run_user_request("create new branch feature/git-workflow", entrypoint="chat")
+    result = main.run_user_request(
+        "create new branch feature/git-workflow",
+        entrypoint="chat",
+        git_intent=intent,
+    )
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -1020,6 +1059,43 @@ def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
     assert ["switch", "-c", "feature/git-workflow"] in commands
     assert _git(repo, "branch", "--show-current").stdout.strip() == "feature/git-workflow"
     assert task.status == TaskStatus.VERIFYING
+
+
+def test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations(tmp_path):
+    """SWE-bench prompts mention commit/push only to forbid them.
+
+    Keyword GitIntent inference previously hijacked every bench instance into
+    `git switch -c and` + failed `origin/and` verification.
+    """
+    repo = _init_git_repo(tmp_path / "repo")
+    prompt = (
+        "You are solving a single SWE-bench issue inside an isolated git checkout.\n"
+        "Do not commit, push, rebase, or rewrite git history.\n"
+        "Success means production-source edits left as uncommitted working-tree changes.\n"
+        "Fix the TimeSeries required-column exception message.\n"
+    )
+    main = MainAgent(
+        repo,
+        routing_llm=_RouteModel(
+            {
+                f"chat {prompt}": _route_payload(
+                    "edit",
+                    selected_tools=["repo_search", "read_file", "apply_patch"],
+                    repo_context_needed=True,
+                    code_editing_needed=True,
+                    reasoning_summary="Implement the SWE-bench fix without git history rewrites.",
+                )
+            }
+        ),
+    )
+    result = main.run_user_request(prompt, entrypoint="chat")
+    task = main.taskboard.get_task(result.task_id)
+    commands = _git_job_commands(main, result.task_id)
+    assert result.route_name == "coding"
+    assert not any(command[:2] == ["switch", "-c"] for command in commands)
+    assert not any("origin/and" in item for item in task.blockers)
+    assert "git_push" not in task.required_capabilities
+    assert "git_branch" not in task.required_capabilities
 
 
 @pytest.fixture

@@ -111,6 +111,9 @@ def test_benchmark_overrides_pin_provider_and_model() -> None:
     assert overrides["MANA_COMPUTER_CONTROL_ENABLED"] is False
     assert overrides["MANA_CANVAS_ENABLED"] is False
     assert overrides["MANA_SEARCH_ENABLE_WEB"] is False
+    assert overrides["MANA_MANAGED_WORKTREES_ENABLED"] is False
+    assert overrides["MANA_CODEX_WORKTREE_ISOLATION"] is False
+    assert overrides["MANA_TRANSACTIONAL_ALWAYS_APPROVE"] is True
     assert overrides["MANA_CODEX_TASK_TIMEOUT_SECONDS"] == 3600
 
 

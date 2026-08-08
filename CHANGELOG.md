@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed SWE-bench agent runs blocked by keyword Git intent + transactional policy.
+  - Root cause (from `.swe-bench/logs/*`): prompts say "Do not commit, push…", but
+    `_git_intent_from_request` keyword-matched those words, ran
+    `git switch -c and`, then verifier failed on `git rev-parse origin/and`
+    (`git_verification_failed_or_blocked`). Empty patches followed.
+  - Removed keyword `GitIntent` inference. Git workflows require an explicit
+    structured `GitIntent` argument (model decision), not text matching.
+  - Added transactional `PolicyConfig.always_approve` /
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE`: converts `REQUIRE_APPROVAL` → `ALLOW`
+    for non-interactive bench; `DENY` stays deny.
+  - SWE-bench runner isolation now sets
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE=true`,
+    `MANA_MANAGED_WORKTREES_ENABLED=false`, and
+    `MANA_CODEX_WORKTREE_ISOLATION=false` so edits land in the SWE worktree and
+    shell/git mutations do not stall on human inbox approvals.
+  - User verification required:
+    `python -m pytest tests/test_multi_agent_core.py -k "git or swe_bench" tests/transactional_actions/test_policy_gated_actions.py -k always_approve tests/test_swe_bench_runner_config.py -k benchmark_overrides -q`
+
 - Hardened SWE-bench timeout configuration against multi-line shell flag drops.
   - Logs `Process argv` at startup so missing `--timeout` is obvious.
   - Warns loudly when falling back to the built-in 600s default.

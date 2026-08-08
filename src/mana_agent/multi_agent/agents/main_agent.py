@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import re
 from pathlib import Path
 from typing import Any
 
@@ -168,7 +167,13 @@ class MainAgent:
         self.decision_room = DecisionRoom(self.root, self.taskboard, self.message_bus)
         self.agents = self._build_agents()
 
-    def run_user_request(self, user_request: str, *, entrypoint: str = "chat") -> MainAgentResult:
+    def run_user_request(
+        self,
+        user_request: str,
+        *,
+        entrypoint: str = "chat",
+        git_intent: GitIntent | None = None,
+    ) -> MainAgentResult:
         request = str(user_request or "").strip()
         try:
             scope = self.scope_engine.decide(request=request, context=self.workspace_context)
@@ -221,7 +226,9 @@ class MainAgent:
             reason="route after task duplicate and bundle checks",
         )
         route = self.router.route(task_id=task.task_id, user_request=f"{entrypoint} {request}")
-        git_intent = self._git_intent_from_request(request)
+        # GitIntent must be an explicit structured decision (caller/model). Keyword
+        # inference is forbidden: SWE-bench prompts say "Do not commit, push..." and
+        # keyword matchers hijacked those runs into branch/push workflows.
         if git_intent is not None:
             route = self._route_with_git_contract(route, git_intent)
             task.risk_level = RiskLevel.HIGH
@@ -740,30 +747,6 @@ class MainAgent:
         self.taskboard.add_evidence(task_id, f"CodingAgent created Git queue job {job.job_id}: git {' '.join(args)}")
         self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
         return job
-
-    def _git_intent_from_request(self, request: str) -> GitIntent | None:
-        text = str(request or "").strip().lower()
-        action_re = r"\b(commit|push|branch|checkout|switch|merge|rebase|tag|release)\b"
-        if not re.search(action_re, text):
-            return None
-        wants_commit = bool(re.search(r"\bcommit\b", text))
-        wants_push = bool(re.search(r"\bpush\b", text))
-        wants_branch = bool(re.search(r"\b(branch|checkout|switch)\b", text))
-        target = "main" if re.search(r"\bmain\b", text) else None
-        branch_match = re.search(r"\b(?:branch|checkout|switch)\s+(?:to\s+|new\s+|create\s+|create\s+new\s+)?([A-Za-z0-9._/-]+)", text)
-        if wants_branch and branch_match:
-            target = branch_match.group(1)
-        return GitIntent(
-            wants_status=True,
-            wants_diff=True,
-            wants_commit=wants_commit,
-            wants_push=wants_push,
-            wants_branch=wants_branch,
-            target_branch=target,
-            commit_message=None,
-            requires_remote=wants_push,
-            risk_level="high",
-        )
 
     def _route_with_git_contract(self, route, intent: GitIntent):
         capabilities = ["repo_state", "git_status", "git_diff", "verification"]
