@@ -273,9 +273,52 @@ def test_nvidia_deepseek_payload_uses_chat_template_kwargs(
         provider="nvidia",
     )
     payload = llm._get_request_payload([HumanMessage(content="hello")])
-    assert payload["chat_template_kwargs"]["thinking"] is True
-    assert payload["chat_template_kwargs"]["reasoning_effort"] == "high"
+    # OpenAI SDK path: custom NIM fields must live under extra_body. Top-level
+    # chat_template_kwargs raises TypeError on Completions.create().
+    extra = payload.get("extra_body") or {}
+    assert extra["chat_template_kwargs"]["thinking"] is True
+    assert extra["chat_template_kwargs"]["reasoning_effort"] == "high"
+    assert "chat_template_kwargs" not in payload
     assert "reasoning_effort" not in payload
+    assert "reasoning" not in payload
+
+
+def test_nvidia_deepseek_shaping_placement_for_sdk_vs_raw_http() -> None:
+    from mana_agent.config.nvidia_model_requests import apply_nvidia_chat_completion_shaping
+
+    sdk_payload = {
+        "model": "deepseek-ai/deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra_body": {"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}},
+    }
+    apply_nvidia_chat_completion_shaping(
+        sdk_payload,
+        provider="nvidia",
+        model="deepseek-ai/deepseek-v4-flash",
+        default_effort="high",
+        nest_under_extra_body=True,
+    )
+    assert "chat_template_kwargs" not in sdk_payload
+    assert sdk_payload["extra_body"]["chat_template_kwargs"]["thinking"] is True
+
+    http_payload = {
+        "model": "deepseek-ai/deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "xhigh",
+    }
+    apply_nvidia_chat_completion_shaping(
+        http_payload,
+        provider="nvidia",
+        model="deepseek-ai/deepseek-v4-flash",
+        default_effort="high",
+        nest_under_extra_body=False,
+    )
+    assert http_payload["chat_template_kwargs"] == {
+        "thinking": True,
+        "reasoning_effort": "max",
+    }
+    assert "reasoning_effort" not in http_payload
+    assert "extra_body" not in http_payload
 
 
 def test_nvidia_format_provider_error_never_says_openai() -> None:

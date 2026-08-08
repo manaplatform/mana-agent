@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed NVIDIA DeepSeek direct-chat TypeError:
+  `Completions.create() got an unexpected keyword argument 'chat_template_kwargs'`.
+  - LangChain / OpenAI Python SDK path now nests NIM `chat_template_kwargs`
+    under `extra_body` (SDK merges into the HTTP body) instead of spreading it
+    as a top-level create() kwarg.
+  - Codex Responses bridge continues to send top-level `chat_template_kwargs`
+    via raw HTTP Chat Completions.
+  - Upstream 4xx/410 stream failures now log kind, tools flag, template flag,
+    and a truncated body snippet for diagnosis (still redacted from user UI).
+  - User verification required:
+    `python -m pytest tests/test_nvidia_provider.py tests/test_codex_responses_bridge.py -k "deepseek or chat_template or first_class"`
+
 - Fixed two Windows CI failures in connector health storage and eval suite load.
   - Skip legacy colon-filename snapshot migration on Windows (`os.name == "nt"`);
     colon names are illegal or NTFS ADS syntax there, not real directory entries.

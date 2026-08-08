@@ -162,33 +162,30 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 "reasoning_effort=none reason=tools_with_reasoning_unsupported",
                 self.model_name,
             )
-        # NVIDIA DeepSeek V4 requires chat_template_kwargs; bare OpenAI-style
-        # reasoning_effort alone can hang or fail on integrate.api.nvidia.com.
+        # NVIDIA DeepSeek V4 requires chat_template_kwargs. The OpenAI Python
+        # SDK / LangChain path must nest provider fields under ``extra_body``;
+        # Completions.create() rejects top-level ``chat_template_kwargs``.
+        # (The Codex Responses bridge uses raw HTTP and keeps them top-level.)
         from mana_agent.config.nvidia_model_requests import apply_nvidia_chat_completion_shaping
         from mana_agent.config.user_config import get_setting as _get_setting
 
-        # LangChain may nest extras under ``extra_body``; flatten before shaping
-        # so NIM receives top-level chat_template_kwargs in the HTTP body.
-        extra_body = payload.pop("extra_body", None)
-        if isinstance(extra_body, dict):
-            for key, value in extra_body.items():
-                if key == "chat_template_kwargs" and isinstance(value, dict):
-                    nested = dict(payload.get("chat_template_kwargs") or {})
-                    nested.update(value)
-                    payload["chat_template_kwargs"] = nested
-                else:
-                    payload.setdefault(key, value)
-
         default_effort = str(_get_setting("MANA_LLM_REASONING_EFFORT", "") or "").strip() or "high"
         if self.compatibility_force_reasoning_none:
+            # Mark effort explicitly so NVIDIA shaping overrides init defaults
+            # already nested under extra_body from create_chat_model.
             default_effort = "none"
+            payload["reasoning_effort"] = "none"
         apply_nvidia_chat_completion_shaping(
             payload,
             provider=self.selected_provider,
             model=self.model_name,
             default_effort=default_effort,
+            nest_under_extra_body=True,
         )
-        template = payload.get("chat_template_kwargs") if isinstance(payload.get("chat_template_kwargs"), dict) else {}
+        extra_body = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
+        template = extra_body.get("chat_template_kwargs") if isinstance(extra_body.get("chat_template_kwargs"), dict) else {}
+        if not template and isinstance(payload.get("chat_template_kwargs"), dict):
+            template = payload.get("chat_template_kwargs") or {}
         logger.debug(
             "llm.request api_mode=%s model=%s tools=%s reasoning=%s chat_template_kwargs=%s",
             "responses" if self._use_responses_api(payload) else "chat_completions",

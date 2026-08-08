@@ -54,6 +54,16 @@ def _classify_upstream_status(status_code: int) -> str:
     return "provider_error"
 
 
+def _truncate_upstream_body(body_text: str, *, limit: int = 400) -> str:
+    """Return a short, single-line body snippet for logs (never for user UI)."""
+    text = " ".join(str(body_text or "").split())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 def _safe_upstream_message(
     *,
     provider: str,
@@ -70,7 +80,8 @@ def _safe_upstream_message(
         "not_found": (
             f"{provider} endpoint or model is unavailable (HTTP {status_code}).{model_part} "
             "Confirm the model id is enabled for this NVIDIA account and that the request "
-            "uses Chat Completions with provider-correct options."
+            "uses Chat Completions with provider-correct options "
+            "(including chat_template_kwargs for DeepSeek V4)."
         ),
         "invalid_request": (
             f"{provider} rejected the request (HTTP {status_code}).{model_part}"
@@ -185,18 +196,23 @@ def build_bridge_app(
             ) from exc
 
         if response.status_code >= 400:
+            body_text = response.text
             message = _safe_upstream_message(
                 provider=upstream.display_name,
                 status_code=response.status_code,
-                body_text=response.text,
+                body_text=body_text,
                 model=str(chat_payload.get("model") or upstream.model or ""),
             )
             logger.error(
-                "responses_bridge.upstream_failed provider=%s model=%s status=%s kind=%s",
+                "responses_bridge.upstream_failed provider=%s model=%s status=%s kind=%s "
+                "has_tools=%s has_chat_template_kwargs=%s body_snippet=%r",
                 upstream.provider,
                 chat_payload.get("model"),
                 response.status_code,
                 _classify_upstream_status(response.status_code),
+                bool(chat_payload.get("tools")),
+                isinstance(chat_payload.get("chat_template_kwargs"), dict),
+                _truncate_upstream_body(body_text),
             )
             raise UpstreamProviderError(
                 message,
@@ -266,17 +282,23 @@ async def _stream_upstream(
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
+                    body_text = body.decode("utf-8", errors="replace")
                     message = _safe_upstream_message(
                         provider=upstream.display_name,
                         status_code=response.status_code,
-                        body_text=body.decode("utf-8", errors="replace"),
+                        body_text=body_text,
                         model=str(chat_payload.get("model") or upstream.model or ""),
                     )
                     logger.error(
-                        "responses_bridge.upstream_stream_failed provider=%s model=%s status=%s",
+                        "responses_bridge.upstream_stream_failed provider=%s model=%s status=%s "
+                        "kind=%s has_tools=%s has_chat_template_kwargs=%s body_snippet=%r",
                         upstream.provider,
                         chat_payload.get("model"),
                         response.status_code,
+                        _classify_upstream_status(response.status_code),
+                        bool(chat_payload.get("tools")),
+                        isinstance(chat_payload.get("chat_template_kwargs"), dict),
+                        _truncate_upstream_body(body_text),
                     )
                     for event in adapter.close_events(
                         failed=True,
