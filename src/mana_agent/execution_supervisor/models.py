@@ -349,7 +349,14 @@ class TaskRecord(StrictModel):
     delegated_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     waiting_inbox_item_id: str = ""
-    waiting_reason: Literal["", "waiting_for_approval", "waiting_for_clarification"] = ""
+    waiting_reason: Literal[
+        "",
+        "waiting_for_approval",
+        "waiting_for_clarification",
+        "waiting_for_connector",
+    ] = ""
+    waiting_connector_id: str = ""
+    required_connector_ids: list[str] = Field(default_factory=list)
     human_inputs: list[dict[str, Any]] = Field(default_factory=list)
     human_resume_claim_ids: list[str] = Field(default_factory=list)
     human_wait_started_at: datetime | None = None

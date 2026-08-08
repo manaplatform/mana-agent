@@ -70,6 +70,63 @@ def list_connectors(request: Request) -> list[dict[str, Any]]:
     return _services(request)[3].list()
 
 
+@router.get("/connectors/health")
+def list_connector_health(request: Request) -> list[dict[str, Any]]:
+    """Return path-level connector health (not process-alive alone)."""
+    try:
+        from mana_agent.connectors.health import bootstrap_health_manager, reset_health_manager
+
+        reset_health_manager()
+        manager = bootstrap_health_manager()
+        return [report.model_dump(mode="json") for report in manager.status()]
+    except Exception as exc:
+        raise ManaApiError(500, f"Connector health unavailable: {exc}") from exc
+
+
+@router.get("/connectors/health/{connector_id}")
+def get_connector_health(connector_id: str, request: Request) -> dict[str, Any]:
+    try:
+        from mana_agent.connectors.health import bootstrap_health_manager, reset_health_manager
+
+        reset_health_manager()
+        manager = bootstrap_health_manager()
+        report = manager.get_report(connector_id)
+        if report is None:
+            # Allow type-only ids such as "telegram"
+            matches = [
+                item
+                for item in manager.status()
+                if item.connector_id == connector_id or item.connector_type == connector_id
+            ]
+            if not matches:
+                raise ManaApiError(404, f"Connector health not found: {connector_id}")
+            report = matches[0]
+        return report.model_dump(mode="json")
+    except ManaApiError:
+        raise
+    except Exception as exc:
+        raise ManaApiError(500, f"Connector health unavailable: {exc}") from exc
+
+
+@router.get("/connectors/incidents")
+def list_connector_incidents(
+    request: Request,
+    connector_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    try:
+        from mana_agent.connectors.health import bootstrap_health_manager, reset_health_manager
+
+        reset_health_manager()
+        manager = bootstrap_health_manager()
+        return [
+            item.model_dump(mode="json")
+            for item in manager.list_incidents(connector_id=connector_id, limit=max(1, min(limit, 200)))
+        ]
+    except Exception as exc:
+        raise ManaApiError(500, f"Connector incidents unavailable: {exc}") from exc
+
+
 @router.post("/connectors/telegram/connect")
 def connect_telegram(payload: ConnectorConnectRequest, request: Request, authorization: str | None = Header(None)) -> dict:
     _require_token(authorization)

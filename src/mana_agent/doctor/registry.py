@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.doctor.checks import codex, configuration, execution, filesystem, fleet, human_inbox, protocols, routing, runtime
+from mana_agent.doctor.checks import codex, configuration, connectors, execution, filesystem, fleet, human_inbox, protocols, routing, runtime
 from mana_agent.doctor.models import DoctorCheck
 
 
@@ -17,6 +17,8 @@ CHECKS: tuple[DoctorCheck, ...] = (
     DoctorCheck("config/file-permissions", "Configuration", "Validate sensitive file modes.", configuration.permissions, configuration.repair_permissions),
     DoctorCheck("persistence/state-path", "Persistence", "Validate Mana state path.", filesystem.state_path, filesystem.repair_state_path),
     DoctorCheck("persistence/human-inbox", "Persistence", "Validate durable inbox records and reviewer routing.", human_inbox.durable_state),
+    DoctorCheck("connectors/credentials", "Connectors", "Validate connector credential presence.", connectors.connector_credentials),
+    DoctorCheck("connectors/health", "Connectors", "Validate connector health manager and path signals.", connectors.connector_health),
     DoctorCheck("integrations/codex-binary", "Codex", "Locate configured Codex.", codex.binary),
     DoctorCheck("integrations/codex-protocol", "Codex", "Run Codex app-server preflight.", codex.protocol, deep=True),
     DoctorCheck("protocols/acp-sdk", "Protocols", "Validate the optional ACP SDK.", protocols.acp_sdk),

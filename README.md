@@ -133,7 +133,8 @@ Credentials remain separate from normal settings.
 ## Documentation
 
 See the [`docs/`](docs/) directory for installation, architecture, commands,
-connectors, [resilient execution](docs/29-resilient-execution.md),
+connectors, [connector health](docs/33-connector-health.md),
+[resilient execution](docs/29-resilient-execution.md),
 [API Manager](docs/api-manager.md), automation, Teach Mode, media generation,
 workers, protocols, and development guides.
 

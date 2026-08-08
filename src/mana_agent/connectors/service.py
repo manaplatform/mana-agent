@@ -29,13 +29,64 @@ class ConnectorService:
         self.processes = processes or BackgroundProcessManager()
 
     def list(self) -> list[dict[str, Any]]:
+        """List connectors with process state and real health (not process-alive alone)."""
+        rows: list[dict[str, Any]] = []
         config = load_telegram_config()
         running = self._telegram_process()
-        return [{
-            "name": "telegram", "configured": config.enabled,
-            "transport": config.effective_transport, "state": running.state if running else "stopped",
+        process_state = running.state if running else "stopped"
+        health = self._health_summary("telegram")
+        rows.append({
+            "name": "telegram",
+            "configured": config.enabled,
+            "transport": config.effective_transport,
+            "state": process_state,
             "process_id": running.process_id if running else None,
-        }]
+            "health_state": health.get("state", "unknown"),
+            "health": health,
+        })
+        try:
+            from mana_agent.connectors.email.config import load_accounts
+
+            for account in load_accounts():
+                connector_id = f"{account.provider}:{account.id}"
+                account_health = self._health_summary(connector_id)
+                rows.append({
+                    "name": account.provider,
+                    "account_id": account.id,
+                    "address": account.address.address if account.address else "",
+                    "configured": True,
+                    "enabled": bool(account.enabled),
+                    "state": "configured",
+                    "process_id": None,
+                    "health_state": account_health.get("state", "unknown"),
+                    "health": account_health,
+                })
+        except Exception:
+            pass
+        return rows
+
+    def _health_summary(self, connector_id: str) -> dict[str, Any]:
+        try:
+            from mana_agent.connectors.health import get_health_manager
+
+            manager = get_health_manager()
+            report = manager.get_report(connector_id)
+            if report is None:
+                return {"state": "unknown", "message": "No health report yet"}
+            return {
+                "state": report.state.value,
+                "reason_code": report.reason_code.value,
+                "message": report.message,
+                "auth": report.auth.value,
+                "ingress": report.ingress.value,
+                "egress": report.egress.value,
+                "checked_at": report.checked_at.isoformat() if report.checked_at else None,
+                "latency_ms": report.latency_ms,
+                "circuit_state": report.circuit_state.value,
+                "incident_id": report.current_incident_id,
+            }
+        except Exception:
+            return {"state": "unknown", "message": "Health manager unavailable"}
 
     def connect_telegram(self, request: TelegramConnectRequest, *, token: str) -> CommandResult:
         clean_token = str(token or "").strip()

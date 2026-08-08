@@ -94,6 +94,8 @@ app.add_typer(context_app, name="context")
 app.add_typer(acp_app, name="acp")
 app.add_typer(a2a_app, name="a2a")
 app.add_typer(connector_app, name="connector")
+from .connectors_cli import connectors_app  # noqa: E402  # registers health under connector_app
+app.add_typer(connectors_app, name="connectors")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(worktree_app, name="worktree")
 app.add_typer(codex_app, name="codex")

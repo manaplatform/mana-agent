@@ -2,6 +2,31 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-08
+
+- Added **Connector Health and Self-Healing** so connectors are never treated as
+  online merely because a process, gateway, or adapter is running:
+  - Universal typed health contract (`ConnectorHealthState`, path signals,
+    probe categories, reason codes, delivery receipts, incidents, SLO metrics).
+  - Central `ConnectorHealthManager` with probe scheduling, exponential backoff
+    + jitter, circuit breakers, deterministic recovery, incident timelines, and
+    durable storage under `~/.mana/connectors/`.
+  - Real adapters for **Gmail** (profile/auth, safe ingress list, receipt-based
+    egress/ack) and **Telegram** (getMe, poller/webhook path, subscription
+    probe, false-online detection when process is alive but ingress is broken).
+  - Supervisor bridge pauses dependent branches while a required connector is
+    unavailable and resumes them exactly once after recovery; auth failures can
+    create durable HITL interventions; webhook/subscription repairs require
+    transactional policy authorization.
+  - CLI: `mana-agent connectors status|health|incidents|recover` (also under
+    `connector health`); doctor checks `connectors/credentials` and
+    `connectors/health`; dashboard and API expose real health states.
+  - Routine probes are fully deterministic (no LLM). Synthetic active messages
+    are disabled by default.
+  - Documentation: `docs/33-connector-health.md`.
+  - User verification required:
+    `python -m pytest tests/connectors/health/test_connector_health_core.py tests/connectors/health/test_connector_health_integrations.py tests/execution_supervisor/test_supervisor_core.py tests/human_inbox/test_durable_inbox.py -q`.
+
 ## 2026-08-07
 
 - Fixed gateway task control and chat-turn auto recovery so messages do not
