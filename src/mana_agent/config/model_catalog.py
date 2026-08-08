@@ -196,7 +196,15 @@ def normalize_capabilities(
     model = str(model_id or "").strip()
     if model in _MAINTAINED:
         return _MAINTAINED[model]
+    # Dated / build-suffixed ids (e.g. deepseek-ai/deepseek-v4-flash-0731)
+    # inherit the maintained family entry when they share the same prefix.
     lowered = model.lower()
+    for key, caps in _MAINTAINED.items():
+        key_l = key.lower()
+        if lowered.startswith(key_l) and (
+            len(lowered) == len(key_l) or lowered[len(key_l)] in "-._/"
+        ):
+            return caps
     for capability, markers in _NON_TEXT_MARKERS:
         if any(marker in lowered for marker in markers):
             return frozenset({capability})
@@ -229,6 +237,17 @@ def normalize_capabilities(
     if text_family:
         if provider_id == "openai":
             return frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+        # NVIDIA DeepSeek V4 family is agent-capable with tools on NIM even when
+        # the exact build suffix is not listed in _MAINTAINED.
+        if provider_id == "nvidia" and "deepseek" in lowered:
+            return frozenset(
+                {
+                    ModelCapability.TEXT_GENERATION,
+                    ModelCapability.REASONING,
+                    ModelCapability.CODE,
+                    ModelCapability.TOOL_CALLING,
+                }
+            )
         return frozenset({ModelCapability.TEXT_GENERATION})
     return frozenset()
 

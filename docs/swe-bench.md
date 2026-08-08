@@ -188,15 +188,27 @@ python scripts/swe_bench/runner.py \
    stdin is closed; non-TTY single-shot chat exits after the coding turn.
    The runner emits a heartbeat every ~30s while mana-agent is still running
    (PID, elapsed time, log sizes, stderr tail).
+
+   **Agent environment hardening**
+
+   * A per-instance `agent_bin/` is prepended to `PATH` so bare `python`
+     invokes the runner's Python 3 (many macOS hosts still put Python 2.7
+     first as `python`; that produced SyntaxError on f-strings and empty
+     patches for `astropy__astropy-12907`).
+   * The issue prompt tells the agent to prefer source edits, use `python3`,
+     and not derail on package-import failures for uninstalled checkouts.
 5. Capture `git add -A` + `git diff --cached` as `model_patch`, then **drop
    test-file hunks** by default so grading does not fail on test edits.
+   Mass-delete-only trees (many deletions, zero modifications) are **not**
+   emitted as `model_patch` (`status=destructive_patch`) — that pattern
+   indicates a corrupted worktree, not a real SWE-bench fix.
 6. Append one JSONL prediction with `model_name_or_path`, `agent_name`,
    `agent_model`, and `model_patch` (including empty patches).
 7. Remove the worktree unless `--retain-worktrees`.
 
 Per-instance logs land under `.swe-bench/logs/<instance_id>/`
 (`mana_stdout.log`, `mana_stderr.log`, `mana_summary.txt`, `mana_cmd.txt`,
-`prompt.txt`, isolated `mana_home/`).
+`prompt.txt`, isolated `mana_home/`, `result.json`, `agent_bin/`).
 
 ## Grade predictions with the official harness
 

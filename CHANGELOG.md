@@ -4,6 +4,25 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed SWE-bench empty-patch failures driven by host Python 2.7 and
+  destructive/no-op worktree states after Codex+NVIDIA DeepSeek runs.
+  - Observed on `astropy__astropy-12907`: agent `python -c` hit the host
+    Frameworks Python 2.7, failed on f-strings in `astropy/__init__.py`, then
+    the model emitted DSML/garbage text and finished with `model_patch=""`.
+  - Runner now installs a per-instance `agent_bin` PATH shim so bare `python`
+    always execs the runner's Python 3 interpreter.
+  - Issue prompt now prefers source edits, requires `python3`, and warns that
+    the checkout may not be importable (do not spend the turn on env debug).
+  - Mass-delete-only worktrees (many deletes, no modifications) are rejected
+    as `destructive_patch` instead of shipping a huge delete-only prediction.
+  - Model catalog treats `deepseek-ai/deepseek-v4-flash-0731` (and other
+    family-suffixed DeepSeek V4 ids) as tool/code/reasoning capable so NIM
+    agent routing does not drop tools for dated build ids.
+  - Restored accidental deleted tracked files in the local
+    `.swe-bench/worktrees/astropy__astropy-13033` worktree used for diagnosis.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py tests/test_nvidia_provider.py -k "deepseek or python or mass_delete or prompt or shim or flash-0731 or capabilities"`
+
 - Fixed Codex Responses bridge sending routing profile metadata to NVIDIA,
   which caused HTTP 400 `Unsupported parameter(s): source_levels, capability_source`
   (and empty SWE-bench patches / `codex_failed`).

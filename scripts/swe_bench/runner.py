@@ -625,13 +625,18 @@ def build_prompt(instance: dict[str, Any], *, worktree: Path, max_chars: int) ->
         "Task:",
         "- Read the issue carefully.",
         "- Inspect only the files needed to implement a minimal correct fix.",
+        "- Prefer reading source files and applying edits over running the package.",
+        "- The repository is a source checkout and may not be installed or importable;",
+        "  do not spend the turn diagnosing import/runtime environment failures.",
+        "- If you run Python, always use `python3` (never bare `python`, which may be 2.x).",
         "- Apply the fix directly in this repository (edit production source files only).",
         "- Do not add, edit, delete, or rename test files or test helpers.",
         "- Do not modify tests solely to make them pass.",
         "- Official evaluation tests are applied separately; test changes cause harness failures.",
         "- Do not commit, push, rebase, or rewrite git history.",
         "- Do not interact with the user; complete the coding task in one pass.",
-        "- When finished, leave the patch as uncommitted working-tree changes.",
+        "- Success means production-source edits left as uncommitted working-tree changes.",
+        "- Do not finish with only analysis or chat text when a code fix is required.",
         "",
         "Issue / problem statement:",
         problem or "(empty problem statement)",
@@ -706,8 +711,128 @@ def filter_test_files_from_patch(patch: str) -> tuple[str, list[str]]:
     return filtered, removed
 
 
-def capture_model_patch(worktree: Path, *, exclude_test_files: bool = True) -> str:
-    """Capture a unified diff of all changes, including new/untracked files."""
+@dataclass(frozen=True, slots=True)
+class WorktreeChangeSummary:
+    """Counts of porcelain status paths before model_patch capture."""
+
+    modified: int = 0
+    added: int = 0
+    deleted: int = 0
+    other: int = 0
+    paths: tuple[str, ...] = ()
+
+    @property
+    def total(self) -> int:
+        return self.modified + self.added + self.deleted + self.other
+
+    @property
+    def is_mass_delete_only(self) -> bool:
+        """True when the tree is dominated by accidental mass deletions."""
+        # Intentional SWE-bench fixes almost never delete dozens of unrelated
+        # files with zero content edits. Those runs produce harness-breaking
+        # empty or destructive patches (seen on corrupted worktrees).
+        return self.deleted >= 20 and self.modified == 0 and self.added == 0
+
+
+def summarize_worktree_changes(worktree: Path) -> WorktreeChangeSummary:
+    """Parse ``git status --porcelain`` into coarse change counts."""
+    status = _git(["status", "--porcelain"], cwd=worktree, timeout=120)
+    if status.returncode != 0:
+        return WorktreeChangeSummary()
+    modified = added = deleted = other = 0
+    paths: list[str] = []
+    for raw_line in (status.stdout or "").splitlines():
+        if not raw_line.strip():
+            continue
+        # porcelain v1: XY<path> with optional rename " -> "
+        code = raw_line[:2] if len(raw_line) >= 2 else "  "
+        path = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[-1].strip()
+        paths.append(path)
+        xy = code.replace(" ", "")
+        if "D" in code:
+            deleted += 1
+        elif "A" in code or "?" in code:
+            added += 1
+        elif "M" in code or "T" in code or "R" in code or "C" in code:
+            modified += 1
+        elif xy:
+            other += 1
+        else:
+            other += 1
+    return WorktreeChangeSummary(
+        modified=modified,
+        added=added,
+        deleted=deleted,
+        other=other,
+        paths=tuple(paths[:200]),
+    )
+
+
+def resolve_python3_executable() -> str:
+    """Return an absolute Python 3 interpreter path for agent shells."""
+    # Prefer the runner's interpreter (always 3.x when this module loads).
+    if getattr(sys, "executable", None) and Path(sys.executable).exists():
+        return str(Path(sys.executable).resolve())
+    for name in ("python3", "python3.12", "python3.11", "python3.10"):
+        found = shutil_which(name)
+        if found:
+            return str(Path(found).resolve())
+    raise SweBenchRunnerError(
+        "Could not locate a Python 3 interpreter for the SWE-bench agent PATH shim."
+    )
+
+
+def prepare_agent_python_path(*, run_dir: Path, env: dict[str, str]) -> Path:
+    """Prepend a run-local bin dir so bare ``python`` invokes Python 3.
+
+    Hosts often expose Python 2.7 as ``python`` early on PATH (macOS Frameworks).
+    Agents that run ``python -c '...'`` then hit SyntaxError on f-strings and
+    derail into empty patches. A tiny shim keeps the rest of PATH intact.
+    """
+    bin_dir = (run_dir / "agent_bin").resolve()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python3 = resolve_python3_executable()
+    for name in ("python", "python3"):
+        shim = bin_dir / name
+        script = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f'exec "{python3}" "$@"\n'
+        )
+        shim.write_text(script, encoding="utf-8")
+        shim.chmod(0o755)
+    existing = str(env.get("PATH") or os.environ.get("PATH") or "")
+    env["PATH"] = f"{bin_dir}{os.pathsep}{existing}" if existing else str(bin_dir)
+    # Hint for tools that honor PYTHON / VIRTUAL_ENV conventions without PATH.
+    env["PYTHON"] = python3
+    env.setdefault("PYTHONUTF8", "1")
+    LOG.info("Agent PATH shim: python -> %s (bin=%s)", python3, bin_dir)
+    return bin_dir
+
+
+def capture_model_patch(
+    worktree: Path,
+    *,
+    exclude_test_files: bool = True,
+    reject_mass_delete: bool = True,
+) -> tuple[str, str]:
+    """Capture a unified diff of all changes, including new/untracked files.
+
+    Returns ``(patch, rejection_reason)``. ``rejection_reason`` is non-empty
+    when the patch is discarded as unsafe (e.g. mass-delete-only worktree).
+    """
+    summary = summarize_worktree_changes(worktree)
+    if reject_mass_delete and summary.is_mass_delete_only:
+        reason = (
+            f"refusing mass-delete-only worktree "
+            f"(deleted={summary.deleted}, modified={summary.modified}, "
+            f"added={summary.added}); not emitting destructive model_patch"
+        )
+        LOG.error("%s in %s", reason, worktree)
+        return "", reason
+
     # Stage everything in the index without committing so new files appear.
     add = _git(["add", "-A"], cwd=worktree, timeout=120)
     if add.returncode != 0:
@@ -731,7 +856,7 @@ def capture_model_patch(worktree: Path, *, exclude_test_files: bool = True) -> s
         raw = diff.stdout or ""
 
     if not exclude_test_files:
-        return raw
+        return raw, ""
 
     filtered, removed = filter_test_files_from_patch(raw)
     if removed:
@@ -741,7 +866,7 @@ def capture_model_patch(worktree: Path, *, exclude_test_files: bool = True) -> s
             len(removed),
             ", ".join(removed[:12]) + ("..." if len(removed) > 12 else ""),
         )
-    return filtered
+    return filtered, ""
 
 
 def prediction_record(
@@ -1023,6 +1148,8 @@ def run_mana_agent(
     env["PYTHONUNBUFFERED"] = "1"
     # Keep chat console quieter; runner heartbeats + log files show progress.
     env.setdefault("MANA_CHAT_ANIMATION", "0")
+    # Ensure bare `python` in agent shell tools is Python 3 (not host Python 2.7).
+    prepare_agent_python_path(run_dir=run_dir, env=env)
 
     # Per-step agent timeout should leave headroom under the hard wall clock.
     agent_step_timeout = max(30, min(int(timeout_seconds), max(30, int(timeout_seconds) - 30)))
@@ -1227,9 +1354,24 @@ def process_instance(
                 status = "ok"
                 error = ""
 
-            patch = capture_model_patch(
+            change_summary = summarize_worktree_changes(worktree)
+            patch, reject_reason = capture_model_patch(
                 worktree, exclude_test_files=cfg.exclude_test_files
             )
+            if reject_reason:
+                status = "destructive_patch"
+                error = reject_reason
+                patch = ""
+            elif status == "ok" and change_summary.total == 0:
+                # Explicit diagnostics when agent exits 0 with a clean tree.
+                LOG.warning(
+                    "No worktree changes after agent for %s "
+                    "(deleted=%s modified=%s added=%s)",
+                    instance_id,
+                    change_summary.deleted,
+                    change_summary.modified,
+                    change_summary.added,
+                )
 
         empty = not bool(patch.strip())
         if empty:

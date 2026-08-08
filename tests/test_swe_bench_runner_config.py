@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import subprocess
 from pathlib import Path
 
 from scripts.swe_bench.runner import (
     RunnerConfig,
+    WorktreeChangeSummary,
     _benchmark_config_overrides,
+    build_prompt,
+    capture_model_patch,
     load_operator_inference_defaults,
+    prepare_agent_python_path,
     resolve_agent_inference,
     resolve_model_name_or_path,
+    summarize_worktree_changes,
 )
 
 
@@ -105,3 +113,82 @@ def test_model_name_or_path_includes_non_openai_provider() -> None:
         resolve_model_name_or_path(cfg)
         == "mana-agent__nvidia__deepseek-ai__deepseek-v4-flash-0731"
     )
+
+
+def test_build_prompt_prefers_source_edits_and_python3() -> None:
+    prompt = build_prompt(
+        {
+            "instance_id": "astropy__astropy-12907",
+            "repo": "astropy/astropy",
+            "problem_statement": "separability_matrix nested compound bug",
+        },
+        worktree=Path("/tmp/worktree"),
+        max_chars=48_000,
+    )
+    assert "python3" in prompt
+    assert "never bare `python`" in prompt
+    assert "may not be installed or importable" in prompt
+    assert "production-source edits" in prompt
+    assert "separability_matrix nested compound bug" in prompt
+
+
+def test_prepare_agent_python_path_shims_python_to_python3(tmp_path: Path) -> None:
+    env: dict[str, str] = {"PATH": "/usr/bin"}
+    bin_dir = prepare_agent_python_path(run_dir=tmp_path, env=env)
+    python_shim = bin_dir / "python"
+    assert python_shim.is_file()
+    assert python_shim.stat().st_mode & stat.S_IXUSR
+    assert str(bin_dir) in env["PATH"].split(os.pathsep)
+    assert env["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    # Shim must invoke Python 3, not host Python 2.7.
+    probe = subprocess.run(
+        [str(python_shim), "-c", "import sys; print(sys.version_info[0])"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0
+    assert probe.stdout.strip() == "3"
+
+
+def test_mass_delete_only_summary_and_capture_rejection(tmp_path: Path) -> None:
+    summary = WorktreeChangeSummary(modified=0, added=0, deleted=42)
+    assert summary.is_mass_delete_only is True
+    assert WorktreeChangeSummary(modified=1, added=0, deleted=42).is_mass_delete_only is False
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    for i in range(25):
+        path = repo / f"file_{i}.txt"
+        path.write_text(f"content {i}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    for i in range(25):
+        (repo / f"file_{i}.txt").unlink()
+
+    counted = summarize_worktree_changes(repo)
+    assert counted.deleted >= 20
+    assert counted.modified == 0
+    assert counted.is_mass_delete_only is True
+
+    patch, reason = capture_model_patch(repo, exclude_test_files=False)
+    assert patch == ""
+    assert "mass-delete" in reason

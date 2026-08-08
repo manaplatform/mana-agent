@@ -13,7 +13,12 @@ from mana_agent.config.inference_provider import (
     credentials_from_mapping,
     resolve_inference_connection,
 )
-from mana_agent.config.model_catalog import ModelCapability, ModelPurpose, filter_models
+from mana_agent.config.model_catalog import (
+    ModelCapability,
+    ModelPurpose,
+    filter_models,
+    normalize_capabilities,
+)
 from mana_agent.config.provider_registry import (
     PROVIDERS,
     provider_credential_env_names,
@@ -115,6 +120,11 @@ def test_nvidia_catalog_preserves_canonical_ids(isolated_nvidia_config: Path) ->
     )
     assert ModelCapability.TEXT_GENERATION in by_id["deepseek-ai/deepseek-v4-flash"].capabilities
     assert ModelCapability.TOOL_CALLING in by_id["deepseek-ai/deepseek-v4-flash"].capabilities
+    # Build-suffixed DeepSeek ids inherit family capabilities (SWE-bench / NIM).
+    dated = normalize_capabilities("nvidia", "deepseek-ai/deepseek-v4-flash-0731")
+    assert ModelCapability.TOOL_CALLING in dated
+    assert ModelCapability.CODE in dated
+    assert ModelCapability.REASONING in dated
     assert by_id["nvidia/nv-embedqa-e5-v5"].supports(ModelPurpose.EMBEDDING)
     # Unknown IDs remain usable via advanced selection rather than being dropped.
     assert any(model.id == "moonshotai/kimi-k2.6" for model in models)
