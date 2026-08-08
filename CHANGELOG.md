@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed two Windows CI failures in connector health storage and eval suite load.
+  - Skip legacy colon-filename snapshot migration on Windows (`os.name == "nt"`);
+    colon names are illegal or NTFS ADS syntax there, not real directory entries.
+  - Eval baseline-not-suite error hints now use portable POSIX path separators
+    (`evals/suites/...`) instead of platform-local `Path` stringification.
+  - User verification required:
+    `python -m pytest tests/connectors/health/test_connector_health_core.py -k "migrate_legacy or fs_names_encode" tests/evals/test_eval_lab.py -k "baseline_document"`
+
+- Fixed NVIDIA DeepSeek V4 request shaping for both direct chat and the Codex
+  Responses bridge.
+  - Inject `chat_template_kwargs` (`thinking` + `reasoning_effort`) required by
+    NVIDIA NIM for `deepseek-ai/deepseek-v4-flash` / `deepseek-v4-pro`.
+  - Avoid sending bare top-level `reasoning_effort` alone to NVIDIA DeepSeek
+    (can hang, 4xx/410, or disconnect Codex streams as `systemError`).
+  - Improve provider error logs with HTTP status and NVIDIA-specific messaging.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_nvidia_provider.py -k "deepseek or chat_template or fragmented or first_class"`
+
 - Fixed the Responses bridge fragmented tool-argument test assertion to account
   for JSON-escaped SSE payloads while still verifying full argument reconstruction.
   - User verification required:

@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from mana_agent.config.nvidia_model_requests import (
+    apply_nvidia_chat_completion_shaping,
+    is_nvidia_deepseek_model,
+    normalize_nvidia_deepseek_effort,
+)
 from mana_agent.integrations.codex.responses_bridge.models import BridgeUpstreamConfig
 
 
@@ -14,26 +19,12 @@ def normalize_reasoning_effort(
     model: str,
     effort: str | None,
 ) -> str | None:
-    """Map Codex/OpenAI reasoning effort onto provider-supported values.
-
-    DeepSeek V4 on NVIDIA accepts ``none`` / ``high`` / ``max`` only.
-    """
+    """Map Codex/OpenAI reasoning effort onto provider-supported values."""
     if effort is None or not str(effort).strip():
         return None
     raw = str(effort).strip().lower()
-    provider_id = str(provider or "").strip().lower()
-    model_id = str(model or "").strip().lower()
-    if provider_id == "nvidia" and "deepseek" in model_id:
-        mapping = {
-            "none": "none",
-            "minimal": "none",
-            "low": "none",
-            "medium": "high",
-            "high": "high",
-            "xhigh": "max",
-            "max": "max",
-        }
-        return mapping.get(raw, "high")
+    if is_nvidia_deepseek_model(provider=provider, model=model):
+        return normalize_nvidia_deepseek_effort(raw)
     return raw
 
 
@@ -235,7 +226,13 @@ def convert_responses_request_to_chat(
     mapped = normalize_reasoning_effort(
         provider=upstream.provider, model=model, effort=None if effort is None else str(effort)
     )
-    if mapped is not None:
+    # Non-DeepSeek hosts may still accept top-level reasoning_effort.
+    if mapped is not None and not is_nvidia_deepseek_model(
+        provider=upstream.provider, model=model
+    ):
+        payload["reasoning_effort"] = mapped
+    elif mapped is not None:
+        # Stash for NVIDIA DeepSeek shaping below.
         payload["reasoning_effort"] = mapped
 
     # Optional provider/model overrides (never secrets).
@@ -260,7 +257,21 @@ def convert_responses_request_to_chat(
     extra_body = payload.pop("extra_body", None)
     if isinstance(extra_body, dict):
         for key, value in extra_body.items():
-            payload.setdefault(key, value)
+            if key == "chat_template_kwargs" and isinstance(value, dict):
+                nested = dict(payload.get("chat_template_kwargs") or {})
+                nested.update(value)
+                payload["chat_template_kwargs"] = nested
+            else:
+                payload.setdefault(key, value)
+
+    # DeepSeek V4 on NVIDIA requires chat_template_kwargs; bare reasoning_effort
+    # alone can hang, 4xx, or produce empty streams (seen as Codex systemError/410).
+    apply_nvidia_chat_completion_shaping(
+        payload,
+        provider=upstream.provider,
+        model=model,
+        default_effort=mapped or "high",
+    )
     return payload
 
 

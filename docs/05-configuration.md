@@ -219,6 +219,12 @@ Chat Completions-only hosts). Codex receives a temporary local token and never
 sees `NVIDIA_API_KEY`. Mana still attributes context/cost accounting to
 `provider=nvidia` with transport `codex_responses_bridge`.
 
+**DeepSeek V4 on NVIDIA:** models such as `deepseek-ai/deepseek-v4-flash` and
+`deepseek-ai/deepseek-v4-pro` require NIM `chat_template_kwargs` (`thinking` +
+`reasoning_effort` in `none`/`high`/`max`). Mana injects these automatically for
+both direct chat and the Codex bridge. Without them, NVIDIA may hang, return
+4xx/410, or disconnect the Codex stream as a generic `systemError`.
+
 Saved files:
 
 - `~/.mana/config.toml` for non-secret settings.

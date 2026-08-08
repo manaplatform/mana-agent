@@ -82,13 +82,17 @@ def _legacy_identity_path(directory: Path, identity: str, *, suffix: str) -> Pat
 def _resolve_identity_path(directory: Path, identity: str, *, suffix: str) -> Path:
     """Return the path to use, migrating a legacy colon-named file when present."""
     modern = _identity_path(directory, identity, suffix=suffix)
+    # Colon characters are illegal (or NTFS ADS syntax) on Windows; never probe
+    # legacy names there. Migration is a POSIX-only upgrade path.
+    if os.name == "nt":
+        return modern
     legacy = _legacy_identity_path(directory, identity, suffix=suffix)
     if legacy is None:
         return modern
     try:
         legacy_exists = legacy.exists()
     except OSError:
-        # Windows rejects colon-bearing names; treat as absent.
+        # Platform rejects colon-bearing names; treat as absent.
         return modern
     if not legacy_exists:
         return modern

@@ -511,8 +511,12 @@ def test_storage_fs_names_encode_colons_for_windows(tmp_path: Path):
 def test_storage_migrates_legacy_colon_snapshot_names(tmp_path: Path):
     """POSIX installs may still have colon filenames; resolve migrates once."""
     import json
+    import os
 
     from mana_agent.connectors.health.models import ConnectorHealthReport, ConnectorHealthSnapshot
+
+    if os.name == "nt":
+        pytest.skip("legacy colon filenames are not valid Windows directory entries")
 
     root = tmp_path / "connectors"
     store = ConnectorHealthStore(root)
@@ -531,6 +535,16 @@ def test_storage_migrates_legacy_colon_snapshot_names(tmp_path: Path):
         legacy.write_text(snapshot.model_dump_json(), encoding="utf-8")
     except OSError:
         pytest.skip("platform rejects colon filenames (expected on Windows)")
+
+    # On some hosts a colon path is accepted by open() but becomes an NTFS ADS
+    # (or similar), not a real directory entry named with ':'. Migration only
+    # applies when the legacy name is a real filesystem entry.
+    try:
+        names = {p.name for p in legacy.parent.iterdir()}
+    except OSError:
+        names = set()
+    if legacy.name not in names:
+        pytest.skip("platform does not store colon characters in directory entries")
 
     loaded = store.load_snapshot("fake:1")
     assert loaded is not None

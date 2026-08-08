@@ -43,7 +43,7 @@ def _bearer_token(header_value: str | None) -> str | None:
 def _classify_upstream_status(status_code: int) -> str:
     if status_code in {401, 403}:
         return "authentication"
-    if status_code == 404:
+    if status_code in {404, 410}:
         return "not_found"
     if status_code == 422:
         return "invalid_request"
@@ -59,15 +59,25 @@ def _safe_upstream_message(
     provider: str,
     status_code: int,
     body_text: str,
+    model: str | None = None,
 ) -> str:
     kind = _classify_upstream_status(status_code)
+    model_part = f" model={model}" if model else ""
     labels = {
-        "authentication": f"{provider} authentication or permission failed (HTTP {status_code}).",
-        "not_found": f"{provider} endpoint or model is unavailable (HTTP {status_code}).",
-        "invalid_request": f"{provider} rejected the request (HTTP {status_code}).",
-        "rate_limit": f"{provider} rate limit or quota exceeded (HTTP {status_code}).",
-        "provider_service": f"{provider} service failure (HTTP {status_code}).",
-        "provider_error": f"{provider} request failed (HTTP {status_code}).",
+        "authentication": (
+            f"{provider} authentication or permission failed (HTTP {status_code}).{model_part}"
+        ),
+        "not_found": (
+            f"{provider} endpoint or model is unavailable (HTTP {status_code}).{model_part} "
+            "Confirm the model id is enabled for this NVIDIA account and that the request "
+            "uses Chat Completions with provider-correct options."
+        ),
+        "invalid_request": (
+            f"{provider} rejected the request (HTTP {status_code}).{model_part}"
+        ),
+        "rate_limit": f"{provider} rate limit or quota exceeded (HTTP {status_code}).{model_part}",
+        "provider_service": f"{provider} service failure (HTTP {status_code}).{model_part}",
+        "provider_error": f"{provider} request failed (HTTP {status_code}).{model_part}",
     }
     # Never include raw provider body in user-facing text (may leak request fragments).
     _ = body_text
@@ -135,12 +145,16 @@ def build_bridge_app(
             **dict(upstream.headers or {}),
         }
         # Never log secrets or full authorization headers.
+        template = chat_payload.get("chat_template_kwargs")
         logger.info(
-            "responses_bridge.upstream_request provider=%s model=%s stream=%s host=%s",
+            "responses_bridge.upstream_request provider=%s model=%s stream=%s host=%s "
+            "has_tools=%s has_chat_template_kwargs=%s",
             upstream.provider,
             chat_payload.get("model"),
             stream,
             httpx.URL(url).host,
+            bool(chat_payload.get("tools")),
+            isinstance(template, dict),
         )
 
         if stream:
@@ -175,6 +189,14 @@ def build_bridge_app(
                 provider=upstream.display_name,
                 status_code=response.status_code,
                 body_text=response.text,
+                model=str(chat_payload.get("model") or upstream.model or ""),
+            )
+            logger.error(
+                "responses_bridge.upstream_failed provider=%s model=%s status=%s kind=%s",
+                upstream.provider,
+                chat_payload.get("model"),
+                response.status_code,
+                _classify_upstream_status(response.status_code),
             )
             raise UpstreamProviderError(
                 message,
@@ -248,6 +270,13 @@ async def _stream_upstream(
                         provider=upstream.display_name,
                         status_code=response.status_code,
                         body_text=body.decode("utf-8", errors="replace"),
+                        model=str(chat_payload.get("model") or upstream.model or ""),
+                    )
+                    logger.error(
+                        "responses_bridge.upstream_stream_failed provider=%s model=%s status=%s",
+                        upstream.provider,
+                        chat_payload.get("model"),
+                        response.status_code,
                     )
                     for event in adapter.close_events(
                         failed=True,

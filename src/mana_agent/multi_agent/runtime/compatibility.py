@@ -162,12 +162,40 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 "reasoning_effort=none reason=tools_with_reasoning_unsupported",
                 self.model_name,
             )
+        # NVIDIA DeepSeek V4 requires chat_template_kwargs; bare OpenAI-style
+        # reasoning_effort alone can hang or fail on integrate.api.nvidia.com.
+        from mana_agent.config.nvidia_model_requests import apply_nvidia_chat_completion_shaping
+        from mana_agent.config.user_config import get_setting as _get_setting
+
+        # LangChain may nest extras under ``extra_body``; flatten before shaping
+        # so NIM receives top-level chat_template_kwargs in the HTTP body.
+        extra_body = payload.pop("extra_body", None)
+        if isinstance(extra_body, dict):
+            for key, value in extra_body.items():
+                if key == "chat_template_kwargs" and isinstance(value, dict):
+                    nested = dict(payload.get("chat_template_kwargs") or {})
+                    nested.update(value)
+                    payload["chat_template_kwargs"] = nested
+                else:
+                    payload.setdefault(key, value)
+
+        default_effort = str(_get_setting("MANA_LLM_REASONING_EFFORT", "") or "").strip() or "high"
+        if self.compatibility_force_reasoning_none:
+            default_effort = "none"
+        apply_nvidia_chat_completion_shaping(
+            payload,
+            provider=self.selected_provider,
+            model=self.model_name,
+            default_effort=default_effort,
+        )
+        template = payload.get("chat_template_kwargs") if isinstance(payload.get("chat_template_kwargs"), dict) else {}
         logger.debug(
-            "llm.request api_mode=%s model=%s tools=%s reasoning=%s",
+            "llm.request api_mode=%s model=%s tools=%s reasoning=%s chat_template_kwargs=%s",
             "responses" if self._use_responses_api(payload) else "chat_completions",
             self.model_name,
             _has_tools(payload),
             payload.get("reasoning", {}).get("effort") if isinstance(payload.get("reasoning"), dict) else payload.get("reasoning_effort"),
+            bool(template),
         )
         return payload
 
@@ -199,13 +227,19 @@ class CompatibleChatOpenAI(ChatOpenAI):
             safe_error = format_provider_error(
                 exc, provider=self.selected_provider, model=self.model_name
             )
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            if status is None:
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
             logger.error(
                 "llm.request_failed provider=%s model=%s streaming=false "
-                "retry_count=%s error_type=%s",
+                "retry_count=%s error_type=%s status=%s detail=%s",
                 self.selected_provider or "unknown",
                 self.model_name,
                 int(self.compatibility_retry_attempted),
                 type(exc).__name__,
+                status,
+                safe_error,
             )
             record_current(
                 "model.call.failed",
@@ -270,13 +304,19 @@ class CompatibleChatOpenAI(ChatOpenAI):
             safe_error = format_provider_error(
                 exc, provider=self.selected_provider, model=self.model_name
             )
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            if status is None:
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
             logger.error(
                 "llm.request_failed provider=%s model=%s streaming=true "
-                "retry_count=%s error_type=%s",
+                "retry_count=%s error_type=%s status=%s detail=%s",
                 self.selected_provider or "unknown",
                 self.model_name,
                 int(self.compatibility_retry_attempted),
                 type(exc).__name__,
+                status,
+                safe_error,
             )
             record_current(
                 "model.call.failed",
@@ -489,7 +529,23 @@ def create_chat_model(
         init_kwargs["base_url"] = base_url
     if default_headers:
         init_kwargs["default_headers"] = default_headers
-    if reasoning_effort and "reasoning_effort" not in init_kwargs and "reasoning" not in init_kwargs:
+    # NVIDIA DeepSeek expects chat_template_kwargs rather than top-level
+    # reasoning_effort. Attach defaults here; per-request shaping in
+    # _get_request_payload remains authoritative.
+    from mana_agent.config.nvidia_model_requests import (
+        deepseek_chat_template_kwargs,
+        is_nvidia_deepseek_model,
+    )
+
+    if is_nvidia_deepseek_model(provider=provider, model=model):
+        template = deepseek_chat_template_kwargs(reasoning_effort or "high")
+        extra_body = dict(init_kwargs.get("extra_body") or {})
+        nested = dict(extra_body.get("chat_template_kwargs") or {})
+        for key, value in template.items():
+            nested.setdefault(key, value)
+        extra_body["chat_template_kwargs"] = nested
+        init_kwargs["extra_body"] = extra_body
+    elif reasoning_effort and "reasoning_effort" not in init_kwargs and "reasoning" not in init_kwargs:
         init_kwargs["reasoning_effort"] = reasoning_effort
     if isinstance(configuration, dict):
         _apply_model_request_configuration(init_kwargs, configuration)
@@ -522,9 +578,10 @@ def format_provider_error(exc: BaseException, *, provider: str | None = None, mo
             f"{label} authentication or permission failed (HTTP {code}).{model_part}"
             f"{isolation}"
         )
-    if code == 404:
+    if code in {404, 410}:
         return (
-            f"{label} endpoint or model is unavailable (HTTP 404).{model_part}"
+            f"{label} endpoint or model is unavailable (HTTP {code}).{model_part} "
+            "Confirm the model id is enabled for this account."
         )
     if code == 429:
         return f"{label} rate limit or quota exceeded (HTTP 429).{model_part}"
@@ -538,4 +595,7 @@ def format_provider_error(exc: BaseException, *, provider: str | None = None, mo
     # Never rebrand a multi-provider failure as an OpenAI error.
     if "openai" in text.lower() and provider_id not in {"openai", "unknown", ""}:
         return f"{label} request failed.{model_part} {type(exc).__name__}"
+    # Prefer status-aware short message when the exception body is noisy.
+    if code is not None:
+        return f"{label} request failed (HTTP {code}).{model_part}"
     return f"{label} request failed.{model_part} {type(exc).__name__}: {text}"

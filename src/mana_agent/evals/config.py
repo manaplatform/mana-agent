@@ -152,11 +152,14 @@ def _looks_like_baseline(raw: dict[str, Any]) -> bool:
 
 
 def _suite_path_hint_for_baseline(path: Path, raw: dict[str, Any]) -> str:
+    """Return a portable suite path hint for error messages (POSIX separators)."""
     suite_name = str(raw.get("suite_name") or raw.get("name") or path.stem).strip() or path.stem
-    candidate = Path("evals/suites") / f"{suite_name}.yaml"
+    relative = f"evals/suites/{suite_name}.yaml"
+    candidate = Path(relative)
     if candidate.exists():
-        return str(candidate)
-    return f"evals/suites/{suite_name}.yaml"
+        # Prefer relative repo path with stable separators for CLI copy/paste.
+        return candidate.as_posix()
+    return relative
 
 
 def load_suite(path: str | Path, *, validate_runtime: bool = True) -> EvalSuite:

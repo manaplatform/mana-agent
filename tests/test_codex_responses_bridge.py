@@ -52,6 +52,23 @@ def test_deepseek_v4_pro_reasoning_effort_mapping() -> None:
         )
         == "none"
     )
+    # Codex xhigh must land in NIM chat_template_kwargs as max.
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-pro",
+            "input": "hello",
+            "reasoning": {"effort": "xhigh"},
+        },
+        upstream=BridgeUpstreamConfig(
+            provider="nvidia",
+            display_name="NVIDIA",
+            api_key="nvapi",
+            base_url="https://integrate.api.nvidia.com/v1",
+            model="deepseek-ai/deepseek-v4-pro",
+        ),
+    )
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "max"
+    assert chat["chat_template_kwargs"]["thinking"] is True
 
 
 def test_responses_to_chat_tools_and_function_outputs() -> None:
@@ -319,6 +336,27 @@ def test_deepseek_v4_pro_outgoing_payload_includes_reasoning_effort() -> None:
     )
     assert chat["model"] == "deepseek-ai/deepseek-v4-pro"
     assert chat["stream"] is False
-    assert chat["reasoning_effort"] == "high"
+    # NVIDIA DeepSeek requires chat_template_kwargs, not bare reasoning_effort.
+    assert "reasoning_effort" not in chat
+    assert chat["chat_template_kwargs"] == {
+        "thinking": True,
+        "reasoning_effort": "high",
+    }
     assert chat["messages"][0]["role"] == "user"
     assert chat["messages"][0]["content"] == "hello"
+
+
+def test_deepseek_v4_flash_default_chat_template_kwargs() -> None:
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash",
+    )
+    chat = convert_responses_request_to_chat(
+        {"model": "deepseek-ai/deepseek-v4-flash", "input": "hi"},
+        upstream=upstream,
+    )
+    assert chat["chat_template_kwargs"]["thinking"] is True
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"

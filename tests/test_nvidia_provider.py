@@ -256,6 +256,28 @@ def test_nvidia_model_specific_request_configuration_forwarded(
     }
 
 
+def test_nvidia_deepseek_payload_uses_chat_template_kwargs(
+    isolated_nvidia_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.runtime.compatibility.get_setting",
+        lambda name, default=None: default,
+    )
+    llm = create_chat_model(
+        api_key="nvapi-test",
+        model="deepseek-ai/deepseek-v4-flash",
+        base_url="https://integrate.api.nvidia.com/v1",
+        provider="nvidia",
+    )
+    payload = llm._get_request_payload([HumanMessage(content="hello")])
+    assert payload["chat_template_kwargs"]["thinking"] is True
+    assert payload["chat_template_kwargs"]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in payload
+
+
 def test_nvidia_format_provider_error_never_says_openai() -> None:
     class FakeHTTPError(Exception):
         status_code = 401
