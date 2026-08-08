@@ -36,16 +36,22 @@ OPENAI_DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 NVIDIA_DEFAULT_EMBED_MODEL = "nvidia/nv-embedqa-e5-v5"
 
 
-def resolve_embed_model(base_url: str | None, explicit_model: str | None = None) -> str:
-    """Return the embedding model to use for the given base URL.
+def resolve_embed_model(
+    base_url: str | None,
+    explicit_model: str | None = None,
+    *,
+    provider: str | None = None,
+) -> str:
+    """Return the embedding model to use for the given base URL / provider.
 
     An explicitly configured model always wins. Otherwise the model is inferred
-    from the base URL: NVIDIA endpoints get an NVIDIA embedding model, everything
-    else falls back to the OpenAI default.
+    from the provider or base URL: NVIDIA endpoints get an NVIDIA embedding
+    model, everything else falls back to the OpenAI default.
     """
     if explicit_model and explicit_model.strip():
         return explicit_model.strip()
-    if base_url and "nvidia" in base_url.lower():
+    provider_id = str(provider or "").strip().lower()
+    if provider_id == "nvidia" or (base_url and "nvidia" in base_url.lower()):
         return NVIDIA_DEFAULT_EMBED_MODEL
     return OPENAI_DEFAULT_EMBED_MODEL
 
@@ -71,6 +77,10 @@ class Settings(BaseSettings):
     openrouter_title: str = Field(default="Mana-Agent", alias="OPENROUTER_TITLE")
     openrouter_provider_preferences: dict[str, Any] | str = Field(
         default_factory=dict, alias="OPENROUTER_PROVIDER_PREFERENCES"
+    )
+    nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
+    nvidia_base_url: str = Field(
+        default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL"
     )
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_tool_worker_model: str | None = Field(

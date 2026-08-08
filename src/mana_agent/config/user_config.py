@@ -39,6 +39,7 @@ def model_cache_file() -> Path:
 SECRET_KEYS = {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "NVIDIA_API_KEY",
     "MANA_GITHUB_TOKEN",
     "MANA_WEB_SEARCH_API_KEY",
     "MANA_API_TOKEN",
@@ -63,6 +64,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENROUTER_HTTP_REFERER": "https://github.com/mana-agent/mana-agent",
     "OPENROUTER_TITLE": "Mana-Agent",
     "OPENROUTER_PROVIDER_PREFERENCES": {},
+    "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
     "OPENAI_TOOL_WORKER_MODEL": "",
     "OPENAI_CODING_PLANNER_MODEL": "",
@@ -401,6 +403,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "OPENROUTER_HTTP_REFERER": "openrouter_http_referer",
     "OPENROUTER_TITLE": "openrouter_title",
     "OPENROUTER_PROVIDER_PREFERENCES": "openrouter_provider_preferences",
+    "NVIDIA_API_KEY": "nvidia_api_key",
+    "NVIDIA_BASE_URL": "nvidia_base_url",
     "OPENAI_CHAT_MODEL": "openai_chat_model",
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
     "OPENAI_CODING_PLANNER_MODEL": "openai_coding_planner_model",
@@ -883,8 +887,15 @@ def has_user_config() -> bool:
 
 def is_user_config_valid() -> bool:
     effective = load_effective_settings(include_env=True)
+    provider = str(effective.get("MANA_AI_PROVIDER") or "openai").strip().lower()
+    if provider == "openrouter":
+        api_key = effective.get("OPENROUTER_API_KEY", "")
+    elif provider == "nvidia":
+        api_key = effective.get("NVIDIA_API_KEY", "")
+    else:
+        api_key = effective.get("OPENAI_API_KEY", "")
     return bool(
-        str(effective.get("OPENAI_API_KEY", "") or "").strip()
+        str(api_key or "").strip()
         and str(effective.get("OPENAI_CHAT_MODEL", "") or "").strip()
     )
 
@@ -1022,6 +1033,12 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         )
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
+    if cleaned.get("OPENROUTER_BASE_URL"):
+        cleaned["OPENROUTER_BASE_URL"] = validate_base_url(
+            str(cleaned["OPENROUTER_BASE_URL"])
+        )
+    if cleaned.get("NVIDIA_BASE_URL"):
+        cleaned["NVIDIA_BASE_URL"] = validate_base_url(str(cleaned["NVIDIA_BASE_URL"]))
     if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
         cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"] = validate_base_url(
             str(cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"])
@@ -1225,6 +1242,25 @@ def migrate_legacy_config() -> list[str]:
         base_url = str(config.get("OPENAI_BASE_URL") or "").lower()
         provider = "nvidia" if "nvidia" in base_url else "openai"
         config["MANA_AI_PROVIDER"] = provider
+    # Legacy installs often pointed OPENAI_BASE_URL at NVIDIA while still
+    # storing the key as OPENAI_API_KEY. Promote isolated NVIDIA settings when
+    # the provider is NVIDIA and dedicated keys are still empty.
+    if provider == "nvidia":
+        if not str(config.get("NVIDIA_BASE_URL") or "").strip():
+            openai_base = str(config.get("OPENAI_BASE_URL") or "").strip()
+            if openai_base and "nvidia" in openai_base.lower():
+                config["NVIDIA_BASE_URL"] = openai_base
+            else:
+                config.setdefault(
+                    "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
+                )
+        nvidia_key = str(secrets.get("NVIDIA_API_KEY") or "").strip()
+        openai_key = str(secrets.get("OPENAI_API_KEY") or config.get("OPENAI_API_KEY") or "").strip()
+        if not nvidia_key and openai_key:
+            secrets["NVIDIA_API_KEY"] = openai_key
+            messages.append(
+                "Copied legacy OPENAI_API_KEY into NVIDIA_API_KEY for the NVIDIA provider."
+            )
     from mana_agent.config.provider_registry import qualify_model_id
 
     chat_model = str(

@@ -49,15 +49,21 @@ class ProviderRegistry:
                 auth_method=AuthenticationMethod.API_KEY,
                 default_base_url="https://openrouter.ai/api/v1",
                 api_key_env="OPENROUTER_API_KEY",
-                default_headers=(("HTTP-Referer", "https://github.com/mana-agent/mana-agent"), ("X-OpenRouter-Title", "Mana-Agent")),
+                default_headers=(
+                    ("HTTP-Referer", "https://github.com/mana-agent/mana-agent"),
+                    ("X-OpenRouter-Title", "Mana-Agent"),
+                ),
                 supports_responses_api=True,
             ),
             ProviderDefinition(
                 id="nvidia",
-                display_name="NVIDIA NIM",
+                display_name="NVIDIA",
                 auth_method=AuthenticationMethod.API_KEY,
                 default_base_url="https://integrate.api.nvidia.com/v1",
-                api_key_env="OPENAI_API_KEY",
+                api_key_env="NVIDIA_API_KEY",
+                # NVIDIA Build / NIM is OpenAI Chat Completions compatible.
+                # Do not claim Responses API support without validating it.
+                supports_responses_api=False,
             ),
             ProviderDefinition(
                 id="custom",
@@ -82,22 +88,88 @@ class ProviderRegistry:
 
 PROVIDERS = ProviderRegistry()
 
+# Providers whose upstream catalog IDs are usually bare model names (not org/model).
+_SIMPLE_UPSTREAM_PROVIDERS = frozenset({"openai", "custom", "openrouter"})
+
+
+def _known_provider_ids() -> set[str]:
+    return {item.id for item in PROVIDERS.all()}
+
 
 def qualify_model_id(provider: str, model_id: str) -> str:
+    """Build a Mana-qualified model identity ``provider/upstream_id``.
+
+    Upstream NVIDIA Build IDs may themselves contain slashes and may even
+    begin with ``nvidia/`` (for models published under the NVIDIA org). Those
+    must round-trip as::
+
+        nvidia/nemotron-x  →  nvidia/nvidia/nemotron-x
+        deepseek-ai/x      →  nvidia/deepseek-ai/x
+
+    Already-qualified Mana IDs remain idempotent.
+    """
     provider_id = str(provider or "").strip().lower()
     model = str(model_id or "").strip()
     if not provider_id or not model:
         raise ValueError("Provider and model ID are required.")
     if model.startswith(f"{provider_id}/"):
-        return model
+        split_provider, split_model = split_qualified_model_id(
+            model, default_provider=provider_id
+        )
+        if split_provider == provider_id and f"{provider_id}/{split_model}" == model:
+            return model
+        # Bare upstream that happens to start with the provider name
+        # (e.g. nvidia/nemotron-...) still needs a Mana provider prefix.
+        return f"{provider_id}/{model}"
     return f"{provider_id}/{model}"
 
 
-def split_qualified_model_id(value: str, *, default_provider: str = "openai") -> tuple[str, str]:
+def split_qualified_model_id(
+    value: str, *, default_provider: str = "openai"
+) -> tuple[str, str]:
+    """Split a Mana-qualified or bare upstream model ID.
+
+    Bare upstream IDs hosted by multi-tenant providers (OpenRouter, NVIDIA)
+    often look like ``org/model``. When the first segment is a *different*
+    known Mana provider than ``default_provider``, the whole string is treated
+    as the upstream model under the default provider (OpenRouter hosting
+    ``openai/*``, NVIDIA hosting ``deepseek-ai/*``, etc.).
+
+    When the first segment equals the default provider and the remainder has
+    no further slash, providers that publish under their own org name
+    (NVIDIA) keep the full string as the upstream model ID so
+    ``nvidia/nemotron-x`` is not reduced to ``nemotron-x``.
+    """
     text = str(value or "").strip()
+    default = str(default_provider or "openai").strip().lower() or "openai"
+    if not text:
+        return default, ""
     if "/" not in text:
-        return default_provider, text
-    provider, model = text.split("/", 1)
-    if provider in {item.id for item in PROVIDERS.all()} and model:
-        return provider, model
-    return default_provider, text
+        return default, text
+    head, rest = text.split("/", 1)
+    if not rest:
+        return default, text
+    known = _known_provider_ids()
+    if head not in known:
+        return default, text
+    if head == default:
+        if "/" in rest:
+            return head, rest
+        if head in _SIMPLE_UPSTREAM_PROVIDERS:
+            return head, rest
+        # Nested catalog namespaces that share the provider name (nvidia/*).
+        return head, text
+    # Different known provider prefix: treat as upstream under the active provider.
+    if default in known:
+        return default, text
+    return head, rest
+
+
+def provider_credential_env_names(provider: str) -> tuple[str, str]:
+    """Return ``(api_key_env, base_url_env)`` config keys for a provider."""
+    provider_id = str(provider or "openai").strip().lower() or "openai"
+    if provider_id == "openrouter":
+        return "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"
+    if provider_id == "nvidia":
+        return "NVIDIA_API_KEY", "NVIDIA_BASE_URL"
+    return "OPENAI_API_KEY", "OPENAI_BASE_URL"

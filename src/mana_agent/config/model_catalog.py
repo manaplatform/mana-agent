@@ -123,6 +123,25 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "text-embedding-3-small": frozenset({ModelCapability.EMBEDDING}),
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),
+    "nvidia/llama-3.2-nv-embedqa-1b-v2": frozenset({ModelCapability.EMBEDDING}),
+    # Known NVIDIA Build / NIM text models used as agent baselines. Tool
+    # calling is OpenAI-compatible on these hosted models; unknown catalog
+    # entries remain unclassified until Advanced/manual selection.
+    "deepseek-ai/deepseek-v4-flash": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "nvidia/nemotron-3-nano-30b-a3b": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
     "gpt-image-1": frozenset({ModelCapability.IMAGE_GENERATION}),
     "gpt-image-1-mini": frozenset({ModelCapability.IMAGE_GENERATION}),
     "dall-e-2": frozenset({ModelCapability.IMAGE_GENERATION}),
@@ -174,13 +193,35 @@ def normalize_capabilities(
         if any(marker in lowered for marker in markers):
             return frozenset({capability})
     provider_id = str(provider or "").strip().lower()
+    # Conservative name-based text detection only. Do not invent tool-calling
+    # or reasoning capability solely because a model is an LLM; unknown models
+    # remain unclassified and stay usable via Advanced/manual entry.
     text_family = (
         provider_id == "openai" and lowered.startswith(("gpt-", "o1", "o3", "o4"))
     ) or (
-        provider_id == "nvidia" and any(marker in lowered for marker in ("llama", "nemotron", "mistral", "qwen", "deepseek"))
+        provider_id == "nvidia"
+        and any(
+            marker in lowered
+            for marker in (
+                "llama",
+                "nemotron",
+                "mistral",
+                "mixtral",
+                "qwen",
+                "deepseek",
+                "kimi",
+                "moonshot",
+                "gemma",
+                "phi-",
+                "codellama",
+                "yi-",
+            )
+        )
     )
     if text_family:
-        return frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+        if provider_id == "openai":
+            return frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+        return frozenset({ModelCapability.TEXT_GENERATION})
     return frozenset()
 
 

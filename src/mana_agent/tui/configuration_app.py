@@ -13,8 +13,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, Switch, TabbedContent, TabPane
 
 from mana_agent.config.catalog_service import ModelCatalogService, ProviderValidationError
+from mana_agent.config.inference_provider import credentials_from_mapping
 from mana_agent.config.model_catalog import ModelPurpose, filter_models, search_models
-from mana_agent.config.provider_registry import PROVIDERS
+from mana_agent.config.provider_registry import PROVIDERS, provider_credential_env_names
 from mana_agent.config.session import ConfigurationDraft
 from mana_agent.config.user_config import migrate_legacy_config
 from mana_agent.search.registry import SEARCH_PROVIDERS
@@ -361,17 +362,19 @@ class ManaConfigurationApp(App[bool]):
 
     @staticmethod
     def _provider_secret_name(provider: str) -> str:
-        return "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
+        return provider_credential_env_names(provider)[0]
 
     @staticmethod
     def _provider_base_key(provider: str) -> str:
-        return "OPENROUTER_BASE_URL" if provider == "openrouter" else "OPENAI_BASE_URL"
+        return provider_credential_env_names(provider)[1]
 
     def _provider_base_url(self, values: dict[str, Any], provider: str) -> str:
-        return str(values.get(self._provider_base_key(provider)) or PROVIDERS.get(provider).default_base_url)
+        _api_key, base_url = credentials_from_mapping(values, provider=provider)
+        return base_url or PROVIDERS.get(provider).default_base_url
 
     def _provider_api_key(self, values: dict[str, Any], provider: str) -> str:
-        return str(values.get(self._provider_secret_name(provider)) or "")
+        api_key, _base_url = credentials_from_mapping(values, provider=provider)
+        return api_key
 
     def _initial_model_options(self, key: str, *, embedding: bool = False) -> list[tuple[str, str]]:
         current = str(self.draft.values.get(key) or "").strip()

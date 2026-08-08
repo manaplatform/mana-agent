@@ -178,13 +178,40 @@ mana-agent
 
 When no saved user config exists, the CLI prints the Mana banner first, then starts a keyboard-selectable setup wizard. The wizard can:
 
-- Configure OpenAI, OpenAI-compatible, NVIDIA OpenAI-compatible, or manual provider settings.
-- Enter API keys without echoing them back to the terminal.
-- Fetch models from `GET {OPENAI_BASE_URL}/models`.
+- Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), or a custom OpenAI-compatible endpoint.
+- Enter the selected provider's API key without echoing it back (NVIDIA uses `NVIDIA_API_KEY`, never `OPENAI_API_KEY`).
+- Fetch models dynamically from `GET {provider_base_url}/models`.
 - Select chat, tool-worker, coding-planner, and embedding models.
 - Assign model levels for Mana roles such as main, planner, coding, verifier, reviewer, tool, and summarizer.
 - Configure web and GitHub search providers.
 - Save a masked config summary for review.
+
+### NVIDIA Build / NVIDIA NIM
+
+1. Create an API key at [NVIDIA Build](https://build.nvidia.com/).
+2. Run `mana-agent configure` (or `mana-agent --configure`) and select **NVIDIA**.
+3. Enter `NVIDIA_API_KEY` and keep the default base URL
+   `https://integrate.api.nvidia.com/v1`, or point `NVIDIA_BASE_URL` at a
+   self-hosted OpenAI-compatible NIM endpoint.
+4. Validate the connection, fetch models, and assign role models.
+5. Start Mana-Agent normally; chat, tools, streaming, and agent workflows use
+   the selected NVIDIA-hosted model through the shared OpenAI-compatible transport.
+
+Canonical upstream model IDs are preserved exactly (including nested org
+namespaces such as `deepseek-ai/deepseek-v4-flash` or
+`nvidia/nemotron-3-nano-30b-a3b`). Mana persists a provider-qualified form
+(`nvidia/<upstream_id>`) while API requests send only the upstream ID.
+
+The Build model catalog changes over time; Mana does not ship a static copy.
+Unknown models remain selectable via Advanced/manual entry.
+
+**Benchmark profile (not the product default):** for open-model agent/coding
+benchmarks, a recommended configuration is
+`MANA_AI_PROVIDER=nvidia` with model `deepseek-ai/deepseek-v4-flash`. High
+reasoning options for that model can be supplied as optional model-specific
+request configuration (for example `chat_template_kwargs`) without affecting
+other NVIDIA models. A smaller baseline when available is
+`nvidia/nemotron-3-nano-30b-a3b`.
 
 Saved files:
 
@@ -239,7 +266,7 @@ Use `--no-interactive` in CI or scripts:
 mana-agent --no-interactive chat --root-dir .
 ```
 
-In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if required values such as `OPENAI_API_KEY` are missing.
+In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if the selected provider's key is missing (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `NVIDIA_API_KEY`).
 
 ## Memory providers
 
@@ -318,8 +345,16 @@ occurs.
 Set these through the Settings menu; Mana-Agent writes them to `~/.mana`.
 
 ```bash
+# OpenAI
 OPENAI_API_KEY="sk-..."
 OPENAI_BASE_URL="https://api.openai.com/v1"
+
+# NVIDIA Build / NIM (isolated credentials; do not reuse OPENAI_API_KEY)
+# NVIDIA_API_KEY="nvapi-..."
+# NVIDIA_BASE_URL="https://integrate.api.nvidia.com/v1"
+# MANA_AI_PROVIDER="nvidia"
+# OPENAI_CHAT_MODEL="deepseek-ai/deepseek-v4-flash"
+
 OPENAI_CHAT_MODEL="gpt-4.1"
 LLM_MODEL="gpt-4.1"
 OPENAI_TOOL_WORKER_MODEL="gpt-4.1"

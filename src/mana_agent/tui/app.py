@@ -220,12 +220,15 @@ class ManaChatApp(App):
             try:
                 from mana_agent.config.user_config import load_effective_settings
 
+                from mana_agent.config.inference_provider import credentials_from_mapping
+
                 configured = load_effective_settings(include_env=False)
                 provider = str(configured.get("MANA_AI_PROVIDER") or "openai")
                 search = str(configured.get("MANA_WEB_SEARCH_PROVIDER") or "disabled") if configured.get("MANA_SEARCH_ENABLE_WEB") else "disabled"
                 github = str(configured.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "disabled")
                 warnings = []
-                if not configured.get("OPENAI_API_KEY"):
+                api_key, _base = credentials_from_mapping(configured, provider=provider)
+                if not api_key:
                     warnings.append("provider authentication missing")
                 warning_line = f"\nWarnings: {', '.join(warnings)}" if warnings else ""
             except Exception:
@@ -1596,16 +1599,29 @@ class ManaChatApp(App):
             from mana_agent.config.settings import Settings
 
             settings = Settings()
-            api_key = self.api_key or settings.openai_api_key
-            base_url = self.base_url or settings.openai_base_url
+            from mana_agent.config.inference_provider import (
+                ProviderConfigurationError,
+                resolve_inference_connection,
+            )
+
+            try:
+                connection = resolve_inference_connection(settings)
+            except ProviderConfigurationError as exc:
+                raise RuntimeError(str(exc)) from exc
+            api_key = self.api_key or connection.api_key
+            base_url = self.base_url or connection.base_url
 
             if not api_key:
-                raise RuntimeError("No OPENAI_API_KEY is saved in ~/.mana/secrets.toml")
+                raise RuntimeError(
+                    f"No {connection.display_name} API key is saved in ~/.mana/secrets.toml"
+                )
 
             llm = create_chat_model(
                 api_key=api_key,
                 model=model_name,
                 base_url=base_url,
+                provider=connection.provider,
+                default_headers=connection.headers,
             )
 
             system = (

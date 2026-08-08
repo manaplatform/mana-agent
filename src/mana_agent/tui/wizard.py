@@ -61,6 +61,8 @@ def _timeout(current: dict[str, object]) -> int:
 
 
 def configure_model_provider(current: dict[str, object], *, force_refresh: bool = False) -> dict[str, object]:
+    from mana_agent.config.provider_registry import provider_credential_env_names
+
     provider = select_option(
         title="Model provider",
         text="Select the model provider.",
@@ -68,7 +70,7 @@ def configure_model_provider(current: dict[str, object], *, force_refresh: bool 
             *(MenuOption(item.id, item.display_name) for item in PROVIDERS.all()),
             MenuOption("manual", PROVIDER_DEFAULTS["manual"][0]),
         ],
-        default="openai",
+        default=str(current.get("MANA_AI_PROVIDER") or "openai"),
     )
     if provider == "manual":
         main = text_input(
@@ -77,29 +79,38 @@ def configure_model_provider(current: dict[str, object], *, force_refresh: bool 
             default=str(current.get("OPENAI_CHAT_MODEL") or DEFAULT_USER_CONFIG["OPENAI_CHAT_MODEL"]),
         )
         return {
+            "MANA_AI_PROVIDER": "custom",
             "OPENAI_API_KEY": str(current.get("OPENAI_API_KEY") or ""),
             "OPENAI_BASE_URL": str(current.get("OPENAI_BASE_URL") or ""),
             "OPENAI_CHAT_MODEL": main,
             "LLM_MODEL": main,
             "MODEL_LEVEL_3_HIGH_REASONING": main,
         }
+    definition = PROVIDERS.get(provider)
+    key_env, base_env = provider_credential_env_names(provider)
     _, default_url = PROVIDER_DEFAULTS[provider]
     base_url = text_input(
-        "Base URL",
-        "OpenAI-compatible API base URL:",
-        default=str(current.get("OPENAI_BASE_URL") or default_url or "https://api.openai.com/v1"),
+        f"{definition.display_name} base URL",
+        f"{definition.display_name} OpenAI-compatible API base URL:",
+        default=str(current.get(base_env) or default_url or definition.default_base_url),
     )
-    api_key = secret_input("API key", "Enter API key. It will not be printed back:")
+    api_key = secret_input(
+        f"{definition.display_name} API key",
+        f"Enter {definition.api_key_env}. It will not be printed back:",
+    )
     values: dict[str, object] = {
-        "OPENAI_API_KEY": api_key or str(current.get("OPENAI_API_KEY") or ""),
-        "OPENAI_BASE_URL": validate_base_url(base_url),
+        "MANA_AI_PROVIDER": provider,
+        key_env: api_key or str(current.get(key_env) or ""),
+        base_env: validate_base_url(base_url) if base_url else definition.default_base_url,
     }
+    resolved_key = str(values[key_env])
+    resolved_base = str(values[base_env])
     if confirm("Validate provider", "Fetch model list now?", default=True):
         values.update(
             choose_models(
                 provider=provider,
-                base_url=str(values["OPENAI_BASE_URL"]),
-                api_key=str(values["OPENAI_API_KEY"]),
+                base_url=resolved_base,
+                api_key=resolved_key,
                 timeout_seconds=_timeout(current),
                 current={**current, **values},
                 force_refresh=force_refresh,
@@ -193,13 +204,18 @@ def ensure_setup(*, no_interactive: bool = False, command_needs_llm: bool = True
 
 
 def refresh_model_list(*, console: Console | None = None) -> None:
+    from mana_agent.config.inference_provider import credentials_from_mapping
+
     target = console or Console()
     current = load_effective_settings(include_env=True)
-    base_url = validate_base_url(str(current.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"))
-    api_key = str(current.get("OPENAI_API_KEY") or "")
+    provider = str(current.get("MANA_AI_PROVIDER") or "openai")
+    api_key, base_url = credentials_from_mapping(current, provider=provider)
+    if not base_url:
+        base_url = PROVIDERS.get(provider).default_base_url or "https://api.openai.com/v1"
+    base_url = validate_base_url(base_url)
     try:
         models = load_or_fetch_models(
-            provider="openai-compatible",
+            provider=provider,
             base_url=base_url,
             api_key=api_key,
             timeout_seconds=_timeout(current),
@@ -211,6 +227,29 @@ def refresh_model_list(*, console: Console | None = None) -> None:
     success(f"Cached {len(models)} model(s) from {base_url}.", console=target)
 
 
+def _save_selected_models() -> None:
+    from mana_agent.config.inference_provider import credentials_from_mapping
+
+    current = load_effective_settings(include_env=True)
+    provider = str(current.get("MANA_AI_PROVIDER") or "openai")
+    api_key, base_url = credentials_from_mapping(current, provider=provider)
+    if not base_url:
+        base_url = PROVIDERS.get(provider).default_base_url or "https://api.openai.com/v1"
+    save_effective_user_config(
+        validate_config_values(
+            choose_models(
+                provider=provider,
+                base_url=base_url,
+                api_key=api_key,
+                timeout_seconds=_timeout(current),
+                current=current,
+                force_refresh=False,
+            )
+        ),
+        merge=True,
+    )
+
+
 def settings_menu(*, console: Console | None = None) -> None:
     target = console or Console()
     actions: dict[str, Callable[[], None]] = {
@@ -219,19 +258,7 @@ def settings_menu(*, console: Console | None = None) -> None:
             merge=True,
         ),
         "refresh": lambda: refresh_model_list(console=target),
-        "models": lambda: save_effective_user_config(
-            validate_config_values(
-                choose_models(
-                    provider="openai-compatible",
-                    base_url=str(load_effective_settings(include_env=True).get("OPENAI_BASE_URL") or "https://api.openai.com/v1"),
-                    api_key=str(load_effective_settings(include_env=True).get("OPENAI_API_KEY") or ""),
-                    timeout_seconds=_timeout(load_effective_settings(include_env=True)),
-                    current=load_effective_settings(include_env=True),
-                    force_refresh=False,
-                )
-            ),
-            merge=True,
-        ),
+        "models": lambda: _save_selected_models(),
         "roles": lambda: save_effective_user_config(validate_config_values(configure_model_roles(load_effective_settings(include_env=True))), merge=True),
         "search": lambda: save_effective_user_config(validate_config_values(configure_search_provider(load_effective_settings(include_env=True))), merge=True),
         "summary": lambda: config_table(masked_config_summary(), console=target),

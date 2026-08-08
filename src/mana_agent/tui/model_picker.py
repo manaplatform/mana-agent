@@ -26,6 +26,59 @@ def parse_model_ids(payload: dict[str, Any]) -> list[str]:
     return sorted(dict.fromkeys(model_id for model_id in ids if model_id))
 
 
+def parse_openai_compatible_model_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Preserve canonical upstream model IDs and any capability metadata present.
+
+    Used for NVIDIA Build / NIM and other OpenAI-compatible catalogs where the
+    ``id`` field is authoritative (including nested org namespaces such as
+    ``deepseek-ai/deepseek-v4-flash`` or ``nvidia/nemotron-...``). IDs are never
+    rewritten or stripped.
+    """
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    records: dict[str, dict[str, Any]] = {}
+    for raw in data:
+        if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+            continue
+        item = dict(raw)
+        model_id = str(item["id"]).strip()
+        # Preserve only capability hints the catalog actually supplies.
+        capabilities: set[str] = set()
+        supplied = item.get("capabilities")
+        if isinstance(supplied, list):
+            for value in supplied:
+                text = str(value or "").strip().lower().replace("-", "_")
+                if text:
+                    capabilities.add(text)
+        supported = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
+        if any(str(value).lower() in {"tools", "tool_choice", "parallel_tool_calls"} for value in supported):
+            capabilities.add(ModelCapability.TOOL_CALLING.value)
+        if any(
+            "structured" in str(value).lower() or "response_format" in str(value).lower()
+            for value in supported
+        ):
+            capabilities.add(ModelCapability.STRUCTURED_OUTPUT.value)
+        if any("reasoning" in str(value).lower() for value in supported):
+            capabilities.add(ModelCapability.REASONING.value)
+        architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+        modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else []
+        if any(str(value).lower() in {"image", "image_url"} for value in modalities or []):
+            capabilities.add(ModelCapability.IMAGE_INPUT.value)
+        lowered = model_id.lower()
+        if any(marker in lowered for marker in ("embed", "embedding")):
+            capabilities.add(ModelCapability.EMBEDDING.value)
+        elif capabilities or item.get("object") == "model":
+            # Basic OpenAI-style model entries with no capability metadata remain
+            # capability-empty so Advanced/manual selection can still use them.
+            pass
+        if capabilities:
+            item["capabilities"] = sorted(capabilities)
+        item["id"] = model_id
+        records[model_id] = item
+    return [records[key] for key in sorted(records)]
+
+
 def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Preserve OpenRouter's canonical IDs and useful catalog metadata."""
     data = payload.get("data")
@@ -69,6 +122,25 @@ def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [records[key] for key in sorted(records)]
 
 
+def _http_error_message(provider_label: str, exc: urllib.error.HTTPError) -> str:
+    code = int(exc.code)
+    if code in {401, 403}:
+        return (
+            f"{provider_label} authentication or permission failed (HTTP {code}). "
+            "Check the API key and account access."
+        )
+    if code == 404:
+        return (
+            f"{provider_label} model catalog endpoint was not found (HTTP 404). "
+            "Verify the base URL ends with /v1 for OpenAI-compatible hosts."
+        )
+    if code == 429:
+        return f"{provider_label} rate limit or quota was exceeded (HTTP 429)."
+    if code >= 500:
+        return f"{provider_label} service failure (HTTP {code})."
+    return f"{provider_label} model fetch failed with HTTP {code}."
+
+
 def fetch_openai_compatible_models(
     *,
     base_url: str,
@@ -83,9 +155,12 @@ def fetch_openai_compatible_models(
         with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ModelFetchError(f"Model fetch failed with HTTP {exc.code}.") from exc
+        raise ModelFetchError(_http_error_message("Provider", exc)) from exc
     except urllib.error.URLError as exc:
-        raise ModelFetchError(f"Model fetch failed: {exc.reason}.") from exc
+        reason = getattr(exc, "reason", exc)
+        if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
+            raise ModelFetchError(f"Provider model fetch timed out: {reason}.") from exc
+        raise ModelFetchError(f"Model fetch failed: {reason}.") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ModelFetchError(f"Model fetch failed: {exc}.") from exc
     models = parse_model_ids(payload)
@@ -95,7 +170,7 @@ def fetch_openai_compatible_models(
 
 
 def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout_seconds: int = 15) -> list[str | dict[str, Any]]:
-    """Fetch one provider catalog without converting OpenRouter into an alias."""
+    """Fetch one provider catalog without converting multi-tenant hosts into aliases."""
     if not api_key.strip():
         raise ModelFetchError("API key is required to fetch models.")
     try:
@@ -109,14 +184,26 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
         with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ModelFetchError(f"{definition.display_name} model fetch failed with HTTP {exc.code}.") from exc
+        raise ModelFetchError(_http_error_message(definition.display_name, exc)) from exc
     except urllib.error.URLError as exc:
-        raise ModelFetchError(f"{definition.display_name} model fetch failed: {exc.reason}.") from exc
+        reason = getattr(exc, "reason", exc)
+        if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
+            raise ModelFetchError(
+                f"{definition.display_name} model fetch timed out: {reason}."
+            ) from exc
+        raise ModelFetchError(f"{definition.display_name} model fetch failed: {reason}.") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ModelFetchError(f"{definition.display_name} model fetch failed: {exc}.") from exc
-    models = parse_openrouter_models(payload) if provider == "openrouter" else parse_model_ids(payload)
+    if provider == "openrouter":
+        models: list[str | dict[str, Any]] = parse_openrouter_models(payload)
+    elif provider == "nvidia":
+        models = parse_openai_compatible_model_records(payload)
+    else:
+        models = parse_model_ids(payload)
     if not models:
-        raise ModelFetchError(f"{definition.display_name} model fetch succeeded, but no model IDs were returned.")
+        raise ModelFetchError(
+            f"{definition.display_name} model fetch succeeded, but no model IDs were returned."
+        )
     return models
 
 

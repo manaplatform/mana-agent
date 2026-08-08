@@ -72,7 +72,17 @@ class ConfigurationDraft:
         def provider_identity(values: dict[str, Any]) -> tuple[Any, Any, Any]:
             provider = str(values.get("MANA_AI_PROVIDER") or "openai")
             if provider == "openrouter":
-                return provider, values.get("OPENROUTER_BASE_URL"), values.get("OPENROUTER_API_KEY")
+                return (
+                    provider,
+                    values.get("OPENROUTER_BASE_URL"),
+                    values.get("OPENROUTER_API_KEY"),
+                )
+            if provider == "nvidia":
+                return (
+                    provider,
+                    values.get("NVIDIA_BASE_URL"),
+                    values.get("NVIDIA_API_KEY"),
+                )
             return provider, values.get("OPENAI_BASE_URL"), values.get("OPENAI_API_KEY")
         old_identity = (
             *provider_identity(self.original),

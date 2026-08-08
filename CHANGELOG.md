@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Completed first-class NVIDIA Build / NVIDIA NIM inference provider support.
+  - Canonical provider id `nvidia` uses `NVIDIA_API_KEY` and
+    `NVIDIA_BASE_URL` (default `https://integrate.api.nvidia.com/v1`).
+  - Runtime connection resolution no longer falls back to OpenAI credentials.
+  - Dynamic model discovery preserves nested upstream IDs
+    (e.g. `deepseek-ai/deepseek-v4-flash`, `nvidia/nemotron-...`).
+  - Configuration TUI, model management, wizard, embeddings, and CLI paths
+    resolve NVIDIA credentials in isolation.
+  - Chat Completions transport (streaming, tools, optional model-specific
+    `extra_body` / `chat_template_kwargs`) works through the existing adapter.
+  - Docs and `.env.example` document NVIDIA setup and the open-model benchmark
+    profile (`deepseek-ai/deepseek-v4-flash`) without making it the product default.
+  - User verification required:
+    `python -m pytest tests/test_nvidia_provider.py tests/test_openrouter_provider.py tests/test_llm_compatibility.py tests/test_tui_user_config.py`
+
 - Fixed confusing `mana-agent eval run` errors when a baseline JSON is passed
   instead of a suite YAML (e.g. `./evals/baselines/routing-smoke.json`).
   - `load_suite` now detects checked-in baseline documents and fails closed with

@@ -226,14 +226,17 @@ def _build_project_llm_analyzer():
     except Exception as exc:  # noqa: BLE001 - unavailable configuration should not break analyze
         logger.warning("Project analyze LLM disabled (user configuration unavailable): %s", exc)
         return None
-    api_key = str(config.get("OPENAI_API_KEY", "") or "").strip()
+    from mana_agent.config.inference_provider import credentials_from_mapping
+
+    provider = str(config.get("MANA_AI_PROVIDER") or "openai")
+    api_key, base_url = credentials_from_mapping(config, provider=provider)
     if not api_key:
         return None
     return build_llm_analyzer(
         ModelConfig(
             api_key=api_key,
             model=str(config.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini"),
-            base_url=str(config.get("OPENAI_BASE_URL", "") or "").strip() or None,
+            base_url=base_url or None,
         )
     )
 
