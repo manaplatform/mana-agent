@@ -59,11 +59,15 @@ DEFAULT_AGENT_NAME = "mana-agent"
 DEFAULT_AGENT_MODEL = "gpt-4o-mini"
 DEFAULT_AGENT_PROVIDER = "openai"
 DEFAULT_TIMEOUT_SECONDS = 600
+# 0 / negative CLI or env timeout means no runner wall-clock kill.
+UNLIMITED_TIMEOUT_SENTINEL = 0
 DEFAULT_OUTPUT = "predictions.jsonl"
 DEFAULT_WORK_DIR = ".swe-bench"
 GITHUB_URL = "https://github.com/{repo}.git"
 # Mana provider ids that may appear as a MANA_PRIMARY_MODEL prefix.
 _KNOWN_MANA_PROVIDERS = frozenset({"openai", "nvidia", "openrouter", "custom"})
+# Optional env overrides when CLI --timeout is omitted (same-line flags preferred).
+_TIMEOUT_ENV_KEYS = ("MANA_SWE_BENCH_TIMEOUT", "SWE_BENCH_TIMEOUT")
 
 SAFE_INSTANCE_ID = re.compile(r"[^A-Za-z0-9._-]+")
 # Paths that look like test code. SWE-bench applies the official ``test_patch``
@@ -134,7 +138,9 @@ class RunnerConfig:
     # Human-readable origin for logs (config path, cli, built-in default).
     model_source: str = "built-in"
     provider_source: str = "built-in"
+    # 0 means unlimited (no runner wall-clock kill).
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    timeout_source: str = "built-in"
     mana_bin: str | None = None
     retain_worktrees: bool = False
     skip_agent: bool = False
@@ -988,16 +994,53 @@ def _upsert_toml_keys(path: Path, updates: dict[str, str | bool | int]) -> None:
     path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 
 
+def resolve_runner_timeout_seconds(
+    cli_timeout: int | None,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Resolve per-instance wall-clock timeout from CLI, env, or default.
+
+    Returns ``(seconds, source)``. ``seconds <= 0`` means unlimited (no kill).
+
+    Important shell note: multi-line invocations need a trailing ``\\`` after
+    ``runner.py`` or flags on the same line. Otherwise the shell runs the
+    script with defaults and treats ``--timeout`` as a separate command
+    (exit 127).
+    """
+    if cli_timeout is not None:
+        return int(cli_timeout), "cli --timeout"
+    environ = env if env is not None else os.environ
+    for key in _TIMEOUT_ENV_KEYS:
+        raw = str(environ.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            return int(raw), f"env {key}"
+        except ValueError as exc:
+            raise SweBenchRunnerError(
+                f"Invalid {key}={raw!r}; expected integer seconds (0 = unlimited)."
+            ) from exc
+    return int(DEFAULT_TIMEOUT_SECONDS), f"built-in default ({DEFAULT_TIMEOUT_SECONDS}s)"
+
+
+def format_timeout_label(timeout_seconds: int) -> str:
+    if int(timeout_seconds) <= 0:
+        return "unlimited"
+    return f"{int(timeout_seconds)}s"
+
+
 def _benchmark_config_overrides(
     agent_model: str,
     *,
     agent_provider: str = DEFAULT_AGENT_PROVIDER,
+    timeout_seconds: int | None = None,
 ) -> dict[str, str | bool | int]:
     """Settings that must be forced for reliable non-interactive SWE-bench runs."""
     model = str(agent_model).strip()
     provider = str(agent_provider or DEFAULT_AGENT_PROVIDER).strip().lower() or DEFAULT_AGENT_PROVIDER
     primary = model if model.lower().startswith(provider + "/") else f"{provider}/{model}"
-    return {
+    overrides: dict[str, str | bool | int] = {
         # External supermemory (or other hosted memory) serializes many HTTP
         # calls during chat startup and can look like a hang; use local memory.
         # MANA_MEMORY_FALLBACK_TO_INTERNAL must stay false: true is a hard error
@@ -1026,7 +1069,89 @@ def _benchmark_config_overrides(
         "MANA_MODEL_TOOL": model,
         "MANA_MODEL_TOOL_WORKER": model,
         "MANA_MODEL_SUMMARIZER": model,
+        # Coding-only surface: operator ~/.mana often enables desktop/server
+        # integrations that dump 100+ irrelevant tools into SWE-bench logs and
+        # dilute the coding agent.
+        "MANA_BROWSER_ENABLED": False,
+        "MANA_COMPUTER_CONTROL_ENABLED": False,
+        "MANA_CANVAS_ENABLED": False,
+        "MANA_SEARCH_ENABLE_WEB": False,
+        "MANA_SEARCH_ENABLE_GITHUB": False,
+        "MANA_ACP_ENABLED": False,
+        "MANA_A2A_SERVER_ENABLED": False,
+        "MANA_FLEET_ENABLED": False,
+        "MANA_WORKER_GATEWAY_ENABLED": False,
     }
+    if timeout_seconds is not None:
+        # Keep Codex task timeout aligned with the runner wall clock.
+        # Unlimited runner timeout → long finite Codex ceiling (no silent 1800s).
+        overrides["MANA_CODEX_TASK_TIMEOUT_SECONDS"] = (
+            int(timeout_seconds)
+            if int(timeout_seconds) > 0
+            else 7 * 24 * 60 * 60
+        )
+    return overrides
+
+
+def _set_toml_table_key(path: Path, table: str, key: str, value: bool | str | int) -> None:
+    """Set ``key`` inside a top-level ``[table]`` section (create section if missing)."""
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    header = f"[{table}]"
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            break
+    if isinstance(value, bool):
+        rendered = "true" if value else "false"
+    elif isinstance(value, int):
+        rendered = str(value)
+    else:
+        rendered = _toml_quote(str(value))
+    assignment = f"{key} = {rendered}"
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(header)
+        lines.append(assignment)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            end = j
+            break
+    replaced = False
+    for j in range(start + 1, end):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        existing_key = stripped.split("=", 1)[0].strip()
+        if existing_key == key:
+            lines[j] = assignment
+            replaced = True
+            break
+    if not replaced:
+        lines.insert(end, assignment)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _disable_non_coding_integrations(config_path: Path) -> None:
+    """Force nested integration tables off for SWE-bench isolated MANA_HOME."""
+    for table in (
+        "computer_control",
+        "telegram",
+        "teach",
+        "experience_to_skill",
+    ):
+        _set_toml_table_key(config_path, table, "enabled", False)
+    for table in ("media.image", "media.voice", "media.video"):
+        # Nested dotted tables may appear as [media.image] in Mana config.
+        _set_toml_table_key(config_path, table, "enabled", False)
 
 
 def _seed_isolated_mana_home(
@@ -1034,6 +1159,7 @@ def _seed_isolated_mana_home(
     *,
     agent_model: str,
     agent_provider: str = DEFAULT_AGENT_PROVIDER,
+    timeout_seconds: int | None = None,
 ) -> Path:
     """Create a per-instance MANA_HOME that still has user credentials/config.
 
@@ -1060,8 +1186,13 @@ def _seed_isolated_mana_home(
     try:
         _upsert_toml_keys(
             config_path,
-            _benchmark_config_overrides(agent_model, agent_provider=agent_provider),
+            _benchmark_config_overrides(
+                agent_model,
+                agent_provider=agent_provider,
+                timeout_seconds=timeout_seconds,
+            ),
         )
+        _disable_non_coding_integrations(config_path)
     except OSError as exc:
         LOG.warning("Could not apply SWE-bench isolation overrides to %s: %s", config_path, exc)
     return target
@@ -1075,16 +1206,24 @@ def _wait_with_heartbeat(
     stderr_path: Path,
     heartbeat_seconds: int = 30,
 ) -> tuple[int, bool]:
-    """Wait for proc with periodic progress logs; return (returncode, timed_out)."""
+    """Wait for proc with periodic progress logs; return (returncode, timed_out).
+
+    ``timeout_seconds <= 0`` means unlimited (no wall-clock kill).
+    """
     started = time.monotonic()
-    deadline = started + max(1, int(timeout_seconds))
+    unlimited = int(timeout_seconds) <= 0
+    deadline = None if unlimited else started + max(1, int(timeout_seconds))
     beat = max(5, int(heartbeat_seconds))
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return (proc.returncode if proc.returncode is not None else 124), True
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return (proc.returncode if proc.returncode is not None else 124), True
+            wait_for = min(beat, remaining)
+        else:
+            wait_for = beat
         try:
-            returncode = proc.wait(timeout=min(beat, remaining))
+            returncode = proc.wait(timeout=wait_for)
             return returncode, False
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - started
@@ -1092,9 +1231,9 @@ def _wait_with_heartbeat(
             err_size = stderr_path.stat().st_size if stderr_path.exists() else 0
             err_tail = _tail_text(stderr_path, max_chars=400).replace("\n", " | ")
             LOG.info(
-                "mana-agent still running (elapsed=%.0fs / %ss, pid=%s, stdout=%dB, stderr=%dB)%s",
+                "mana-agent still running (elapsed=%.0fs / %s, pid=%s, stdout=%dB, stderr=%dB)%s",
                 elapsed,
-                timeout_seconds,
+                format_timeout_label(timeout_seconds),
                 proc.pid,
                 out_size,
                 err_size,
@@ -1131,13 +1270,16 @@ def run_mana_agent(
         run_dir / "mana_home",
         agent_model=agent_model,
         agent_provider=agent_provider,
+        timeout_seconds=timeout_seconds,
     )
 
     env = os.environ.copy()
     env["MANA_HOME"] = str(mana_home)
     # Also set env (fills gaps if a key is missing from the rewritten config).
     for key, value in _benchmark_config_overrides(
-        agent_model, agent_provider=agent_provider
+        agent_model,
+        agent_provider=agent_provider,
+        timeout_seconds=timeout_seconds,
     ).items():
         if isinstance(value, bool):
             env[key] = "true" if value else "false"
@@ -1148,11 +1290,20 @@ def run_mana_agent(
     env["PYTHONUNBUFFERED"] = "1"
     # Keep chat console quieter; runner heartbeats + log files show progress.
     env.setdefault("MANA_CHAT_ANIMATION", "0")
+    # Skip the 179-tool catalog dump that pollutes SWE-bench mana_stdout.log.
+    env["MANA_CHAT_QUIET"] = "1"
+    env.setdefault("MANA_CHAT_UI", "plain")
     # Ensure bare `python` in agent shell tools is Python 3 (not host Python 2.7).
     prepare_agent_python_path(run_dir=run_dir, env=env)
 
     # Per-step agent timeout should leave headroom under the hard wall clock.
-    agent_step_timeout = max(30, min(int(timeout_seconds), max(30, int(timeout_seconds) - 30)))
+    # 0 = unlimited (mana-agent normalizes to a long finite ceiling; no 600s cap).
+    if int(timeout_seconds) <= 0:
+        agent_step_timeout = 0
+    else:
+        agent_step_timeout = max(
+            30, min(int(timeout_seconds), max(30, int(timeout_seconds) - 30))
+        )
 
     cmd = [
         *mana_argv,
@@ -1182,12 +1333,13 @@ def run_mana_agent(
     ]
 
     LOG.info(
-        "Starting mana-agent (timeout=%ss, provider=%s, model=%s, root=%s, mana_home=%s)",
-        timeout_seconds,
+        "Starting mana-agent (timeout=%s, provider=%s, model=%s, root=%s, mana_home=%s, agent_timeout=%s)",
+        format_timeout_label(timeout_seconds),
         agent_provider,
         agent_model,
         worktree,
         mana_home,
+        format_timeout_label(agent_step_timeout),
     )
     LOG.debug("Command: %s", " ".join(shlex.quote(c) for c in cmd))
     (run_dir / "mana_cmd.txt").write_text(
@@ -1630,8 +1782,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=DEFAULT_TIMEOUT_SECONDS,
-        help=f"Hard per-instance wall-clock timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).",
+        default=None,
+        help=(
+            f"Hard per-instance wall-clock timeout in seconds "
+            f"(default: {DEFAULT_TIMEOUT_SECONDS}, or MANA_SWE_BENCH_TIMEOUT / "
+            "SWE_BENCH_TIMEOUT). Use 0 for unlimited. Put flags on the same line "
+            "as runner.py (or end the line with \\) so the shell does not drop them."
+        ),
     )
     parser.add_argument(
         "--mana-bin",
@@ -1718,7 +1875,11 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
     )
     LOG.info("Predictions model_name_or_path: %s", model_name_or_path)
     LOG.info("Exclude test files from model_patch: %s", cfg.exclude_test_files)
-    LOG.info("Per-instance timeout: %ss", cfg.timeout_seconds)
+    LOG.info(
+        "Per-instance timeout: %s (source: %s)",
+        format_timeout_label(cfg.timeout_seconds),
+        cfg.timeout_source,
+    )
 
     instances = load_instances(
         dataset_name=cfg.dataset_name,
@@ -1896,6 +2057,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         cli_model=getattr(args, "model", None),
         cli_provider=getattr(args, "provider", None),
     )
+    try:
+        timeout_seconds, timeout_source = resolve_runner_timeout_seconds(
+            getattr(args, "timeout", None)
+        )
+    except SweBenchRunnerError as exc:
+        LOG.error("%s", exc)
+        return 2
     cfg = RunnerConfig(
         dataset_name=str(args.dataset),
         split=str(args.split),
@@ -1911,7 +2079,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_name_or_path=(
             str(explicit_model_name).strip() if explicit_model_name else None
         ),
-        timeout_seconds=max(30, int(args.timeout)),
+        timeout_seconds=timeout_seconds,
+        timeout_source=timeout_source,
         mana_bin=args.mana_bin,
         retain_worktrees=bool(args.retain_worktrees),
         skip_agent=bool(args.skip_agent),

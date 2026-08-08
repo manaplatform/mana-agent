@@ -1024,7 +1024,11 @@ def process_chat_turn(
     if analysis_context:
         request_for_generation = f"{analysis_context}\n\n{request_for_generation}"
 
-    timeout = min(max(agent_timeout_seconds, 60), 600)
+    from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
+
+    # Do not hard-cap at 600s: SWE-bench / full-auto runners pass multi-hour
+    # --agent-timeout-seconds and must not be silently truncated.
+    timeout = normalize_agent_timeout_seconds(agent_timeout_seconds, floor=60, default=600)
     pending_prechecklist = session_state.get("pending_prechecklist")
     pending_source = str(session_state.get("pending_prechecklist_source") or "")
     pending_warning = str(session_state.get("pending_prechecklist_warning") or "")

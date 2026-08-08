@@ -47,6 +47,14 @@ from mana_agent.skills.chat import ChatSkillCoordinator
 from mana_agent.connectors.browser.session import BrowserSessionManager
 from mana_agent.gateway import AgentChatGateway, ChatGatewayConfig
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
+
+
+def _normalize_chat_timeout(agent_timeout_seconds: int) -> int:
+    """Honor large/explicit agent timeouts; never hard-cap at 600s."""
+    return normalize_agent_timeout_seconds(
+        agent_timeout_seconds, floor=60, default=600
+    )
 
 
 _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
@@ -2630,7 +2638,7 @@ def chat(
                                 index_dir=selected_index,
                                 k=resolved_k,
                                 max_steps=max(12, len(available_browser_tools) + 4),
-                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                 tool_policy={
                                     "allowed_tools": available_browser_tools,
                                     "disable_external_search": True,
@@ -3306,7 +3314,7 @@ def chat(
                                     index_dirs=index_dirs,
                                     k=resolved_k,
                                     max_steps=coding_agent_max_steps,
-                                    timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                    timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                     pass_cap=auto_execute_max_passes,
                                     callbacks=callbacks,
                                     flow_id=active_flow_id,
@@ -3328,7 +3336,7 @@ def chat(
                                 index_dirs=index_dirs,
                                 k=resolved_k,
                                 max_steps=coding_agent_max_steps,
-                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                 callbacks=callbacks,
                                 flow_id=active_flow_id,
                                 auto_chat_mode=auto_chat_mode.value,
@@ -3343,7 +3351,7 @@ def chat(
                                     index_dir=resolved_index_dir,
                                     k=resolved_k,
                                     max_steps=coding_agent_max_steps,
-                                    timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                    timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                     pass_cap=auto_execute_max_passes,
                                     callbacks=callbacks,
                                     flow_id=active_flow_id,
@@ -3365,7 +3373,7 @@ def chat(
                                 index_dir=resolved_index_dir,
                                 k=resolved_k,
                                 max_steps=coding_agent_max_steps,
-                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                 callbacks=callbacks,
                                 flow_id=active_flow_id,
                                 auto_chat_mode=auto_chat_mode.value,

@@ -11,12 +11,16 @@ from scripts.swe_bench.runner import (
     RunnerConfig,
     WorktreeChangeSummary,
     _benchmark_config_overrides,
+    _disable_non_coding_integrations,
+    _set_toml_table_key,
     build_prompt,
     capture_model_patch,
+    format_timeout_label,
     load_operator_inference_defaults,
     prepare_agent_python_path,
     resolve_agent_inference,
     resolve_model_name_or_path,
+    resolve_runner_timeout_seconds,
     summarize_worktree_changes,
 )
 
@@ -96,11 +100,56 @@ def test_benchmark_overrides_pin_provider_and_model() -> None:
     overrides = _benchmark_config_overrides(
         "deepseek-ai/deepseek-v4-flash-0731",
         agent_provider="nvidia",
+        timeout_seconds=3600,
     )
     assert overrides["MANA_AI_PROVIDER"] == "nvidia"
     assert overrides["OPENAI_CHAT_MODEL"] == "deepseek-ai/deepseek-v4-flash-0731"
     assert overrides["MANA_PRIMARY_MODEL"] == "nvidia/deepseek-ai/deepseek-v4-flash-0731"
     assert overrides["MANA_MEMORY_MODE"] == "internal"
+    # Coding-only isolation for SWE-bench.
+    assert overrides["MANA_BROWSER_ENABLED"] is False
+    assert overrides["MANA_COMPUTER_CONTROL_ENABLED"] is False
+    assert overrides["MANA_CANVAS_ENABLED"] is False
+    assert overrides["MANA_SEARCH_ENABLE_WEB"] is False
+    assert overrides["MANA_CODEX_TASK_TIMEOUT_SECONDS"] == 3600
+
+
+def test_resolve_runner_timeout_cli_env_and_unlimited() -> None:
+    seconds, source = resolve_runner_timeout_seconds(999999999)
+    assert seconds == 999999999
+    assert source == "cli --timeout"
+    assert format_timeout_label(seconds) == "999999999s"
+
+    seconds, source = resolve_runner_timeout_seconds(0)
+    assert seconds == 0
+    assert format_timeout_label(seconds) == "unlimited"
+
+    seconds, source = resolve_runner_timeout_seconds(
+        None, env={"MANA_SWE_BENCH_TIMEOUT": "7200"}
+    )
+    assert seconds == 7200
+    assert "MANA_SWE_BENCH_TIMEOUT" in source
+
+    seconds, source = resolve_runner_timeout_seconds(None, env={})
+    assert seconds == 600
+    assert "built-in" in source
+
+
+def test_disable_nested_computer_control_for_isolation(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "MANA_AI_PROVIDER = \"nvidia\"\n\n"
+        "[computer_control]\n"
+        "enabled = true\n"
+        "timeout_seconds = \"30.0\"\n",
+        encoding="utf-8",
+    )
+    _disable_non_coding_integrations(config)
+    text = config.read_text(encoding="utf-8")
+    assert "enabled = false" in text
+    # helper also works for creating missing tables
+    _set_toml_table_key(config, "telegram", "enabled", False)
+    assert "[telegram]" in config.read_text(encoding="utf-8")
 
 
 def test_model_name_or_path_includes_non_openai_provider() -> None:

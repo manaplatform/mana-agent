@@ -2,6 +2,24 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-09
+
+- Fixed SWE-bench timeout + bloated auto-chat tool surface for coding runs.
+  - Gateway/chat paths no longer hard-cap agent timeouts at 600s
+    (`min(..., 600)`), so runner `--timeout` / `--agent-timeout-seconds`
+    multi-hour values actually apply (shared `normalize_agent_timeout_seconds`).
+  - Runner `--timeout` default remains 600; supports `0` = unlimited, env
+    `MANA_SWE_BENCH_TIMEOUT` / `SWE_BENCH_TIMEOUT`, and logs timeout **source**.
+  - Isolated SWE-bench `MANA_HOME` disables browser, computer control, canvas,
+    web/github search, fleet, and worker gateway; nested
+    `[computer_control]` / `[telegram]` / media tables forced `enabled=false`.
+  - Runner sets `MANA_CHAT_QUIET=1` so non-interactive startup skips dumping
+    the full ~179-tool catalog into `mana_stdout.log`.
+  - Docs note: multi-line shell invocations need `\\` after `runner.py` or
+    flags are dropped (exit 127 on the next line).
+  - User verification required:
+    `python -m pytest tests/test_timeouts_normalize.py tests/test_swe_bench_runner_config.py tests/test_auto_chat_tools_catalog.py -k "timeout or quiet or browser or python or mass_delete or prompt or shim"`
+
 ## 2026-08-08
 
 - Fixed SWE-bench empty-patch failures driven by host Python 2.7 and

@@ -127,7 +127,7 @@ Field contract:
 | `--list-instance-ids` | Print selected ids (after filters/limit) and exit |
 | `--limit N` | Run at most N instances **after** id selection |
 | `--output PATH` | Predictions path (default `predictions.jsonl`) |
-| `--timeout SECONDS` | Hard per-instance wall-clock timeout (default `600`) |
+| `--timeout SECONDS` | Hard per-instance wall-clock timeout (default `600`; `0` = unlimited; also `MANA_SWE_BENCH_TIMEOUT`) |
 | `--model ID` | LLM for mana-agent; **omit to use `~/.mana/config.toml`** |
 | `--provider ID` | Inference provider; **omit to use `MANA_AI_PROVIDER` from config** |
 | `--agent-name NAME` | Agent identity written as `agent_name` (default `mana-agent`) |
@@ -195,8 +195,29 @@ python scripts/swe_bench/runner.py \
      invokes the runner's Python 3 (many macOS hosts still put Python 2.7
      first as `python`; that produced SyntaxError on f-strings and empty
      patches for `astropy__astropy-12907`).
+   * Isolated `MANA_HOME` disables browser / computer-control / canvas / web
+     search / fleet / gateway noise so the coding agent is not flooded with
+     100+ unrelated tools copied from the operator config.
+   * `MANA_CHAT_QUIET=1` skips the full auto-chat tool catalog dump in
+     `mana_stdout.log`.
+   * Coding-agent timeouts honor large `--timeout` values (no silent 600s
+     hard-cap in the gateway/chat path).
    * The issue prompt tells the agent to prefer source edits, use `python3`,
      and not derail on package-import failures for uninstalled checkouts.
+
+   **Shell tip for multi-line commands**
+
+   ```bash
+   # Correct — backslash continues the line, or put flags on one line:
+   python scripts/swe_bench/runner.py \
+     --timeout 0 \
+     --output predictions.jsonl
+
+   # Wrong — runs with defaults; shell then tries to execute --timeout as a command (exit 127):
+   python scripts/swe_bench/runner.py
+     --timeout 0 \
+     --output predictions.jsonl
+   ```
 5. Capture `git add -A` + `git diff --cached` as `model_patch`, then **drop
    test-file hunks** by default so grading does not fail on test edits.
    Mass-delete-only trees (many deletions, zero modifications) are **not**

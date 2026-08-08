@@ -97,6 +97,28 @@ def test_startup_header_emits_auto_tools(tmp_path: Path) -> None:
     assert any(event.type == "session.tools" for event in state.events)
 
 
+def test_startup_header_quiet_skips_full_catalog(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_CHAT_QUIET", "1")
+    console = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    state = ChatUIState(
+        repo_root=tmp_path,
+        provider="openai",
+        model="gpt-test",
+        tools_enabled=True,
+        memory_enabled=True,
+        skills_status="indexed",
+        ui_mode="plain",
+    )
+    render_startup_header(console, state)
+    rendered = console.export_text()
+
+    assert "Mana-Agent" in rendered
+    assert "Quiet startup" in rendered
+    assert "web_search" not in rendered
+    assert "email_read" not in rendered
+    assert "server_shell_execute" not in rendered
+
+
 def test_tui_welcome_hides_available_tools_catalog(monkeypatch) -> None:
     from mana_agent.tui.app import ManaChatApp
 
