@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed CI failures on Windows deleted-cwd tests and Python 3.10 `tomllib`.
+  - Symptom: Windows runners failed
+    `test_llm_run_logger_survives_deleted_cwd`,
+    `test_safe_cwd_falls_back_when_directory_deleted`, and
+    `test_safe_cwd_prefers_mana_home_when_no_fallback` with
+    `PermissionError: [WinError 32]` when `shutil.rmtree` targeted the process
+    CWD; Ubuntu Python 3.10 failed
+    `test_upsert_toml_keys_inserts_before_nested_tables` with
+    `ModuleNotFoundError: No module named 'tomllib'`.
+  - Fix: on Windows, deleted-cwd tests simulate the Unix
+    `FileNotFoundError` from `os.getcwd()` instead of rmtree'ing the locked
+    process CWD; the TOML upsert test falls back to `tomli` on Python < 3.11.
+  - User verification required:
+    `python -m pytest tests/test_path_safety_safe_cwd.py tests/test_llm_logging.py::test_llm_run_logger_survives_deleted_cwd tests/test_swe_bench_runner_config.py::test_upsert_toml_keys_inserts_before_nested_tables -q`
+
 - Fixed Codex coding model pin and SWE-bench empty-mutation recovery.
   - Symptom: isolated SWE-bench config still had
     `MANA_CODEX_MODEL = "gpt-5.6-luna"` (copied from operator `~/.mana`), while

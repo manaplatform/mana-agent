@@ -177,7 +177,10 @@ def test_disable_nested_computer_control_for_isolation(tmp_path: Path) -> None:
 
 def test_upsert_toml_keys_inserts_before_nested_tables(tmp_path: Path) -> None:
     """Isolation overrides must stay top-level; EOF append nests under last table."""
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef]
 
     config = tmp_path / "config.toml"
     config.write_text(

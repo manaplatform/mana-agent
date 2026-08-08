@@ -76,16 +76,26 @@ def _read_rows(log_file: Path) -> list[dict]:
 
 def test_llm_run_logger_survives_deleted_cwd(tmp_path: Path, monkeypatch) -> None:
     """SWE-bench worktree thrash must not crash gateway init via Path.cwd()."""
+    import errno
     import os
     import shutil
+    import sys
 
     work = tmp_path / "cwd"
     work.mkdir()
     mana = tmp_path / "mana-home"
     mana.mkdir()
     monkeypatch.setenv("MANA_HOME", str(mana))
-    monkeypatch.chdir(work)
-    shutil.rmtree(work)
+    if sys.platform == "win32":
+        # Windows locks the process CWD (rmtree → WinError 32). Simulate the
+        # same FileNotFoundError that os.getcwd() raises on Unix after unlink.
+        def _getcwd_gone() -> str:
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(work))
+
+        monkeypatch.setattr(os, "getcwd", _getcwd_gone)
+    else:
+        monkeypatch.chdir(work)
+        shutil.rmtree(work)
     with pytest.raises(FileNotFoundError):
         os.getcwd()
 
