@@ -1068,12 +1068,14 @@ def test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations(tmp_pat
     `git switch -c and` + failed `origin/and` verification.
     """
     repo = _init_git_repo(tmp_path / "repo")
+    # Strip so the fixture key matches MainAgent.run_user_request, which
+    # normalizes with str(...).strip() before routing as f"{entrypoint} {request}".
     prompt = (
         "You are solving a single SWE-bench issue inside an isolated git checkout.\n"
         "Do not commit, push, rebase, or rewrite git history.\n"
         "Success means production-source edits left as uncommitted working-tree changes.\n"
         "Fix the TimeSeries required-column exception message.\n"
-    )
+    ).strip()
     main = MainAgent(
         repo,
         routing_llm=_RouteModel(

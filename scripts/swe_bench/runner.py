@@ -1051,51 +1051,78 @@ def _toml_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _upsert_toml_keys(path: Path, updates: dict[str, str | bool | int]) -> None:
-    """Insert or replace top-level KEY = value lines in a simple TOML file.
+def _render_toml_assignment(key: str, value: str | bool | int) -> str:
+    if isinstance(value, bool):
+        rendered = "true" if value else "false"
+    elif isinstance(value, int):
+        rendered = str(value)
+    else:
+        rendered = _toml_quote(str(value))
+    return f"{key} = {rendered}"
 
-    Mana config/secrets files are flat KEY = value tables (no nested tables for
-    the keys we rewrite). Explicit file keys always win over process env in
-    mana settings load, so benchmark isolation must rewrite the copied file.
+
+def _first_toml_table_index(lines: list[str]) -> int | None:
+    """Return the index of the first ``[table]`` header, if any."""
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]") and not stripped.startswith("[["):
+            return index
+    return None
+
+
+def _upsert_toml_keys(path: Path, updates: dict[str, str | bool | int]) -> None:
+    """Insert or replace top-level KEY = value lines in a Mana config.toml.
+
+    Operator configs often mix flat keys with nested tables (``[media]``,
+    ``[telegram.attachments]``, …). Missing isolation keys must be inserted
+    *before* the first table header; appending at EOF nests them under the last
+    table and Mana never sees the override (Settings stays at defaults).
     """
     if not updates:
         return
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = original.splitlines()
+    table_start = _first_toml_table_index(lines)
+    # Only rewrite KEY = value lines that appear in the top-level section so we
+    # never "update" a nested table key that happens to share the same name.
+    top_end = table_start if table_start is not None else len(lines)
+
     seen: set[str] = set()
     out: list[str] = []
-    for line in lines:
+    for index, line in enumerate(lines):
         stripped = line.strip()
         replaced = False
-        if stripped and not stripped.startswith("#") and "=" in stripped:
+        if (
+            index < top_end
+            and stripped
+            and not stripped.startswith("#")
+            and "=" in stripped
+        ):
             key = stripped.split("=", 1)[0].strip()
             if key in updates:
-                value = updates[key]
-                if isinstance(value, bool):
-                    rendered = "true" if value else "false"
-                elif isinstance(value, int):
-                    rendered = str(value)
-                else:
-                    rendered = _toml_quote(str(value))
-                out.append(f"{key} = {rendered}")
+                out.append(_render_toml_assignment(key, updates[key]))
                 seen.add(key)
                 replaced = True
         if not replaced:
             out.append(line)
+
     missing = [key for key in updates if key not in seen]
     if missing:
-        if out and out[-1].strip():
-            out.append("")
-        out.append("# SWE-bench runner isolation overrides")
-        for key in missing:
-            value = updates[key]
-            if isinstance(value, bool):
-                rendered = "true" if value else "false"
-            elif isinstance(value, int):
-                rendered = str(value)
-            else:
-                rendered = _toml_quote(str(value))
-            out.append(f"{key} = {rendered}")
+        block = ["# SWE-bench runner isolation overrides"]
+        block.extend(_render_toml_assignment(key, updates[key]) for key in missing)
+        insert_at = _first_toml_table_index(out)
+        if insert_at is None:
+            if out and out[-1].strip():
+                out.append("")
+            out.extend(block)
+        else:
+            # Insert before first [table], with blank lines around the block.
+            if insert_at > 0 and out[insert_at - 1].strip():
+                block = [""] + block
+            if insert_at < len(out) and out[insert_at].strip():
+                block = block + [""]
+            out[insert_at:insert_at] = block
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 

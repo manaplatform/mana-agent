@@ -16,6 +16,7 @@ from scripts.swe_bench.runner import (
     _benchmark_config_overrides,
     _disable_non_coding_integrations,
     _set_toml_table_key,
+    _upsert_toml_keys,
     acquire_worktree_lock,
     build_prompt,
     capture_model_patch,
@@ -165,6 +166,73 @@ def test_disable_nested_computer_control_for_isolation(tmp_path: Path) -> None:
     # helper also works for creating missing tables
     _set_toml_table_key(config, "telegram", "enabled", False)
     assert "[telegram]" in config.read_text(encoding="utf-8")
+
+
+def test_upsert_toml_keys_inserts_before_nested_tables(tmp_path: Path) -> None:
+    """Isolation overrides must stay top-level; EOF append nests under last table."""
+    import tomllib
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'MANA_AI_PROVIDER = "nvidia"\n'
+        "MANA_BROWSER_ENABLED = true\n\n"
+        "[telegram.attachments]\n"
+        "enabled = true\n"
+        "max_bytes = 10\n",
+        encoding="utf-8",
+    )
+    _upsert_toml_keys(
+        config,
+        {
+            "MANA_BROWSER_ENABLED": False,
+            "MANA_MANAGED_WORKTREES_ENABLED": False,
+            "MANA_TRANSACTIONAL_ALWAYS_APPROVE": True,
+            "MANA_CODEX_WORKTREE_ISOLATION": False,
+        },
+    )
+    text = config.read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    # Top-level (not nested under telegram.attachments).
+    assert data["MANA_BROWSER_ENABLED"] is False
+    assert data["MANA_MANAGED_WORKTREES_ENABLED"] is False
+    assert data["MANA_TRANSACTIONAL_ALWAYS_APPROVE"] is True
+    assert data["MANA_CODEX_WORKTREE_ISOLATION"] is False
+    nested = data["telegram"]["attachments"]
+    assert "MANA_TRANSACTIONAL_ALWAYS_APPROVE" not in nested
+    assert "MANA_MANAGED_WORKTREES_ENABLED" not in nested
+    # Override block appears before the first table header.
+    assert text.index("MANA_TRANSACTIONAL_ALWAYS_APPROVE") < text.index("[telegram.attachments]")
+
+
+def test_benchmark_isolation_settings_reach_settings_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SWE-bench isolation is useless if Settings ignores the rewritten keys."""
+    from mana_agent.config.settings import Settings
+
+    home = tmp_path / "mana_home"
+    home.mkdir()
+    config = home / "config.toml"
+    config.write_text(
+        'MANA_AI_PROVIDER = "nvidia"\n\n'
+        "[telegram.attachments]\n"
+        "enabled = false\n",
+        encoding="utf-8",
+    )
+    _upsert_toml_keys(config, _benchmark_config_overrides("m", agent_provider="nvidia"))
+
+    monkeypatch.setenv("MANA_HOME", str(home))
+    for key in (
+        "MANA_MANAGED_WORKTREES_ENABLED",
+        "MANA_TRANSACTIONAL_ALWAYS_APPROVE",
+        "MANA_CODEX_WORKTREE_ISOLATION",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings()
+    assert settings.mana_managed_worktrees_enabled is False
+    assert settings.mana_transactional_always_approve is True
+    assert settings.mana_codex_worktree_isolation is False
 
 
 def test_model_name_or_path_includes_non_openai_provider() -> None:

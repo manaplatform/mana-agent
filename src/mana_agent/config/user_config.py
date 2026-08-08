@@ -265,6 +265,11 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
         "artifact_retention_days": 30,
     },
     "MANA_COMPUTER_CONTROL_ENABLED": False,
+    # When true, multi-agent coding/tool routes allocate an isolated Git worktree
+    # under ~/.mana/repositories/<id>/worktrees/ instead of editing the primary
+    # checkout. SWE-bench isolation forces this false so patches land in the
+    # evaluated worktree.
+    "MANA_MANAGED_WORKTREES_ENABLED": True,
     "MANA_TRANSACTIONAL_ALWAYS_APPROVE": False,
     "computer_control": {
         "enabled": False,
@@ -539,6 +544,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_BROWSER_ARTIFACT_DIR": "mana_browser_artifact_dir",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": "mana_browser_profile_max_age_days",
     "MANA_COMPUTER_CONTROL_ENABLED": "mana_computer_control_enabled",
+    "MANA_MANAGED_WORKTREES_ENABLED": "mana_managed_worktrees_enabled",
     "MANA_TRANSACTIONAL_ALWAYS_APPROVE": "mana_transactional_always_approve",
     "MANA_CODING_BACKEND": "mana_coding_backend",
     "MANA_CODEX_ENABLED": "mana_codex_enabled",
@@ -709,6 +715,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
     "media",
     "MANA_COMPUTER_CONTROL_ENABLED",
+    "MANA_MANAGED_WORKTREES_ENABLED",
     "MANA_TRANSACTIONAL_ALWAYS_APPROVE",
     "computer_control",
     "MANA_CODING_BACKEND",

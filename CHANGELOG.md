@@ -4,6 +4,39 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed `test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations`
+  routing key mismatch.
+  - Cause: multi-line fixture prompt ended with `\n`, while
+    `MainAgent.run_user_request` strips the request before looking up the
+    route as `f"{entrypoint} {request}"`, so `_RouteModel` missed the
+    payload and fell through to the unavailable-model `simple` route.
+  - Fix: strip the fixture prompt so the mock key matches the normalized
+    request used by the router.
+  - User verification required:
+    `python -m pytest tests/test_multi_agent_core.py::test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations -q`
+
+- Fixed SWE-bench isolation overrides not reaching `Settings` (empty_patch
+  root cause for managed-worktree hijacks).
+  - Symptom: `astropy__astropy-12907` (and peers) finished `empty_patch`
+    after MainAgent created
+    `mana/you-are-solving-a-single-swe-bench-issue-inside-…` worktrees and
+    failed `python -m compileall .` verification, despite runner writing
+    `MANA_MANAGED_WORKTREES_ENABLED = false` and
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE = true`.
+  - Cause 1: `MANA_MANAGED_WORKTREES_ENABLED` was on `Settings` and in
+    seeded `config.toml`, but missing from `FIELD_NAME_BY_ENV` /
+    `DEFAULT_USER_CONFIG`, so `settings_source_for_pydantic()` never
+    passed it and the default stayed `True`.
+  - Cause 2: `_upsert_toml_keys` appended *new* keys at EOF. Operator
+    configs with nested tables (e.g. `[telegram.attachments]`) made
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE = true` parse as a nested key, so
+    top-level always-approve stayed `False`.
+  - Fix: register the managed-worktrees key in user-config maps; insert
+    missing top-level isolation keys *before* the first `[table]` header.
+  - Quiet mode (`MANA_CHAT_QUIET=1`) was already correct and is unrelated.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py -k "upsert or isolation or benchmark_overrides" tests/test_tui_user_config.py -k "settings_source" -q`
+
 - Fixed pytest collection of `tests/test_swe_bench_runner_config.py`
   (`ModuleNotFoundError: No module named 'scripts'`).
   - `tests/conftest.py` now puts the repository root on `sys.path` after
