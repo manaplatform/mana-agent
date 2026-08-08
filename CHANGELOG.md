@@ -4,6 +4,26 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Clarified SWE-bench instance selection: **no ids entered → all dataset ids**.
+  - If neither `--instance-ids` nor `--instance-ids-file` is set, the runner
+    loads **every** instance id from the SWE-bench dataset split (~500 Verified
+    `test` rows) and runs them (optional `--limit` still caps after selection).
+  - If ids are entered via `--instance-ids` and/or `--instance-ids-file`, only
+    those specific ids run.
+  - New flags: `--instance-ids-file` (text / JSON array / JSONL),
+    `--list-instance-ids` (print selected ids and exit).
+  - Docs updated for full-suite generation and grading without forcing a single
+    hardcoded harness `--instance_ids` (omit harness ids to grade all submitted
+    prediction rows). Your report with `submitted_instances: 1` and ~499
+    `incomplete_ids` is expected for a one-id smoke; re-run without id filters
+    to generate/grade the full suite.
+  - User verification required:
+    `python3 scripts/swe_bench/runner.py --list-instance-ids | wc -l`
+    then
+    `python3 scripts/swe_bench/runner.py --instance-ids astropy__astropy-12907 --list-instance-ids`
+    then
+    `python3 scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`.
+
 - Fixed SWE-bench prediction identity and smoke-eval failure modes:
   - Predictions no longer write `model_name_or_path: "mana-agent"`. Default is
     now `{agent_name}__{model}` (e.g. `mana-agent__gpt-5.6-luna`).

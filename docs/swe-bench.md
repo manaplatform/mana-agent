@@ -4,9 +4,17 @@ Mana-Agent can generate **SWE-bench Verified** predictions in the official
 JSONL format so the [SWE-bench harness](https://www.swebench.com/SWE-bench/guides/evaluation/)
 can grade them.
 
-This integration is intentionally **prediction-generation + smoke grading only**.
-It does **not** cover the full 500-instance leaderboard run, SWE-bench Pro,
-Terminal-Bench, pass@k, or submission packaging.
+**Instance selection contract** (prediction runner):
+
+| You pass | What runs |
+| --- | --- |
+| No `--instance-ids` and no `--instance-ids-file` | **All** instance ids from the SWE-bench dataset split (~500 for Verified `test`) |
+| `--instance-ids ID[,ID...]` and/or `--instance-ids-file PATH` | **Only** those specific ids |
+| Optional `--limit N` | Cap after the selection above (smoke / partial batches) |
+
+This integration focuses on **prediction generation + optional local grading**.
+It does **not** cover SWE-bench Pro, Terminal-Bench, pass@k ensembles, or
+automatic leaderboard upload.
 
 ## Prerequisites
 
@@ -36,7 +44,34 @@ rewrites that isolated config so:
 
 ## Generate predictions
 
-From the repository root:
+From the repository root.
+
+**Full Verified suite** (no instance ids entered → load every id from SWE-bench):
+
+```bash
+python scripts/swe_bench/runner.py \
+  --output predictions.jsonl \
+  --timeout 600 \
+  --model gpt-4o-mini
+```
+
+**List all dataset ids** without running the agent:
+
+```bash
+python scripts/swe_bench/runner.py --list-instance-ids
+```
+
+**Specific ids only** (entered via flag or file):
+
+```bash
+python scripts/swe_bench/runner.py \
+  --instance-ids astropy__astropy-12907,django__django-11099 \
+  --output predictions.jsonl \
+  --timeout 600 \
+  --model gpt-4o-mini
+```
+
+**Smoke / cost-limited batch** (still loads all when no ids, then caps):
 
 ```bash
 python scripts/swe_bench/runner.py \
@@ -78,8 +113,11 @@ Field contract:
 
 | Flag | Purpose |
 | --- | --- |
-| `--limit N` | Run at most N instances (after filters) |
-| `--instance-ids ID[,ID...]` | Only these instances (repeatable) |
+| *(omit id filters)* | Run **all** instance ids from the SWE-bench dataset split |
+| `--instance-ids ID[,ID...]` | Run **only** these ids (repeatable / comma-separated) |
+| `--instance-ids-file PATH` | Load ids from a text list, JSON array, or JSONL `instance_id` rows |
+| `--list-instance-ids` | Print selected ids (after filters/limit) and exit |
+| `--limit N` | Run at most N instances **after** id selection |
 | `--output PATH` | Predictions path (default `predictions.jsonl`) |
 | `--timeout SECONDS` | Hard per-instance wall-clock timeout (default `600`) |
 | `--model ID` | Forced LLM for mana-agent (default `gpt-4o-mini`); also used in default `model_name_or_path` |
@@ -153,16 +191,32 @@ Per-instance logs land under `.swe-bench/logs/<instance_id>/`
 
 ## Grade predictions with the official harness
 
-After `predictions.jsonl` exists, grade **only the instances you submitted**
-(smoke runs almost never cover all 500 Verified rows):
+After `predictions.jsonl` exists, grade the rows you submitted.
+
+**Harness `--instance_ids`:**
+
+* **Omit** it to grade **all rows present in `predictions.jsonl`** (recommended
+  when you generated a full or multi-id batch).
+* **Pass** specific ids only when you want a subset of the prediction file
+  (typical for one-id smoke).
+
+Incomplete dataset ids in the report are ids **not present in your predictions
+file** — expected for partial runs, not agent bugs.
 
 ```bash
-# Prefer local harness for smoke. Pin instance_ids to the rows in predictions.jsonl.
+# Grade everything in predictions.jsonl (no harness instance_ids → all submitted)
+python -m swebench.harness.run_evaluation \
+  --dataset_name princeton-nlp/SWE-bench_Verified \
+  --predictions_path predictions.jsonl \
+  --max_workers 4 \
+  --run_id mana-agent__gpt-4o-mini-full
+
+# Smoke: pin to one submitted id
 python -m swebench.harness.run_evaluation \
   --dataset_name princeton-nlp/SWE-bench_Verified \
   --predictions_path predictions.jsonl \
   --instance_ids astropy__astropy-12907 \
-  --max_workers 4 \
+  --max_workers 1 \
   --run_id mana-agent__gpt-4o-mini-smoke
 ```
 
@@ -170,6 +224,13 @@ Or with `sb-cli` (cloud). Use a **run_id that includes agent + model**, not the
 agent name alone:
 
 ```bash
+# Full submitted set (omit --instance_ids)
+sb-cli submit swe-bench_verified test \
+  --predictions_path predictions.jsonl \
+  --run_id mana-agent__gpt-5.6-luna \
+  --output_dir ./sb-cli-reports
+
+# Smoke subset
 sb-cli submit swe-bench_verified test \
   --predictions_path predictions.jsonl \
   --run_id mana-agent__gpt-5.6-luna-smoke \
@@ -229,7 +290,9 @@ Inspect harness output under the report path printed by the harness
 
 ## Current limitations
 
-- **Not** a full Verified (500) evaluation pipeline or leaderboard submission path.
+- Full Verified (500) **prediction generation is supported** when no
+  `--instance-ids` are entered; it is slow/expensive and needs disk + API budget.
+  Leaderboard packaging/upload is still manual via the official harness / sb-cli.
 - Does not install project-specific conda/test environments; the agent only edits the tree. Official tests run later inside harness Docker images.
 - Default model is intentionally **cheap/fast** (`gpt-4o-mini`); quality will be lower than production coding models.
 - Single-shot chat invocation: no multi-trial pass@k, no ensemble voting.
@@ -241,18 +304,25 @@ Inspect harness output under the report path printed by the harness
 ## Recommended verification (user-owned)
 
 ```bash
-# 1) Format smoke (empty patches; checks keys + naming)
+# 1) Confirm selection contract: no ids → all dataset ids listed
+python scripts/swe_bench/runner.py --list-instance-ids | wc -l
+# expect ~500 for Verified test
+
+# 2) Format smoke (empty patches; checks keys + naming)
 python scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl
 python -c "import json; r=json.loads(open('predictions.jsonl').readline()); print(sorted(r.keys())); print(r['model_name_or_path'], r['agent_name'], r.get('agent_model'))"
 
-# 2) Optional one-instance agent run (use your real LLM id)
+# 3) Optional one-instance agent run (explicit ids only)
 python scripts/swe_bench/runner.py \
   --instance-ids astropy__astropy-12907 \
   --model gpt-5.6-luna \
   --timeout 600 \
   --output predictions.jsonl
 
-# 3) Local harness smoke grade for the same instance only
+# 4) Full suite generation (no --instance-ids → all SWE-bench ids)
+# python scripts/swe_bench/runner.py --model gpt-5.6-luna --timeout 600 --output predictions.jsonl
+
+# 5) Local harness grade: omit --instance_ids to grade all submitted rows
 python -m swebench.harness.run_evaluation \
   --dataset_name princeton-nlp/SWE-bench_Verified \
   --predictions_path predictions.jsonl \

@@ -18,9 +18,17 @@ uses it for report filenames. ``agent_name`` is the coding agent (always
 ``mana-agent`` unless overridden). The LLM id alone is not sufficient when
 comparing multiple agents that share a model.
 
-Scope: prediction generation only (smoke grading is documented separately).
-Does not run the full 500-instance suite, SWE-bench Pro, Terminal-Bench,
-pass@k, or leaderboard submission.
+Instance selection (explicit contract):
+
+* **No** ``--instance-ids`` (and no ``--instance-ids-file``) → load **all**
+  instance ids from the SWE-bench dataset split and run them (full Verified
+  suite is ~500 rows). Optional ``--limit N`` caps after that selection.
+* **With** ``--instance-ids`` / ``--instance-ids-file`` → run **only** those
+  ids (still subject to ``--limit``).
+
+Scope: prediction generation (smoke grading is documented separately).
+Does not cover SWE-bench Pro, Terminal-Bench, pass@k packaging, or automatic
+leaderboard upload.
 """
 
 from __future__ import annotations
@@ -194,13 +202,8 @@ def shutil_which(name: str) -> str | None:
     return which(name)
 
 
-def load_instances(
-    *,
-    dataset_name: str,
-    split: str,
-    limit: int | None,
-    instance_ids: Sequence[str],
-) -> list[dict[str, Any]]:
+def load_dataset_rows(*, dataset_name: str, split: str) -> list[dict[str, Any]]:
+    """Load every row from a HuggingFace SWE-bench dataset split."""
     try:
         from datasets import load_dataset
     except ImportError as exc:  # pragma: no cover - environment specific
@@ -210,22 +213,91 @@ def load_instances(
 
     LOG.info("Loading dataset %s split=%s", dataset_name, split)
     ds = load_dataset(dataset_name, split=split)
-    rows: list[dict[str, Any]] = [dict(row) for row in ds]
+    return [dict(row) for row in ds]
 
-    if instance_ids:
-        wanted = {i.strip() for i in instance_ids if i.strip()}
-        rows = [r for r in rows if str(r.get("instance_id", "")) in wanted]
-        missing = wanted - {str(r.get("instance_id", "")) for r in rows}
+
+def dataset_instance_ids(rows: Sequence[dict[str, Any]]) -> list[str]:
+    """Return ordered instance_id values from dataset rows (non-empty only)."""
+    ids: list[str] = []
+    for row in rows:
+        iid = str(row.get("instance_id") or "").strip()
+        if iid:
+            ids.append(iid)
+    return ids
+
+
+def select_instances(
+    rows: Sequence[dict[str, Any]],
+    *,
+    instance_ids: Sequence[str],
+    limit: int | None,
+) -> list[dict[str, Any]]:
+    """Select dataset rows by optional id filter and limit.
+
+    Selection contract:
+
+    * Empty ``instance_ids`` → keep **all** rows from the loaded SWE-bench split.
+    * Non-empty ``instance_ids`` → keep **only** matching rows (warn on missing).
+    * ``limit`` (if set) is applied **after** the id filter.
+    """
+    selected: list[dict[str, Any]] = list(rows)
+    all_ids = dataset_instance_ids(selected)
+
+    wanted = [i.strip() for i in instance_ids if str(i).strip()]
+    if wanted:
+        wanted_set = set(wanted)
+        # Preserve dataset order; allow duplicate flags without duplicating rows.
+        selected = [
+            r for r in selected if str(r.get("instance_id", "")).strip() in wanted_set
+        ]
+        found = {str(r.get("instance_id", "")).strip() for r in selected}
+        missing = sorted(wanted_set - found)
         if missing:
-            LOG.warning("Requested instance_ids not found in dataset: %s", sorted(missing))
+            LOG.warning(
+                "Requested instance_ids not found in dataset (%d): %s",
+                len(missing),
+                missing[:20] + (["..."] if len(missing) > 20 else []),
+            )
+        LOG.info(
+            "Instance filter: explicit --instance-ids (%d requested) → %d match(es) "
+            "from %d dataset id(s)",
+            len(wanted_set),
+            len(selected),
+            len(all_ids),
+        )
+    else:
+        LOG.info(
+            "Instance filter: no --instance-ids provided → selecting all %d "
+            "instance id(s) from SWE-bench dataset",
+            len(all_ids),
+        )
 
     if limit is not None:
         if limit < 0:
             raise SweBenchRunnerError("--limit must be >= 0")
-        rows = rows[:limit]
+        if len(selected) > limit:
+            LOG.info("Applying --limit %d (was %d selected)", limit, len(selected))
+        selected = selected[:limit]
 
-    LOG.info("Selected %d instance(s)", len(rows))
-    return rows
+    LOG.info("Selected %d instance(s) to run", len(selected))
+    if selected and LOG.isEnabledFor(logging.DEBUG):
+        LOG.debug(
+            "Selected ids: %s",
+            [str(r.get("instance_id", "")) for r in selected],
+        )
+    return selected
+
+
+def load_instances(
+    *,
+    dataset_name: str,
+    split: str,
+    limit: int | None,
+    instance_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Load SWE-bench rows and apply the instance selection contract."""
+    rows = load_dataset_rows(dataset_name=dataset_name, split=split)
+    return select_instances(rows, instance_ids=instance_ids, limit=limit)
 
 
 def ensure_repo_clone(repo: str, repos_dir: Path) -> Path:
@@ -1007,22 +1079,106 @@ def process_instance(
 
 
 def parse_instance_ids(values: Sequence[str] | None) -> list[str]:
+    """Parse CLI ``--instance-ids`` values (repeatable and/or comma-separated)."""
     if not values:
         return []
     ids: list[str] = []
     for value in values:
-        for part in value.split(","):
+        for part in str(value).split(","):
             part = part.strip()
             if part:
                 ids.append(part)
     return ids
 
 
+def load_instance_ids_file(path: Path) -> list[str]:
+    """Load instance ids from a text or JSONL file.
+
+    Accepted formats:
+
+    * One ``instance_id`` per line (``#`` comments and blank lines ignored).
+    * JSONL rows with an ``instance_id`` field (e.g. a predictions file).
+    * A JSON array of strings.
+    """
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise SweBenchRunnerError(f"--instance-ids-file not found: {resolved}")
+    text = resolved.read_text(encoding="utf-8")
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    # JSON array of strings.
+    if stripped.startswith("["):
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise SweBenchRunnerError(
+                f"Invalid JSON array in --instance-ids-file {path}: {exc}"
+            ) from exc
+        if not isinstance(data, list):
+            raise SweBenchRunnerError(
+                f"--instance-ids-file {path}: expected a JSON array of strings"
+            )
+        return [str(item).strip() for item in data if str(item).strip()]
+
+    ids: list[str] = []
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("{"):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SweBenchRunnerError(
+                    f"Invalid JSONL on line {line_no} of {path}: {exc}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise SweBenchRunnerError(
+                    f"--instance-ids-file {path} line {line_no}: expected a JSON object"
+                )
+            iid = str(row.get("instance_id") or "").strip()
+            if iid:
+                ids.append(iid)
+            continue
+        # Plain id (allow optional trailing comma from copied lists).
+        ids.append(line.rstrip(",").strip())
+    return [i for i in ids if i]
+
+
+def resolve_requested_instance_ids(
+    *,
+    cli_values: Sequence[str] | None,
+    ids_file: Path | None,
+) -> list[str]:
+    """Merge CLI and file-sourced instance ids (empty → run all dataset ids)."""
+    ids = parse_instance_ids(cli_values)
+    if ids_file is not None:
+        file_ids = load_instance_ids_file(ids_file)
+        LOG.info(
+            "Loaded %d instance id(s) from --instance-ids-file %s",
+            len(file_ids),
+            ids_file,
+        )
+        ids.extend(file_ids)
+    # De-dupe while preserving first-seen order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for iid in ids:
+        if iid not in seen:
+            seen.add(iid)
+            ordered.append(iid)
+    return ordered
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Generate SWE-bench Verified predictions.jsonl using mana-agent. "
-            "Each line includes instance_id, model_name_or_path "
+            "With no --instance-ids, loads and runs ALL ids from the dataset "
+            "split (full Verified suite). With --instance-ids, runs only those. "
+            "Each prediction line includes instance_id, model_name_or_path "
             f"(default {DEFAULT_AGENT_NAME}__<llm>), agent_name "
             f"(default {DEFAULT_AGENT_NAME}), optional agent_model, and model_patch."
         )
@@ -1041,15 +1197,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=None,
-        help="Maximum number of instances to run (after --instance-ids filter).",
+        help=(
+            "Maximum number of instances to run after selection. "
+            "Applied after --instance-ids / --instance-ids-file. "
+            "Omit to run every selected id (all dataset ids when no id filter)."
+        ),
     )
     parser.add_argument(
         "--instance-ids",
         action="append",
-        default=[],
+        default=None,
         help=(
-            "Only run these instance_id values. Repeatable, or comma-separated. "
+            "Run only these instance_id values (repeatable or comma-separated). "
+            "If omitted (and --instance-ids-file is also omitted), every id from "
+            "the SWE-bench dataset split is selected. "
             "Example: --instance-ids astropy__astropy-12907"
+        ),
+    )
+    parser.add_argument(
+        "--instance-ids-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional file of instance ids: one id per line, a JSON string array, "
+            "or JSONL rows with instance_id (e.g. predictions.jsonl). "
+            "Combined with --instance-ids. When neither is set, all dataset ids run."
+        ),
+    )
+    parser.add_argument(
+        "--list-instance-ids",
+        action="store_true",
+        help=(
+            "Print the selected instance ids (one per line) after applying "
+            "--instance-ids / --instance-ids-file / --limit, then exit without "
+            "running mana-agent. With no id filter, prints all dataset ids."
         ),
     )
     parser.add_argument(
@@ -1182,7 +1363,10 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
         instance_ids=cfg.instance_ids,
     )
     if not instances:
-        raise SweBenchRunnerError("No instances selected. Check --limit / --instance-ids.")
+        raise SweBenchRunnerError(
+            "No instances selected. Check --limit / --instance-ids / "
+            "--instance-ids-file (omit id filters to run all dataset ids)."
+        )
 
     results: list[InstanceResult] = []
     for index, instance in enumerate(instances, start=1):
@@ -1297,12 +1481,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     configure_logging(bool(args.verbose))
 
+    try:
+        requested_ids = resolve_requested_instance_ids(
+            cli_values=args.instance_ids,
+            ids_file=args.instance_ids_file,
+        )
+    except SweBenchRunnerError as exc:
+        LOG.error("%s", exc)
+        return 2
+
+    if not requested_ids:
+        LOG.info(
+            "No instance ids entered via --instance-ids / --instance-ids-file; "
+            "will load all ids from SWE-bench dataset %s split=%s",
+            args.dataset,
+            args.split,
+        )
+    else:
+        LOG.info(
+            "Using %d explicit instance id(s); only those will run",
+            len(requested_ids),
+        )
+
+    if bool(args.list_instance_ids):
+        try:
+            instances = load_instances(
+                dataset_name=str(args.dataset),
+                split=str(args.split),
+                limit=args.limit,
+                instance_ids=requested_ids,
+            )
+        except SweBenchRunnerError as exc:
+            LOG.error("%s", exc)
+            return 2
+        for row in instances:
+            iid = str(row.get("instance_id") or "").strip()
+            if iid:
+                print(iid)
+        return 0 if instances else 2
+
     explicit_model_name = getattr(args, "model_name_or_path", None)
     cfg = RunnerConfig(
         dataset_name=str(args.dataset),
         split=str(args.split),
         limit=args.limit,
-        instance_ids=parse_instance_ids(args.instance_ids),
+        instance_ids=requested_ids,
         output=Path(args.output),
         work_dir=Path(args.work_dir),
         agent_name=str(args.agent_name).strip() or DEFAULT_AGENT_NAME,
