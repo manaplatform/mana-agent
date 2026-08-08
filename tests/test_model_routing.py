@@ -151,6 +151,32 @@ def test_configured_and_legacy_profiles_migrate_without_role_lock(monkeypatch) -
     assert "coding" in migrated[0].supported_roles
 
 
+def test_pinned_profiles_ignore_operator_model_levels(monkeypatch) -> None:
+    from mana_agent.model_routing.profiles import profiles_for_pinned_models
+
+    monkeypatch.setattr(
+        "mana_agent.model_routing.profiles.get_setting",
+        lambda name, default="": {"MODEL_LEVEL_3_HIGH_REASONING": "openai/gpt-5.6-luna"}.get(name, default),
+    )
+    pinned = profiles_for_pinned_models(["gpt-4.1-mini", "gpt-4.1-mini"])
+    assert len(pinned) == 1
+    assert pinned[0].model_id == "gpt-4.1-mini"
+    assert pinned[0].context_window >= 100_000
+    assert pinned[0].source_level == "pinned"
+
+
+def test_legacy_profiles_apply_maintained_token_limits_for_known_models(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "mana_agent.model_routing.profiles.get_setting",
+        lambda name, default="": {"MODEL_LEVEL_3_HIGH_REASONING": "openai/gpt-5.6-luna"}.get(name, default),
+    )
+    migrated = profiles_from_legacy_configuration(context_window=16_384, max_output_tokens=4_096)
+    assert len(migrated) == 1
+    assert migrated[0].model_id == "gpt-5.6-luna"
+    assert migrated[0].context_window == 400_000
+    assert migrated[0].max_output_tokens == 128_000
+
+
 class FakeExecutor:
     def __init__(self, root: Path) -> None:
         self.active_repository_root = root / "active"

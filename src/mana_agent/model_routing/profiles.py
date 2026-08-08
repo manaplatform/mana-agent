@@ -94,6 +94,66 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
     return tuple(profiles)
 
 
+def profiles_for_pinned_models(
+    models: list[str] | tuple[str, ...],
+    *,
+    default_provider: str = "openai",
+    context_window: int = 16_384,
+    max_output_tokens: int = 4_096,
+) -> tuple[ModelProfile, ...]:
+    """Build isolated routing profiles for explicit suite/runtime-pinned models.
+
+    Does not read operator MODEL_LEVEL_* settings, so eval variants measure the
+    models they declare rather than the host machine preferences.
+    """
+    from mana_agent.config.model_catalog import maintained_token_limits
+
+    configured: list[tuple[str, str]] = []
+    for value in models:
+        model = str(value or "").strip()
+        if model:
+            configured.append(("MODEL_LEVEL_3_HIGH_REASONING", model))
+    if not configured:
+        return ()
+
+    levels_by_model: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for level, value in configured:
+        provider, model_id = split_qualified_model_id(value, default_provider=default_provider)
+        if model_id:
+            levels_by_model[(provider, model_id)].append(level)
+
+    profiles: list[ModelProfile] = []
+    for (provider, model_id), levels in sorted(levels_by_model.items()):
+        strongest = max(levels, key=lambda item: _LEVELS_INDEX[item])
+        reliability, logical_cost, latency, reasoning = _LEVEL_METADATA[strongest]
+        maintained = maintained_token_limits(provider, model_id)
+        window = int(maintained[0] if maintained else context_window)
+        output = int(maintained[1] if maintained else max_output_tokens)
+        output = min(window, max(1, output))
+        profiles.append(ModelProfile(
+            provider=provider,
+            model_id=model_id,
+            supported_roles=_ALL_ROLES,
+            supported_tools=frozenset({"*"}),
+            reasoning_settings=reasoning,
+            context_window=window,
+            max_output_tokens=output,
+            latency_class=latency,
+            logical_cost_per_1k_tokens=logical_cost,
+            reliability_score=reliability,
+            benchmark_scores=dict(_LEVEL_BENCHMARKS[strongest]),
+            source_level="pinned",
+            configuration={
+                "source_levels": ("pinned",),
+                "token_profile_confidence": "high" if maintained else "low",
+                "capability_source": (
+                    "maintained-token-limits" if maintained else "configured-unknown-model-policy"
+                ),
+            },
+        ))
+    return tuple(profiles)
+
+
 def profiles_from_legacy_configuration(
     *,
     global_model: str = "",
@@ -118,6 +178,8 @@ def profiles_from_legacy_configuration(
         if model_id:
             levels_by_model[(provider, model_id)].append(level)
 
+    from mana_agent.config.model_catalog import maintained_token_limits
+
     profiles: list[ModelProfile] = []
     for (provider, model_id), levels in sorted(levels_by_model.items()):
         strongest = max(levels, key=lambda item: _LEVELS_INDEX[item])
@@ -129,14 +191,27 @@ def profiles_from_legacy_configuration(
         # routing can make a provider/model decision.
         if "MODEL_LEVEL_1_FAST_TOOL" in levels:
             latency = LatencyClass.INTERACTIVE
+        maintained = maintained_token_limits(provider, model_id)
+        window = int(
+            (maintained[0] if maintained else 0)
+            or context_window
+            or 0
+        )
+        output = int(
+            (maintained[1] if maintained else 0)
+            or max_output_tokens
+            or 0
+        )
+        if window > 0 and output > 0:
+            output = min(window, output)
         profiles.append(ModelProfile(
             provider=provider,
             model_id=model_id,
             supported_roles=_ALL_ROLES,
             supported_tools=frozenset({"*"}),
             reasoning_settings=reasoning,
-            context_window=int(context_window or 0),
-            max_output_tokens=int(max_output_tokens or 0),
+            context_window=window,
+            max_output_tokens=output,
             latency_class=latency,
             logical_cost_per_1k_tokens=logical_cost,
             reliability_score=reliability,
@@ -144,8 +219,10 @@ def profiles_from_legacy_configuration(
             source_level=strongest,
             configuration={
                 "source_levels": tuple(sorted(levels)),
-                "token_profile_confidence": "low",
-                "capability_source": "configured-unknown-model-policy",
+                "token_profile_confidence": "high" if maintained else "low",
+                "capability_source": (
+                    "maintained-token-limits" if maintained else "configured-unknown-model-policy"
+                ),
             },
         ))
     return tuple(profiles)

@@ -4,6 +4,28 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed routing-smoke eval isolation and context accounting that were collapsing
+  many tasks under operator `gpt-5.6-luna` preferences and a 16k unknown-model
+  window:
+  - Eval gateway construction now sets `ChatGatewayConfig.pin_models=True` with
+    the suite variant models, so `MODEL_LEVEL_*` / `MANA_MODEL_*` no longer
+    rewrite measured runtime models (suite `gpt-4.1-mini` was becoming
+    `gpt-5.6-luna` from `~/.mana/config.toml`).
+  - New `profiles_for_pinned_models` and `pin_model_for_role` build isolated
+    routing profiles/assignments without reading operator level settings.
+  - Maintained token limits for common OpenAI families (`gpt-4.1*`, `gpt-4o*`,
+    `gpt-5*`, `o3`/`o4`) fill catalog gaps so accounting no longer treats
+    modern models as 16 384-token unknowns (fixes
+    `effective limit is 0` / `context_limit_deficit` blocks on agent prompts).
+  - Budget-overrun finalization prompt now requires `safe_to_continue=true` for
+    valid `require_review` decisions (models were returning `false` and failing
+    schema validation mid-handoff).
+  - Observe-mode governor errors prefer the policy-free estimate so residual `0`
+    is not misreported when the real deficit is model context capacity.
+  - User verification required:
+    `python -m pytest tests/test_model_routing.py::test_pinned_profiles_ignore_operator_model_levels tests/test_model_routing.py::test_legacy_profiles_apply_maintained_token_limits_for_known_models tests/test_multi_agent_core.py::test_pin_model_for_role_bypasses_operator_model_levels tests/execution_supervisor/test_supervisor_core.py::test_budget_overrun_prompt_requires_safe_to_continue_for_require_review -q`
+    then re-run `mana-agent eval ./evals/suites/routing-smoke.yaml`.
+
 - Added SWE-bench Verified prediction generation for mana-agent:
   - New focused runner: `scripts/swe_bench/runner.py` loads
     `princeton-nlp/SWE-bench_Verified`, checks out each instance at

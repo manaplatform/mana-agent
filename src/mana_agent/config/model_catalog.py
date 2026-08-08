@@ -64,6 +64,54 @@ class ModelDescriptor:
         return ModelCapability.TEXT_GENERATION in self.capabilities
 
 
+# Known provider context windows used when catalog endpoints omit token limits.
+# Values are capability facts for accounting; they do not select models.
+# (context_window, max_output_tokens)
+_MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
+    "gpt-4.1": (1_047_576, 32_768),
+    "gpt-4.1-mini": (1_047_576, 32_768),
+    "gpt-4.1-nano": (1_047_576, 32_768),
+    "gpt-4o": (128_000, 16_384),
+    "gpt-4o-mini": (128_000, 16_384),
+    "gpt-5": (400_000, 128_000),
+    "gpt-5-mini": (400_000, 128_000),
+    "gpt-5-nano": (400_000, 128_000),
+    "gpt-5.1": (400_000, 128_000),
+    "gpt-5.2": (400_000, 128_000),
+    "gpt-5.4": (400_000, 128_000),
+    "gpt-5.5": (400_000, 128_000),
+    "gpt-5.6-luna": (400_000, 128_000),
+    "gpt-5.6-sol": (400_000, 128_000),
+    "gpt-5.6-terra": (400_000, 128_000),
+    "o3": (200_000, 100_000),
+    "o3-mini": (200_000, 100_000),
+    "o4-mini": (200_000, 100_000),
+}
+
+
+def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | None:
+    """Return maintained (context_window, max_output_tokens) when known."""
+    model = str(model_id or "").strip()
+    if not model:
+        return None
+    direct = _MAINTAINED_TOKEN_LIMITS.get(model)
+    if direct is not None:
+        return direct
+    # Family prefixes (e.g. gpt-5.4-mini-2026-03-17) inherit parent limits.
+    lowered = model.casefold()
+    for key, limits in _MAINTAINED_TOKEN_LIMITS.items():
+        if lowered.startswith(key.casefold()):
+            return limits
+    provider_id = str(provider or "").strip().casefold()
+    if provider_id == "openai" and lowered.startswith("gpt-5"):
+        return (400_000, 128_000)
+    if provider_id == "openai" and lowered.startswith("gpt-4.1"):
+        return (1_047_576, 32_768)
+    if provider_id == "openai" and lowered.startswith("gpt-4o"):
+        return (128_000, 16_384)
+    return None
+
+
 # Maintained metadata takes precedence over the isolated provider-name
 # normalizer below. Entries are intentionally capability-focused, not a claim
 # that every model is available to every account.
@@ -158,6 +206,11 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
             max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else None
         except (TypeError, ValueError):
             max_output_tokens = None
+        if context_window is None or max_output_tokens is None:
+            maintained = maintained_token_limits(provider, model_id)
+            if maintained is not None:
+                context_window = context_window or maintained[0]
+                max_output_tokens = max_output_tokens or maintained[1]
         result.append(ModelDescriptor(
             provider=provider,
             id=model_id,

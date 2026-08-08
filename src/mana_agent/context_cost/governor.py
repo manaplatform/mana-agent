@@ -475,8 +475,10 @@ class ContextCostGovernor:
                                 attempt_id=str(identity.get("attempt_id") or ""),
                             )
                             break
-                        except ModelContextLimitError:
-                            pass
+                        except ModelContextLimitError as observe_exc:
+                            # Prefer the policy-free estimate error so operators see
+                            # the real model-context deficit instead of residual 0.
+                            exc = observe_exc
                         except ValueError as observe_exc:
                             if "already finalized" not in str(observe_exc).casefold():
                                 raise

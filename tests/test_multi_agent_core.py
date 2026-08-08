@@ -1088,6 +1088,20 @@ def test_missing_symbolic_model_level_falls_back_to_global(
     assert assignment.resolved_model == "global-model"
 
 
+def test_pin_model_for_role_bypasses_operator_model_levels(
+    isolated_model_config: Path,
+) -> None:
+    from mana_agent.multi_agent.runtime.model_levels import pin_model_for_role
+
+    user_config.save_effective_user_config(
+        {MODEL_LEVEL_3_HIGH_REASONING: "operator-high-model"},
+        merge=False,
+    )
+    assignment = pin_model_for_role(AgentRole.MAIN, "suite-gpt-4.1-mini")
+    assert assignment.model_level == "pinned"
+    assert assignment.resolved_model == "suite-gpt-4.1-mini"
+
+
 def test_execution_context_preserves_model_metadata():
     ctx = ExecutionContext.from_mapping(
         {

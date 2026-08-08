@@ -67,10 +67,17 @@ class EvalRunner:
 
     @staticmethod
     def _default_gateway(root: Path, variant: EvalVariant) -> AgentChatGateway:
+        # Pin suite models so operator MODEL_LEVEL_* / MANA_MODEL_* preferences
+        # cannot rewrite the measured runtime (e.g. gpt-4.1-mini -> gpt-5.6-luna).
         return AgentChatGateway(
             root,
             config=ChatGatewayConfig(
                 model=variant.main_model,
+                pin_models=True,
+                router_model=variant.router_model,
+                coding_model=variant.coding_model,
+                reviewer_model=variant.reviewer_model,
+                verifier_model=variant.verifier_model,
                 lane_overrides=variant.lane_configuration,
                 session_id=execution_id("eval_session"),
                 agent_timeout_seconds=max(1, int(variant.context_limits.get("timeout_seconds", 30))),

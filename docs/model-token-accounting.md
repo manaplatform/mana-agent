@@ -28,10 +28,12 @@ and transactional safety context are protected.
 
 ## Model metadata and unknown models
 
-Provider catalog metadata is preferred, followed by configured model profiles
-and explicit custom-deployment metadata. A model profile includes provider,
-model ID, context window, maximum output, tokenizer, usage-reporting support,
-and Decimal input/cached-input/output/reasoning prices.
+Provider catalog metadata is preferred, followed by maintained OpenAI-family
+token limits for common `gpt-4.1*`, `gpt-4o*`, `gpt-5*`, and `o3`/`o4` models
+when the catalog omits windows, then configured model profiles and explicit
+custom-deployment metadata. A model profile includes provider, model ID,
+context window, maximum output, tokenizer, usage-reporting support, and
+Decimal input/cached-input/output/reasoning prices.
 
 Explicit `MANA_MODEL_PROFILES` entries must provide both `context_window` and
 `max_output_tokens`. Custom providers should publish the same fields through
@@ -42,6 +44,10 @@ whose capability metadata is absent. `conservative` permits the explicitly
 configured unknown-model context and output limits, labels the profile and
 token estimate low-confidence, and leaves monetary cost unknown when pricing is
 absent. Unknown cost is never treated as free.
+
+Eval suite runs pin variant models via `ChatGatewayConfig.pin_models` so
+operator `MODEL_LEVEL_*` / `MANA_MODEL_*` preferences cannot rewrite the
+measured models or their token profiles.
 
 ## Reservation and reconciliation
 
