@@ -4,6 +4,28 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed pytest collection of `tests/test_swe_bench_runner_config.py`
+  (`ModuleNotFoundError: No module named 'scripts'`).
+  - `tests/conftest.py` now puts the repository root on `sys.path` after
+    `src/`, so `from scripts.swe_bench.runner import …` resolves regardless
+    of cwd.
+  - Added `scripts/__init__.py` so `scripts` is an explicit package.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py --collect-only -q`
+
+- Fixed gateway `checkpoint_resume` failing on NVIDIA DeepSeek with
+  `LengthFinishReasonError` / truncated structured JSON.
+  - Symptom: Gmail (and other) entry turns returned
+    `Model decision failed: checkpoint_resume… length limit was reached`
+    with `completion_tokens=512` while the router model was
+    `deepseek-ai/deepseek-v4-flash` (thinking/reasoning enabled by default).
+  - Cause: `CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS` was 512; provider thinking
+    tokens share that budget, so the decision schema never completed.
+  - Raised the explicit output budget to 4096 and clarified length-limit
+    errors. Still no fallback resume/start when the decision is incomplete.
+  - User verification required:
+    `python -m pytest tests/gateway/test_checkpoint_resume.py -q`
+
 - Fixed Windows CI failure for SWE-bench `agent_bin` Python PATH shim.
   - `prepare_agent_python_path` now writes `python.cmd` / `python3.cmd` on
     Windows (PATHEXT) and keeps executable shell scripts on POSIX.

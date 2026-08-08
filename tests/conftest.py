@@ -17,8 +17,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 
 # Ensure test imports resolve to local source tree, not an installed wheel/editable.
+# Insert src first so `mana_agent` resolves under src/, then the repo root so
+# tests can import non-packaged helpers such as `scripts.swe_bench.runner`.
+# Relying only on "" / cwd fails when pytest is invoked with a different
+# working directory or without the root on sys.path.
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(1 if sys.path and sys.path[0] == str(SRC_DIR) else 0, str(PROJECT_ROOT))
 
 
 # Capture this before pytest changes HOME.  The value is deliberately never
