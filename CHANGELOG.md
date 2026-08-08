@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed `split_qualified_model_id` so fully qualified OpenRouter IDs such as
+  `openrouter/anthropic/claude-sonnet` keep provider `openrouter` even when the
+  default provider is `openai` (regression from the NVIDIA nested-ID work).
+  - User verification required:
+    `python -m pytest tests/test_openrouter_provider.py tests/test_nvidia_provider.py -k "first_class or qualified"`
+
 - Completed first-class NVIDIA Build / NVIDIA NIM inference provider support.
   - Canonical provider id `nvidia` uses `NVIDIA_API_KEY` and
     `NVIDIA_BASE_URL` (default `https://integrate.api.nvidia.com/v1`).

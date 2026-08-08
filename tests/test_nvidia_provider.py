@@ -267,7 +267,7 @@ def test_nvidia_format_provider_error_never_says_openai() -> None:
     )
     assert "NVIDIA" in message
     assert "401" in message
-    assert "OpenAI" not in message or "No OpenAI credentials" in message
+    assert "OPENAI_API_KEY" in message
 
 
 def test_nvidia_tool_calling_payload_shape(

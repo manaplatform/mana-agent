@@ -264,11 +264,19 @@ Important behaviors:
 ### Indexing and embeddings (FAISS vector store)
 
 - **`src/mana_agent/vector_store/embeddings.py`** constructs an embeddings client
-  compatible with the configured `base_url`.
-  In particular, it supports NVIDIA endpoints by:
+  compatible with the configured `base_url` / provider.
+  In particular, it supports NVIDIA Build / NIM endpoints by:
+  - resolving `NVIDIA_API_KEY` + `NVIDIA_BASE_URL` through
+    `resolve_inference_connection` (never via `OPENAI_API_KEY`)
   - disabling client-side tokenization (`check_embedding_ctx_length=False`)
   - setting `extra_body["input_type"]` to `"query"` vs `"passage"`
-  See: `src/mana_agent/vector_store/embeddings.py:1-88`.
+  See: `src/mana_agent/vector_store/embeddings.py` and
+  `src/mana_agent/config/inference_provider.py`.
+
+- **Inference providers** are registered in
+  `src/mana_agent/config/provider_registry.py` (`openai`, `openrouter`,
+  `nvidia`, `custom`). Runtime transport is OpenAI-compatible Chat Completions
+  for all of them; credentials and base URLs stay provider-isolated.
 
 - The ask service uses the FAISS store (`FaissStore`) and falls back when the on-disk
   index under `.mana/` or the requested `index_dir` is missing.

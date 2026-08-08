@@ -129,11 +129,16 @@ def split_qualified_model_id(
 ) -> tuple[str, str]:
     """Split a Mana-qualified or bare upstream model ID.
 
-    Bare upstream IDs hosted by multi-tenant providers (OpenRouter, NVIDIA)
-    often look like ``org/model``. When the first segment is a *different*
-    known Mana provider than ``default_provider``, the whole string is treated
-    as the upstream model under the default provider (OpenRouter hosting
-    ``openai/*``, NVIDIA hosting ``deepseek-ai/*``, etc.).
+    A leading known Mana provider is authoritative for fully qualified IDs
+    such as ``openrouter/anthropic/claude-sonnet`` or
+    ``nvidia/deepseek-ai/deepseek-v4-flash``.
+
+    Multi-tenant hosts (OpenRouter, NVIDIA) may also store bare upstream IDs
+    whose first segment collides with a Mana provider id (e.g. OpenRouter
+    hosting ``openai/gpt-4.1-mini``). When ``default_provider`` is one of those
+    hosts and the first segment is a simple single-namespace provider
+    (``openai`` / ``custom``) with no further slash, the whole string is treated
+    as the upstream model under the default provider.
 
     When the first segment equals the default provider and the remainder has
     no further slash, providers that publish under their own org name
@@ -151,6 +156,7 @@ def split_qualified_model_id(
         return default, text
     known = _known_provider_ids()
     if head not in known:
+        # org/model under the active provider (deepseek-ai/..., anthropic/...).
         return default, text
     if head == default:
         if "/" in rest:
@@ -159,8 +165,12 @@ def split_qualified_model_id(
             return head, rest
         # Nested catalog namespaces that share the provider name (nvidia/*).
         return head, text
-    # Different known provider prefix: treat as upstream under the active provider.
-    if default in known:
+    # Different known Mana provider prefix.
+    # provider/org/model is always a fully qualified Mana identity.
+    if "/" in rest:
+        return head, rest
+    # openai/gpt-4.1-mini stored as a bare OpenRouter/NVIDIA upstream ID.
+    if default in {"openrouter", "nvidia"} and head in {"openai", "custom"}:
         return default, text
     return head, rest
 

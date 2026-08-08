@@ -904,7 +904,11 @@ def chat(
     if stack.tools_execution_config is not None:
         tools_execution_config = stack.tools_execution_config
     tools_execution_boot_warnings = list(stack.tools_execution_boot_warnings or [])
-    effective_base_url = settings.openai_base_url
+    from mana_agent.config.inference_provider import resolve_inference_connection
+
+    inference_connection = resolve_inference_connection(settings, require_api_key=False)
+    effective_base_url = inference_connection.base_url
+    effective_api_key = inference_connection.api_key
     tool_worker_model_assignment = resolve_model_for_role(
         AgentRole.TOOL_WORKER,
         global_model=settings.openai_tool_worker_model or effective_model,
@@ -919,7 +923,7 @@ def chat(
     )
     chat_ui_state = ChatUIState(
         repo_root=root,
-        provider="openai-compatible",
+        provider=inference_connection.provider or "openai-compatible",
         model=effective_model,
         mode="chat",
         tools_enabled=bool(agent_tools),
@@ -1368,7 +1372,7 @@ def chat(
             if tool_worker_client is None:
                 tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
                 tool_worker_client = tool_worker_client_cls(
-                    api_key=settings.openai_api_key,
+                    api_key=effective_api_key,
                     model=effective_tool_worker_model,
                     base_url=effective_base_url,
                     repo_root=root,
@@ -1393,7 +1397,7 @@ def chat(
                 tools_executor_instance = _build_tools_executor(tool_worker_client)
             tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
             tools_manager_orchestrator = tools_manager_orchestrator_cls(
-                api_key=settings.openai_api_key,
+                api_key=effective_api_key,
                 model=effective_model,
                 base_url=effective_base_url,
                 worker_client=tool_worker_client,
@@ -2001,8 +2005,8 @@ def chat(
             reset_global_history()
 
             effective_model_for_tui = model or getattr(settings, "openai_chat_model", None)
-            api_key = getattr(settings, "openai_api_key", None)
-            base_url = getattr(settings, "openai_base_url", None)
+            api_key = effective_api_key or None
+            base_url = effective_base_url or None
 
             # Gateway already owns the stack (built at chat start). TUI connects
             # through the gateway and also receives rich objects for tool-card UI.

@@ -262,9 +262,18 @@ class AskAgent:
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
         execution_manager: ExecutionManager | None = None,
+        *,
+        provider: str | None = None,
+        default_headers: dict[str, str] | None = None,
     ) -> None:
-        self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
-        self.provider = str(getattr(self.llm, "selected_provider", "") or "unknown")
+        self.llm = create_chat_model(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            default_headers=default_headers,
+        )
+        self.provider = str(provider or getattr(self.llm, "selected_provider", "") or "unknown")
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
@@ -288,7 +297,12 @@ class AskAgent:
         if not resolved or resolved == self.model:
             return
         governor = self.context_cost_governor
-        self.llm = create_chat_model(api_key=self.api_key, model=resolved, base_url=self.base_url, provider=self.provider)
+        self.llm = create_chat_model(
+            api_key=self.api_key,
+            model=resolved,
+            base_url=self.base_url,
+            provider=self.provider,
+        )
         self.llm.context_cost_governor = governor
         self.model = resolved
 
