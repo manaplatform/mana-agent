@@ -18,6 +18,8 @@ class CodexHealthReport(BaseModel):
     version: str = ""
     app_server_available: bool = False
     repository_accessible: bool = False
+    codex_transport: str = ""
+    provider_supports_responses_api: bool = False
     errors: list[str] = Field(default_factory=list)
 
 
@@ -74,12 +76,16 @@ def check_codex_health(settings: CodexSettings, repository_path: str | Path) -> 
                         )
         except (OSError, subprocess.TimeoutExpired) as exc:
             errors.append(f"Codex version check failed: {exc}")
+    transport = getattr(settings, "codex_transport", None)
+    transport_value = getattr(transport, "value", str(transport or ""))
     return CodexHealthReport(
         healthy=not errors,
         executable=executable,
         version=version,
         app_server_available=app_server_available,
         repository_accessible=repository.is_dir(),
+        codex_transport=str(transport_value or ""),
+        provider_supports_responses_api=bool(getattr(settings, "supports_responses_api", False)),
         errors=errors,
     )
 

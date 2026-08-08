@@ -5,10 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from mana_agent.config.provider_registry import CodexTransport
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexConfigurationError
+from mana_agent.integrations.codex.responses_bridge import (
+    BridgeUpstreamConfig,
+    ResponsesBridgeHandle,
+    ResponsesBridgeManager,
+)
+from mana_agent.integrations.codex.responses_bridge.lifecycle import BRIDGE_MANAGER
 
 RUNTIME_PROVIDER_ID = "mana_runtime"
 RUNTIME_API_KEY_ENV = "MANA_CODEX_API_KEY"
@@ -54,6 +62,11 @@ class CodexRuntimeConfig:
     request_max_retries: int = 4
     stream_max_retries: int = 5
     stream_idle_timeout_ms: int = 300_000
+    transport: CodexTransport = CodexTransport.DIRECT_RESPONSES
+    bridge: ResponsesBridgeHandle | None = field(default=None, repr=False, compare=False)
+    # Accounting always attributes usage to the real inference provider/model.
+    accounting_provider: str = ""
+    accounting_model: str = ""
 
     @property
     def credential_fingerprint(self) -> str:
@@ -78,6 +91,7 @@ class CodexRuntimeConfig:
                 "http_headers": self.http_headers,
                 "env_http_headers": self.env_http_headers,
                 "query_params": self.query_params,
+                "transport": self.transport.value,
                 "credential": self.credential_fingerprint,
             },
             sort_keys=True,
@@ -104,6 +118,7 @@ class CodexRuntimeConfig:
             f"name = {_toml_string('Mana-Agent runtime provider')}",
             f"base_url = {_toml_string(self.base_url)}",
             f"env_key = {_toml_string(RUNTIME_API_KEY_ENV)}",
+            # Current Codex requires Responses; the bridge presents that API locally.
             'wire_api = "responses"',
             f"request_max_retries = {self.request_max_retries}",
             f"stream_max_retries = {self.stream_max_retries}",
@@ -119,8 +134,21 @@ class CodexRuntimeConfig:
 
 
 class CodexRuntimeConfigBuilder:
+    def __init__(self, bridge_manager: ResponsesBridgeManager | None = None) -> None:
+        self._bridge_manager = bridge_manager or BRIDGE_MANAGER
+
     @staticmethod
-    def build(settings: CodexSettings, *, sandbox_mode: str) -> CodexRuntimeConfig:
+    def build(
+        settings: CodexSettings,
+        *,
+        sandbox_mode: str,
+        bridge_manager: ResponsesBridgeManager | None = None,
+    ) -> CodexRuntimeConfig:
+        return CodexRuntimeConfigBuilder(bridge_manager=bridge_manager)._build(
+            settings, sandbox_mode=sandbox_mode
+        )
+
+    def _build(self, settings: CodexSettings, *, sandbox_mode: str) -> CodexRuntimeConfig:
         provider = str(settings.provider or "").strip()
         model = str(settings.model or "").strip()
         api_key = str(settings.api_key or "")
@@ -133,28 +161,92 @@ class CodexRuntimeConfigBuilder:
             )
         if not model:
             raise CodexConfigurationError("No model was selected for the Codex run.")
-        if not settings.supports_responses_api:
+
+        transport = settings.codex_transport
+        # Explicit transport wins. When unset, only native Responses providers
+        # auto-select DIRECT_RESPONSES. Chat Completions hosts must declare
+        # RESPONSES_BRIDGE via the provider registry (e.g. NVIDIA).
+        if transport is CodexTransport.UNSUPPORTED and settings.supports_responses_api:
+            transport = CodexTransport.DIRECT_RESPONSES
+        if transport is CodexTransport.UNSUPPORTED:
             raise CodexConfigurationError(
                 "The selected provider cannot be used by Codex because it does not expose a "
-                "Responses-compatible API. Select a compatible provider or configure a Mana "
-                "gateway endpoint that supports the Responses API."
+                "Responses-compatible API. Select a compatible provider or a Chat Completions "
+                "host that Mana can serve through the Responses bridge (for example NVIDIA NIM)."
             )
+
+        bridge: ResponsesBridgeHandle | None = None
+        codex_api_key = api_key
+        codex_base_url: str
         http_headers = _validated_safe_values(settings.http_headers, kind="HTTP header")
         query_params = _validated_safe_values(settings.query_params, kind="query parameter")
+
+        if transport is CodexTransport.DIRECT_RESPONSES:
+            if not settings.supports_responses_api:
+                raise CodexConfigurationError(
+                    "The selected provider is marked for direct Responses access but does not "
+                    "declare native Responses support."
+                )
+            codex_base_url = resolve_codex_base_url(settings.base_url)
+        else:
+            # RESPONSES_BRIDGE: Codex talks only to the local bridge; the real
+            # upstream credential never enters the Codex config or child argv.
+            upstream = BridgeUpstreamConfig(
+                provider=provider,
+                display_name=settings.provider_display_name or provider,
+                api_key=api_key,
+                base_url=str(settings.base_url or "").rstrip("/"),
+                model=model,
+                headers=dict(settings.http_headers or {}),
+                request_overrides=dict(settings.model_request_overrides or {}),
+            )
+            if not upstream.base_url:
+                raise CodexConfigurationError(
+                    f"{settings.provider_display_name or provider} has no API base URL configured."
+                )
+            try:
+                bridge = self._bridge_manager.start(upstream)
+            except Exception as exc:
+                raise CodexConfigurationError(
+                    "Mana Responses bridge failed to start for the selected Chat Completions "
+                    f"provider ({settings.provider_display_name or provider}). "
+                    f"Reason: {type(exc).__name__}."
+                ) from exc
+            try:
+                bridge.healthcheck()
+            except Exception as exc:
+                bridge.release()
+                raise CodexConfigurationError(
+                    "Mana Responses bridge health check failed. No Codex process was started."
+                ) from exc
+            codex_base_url = resolve_codex_base_url(bridge.base_url)
+            codex_api_key = bridge.temporary_api_key
+            # Codex must not forward provider-specific attribution headers to the bridge.
+            http_headers = {}
+            query_params = {}
+
         return CodexRuntimeConfig(
             provider=provider,
             provider_display_name=settings.provider_display_name or provider,
             model=model,
-            api_key=api_key,
-            base_url=resolve_codex_base_url(settings.base_url),
+            api_key=codex_api_key,
+            base_url=codex_base_url,
             approval_policy=settings.approval_policy,
             sandbox_mode=sandbox_mode,
             http_headers=http_headers,
-            env_http_headers=dict(settings.env_http_headers),
+            env_http_headers=(
+                dict(settings.env_http_headers)
+                if transport is CodexTransport.DIRECT_RESPONSES
+                else {}
+            ),
             query_params=query_params,
             request_max_retries=settings.request_max_retries,
             stream_max_retries=settings.stream_max_retries,
             stream_idle_timeout_ms=settings.stream_idle_timeout_ms,
+            transport=transport,
+            bridge=bridge,
+            accounting_provider=provider,
+            accounting_model=model,
         )
 
 

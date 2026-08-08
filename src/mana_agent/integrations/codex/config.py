@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mana_agent.config.inference_provider import resolve_inference_connection
+from mana_agent.config.provider_registry import CodexTransport
 
 
 class CodexSettings(BaseModel):
@@ -29,6 +32,8 @@ class CodexSettings(BaseModel):
     env_http_headers: dict[str, str] = Field(default_factory=dict)
     query_params: dict[str, str] = Field(default_factory=dict)
     supports_responses_api: bool = False
+    codex_transport: CodexTransport = CodexTransport.UNSUPPORTED
+    model_request_overrides: dict[str, Any] = Field(default_factory=dict)
     request_max_retries: int = Field(default=4, ge=0)
     stream_max_retries: int = Field(default=5, ge=0)
     stream_idle_timeout_ms: int = Field(default=300_000, ge=1)
@@ -58,6 +63,7 @@ class CodexSettings(BaseModel):
             env_http_headers=connection.env_headers,
             query_params=connection.query_params,
             supports_responses_api=connection.supports_responses_api,
+            codex_transport=connection.codex_transport,
         )
 
     @field_validator("approval_policy")

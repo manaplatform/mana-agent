@@ -207,11 +207,17 @@ Unknown models remain selectable via Advanced/manual entry.
 
 **Benchmark profile (not the product default):** for open-model agent/coding
 benchmarks, a recommended configuration is
-`MANA_AI_PROVIDER=nvidia` with model `deepseek-ai/deepseek-v4-flash`. High
-reasoning options for that model can be supplied as optional model-specific
-request configuration (for example `chat_template_kwargs`) without affecting
-other NVIDIA models. A smaller baseline when available is
+`MANA_AI_PROVIDER=nvidia` with model `deepseek-ai/deepseek-v4-pro` and
+`reasoning_effort=high` (maximum-capability runs may use `reasoning_effort=max`).
+A lighter baseline when available is `deepseek-ai/deepseek-v4-flash` or
 `nvidia/nemotron-3-nano-30b-a3b`.
+
+**Codex + NVIDIA:** current Codex requires the OpenAI Responses API. NVIDIA NIM
+exposes Chat Completions only. Mana therefore starts a loopback Responses
+compatibility bridge automatically when Codex is selected with NVIDIA (or other
+Chat Completions-only hosts). Codex receives a temporary local token and never
+sees `NVIDIA_API_KEY`. Mana still attributes context/cost accounting to
+`provider=nvidia` with transport `codex_responses_bridge`.
 
 Saved files:
 

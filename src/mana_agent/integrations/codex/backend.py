@@ -139,6 +139,8 @@ class CodexCodingBackend:
             last_usage: dict[str, Any] | None = None
             prompt = build_codex_prompt(task, workspace)
             sequence += 1
+            transport = getattr(self.settings, "codex_transport", None)
+            transport_value = getattr(transport, "value", str(transport or ""))
             yield AgentEvent(
                 event_type="backend.selected",
                 task_id=task.task_id,
@@ -147,6 +149,14 @@ class CodexCodingBackend:
                 title="Codex backend selected",
                 summary=self.worker_id,
                 model=self.settings.model or "",
+                payload={
+                    "provider": self.settings.provider,
+                    "transport": transport_value or (
+                        "codex_responses_bridge"
+                        if not self.settings.supports_responses_api
+                        else "direct_responses"
+                    ),
+                },
             )
             try:
                 if self.resume_thread_id:
@@ -197,7 +207,7 @@ class CodexCodingBackend:
                             ),
                         ),
                         model=self.settings.model or "app-server-default",
-                        provider=self.settings.provider,
+                        provider=self.settings.provider,  # real inference provider, not the bridge
                         turn_id=task.task_id,
                         task_id=task.task_id,
                         agent_id=self.worker_id,

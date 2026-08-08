@@ -10,7 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from mana_agent.config.provider_registry import PROVIDERS, provider_credential_env_names
+from mana_agent.config.provider_registry import (
+    PROVIDERS,
+    CodexTransport,
+    provider_credential_env_names,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +27,7 @@ class InferenceConnection:
     env_headers: dict[str, str]
     query_params: dict[str, str]
     supports_responses_api: bool
+    codex_transport: CodexTransport
 
 
 class ProviderConfigurationError(ValueError):
@@ -97,4 +102,5 @@ def resolve_inference_connection(
         env_headers=dict(definition.default_env_headers),
         query_params=dict(definition.default_query_params),
         supports_responses_api=definition.supports_responses_api,
+        codex_transport=definition.codex_transport,
     )

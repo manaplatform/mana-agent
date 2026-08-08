@@ -9,6 +9,19 @@ class AuthenticationMethod(str, Enum):
     NONE = "none"
 
 
+class CodexTransport(str, Enum):
+    """How the official Codex app-server can reach this provider.
+
+    Native Responses capability and Codex usability are separate concepts.
+    Chat Completions-only hosts can still run Codex through Mana's local
+    Responses compatibility bridge without claiming native Responses support.
+    """
+
+    DIRECT_RESPONSES = "direct_responses"
+    RESPONSES_BRIDGE = "responses_bridge"
+    UNSUPPORTED = "unsupported"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderDefinition:
     id: str
@@ -22,6 +35,7 @@ class ProviderDefinition:
     supports_model_refresh: bool = True
     supports_validation: bool = True
     supports_responses_api: bool = False
+    codex_transport: CodexTransport = CodexTransport.UNSUPPORTED
     custom: bool = False
 
 
@@ -42,6 +56,7 @@ class ProviderRegistry:
                 default_base_url="https://api.openai.com/v1",
                 api_key_env="OPENAI_API_KEY",
                 supports_responses_api=True,
+                codex_transport=CodexTransport.DIRECT_RESPONSES,
             ),
             ProviderDefinition(
                 id="openrouter",
@@ -54,6 +69,7 @@ class ProviderRegistry:
                     ("X-OpenRouter-Title", "Mana-Agent"),
                 ),
                 supports_responses_api=True,
+                codex_transport=CodexTransport.DIRECT_RESPONSES,
             ),
             ProviderDefinition(
                 id="nvidia",
@@ -62,8 +78,9 @@ class ProviderRegistry:
                 default_base_url="https://integrate.api.nvidia.com/v1",
                 api_key_env="NVIDIA_API_KEY",
                 # NVIDIA Build / NIM is OpenAI Chat Completions compatible.
-                # Do not claim Responses API support without validating it.
+                # Do not claim Responses API support; Codex uses the bridge.
                 supports_responses_api=False,
+                codex_transport=CodexTransport.RESPONSES_BRIDGE,
             ),
             ProviderDefinition(
                 id="custom",
@@ -72,6 +89,7 @@ class ProviderRegistry:
                 default_base_url="",
                 api_key_env="OPENAI_API_KEY",
                 custom=True,
+                codex_transport=CodexTransport.RESPONSES_BRIDGE,
             ),
         )
 

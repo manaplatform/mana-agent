@@ -4,6 +4,23 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed the Responses bridge fragmented tool-argument test assertion to account
+  for JSON-escaped SSE payloads while still verifying full argument reconstruction.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py::test_stream_adapter_fragmented_tool_arguments`
+
+- Added a Mana-managed OpenAI Responses compatibility bridge so Codex can use
+  Chat Completions-only providers such as NVIDIA NIM (`deepseek-ai/deepseek-v4-pro`).
+  - Introduced explicit `CodexTransport` (`direct_responses` / `responses_bridge`
+    / `unsupported`) separate from native `supports_responses_api`.
+  - NVIDIA remains `supports_responses_api=false` and uses `RESPONSES_BRIDGE`.
+  - Codex still receives `wire_api = "responses"` against a loopback bridge;
+    `NVIDIA_API_KEY` never enters Codex config, logs, or child argv.
+  - Bridge converts Responses requests/tools/streams to Chat Completions and
+    back, including fragmented tool-call argument streaming.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_codex_runtime.py tests/test_codex_integration.py tests/test_nvidia_provider.py`
+
 - Fixed `split_qualified_model_id` so fully qualified OpenRouter IDs such as
   `openrouter/anthropic/claude-sonnet` keep provider `openrouter` even when the
   default provider is `openai` (regression from the NVIDIA nested-ID work).

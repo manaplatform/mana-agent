@@ -135,6 +135,14 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
             ModelCapability.TOOL_CALLING,
         }
     ),
+    "deepseek-ai/deepseek-v4-pro": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
     "nvidia/nemotron-3-nano-30b-a3b": frozenset(
         {
             ModelCapability.TEXT_GENERATION,

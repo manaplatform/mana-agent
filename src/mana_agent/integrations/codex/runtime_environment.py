@@ -24,6 +24,12 @@ _REMOVED_ENVIRONMENT_KEYS = {
     "OPENAI_ORG_ID",
     "OPENAI_ORGANIZATION",
     "OPENAI_PROJECT_ID",
+    # Upstream credentials must never reach the Codex child process. Codex only
+    # receives the temporary MANA_CODEX_API_KEY (bridge token or direct key).
+    "OPENROUTER_API_KEY",
+    "NVIDIA_API_KEY",
+    "NVIDIA_BASE_URL",
+    "OPENROUTER_BASE_URL",
 }
 
 
@@ -35,9 +41,16 @@ class CodexRuntimeContext:
     _closed: bool = False
 
     def close(self) -> None:
-        if not self._closed:
-            shutil.rmtree(self.home, ignore_errors=True)
-            self._closed = True
+        if self._closed:
+            return
+        bridge = getattr(self.config, "bridge", None)
+        if bridge is not None:
+            try:
+                bridge.release()
+            except Exception:
+                pass
+        shutil.rmtree(self.home, ignore_errors=True)
+        self._closed = True
 
     def __enter__(self) -> "CodexRuntimeContext":
         return self

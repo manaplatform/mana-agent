@@ -242,6 +242,7 @@ class CodexCodingAgentShim:
             self.routing_authority.settings,
             provider=routing_decision.provider,
         )
+        request_overrides = dict(getattr(routing_decision, "model_configuration", None) or {})
         self.codex_settings = self.codex_settings.model_copy(
             update={
                 "model": routing_decision.selected_model,
@@ -253,6 +254,8 @@ class CodexCodingAgentShim:
                 "env_http_headers": routed_settings.env_http_headers,
                 "query_params": routed_settings.query_params,
                 "supports_responses_api": routed_settings.supports_responses_api,
+                "codex_transport": routed_settings.codex_transport,
+                "model_request_overrides": request_overrides,
             }
         )
         record_current(
