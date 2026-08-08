@@ -6,7 +6,17 @@ Loads ``princeton-nlp/SWE-bench_Verified``, checks out each instance at
 issue text, captures the final git diff as ``model_patch``, and writes one
 JSONL prediction per instance in the official harness format:
 
-    {"instance_id": "...", "model_name_or_path": "mana-agent", "model_patch": "..."}
+    {
+      "instance_id": "...",
+      "model_name_or_path": "mana-agent__gpt-4o-mini",
+      "agent_name": "mana-agent",
+      "model_patch": "..."
+    }
+
+``model_name_or_path`` identifies the **run system** (agent + LLM). The harness
+uses it for report filenames. ``agent_name`` is the coding agent (always
+``mana-agent`` unless overridden). The LLM id alone is not sufficient when
+comparing multiple agents that share a model.
 
 Scope: prediction generation only (smoke grading is documented separately).
 Does not run the full 500-instance suite, SWE-bench Pro, Terminal-Bench,
@@ -33,8 +43,9 @@ LOG = logging.getLogger("mana_agent.swe_bench")
 
 DEFAULT_DATASET = "princeton-nlp/SWE-bench_Verified"
 DEFAULT_SPLIT = "test"
-DEFAULT_MODEL_NAME_OR_PATH = "mana-agent"
-# Cheap/fast default for smoke and cost-controlled initial runs.
+# Coding agent identity written into every prediction row.
+DEFAULT_AGENT_NAME = "mana-agent"
+# Cheap/fast default LLM for smoke and cost-controlled initial runs.
 DEFAULT_AGENT_MODEL = "gpt-4o-mini"
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_OUTPUT = "predictions.jsonl"
@@ -42,6 +53,30 @@ DEFAULT_WORK_DIR = ".swe-bench"
 GITHUB_URL = "https://github.com/{repo}.git"
 
 SAFE_INSTANCE_ID = re.compile(r"[^A-Za-z0-9._-]+")
+# Paths that look like test code. SWE-bench applies the official ``test_patch``
+# after ``model_patch``; agent edits under these paths often make apply fail
+# (status ``failed`` instead of resolved/unresolved).
+_TEST_PATH_MARKERS = (
+    "/tests/",
+    "/test/",
+    "/testing/",
+    "/__tests__/",
+    "/spec/",
+    "/specs/",
+)
+_TEST_FILE_RE = re.compile(
+    r"(^|/)("
+    r"tests?|"
+    r"testing|"
+    r"conftest|"
+    r"test_[^/]+|"
+    r"[^/]+_test|"
+    r"[^/]+_tests|"
+    r"[^/]+\.test|"
+    r"[^/]+\.spec"
+    r")(\.[^/]+)?$",
+    re.IGNORECASE,
+)
 
 
 class SweBenchRunnerError(RuntimeError):
@@ -67,14 +102,43 @@ class RunnerConfig:
     instance_ids: list[str] = field(default_factory=list)
     output: Path = Path(DEFAULT_OUTPUT)
     work_dir: Path = Path(DEFAULT_WORK_DIR)
+    agent_name: str = DEFAULT_AGENT_NAME
     agent_model: str = DEFAULT_AGENT_MODEL
-    model_name_or_path: str = DEFAULT_MODEL_NAME_OR_PATH
+    # None → derive from agent_name + agent_model at write time.
+    model_name_or_path: str | None = None
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     mana_bin: str | None = None
     retain_worktrees: bool = False
     skip_agent: bool = False
+    # Drop test-file hunks from model_patch (recommended for harness grading).
+    exclude_test_files: bool = True
     max_prompt_chars: int = 48_000
     continue_on_error: bool = True
+
+
+def sanitize_model_token(value: str) -> str:
+    """Make a model/agent token safe for harness report paths and run ids."""
+    cleaned = str(value or "").strip()
+    cleaned = cleaned.replace("/", "__").replace(" ", "-")
+    cleaned = re.sub(r"[^A-Za-z0-9._+-]+", "_", cleaned)
+    return cleaned.strip("._") or "unknown"
+
+
+def compose_model_name_or_path(*, agent_name: str, agent_model: str) -> str:
+    """Default harness id: ``{agent}__{llm}`` (never agent-only or llm-only)."""
+    agent = sanitize_model_token(agent_name)
+    model = sanitize_model_token(agent_model)
+    return f"{agent}__{model}"
+
+
+def resolve_model_name_or_path(cfg: RunnerConfig) -> str:
+    explicit = (cfg.model_name_or_path or "").strip()
+    if explicit:
+        return sanitize_model_token(explicit)
+    return compose_model_name_or_path(
+        agent_name=cfg.agent_name,
+        agent_model=cfg.agent_model,
+    )
 
 
 def _sanitize_id(instance_id: str) -> str:
@@ -308,8 +372,10 @@ def build_prompt(instance: dict[str, Any], *, worktree: Path, max_chars: int) ->
         "Task:",
         "- Read the issue carefully.",
         "- Inspect only the files needed to implement a minimal correct fix.",
-        "- Apply the fix directly in this repository (edit source files).",
+        "- Apply the fix directly in this repository (edit production source files only).",
+        "- Do not add, edit, delete, or rename test files or test helpers.",
         "- Do not modify tests solely to make them pass.",
+        "- Official evaluation tests are applied separately; test changes cause harness failures.",
         "- Do not commit, push, rebase, or rewrite git history.",
         "- Do not interact with the user; complete the coding task in one pass.",
         "- When finished, leave the patch as uncommitted working-tree changes.",
@@ -332,7 +398,62 @@ def build_prompt(instance: dict[str, Any], *, worktree: Path, max_chars: int) ->
     return prompt
 
 
-def capture_model_patch(worktree: Path) -> str:
+def _path_looks_like_test(path: str) -> bool:
+    """Return True when a repo-relative path is almost certainly a test asset."""
+    normalized = path.replace("\\", "/").lstrip("./")
+    if not normalized:
+        return False
+    lower = f"/{normalized.lower()}"
+    if any(marker in lower for marker in _TEST_PATH_MARKERS):
+        return True
+    basename = normalized.rsplit("/", 1)[-1]
+    return bool(_TEST_FILE_RE.search(basename))
+
+
+def is_test_file_path(path: str) -> bool:
+    """Public helper: whether a git path should be excluded from model_patch."""
+    return _path_looks_like_test(path)
+
+
+def filter_test_files_from_patch(patch: str) -> tuple[str, list[str]]:
+    """Remove unified-diff file sections that touch test paths.
+
+    Returns (filtered_patch, removed_paths). Empty string when nothing remains.
+    """
+    if not (patch or "").strip():
+        return "", []
+
+    # Split on file headers while keeping the delimiter.
+    chunks = re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE)
+    kept: list[str] = []
+    removed: list[str] = []
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        if not chunk.startswith("diff --git "):
+            # Preamble / non-standard content: keep unless it is only whitespace.
+            kept.append(chunk)
+            continue
+        header = chunk.splitlines()[0]
+        # diff --git a/path b/path
+        match = re.match(r"^diff --git a/(.+?) b/(.+)$", header)
+        if not match:
+            kept.append(chunk)
+            continue
+        path_a, path_b = match.group(1), match.group(2)
+        if _path_looks_like_test(path_a) or _path_looks_like_test(path_b):
+            removed.append(path_b if path_b != "/dev/null" else path_a)
+            continue
+        kept.append(chunk)
+
+    filtered = "".join(kept)
+    # Ensure trailing newline when non-empty (git style).
+    if filtered and not filtered.endswith("\n"):
+        filtered += "\n"
+    return filtered, removed
+
+
+def capture_model_patch(worktree: Path, *, exclude_test_files: bool = True) -> str:
     """Capture a unified diff of all changes, including new/untracked files."""
     # Stage everything in the index without committing so new files appear.
     add = _git(["add", "-A"], cwd=worktree, timeout=120)
@@ -352,22 +473,45 @@ def capture_model_patch(worktree: Path) -> str:
             cwd=worktree,
             timeout=120,
         )
-        return fallback.stdout if fallback.returncode == 0 else ""
+        raw = fallback.stdout if fallback.returncode == 0 else ""
+    else:
+        raw = diff.stdout or ""
 
-    return diff.stdout or ""
+    if not exclude_test_files:
+        return raw
+
+    filtered, removed = filter_test_files_from_patch(raw)
+    if removed:
+        LOG.warning(
+            "Stripped %d test-file path(s) from model_patch (SWE-bench applies "
+            "official test_patch separately): %s",
+            len(removed),
+            ", ".join(removed[:12]) + ("..." if len(removed) > 12 else ""),
+        )
+    return filtered
 
 
 def prediction_record(
     *,
     instance_id: str,
     model_name_or_path: str,
+    agent_name: str,
     model_patch: str,
+    agent_model: str | None = None,
 ) -> dict[str, str]:
-    return {
+    """Build one harness prediction row with agent + model identity fields."""
+    record: dict[str, str] = {
         "instance_id": instance_id,
+        # Harness-required: identifies this system for reports / run folders.
         "model_name_or_path": model_name_or_path,
+        # Explicit agent identity (extra field; ignored by older harnesses).
+        "agent_name": agent_name,
         "model_patch": model_patch or "",
     }
+    if agent_model:
+        # Optional metadata for operators; not required by the harness.
+        record["agent_model"] = agent_model
+    return record
 
 
 def write_prediction_line(output: Path, record: dict[str, str]) -> None:
@@ -402,11 +546,109 @@ def _kill_process_group(proc: subprocess.Popen[str]) -> None:
             pass
 
 
-def _seed_isolated_mana_home(target: Path) -> Path:
+def _toml_quote(value: str) -> str:
+    """Quote a scalar for simple TOML assignment lines."""
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def _upsert_toml_keys(path: Path, updates: dict[str, str | bool | int]) -> None:
+    """Insert or replace top-level KEY = value lines in a simple TOML file.
+
+    Mana config/secrets files are flat KEY = value tables (no nested tables for
+    the keys we rewrite). Explicit file keys always win over process env in
+    mana settings load, so benchmark isolation must rewrite the copied file.
+    """
+    if not updates:
+        return
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = original.splitlines()
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        replaced = False
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                value = updates[key]
+                if isinstance(value, bool):
+                    rendered = "true" if value else "false"
+                elif isinstance(value, int):
+                    rendered = str(value)
+                else:
+                    rendered = _toml_quote(str(value))
+                out.append(f"{key} = {rendered}")
+                seen.add(key)
+                replaced = True
+        if not replaced:
+            out.append(line)
+    missing = [key for key in updates if key not in seen]
+    if missing:
+        if out and out[-1].strip():
+            out.append("")
+        out.append("# SWE-bench runner isolation overrides")
+        for key in missing:
+            value = updates[key]
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, int):
+                rendered = str(value)
+            else:
+                rendered = _toml_quote(str(value))
+            out.append(f"{key} = {rendered}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+
+
+def _benchmark_config_overrides(agent_model: str) -> dict[str, str | bool | int]:
+    """Settings that must be forced for reliable non-interactive SWE-bench runs."""
+    model = str(agent_model).strip()
+    return {
+        # External supermemory (or other hosted memory) serializes many HTTP
+        # calls during chat startup and can look like a hang; use local memory.
+        # MANA_MEMORY_FALLBACK_TO_INTERNAL must stay false: true is a hard error
+        # in MemoryConfig.validate (external→internal fallback is not implemented).
+        "MANA_MEMORY_MODE": "internal",
+        "MANA_MEMORY_PROVIDER": "mana",
+        "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
+        "MANA_MEMORY_SECRET_REF": "",
+        # Pin every common model role so operator MODEL_LEVEL_* / MANA_MODEL_*
+        # preferences cannot rewrite the measured model mid-run.
+        "OPENAI_CHAT_MODEL": model,
+        "LLM_MODEL": model,
+        "MANA_PRIMARY_MODEL": model,
+        "OPENAI_TOOL_WORKER_MODEL": model,
+        "OPENAI_CODING_PLANNER_MODEL": model,
+        "MODEL_LEVEL_1_FAST_TOOL": model,
+        "MODEL_LEVEL_2_CODING": model,
+        "MODEL_LEVEL_3_HIGH_REASONING": model,
+        "MANA_MODEL_MAIN": model,
+        "MANA_MODEL_HEAD_DECISION": model,
+        "MANA_MODEL_PLANNER": model,
+        "MANA_MODEL_CODING": model,
+        "MANA_MODEL_VERIFIER": model,
+        "MANA_MODEL_REVIEWER": model,
+        "MANA_MODEL_TOOL": model,
+        "MANA_MODEL_TOOL_WORKER": model,
+        "MANA_MODEL_SUMMARIZER": model,
+    }
+
+
+def _seed_isolated_mana_home(target: Path, *, agent_model: str) -> Path:
     """Create a per-instance MANA_HOME that still has user credentials/config.
 
     Isolation keeps run/session state out of the operator's primary ~/.mana while
     copying config.toml and secrets.toml so non-interactive chat can authenticate.
+
+    Mana loads explicit file settings over process env, so this also rewrites the
+    isolated config for internal memory and the forced agent model.
     """
     import shutil
 
@@ -426,7 +668,47 @@ def _seed_isolated_mana_home(target: Path) -> Path:
                     shutil.copy2(src, dst)
                 except OSError as exc:
                     LOG.warning("Could not copy %s into isolated MANA_HOME: %s", src, exc)
+    config_path = target / "config.toml"
+    try:
+        _upsert_toml_keys(config_path, _benchmark_config_overrides(agent_model))
+    except OSError as exc:
+        LOG.warning("Could not apply SWE-bench isolation overrides to %s: %s", config_path, exc)
     return target
+
+
+def _wait_with_heartbeat(
+    proc: subprocess.Popen[str],
+    *,
+    timeout_seconds: int,
+    stdout_path: Path,
+    stderr_path: Path,
+    heartbeat_seconds: int = 30,
+) -> tuple[int, bool]:
+    """Wait for proc with periodic progress logs; return (returncode, timed_out)."""
+    started = time.monotonic()
+    deadline = started + max(1, int(timeout_seconds))
+    beat = max(5, int(heartbeat_seconds))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return (proc.returncode if proc.returncode is not None else 124), True
+        try:
+            returncode = proc.wait(timeout=min(beat, remaining))
+            return returncode, False
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            out_size = stdout_path.stat().st_size if stdout_path.exists() else 0
+            err_size = stderr_path.stat().st_size if stderr_path.exists() else 0
+            err_tail = _tail_text(stderr_path, max_chars=400).replace("\n", " | ")
+            LOG.info(
+                "mana-agent still running (elapsed=%.0fs / %ss, pid=%s, stdout=%dB, stderr=%dB)%s",
+                elapsed,
+                timeout_seconds,
+                proc.pid,
+                out_size,
+                err_size,
+                f" stderr_tail={err_tail!r}" if err_tail.strip() else "",
+            )
 
 
 def run_mana_agent(
@@ -441,7 +723,8 @@ def run_mana_agent(
     """Invoke mana-agent once, non-interactively, with a hard wall-clock timeout.
 
     Uses the chat CLI with a single prompt and closed stdin so the session
-    exits after the coding turn (EOF), leaving patches in the worktree.
+    exits after the coding turn (EOF / single-shot non-TTY), leaving patches in
+    the worktree.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = run_dir / "mana_stdout.log"
@@ -450,20 +733,31 @@ def run_mana_agent(
     prompt_path.write_text(prompt, encoding="utf-8")
 
     # Isolate mana state for this instance to avoid cross-run contamination, but
-    # seed credentials from the operator's real MANA_HOME / ~/.mana.
-    mana_home = _seed_isolated_mana_home(run_dir / "mana_home")
+    # seed credentials from the operator's real MANA_HOME / ~/.mana and force
+    # internal memory + pinned models in the isolated config file.
+    mana_home = _seed_isolated_mana_home(run_dir / "mana_home", agent_model=agent_model)
 
     env = os.environ.copy()
     env["MANA_HOME"] = str(mana_home)
-    # Force the cheap/fast model for this smoke-oriented runner path.
-    env["OPENAI_CHAT_MODEL"] = agent_model
-    env["MANA_PRIMARY_MODEL"] = agent_model
+    # Also set env (fills gaps if a key is missing from the rewritten config).
+    for key, value in _benchmark_config_overrides(agent_model).items():
+        if isinstance(value, bool):
+            env[key] = "true" if value else "false"
+        else:
+            env[key] = str(value)
     # Prefer non-interactive defaults.
     env.setdefault("TERM", "dumb")
     env["PYTHONUNBUFFERED"] = "1"
+    # Keep chat console quieter; runner heartbeats + log files show progress.
+    env.setdefault("MANA_CHAT_ANIMATION", "0")
+
+    # Per-step agent timeout should leave headroom under the hard wall clock.
+    agent_step_timeout = max(30, min(int(timeout_seconds), max(30, int(timeout_seconds) - 30)))
 
     cmd = [
         *mana_argv,
+        "--no-interactive",
+        "--no-banner",
         "chat",
         "--no-tui",
         "--root-dir",
@@ -471,27 +765,39 @@ def run_mana_agent(
         "--model",
         agent_model,
         "--full-auto",
-        "--ephemeral-index",
+        # Do NOT use --ephemeral-index: it builds a full semantic index
+        # synchronously and freezes for large SWE-bench repos (e.g. astropy).
+        # Skip auto-index so chat starts immediately with direct project search.
+        "--no-auto-index-missing",
+        "--no-coding-memory",
         "--auto-continue",
         "--execution-profile",
         "full-auto",
         "--auto-execute-max-passes",
         "10",
+        "--agent-timeout-seconds",
+        str(agent_step_timeout),
         # Single coding task prompt (positional).
         prompt,
     ]
 
     LOG.info(
-        "Starting mana-agent (timeout=%ss, model=%s, root=%s)",
+        "Starting mana-agent (timeout=%ss, model=%s, root=%s, mana_home=%s)",
         timeout_seconds,
         agent_model,
         worktree,
+        mana_home,
     )
     LOG.debug("Command: %s", " ".join(shlex.quote(c) for c in cmd))
+    (run_dir / "mana_cmd.txt").write_text(
+        " ".join(shlex.quote(c) for c in cmd) + "\n",
+        encoding="utf-8",
+    )
 
     started = time.monotonic()
-    with stdout_path.open("w", encoding="utf-8") as out_f, stderr_path.open(
-        "w", encoding="utf-8"
+    # Line-buffered logs so partial progress is visible while the agent runs.
+    with stdout_path.open("w", encoding="utf-8", buffering=1) as out_f, stderr_path.open(
+        "w", encoding="utf-8", buffering=1
     ) as err_f:
         try:
             proc = subprocess.Popen(
@@ -509,11 +815,15 @@ def run_mana_agent(
                 f"mana-agent executable not found: {mana_argv[0]!r}"
             ) from exc
 
-        timed_out = False
-        try:
-            returncode = proc.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        LOG.info("mana-agent spawned pid=%s", proc.pid)
+        returncode, timed_out = _wait_with_heartbeat(
+            proc,
+            timeout_seconds=timeout_seconds,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            heartbeat_seconds=30,
+        )
+        if timed_out:
             LOG.error(
                 "mana-agent timed out after %ss for worktree %s — killing process group",
                 timeout_seconds,
@@ -531,6 +841,12 @@ def run_mana_agent(
         f"--- stderr (tail) ---\n{stderr_tail}\n"
     )
     (run_dir / "mana_summary.txt").write_text(summary, encoding="utf-8")
+    LOG.info(
+        "mana-agent finished returncode=%s elapsed=%.1fs timed_out=%s",
+        returncode,
+        elapsed,
+        timed_out,
+    )
     return returncode, stdout_tail, stderr_tail
 
 
@@ -636,7 +952,9 @@ def process_instance(
                 status = "ok"
                 error = ""
 
-            patch = capture_model_patch(worktree)
+            patch = capture_model_patch(
+                worktree, exclude_test_files=cfg.exclude_test_files
+            )
 
         empty = not bool(patch.strip())
         if empty:
@@ -704,8 +1022,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Generate SWE-bench Verified predictions.jsonl using mana-agent. "
-            "Each line is "
-            '{"instance_id","model_name_or_path","model_patch"}.'
+            "Each line includes instance_id, model_name_or_path "
+            f"(default {DEFAULT_AGENT_NAME}__<llm>), agent_name "
+            f"(default {DEFAULT_AGENT_NAME}), optional agent_model, and model_patch."
         )
     )
     parser.add_argument(
@@ -750,15 +1069,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_AGENT_MODEL,
         help=(
             "LLM id forced for mana-agent during the run "
-            f"(default: {DEFAULT_AGENT_MODEL}, cheap/fast for smoke)."
+            f"(default: {DEFAULT_AGENT_MODEL}, cheap/fast for smoke). "
+            "Also used to compose default model_name_or_path."
+        ),
+    )
+    parser.add_argument(
+        "--agent-name",
+        default=DEFAULT_AGENT_NAME,
+        help=(
+            "Agent identity written as agent_name and used in the default "
+            f"model_name_or_path (default: {DEFAULT_AGENT_NAME})."
         ),
     )
     parser.add_argument(
         "--model-name-or-path",
-        default=DEFAULT_MODEL_NAME_OR_PATH,
+        default=None,
         help=(
-            "Value written into predictions as model_name_or_path "
-            f"(default: {DEFAULT_MODEL_NAME_OR_PATH})."
+            "Value written into predictions as model_name_or_path. "
+            f"Default: {{agent_name}}__{{model}} "
+            f"(e.g. {DEFAULT_AGENT_NAME}__{DEFAULT_AGENT_MODEL}). "
+            "Do not set this to the agent name alone."
         ),
     )
     parser.add_argument(
@@ -783,6 +1113,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Skip mana-agent invocation and write empty model_patch values. "
             "Useful for harness format smoke tests without API cost."
+        ),
+    )
+    parser.add_argument(
+        "--keep-test-files",
+        action="store_true",
+        help=(
+            "Keep test-file hunks in model_patch. Default strips them because "
+            "SWE-bench applies the official test_patch after model_patch; agent "
+            "test edits often produce harness status 'failed'."
         ),
     )
     parser.add_argument(
@@ -828,8 +1167,12 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
         output.unlink()
 
     mana_argv = resolve_mana_bin(cfg.mana_bin)
+    model_name_or_path = resolve_model_name_or_path(cfg)
     LOG.info("mana-agent argv: %s", mana_argv)
-    LOG.info("Forced agent model: %s", cfg.agent_model)
+    LOG.info("Agent name: %s", cfg.agent_name)
+    LOG.info("Forced agent model (LLM): %s", cfg.agent_model)
+    LOG.info("Predictions model_name_or_path: %s", model_name_or_path)
+    LOG.info("Exclude test files from model_patch: %s", cfg.exclude_test_files)
     LOG.info("Per-instance timeout: %ss", cfg.timeout_seconds)
 
     instances = load_instances(
@@ -855,7 +1198,9 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
         )
         record = prediction_record(
             instance_id=result.instance_id,
-            model_name_or_path=cfg.model_name_or_path,
+            model_name_or_path=model_name_or_path,
+            agent_name=cfg.agent_name,
+            agent_model=cfg.agent_model,
             model_patch=result.model_patch,
         )
         write_prediction_line(output, record)
@@ -869,6 +1214,9 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
                     "empty_patch": result.empty_patch,
                     "patch_chars": len(result.model_patch or ""),
                     "worktree": result.worktree,
+                    "agent_name": cfg.agent_name,
+                    "agent_model": cfg.agent_model,
+                    "model_name_or_path": model_name_or_path,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -892,15 +1240,39 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
                 f"Fail-fast: {result.instance_id} failed with {result.status}: {result.error}"
             )
 
-    _write_run_summary(work_dir / "run_summary.json", results, output)
+    _write_run_summary(
+        work_dir / "run_summary.json",
+        results,
+        output,
+        agent_name=cfg.agent_name,
+        agent_model=cfg.agent_model,
+        model_name_or_path=model_name_or_path,
+    )
     LOG.info("Wrote %d prediction(s) to %s", len(results), output)
+    LOG.info(
+        "Prediction identity: agent_name=%s agent_model=%s model_name_or_path=%s",
+        cfg.agent_name,
+        cfg.agent_model,
+        model_name_or_path,
+    )
     return results
 
 
-def _write_run_summary(path: Path, results: Iterable[InstanceResult], output: Path) -> None:
+def _write_run_summary(
+    path: Path,
+    results: Iterable[InstanceResult],
+    output: Path,
+    *,
+    agent_name: str,
+    agent_model: str,
+    model_name_or_path: str,
+) -> None:
     rows = list(results)
     summary = {
         "predictions_path": str(output),
+        "agent_name": agent_name,
+        "agent_model": agent_model,
+        "model_name_or_path": model_name_or_path,
         "count": len(rows),
         "empty_patches": sum(1 for r in rows if r.empty_patch),
         "statuses": {},
@@ -925,6 +1297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     configure_logging(bool(args.verbose))
 
+    explicit_model_name = getattr(args, "model_name_or_path", None)
     cfg = RunnerConfig(
         dataset_name=str(args.dataset),
         split=str(args.split),
@@ -932,12 +1305,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         instance_ids=parse_instance_ids(args.instance_ids),
         output=Path(args.output),
         work_dir=Path(args.work_dir),
-        agent_model=str(args.model),
-        model_name_or_path=str(args.model_name_or_path),
+        agent_name=str(args.agent_name).strip() or DEFAULT_AGENT_NAME,
+        agent_model=str(args.model).strip() or DEFAULT_AGENT_MODEL,
+        model_name_or_path=(
+            str(explicit_model_name).strip() if explicit_model_name else None
+        ),
         timeout_seconds=max(30, int(args.timeout)),
         mana_bin=args.mana_bin,
         retain_worktrees=bool(args.retain_worktrees),
         skip_agent=bool(args.skip_agent),
+        exclude_test_files=not bool(args.keep_test_files),
         max_prompt_chars=max(2000, int(args.max_prompt_chars)),
         continue_on_error=not bool(args.fail_fast),
     )

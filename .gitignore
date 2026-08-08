@@ -3,6 +3,7 @@
 .pytest_cache/
 .venv/
 venv/
+sb-cli-venv/
 .env
 .DS_Store
 *.egg-info/
@@ -24,6 +25,7 @@ logs/
 .ruff_cache/
 .swe-bench/
 predictions.jsonl
+sb-cli-reports/
 mana-agent.*.json
 *.py[cod]
 *.pyc

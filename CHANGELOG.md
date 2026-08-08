@@ -4,6 +4,64 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed SWE-bench prediction identity and smoke-eval failure modes:
+  - Predictions no longer write `model_name_or_path: "mana-agent"`. Default is
+    now `{agent_name}__{model}` (e.g. `mana-agent__gpt-5.6-luna`).
+  - Each prediction line also includes `agent_name` (default `mana-agent`) and
+    `agent_model` (the LLM from `--model`).
+  - New flags: `--agent-name`, corrected `--model-name-or-path` default, and
+    `--keep-test-files` (test hunks are stripped from `model_patch` by default
+    because official `test_patch` is applied later; agent test edits often
+    produce report `failed_ids` instead of resolved/unresolved).
+  - Docs explain incomplete vs failed vs unresolved in sb-cli/harness reports
+    (499 incomplete ids are expected when only 1 of 500 Verified rows is
+    submitted) and recommend grading with `--instance_ids` + a run_id that
+    includes agent and model.
+  - User verification required:
+    `python3 scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`
+    then
+    `python3 -c "import json; r=json.loads(open('predictions.jsonl').readline()); assert r['agent_name']=='mana-agent'; assert r['model_name_or_path'].startswith('mana-agent__'); assert 'agent_model' in r"`
+    and for a real grade of one row:
+    `python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path predictions.jsonl --instance_ids astropy__astropy-12907 --max_workers 1 --run_id mana-agent__gpt-5.6-luna-smoke`.
+
+- Fixed connector health storage on Windows (13 CI failures, WinError 87 /
+  errno 22 “The parameter is incorrect”):
+  - Connector ids use `type:instance` (colon). Writing
+    `health/fake:1.json` / `receipts/gmail:a_m1.json` is illegal on Windows.
+  - `ConnectorHealthStore` now maps identities to filesystem-safe stems
+    (`:` → `=`, bijective for the validated id charset) for snapshots, probe
+    logs, receipts, and incident indexes.
+  - Atomic temp files use a fixed `.tmp.*.partial` prefix instead of embedding
+    the destination basename (which reintroduced illegal characters).
+  - Legacy POSIX colon-named files are migrated to the safe name on first
+    resolve/write so restarts keep working.
+  - User verification required:
+    `python -m pytest -q tests/connectors/health/test_connector_health_core.py tests/connectors/health/test_connector_health_integrations.py`
+
+- Fixed SWE-bench runner freeze after `Starting mana-agent` (benchmark never
+  produced predictions):
+  - Isolated per-instance `MANA_HOME` now **rewrites** copied `config.toml`
+    (Mana file settings beat process env): force `MANA_MEMORY_MODE=internal`,
+    `MANA_MEMORY_PROVIDER=mana`, `MANA_MEMORY_FALLBACK_TO_INTERNAL=false`, clear
+    secret ref, and pin all model roles to `--model`. Operator external
+    supermemory and `MODEL_LEVEL_*` pins no longer stall startup or rewrite the
+    measured model.
+  - Dropped synchronous `--ephemeral-index` (full-repo index blocked large
+    instances such as astropy); use `--no-auto-index-missing` so chat starts
+    with direct project search immediately.
+  - Launch with `--no-interactive --no-banner --no-coding-memory` and aligned
+    `--agent-timeout-seconds`; emit PID + 30s heartbeats (log sizes / stderr
+    tail) while waiting; write `mana_cmd.txt` / line-buffered agent logs.
+  - Non-TTY chat with an initial prompt now exits after the single-shot queue
+    drains instead of waiting for further interactive input.
+  - Docs: `docs/swe-bench.md` updated for the isolation and invocation contract.
+  - User verification required:
+    `python3 scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`
+    then
+    `python3 scripts/swe_bench/runner.py --limit 1 --model gpt-5.6-luna --timeout 600 --output predictions.jsonl -v`
+    (expect heartbeats, logs under `.swe-bench/logs/<instance_id>/`, and a
+    `predictions.jsonl` line; agent run needs API credentials).
+
 - Fixed routing-smoke eval failures beyond model pin isolation:
   - Pinned profiles now advertise interactive latency (see below) so entry
     routing can select suite models.

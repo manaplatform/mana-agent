@@ -1984,6 +1984,11 @@ def chat(
                 logger.debug("Failed to save auto-chat state: %s", exc)
 
         queued_questions = [prompt] if prompt else []
+        # Non-TTY single-shot: when chat is launched with an initial prompt and
+        # no interactive terminal (CI, pipes, SWE-bench runner), process that
+        # turn (and any model-queued follow-ups) then exit. Do not block forever
+        # waiting for further stdin once the queue is empty.
+        single_shot_noninteractive = bool(prompt) and not _is_interactive_terminal()
 
         # TUI for interactive terminals (the enhanced experience).
         # For non-TTY (tests/CliRunner, pipes, CI, or explicit --no-tui) fall back
@@ -2030,6 +2035,12 @@ def chat(
                 if queued_questions:
                     question = queued_questions.pop(0)
                     console.print(f"[bold cyan]mana ❯[/bold cyan] {question}")
+                elif single_shot_noninteractive:
+                    logger.info(
+                        "Single-shot non-interactive chat complete; exiting without further input"
+                    )
+                    console.print("\nExiting chat (single-shot).")
+                    break
                 else:
                     question = _read_chat_input(
                         console,

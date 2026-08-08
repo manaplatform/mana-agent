@@ -457,6 +457,91 @@ def test_delivery_receipt_persistence(tmp_path: Path):
     rows = store.list_receipts("gmail:a")
     assert len(rows) == 1
     assert rows[0].state is DeliveryState.PROVIDER_ACCEPTED
+    # Windows forbids ':' in filenames (WinError 87); stems must encode colons.
+    on_disk = list((tmp_path / "connectors" / "receipts").glob("*.json"))
+    assert len(on_disk) == 1
+    assert ":" not in on_disk[0].name
+    assert on_disk[0].name == "gmail=a_m1.json"
+
+
+def test_storage_fs_names_encode_colons_for_windows(tmp_path: Path):
+    """Connector ids use type:instance; on-disk names must remain Windows-safe."""
+    from mana_agent.connectors.health.models import ConnectorHealthReport, ConnectorHealthSnapshot
+    from mana_agent.connectors.health.storage import _fs_name
+
+    assert _fs_name("fake:1") == "fake=1"
+    assert _fs_name("gmail:bad") == "gmail=bad"
+    assert ":" not in _fs_name("telegram:main")
+
+    store = ConnectorHealthStore(tmp_path / "connectors")
+    report = ConnectorHealthReport(
+        connector_id="fake:1",
+        connector_type="fake",
+        state=ConnectorHealthState.HEALTHY,
+    )
+    store.save_snapshot(
+        ConnectorHealthSnapshot(
+            connector_id="fake:1",
+            connector_type="fake",
+            report=report,
+        )
+    )
+    health_files = list((tmp_path / "connectors" / "health").glob("*.json"))
+    assert len(health_files) == 1
+    assert health_files[0].name == "fake=1.json"
+    assert ":" not in health_files[0].name
+
+    loaded = store.load_snapshot("fake:1")
+    assert loaded is not None
+    assert loaded.connector_id == "fake:1"
+    assert loaded.report.state is ConnectorHealthState.HEALTHY
+
+    store.append_probe_result(
+        "fake:1",
+        ProbeResult(category=ProbeCategory.AUTH, outcome=ProbeOutcome.PASSED, message="ok"),
+    )
+    probe_files = list((tmp_path / "connectors" / "probes").glob("*.jsonl"))
+    assert len(probe_files) == 1
+    assert probe_files[0].name == "fake=1.jsonl"
+    results = store.load_probe_results("fake:1")
+    assert len(results) == 1
+    assert results[0].outcome is ProbeOutcome.PASSED
+
+
+def test_storage_migrates_legacy_colon_snapshot_names(tmp_path: Path):
+    """POSIX installs may still have colon filenames; resolve migrates once."""
+    import json
+
+    from mana_agent.connectors.health.models import ConnectorHealthReport, ConnectorHealthSnapshot
+
+    root = tmp_path / "connectors"
+    store = ConnectorHealthStore(root)
+    legacy = root / "health" / "fake:1.json"
+    report = ConnectorHealthReport(
+        connector_id="fake:1",
+        connector_type="fake",
+        state=ConnectorHealthState.DEGRADED,
+    )
+    snapshot = ConnectorHealthSnapshot(
+        connector_id="fake:1",
+        connector_type="fake",
+        report=report,
+    )
+    try:
+        legacy.write_text(snapshot.model_dump_json(), encoding="utf-8")
+    except OSError:
+        pytest.skip("platform rejects colon filenames (expected on Windows)")
+
+    loaded = store.load_snapshot("fake:1")
+    assert loaded is not None
+    assert loaded.report.state is ConnectorHealthState.DEGRADED
+    modern = root / "health" / "fake=1.json"
+    assert modern.exists()
+    assert not legacy.exists()
+    # Re-save stays on the modern name.
+    store.save_snapshot(loaded)
+    assert modern.exists()
+    assert json.loads(modern.read_text(encoding="utf-8"))["connector_id"] == "fake:1"
 
 
 def test_select_recovery_prefers_token_refresh_for_auth():
