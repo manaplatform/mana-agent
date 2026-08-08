@@ -198,6 +198,13 @@ class CodexCodingAgentShim:
             "Codex owns coding planning and execution; the legacy tools orchestrator cannot be attached."
         )
 
+    _MUTATION_FAILURE_REASONS = frozenset(
+        {
+            "mutation_required_but_no_mutation_tool_attempted",
+            "mutation_required_but_no_changed_files",
+        }
+    )
+
     def _execute_turn(
         self,
         request: str,
@@ -205,6 +212,7 @@ class CodexCodingAgentShim:
         requires_repository_write: bool,
         flow_id: Any = None,
         gateway_task_id: Any = None,
+        _mutation_recovery: bool = False,
     ) -> dict[str, Any]:
         goal = str(request or "").strip()
         if not goal:
@@ -408,6 +416,54 @@ class CodexCodingAgentShim:
         self._active_flow_id = selected_flow_id
         self._flow_results[selected_flow_id] = dict(payload)
         record_current("codex.turn.finished", {"task_id": task_id, "result": result.model_dump(mode="json"), "workspace_path": str(workspace.worktree_path)})
+
+        # Write-required turns that finish without a repository mutation get one
+        # forced recovery turn (parity with multi-agent forced_mutation_retry).
+        # This is deterministic recovery after a validated mutation failure, not
+        # keyword routing or a silent backend switch.
+        terminal = str(payload.get("auto_execute_terminal_reason") or "").strip()
+        if (
+            requires_repository_write
+            and not _mutation_recovery
+            and terminal in self._MUTATION_FAILURE_REASONS
+        ):
+            recovery_goal = (
+                f"{goal}\n\n"
+                "[mutation_required recovery]\n"
+                f"Prior turn terminal reason: {terminal}.\n"
+                "You inspected or discussed the issue but left the worktree unchanged.\n"
+                "You MUST apply the production-source fix now with apply_patch (or an "
+                "equivalent repository file mutation tool). Do not finish with analysis, "
+                "questions, or chat text only. Success requires uncommitted edits under "
+                "the repository root."
+            )
+            record_current(
+                "codex.mutation_recovery.started",
+                {
+                    "task_id": task_id,
+                    "prior_terminal_reason": terminal,
+                    "prior_thread_id": result.thread_id,
+                },
+            )
+            recovery_payload = self._execute_turn(
+                recovery_goal,
+                requires_repository_write=True,
+                flow_id=selected_flow_id,
+                gateway_task_id=gateway_task_id,
+                _mutation_recovery=True,
+            )
+            recovery_payload = dict(recovery_payload)
+            recovery_payload["mutation_recovery"] = True
+            recovery_payload["prior_terminal_reason"] = terminal
+            prior_warnings = list(payload.get("warnings") or [])
+            recovery_warnings = list(recovery_payload.get("warnings") or [])
+            recovery_payload["warnings"] = [
+                *prior_warnings,
+                f"mutation_recovery_after:{terminal}",
+                *recovery_warnings,
+            ]
+            return recovery_payload
+
         return payload
 
     def _repository_has_head(self) -> bool:

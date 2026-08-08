@@ -122,6 +122,13 @@ def test_benchmark_overrides_pin_provider_and_model() -> None:
     assert overrides["MANA_CODEX_WORKTREE_ISOLATION"] is False
     assert overrides["MANA_TRANSACTIONAL_ALWAYS_APPROVE"] is True
     assert overrides["MANA_CODEX_TASK_TIMEOUT_SECONDS"] == 3600
+    # Stale operator MANA_CODEX_MODEL=gpt-5.6-luna must not survive isolation.
+    assert overrides["MANA_CODEX_MODEL"] == "deepseek-ai/deepseek-v4-flash-0731"
+    assert overrides["MANA_CODEX_ENABLED"] is True
+    assert overrides["MANA_CODING_BACKEND"] == "codex"
+    assert overrides["MANA_AUTO_CHAT_TOOL_SURFACE"] == "coding"
+    assert overrides["MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW"] == 1_000_000
+    assert overrides["MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS"] == 65_536
 
 
 def test_resolve_runner_timeout_cli_env_and_unlimited(tmp_path: Path) -> None:

@@ -83,6 +83,10 @@ MANA_CODEX_WORKTREE_ISOLATION = false
 MANA_CODEX_TASK_TIMEOUT_SECONDS = 1800
 MANA_CODEX_ALLOW_NETWORK = false
 MANA_CODEX_MODEL = ""
+# Optional pin for the Codex coding model. Empty = use CLI/gateway model
+# (or the active main model). Do not leave a stale OpenAI id here (e.g.
+# gpt-5.6-luna) when MANA_AI_PROVIDER is nvidia/DeepSeek — SWE-bench isolation
+# rewrites this, but interactive runs honor the pin.
 ```
 
 New configurations explicitly store `MANA_CODING_BACKEND` as `codex` or

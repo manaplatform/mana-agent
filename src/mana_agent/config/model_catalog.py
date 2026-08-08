@@ -86,6 +86,9 @@ _MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
     "o3": (200_000, 100_000),
     "o3-mini": (200_000, 100_000),
     "o4-mini": (200_000, 100_000),
+    # NVIDIA NIM / integrate.api DeepSeek V4 (1M context; max_tokens soft cap 65_536).
+    "deepseek-ai/deepseek-v4-flash": (1_000_000, 65_536),
+    "deepseek-ai/deepseek-v4-pro": (1_000_000, 65_536),
 }
 
 
@@ -109,6 +112,10 @@ def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | N
         return (1_047_576, 32_768)
     if provider_id == "openai" and lowered.startswith("gpt-4o"):
         return (128_000, 16_384)
+    if "deepseek-v4-flash" in lowered or "deepseek-v4-pro" in lowered:
+        return (1_000_000, 65_536)
+    if provider_id == "nvidia" and "deepseek" in lowered:
+        return (1_000_000, 65_536)
     return None
 
 

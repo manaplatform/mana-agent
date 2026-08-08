@@ -4,6 +4,39 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex coding model pin and SWE-bench empty-mutation recovery.
+  - Symptom: isolated SWE-bench config still had
+    `MANA_CODEX_MODEL = "gpt-5.6-luna"` (copied from operator `~/.mana`), while
+    the measured model was NVIDIA DeepSeek; logs showed
+    `coding=gpt-5.6-luna; coding_routed=deepseek…` and runs finished with
+    `mutation_required_but_no_mutation_tool_attempted` + exit 0 /
+    `Empty model_patch (status=ok)`.
+  - Cause: SWE-bench isolation rewrote role models but not `MANA_CODEX_MODEL`;
+    stack logging reported the stale pin; write-required Codex turns that only
+    read files never got a forced mutation recovery; single-shot chat exited 0
+    on mutation failure; auto-chat catalog still listed ~116 tools
+    (canvas/server/email); DeepSeek V4 lacked maintained token limits so
+    accounting fell back to 16k.
+  - Fix:
+    1. SWE-bench overrides pin `MANA_CODEX_MODEL` to the agent model, force
+       `MANA_CODING_BACKEND=codex` / `MANA_CODEX_ENABLED=true`, set
+       `MANA_AUTO_CHAT_TOOL_SURFACE=coding`, and raise unknown-model context
+       defaults for long-context DeepSeek.
+    2. Gateway coding model prefers CLI/gateway model over a leftover
+       `MANA_CODEX_MODEL` pin; runtime logs report the resolved Codex model.
+    3. Codex write-required empty turns get one forced mutation recovery turn.
+    4. Single-shot non-interactive chat exits non-zero on mutation / failed
+       coding terminals so the harness does not treat empty patches as ok.
+    5. DeepSeek V4 Flash/Pro maintained token limits (1M / 65_536).
+    6. Responses bridge logs `chat_template_kwargs` thinking/effort on each
+       upstream request.
+    7. Coding tool surface filters auto-chat catalog to repo/edit/verify tools.
+  - Note: clear or update operator `~/.mana/config.toml`
+    `MANA_CODEX_MODEL` if interactive runs should not keep a stale luna pin;
+    empty means router/CLI-managed.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py tests/test_codex_integration.py tests/test_auto_chat_tools_catalog.py tests/test_codex_responses_bridge.py -q`
+
 - Fixed SWE-bench `empty_patch` when Codex + NVIDIA DeepSeek completed with
   zero worktree changes (`astropy__astropy-12907` logs).
   - Symptom: `Empty model_patch … (status=ok)` after a single-shot coding

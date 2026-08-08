@@ -212,15 +212,23 @@ def build_bridge_app(
         }
         model = str(chat_payload.get("model") or upstream.model or "")
         template = chat_payload.get("chat_template_kwargs")
+        template_summary = ""
+        if isinstance(template, dict):
+            # Log non-secret template knobs only (thinking / reasoning_effort).
+            thinking = template.get("thinking")
+            effort = template.get("reasoning_effort")
+            template_summary = f"thinking={thinking!r} reasoning_effort={effort!r}"
         logger.info(
             "responses_bridge.upstream_request provider=%s model=%s stream=%s host=%s "
-            "has_tools=%s has_chat_template_kwargs=%s transport_max_attempts=%s",
+            "has_tools=%s has_chat_template_kwargs=%s chat_template_kwargs=%s "
+            "transport_max_attempts=%s",
             upstream.provider,
             model,
             stream,
             httpx.URL(url).host,
             bool(chat_payload.get("tools")),
             isinstance(template, dict),
+            template_summary or "none",
             transport_max_attempts,
         )
 

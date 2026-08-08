@@ -312,6 +312,111 @@ def test_codex_shim_surfaces_mutation_required_terminal_reason() -> None:
     assert payload["status"] == "failed"
 
 
+class _EmptyThenMutateBackend:
+    """First write-required turn produces empty patch; recovery mutates."""
+
+    def __init__(self) -> None:
+        self.tasks: list[CodingTask] = []
+        self.results: dict[str, Any] = {}
+        self.closed = False
+        self.calls = 0
+
+    async def stream(self, task: CodingTask, workspace: WorkspaceContext):
+        self.calls += 1
+        self.tasks.append(task)
+        yield adapt_codex_event(
+            task.task_id,
+            {"method": "turn/started", "params": {"threadId": f"thread-{self.calls}"}},
+        )
+        if self.calls == 1:
+            self.results[task.task_id] = parse_codex_result(
+                task=task,
+                workspace=workspace,
+                worker_id="codex-shim",
+                thread_id=f"thread-{self.calls}",
+                turn_id=f"turn-{self.calls}",
+                changed_files=[],
+                notifications=[
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "agentMessage",
+                                "text": "Analysis only, no patch.",
+                            }
+                        },
+                    },
+                    {
+                        "method": "turn/completed",
+                        "params": {"turn": {"status": "completed"}},
+                    },
+                ],
+            )
+        else:
+            self.results[task.task_id] = parse_codex_result(
+                task=task,
+                workspace=workspace,
+                worker_id="codex-shim",
+                thread_id=f"thread-{self.calls}",
+                turn_id=f"turn-{self.calls}",
+                changed_files=["astropy/modeling/separable.py"],
+                notifications=[
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "applyPatch",
+                                "status": "completed",
+                            }
+                        },
+                    },
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "agentMessage",
+                                "text": "Applied the nested CompoundModel fix.",
+                            }
+                        },
+                    },
+                    {
+                        "method": "turn/completed",
+                        "params": {"turn": {"status": "completed"}},
+                    },
+                ],
+            )
+
+    def result_for(self, task_id: str):
+        return self.results[task_id]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_coding_agent_shim_mutation_recovery_retries_empty_write_turn(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
+    backend = _EmptyThenMutateBackend()
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        backend_factory=lambda: backend,
+    )
+
+    result = shim.generate_auto_execute("fix nested separability_matrix", auto_chat_mode="edit")
+
+    assert backend.calls == 2
+    assert "mutation_required recovery" in backend.tasks[1].goal
+    assert result["status"] == "completed"
+    assert result["changed_files"] == ["astropy/modeling/separable.py"]
+    assert result["mutation_recovery"] is True
+    assert result["prior_terminal_reason"] == (
+        "mutation_required_but_no_mutation_tool_attempted"
+    )
+    assert any(
+        str(w).startswith("mutation_recovery_after:") for w in (result.get("warnings") or [])
+    )
+
+
 class _ShimBackend:
     def __init__(self) -> None:
         self.tasks: list[CodingTask] = []

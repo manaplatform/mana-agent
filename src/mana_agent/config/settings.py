@@ -520,6 +520,11 @@ class Settings(BaseSettings):
     )
     mana_codex_model: str | None = Field(default=None, alias="MANA_CODEX_MODEL")
     mana_codex_bin: str = Field(default="codex", alias="MANA_CODEX_BIN")
+    # full = all auto-chat tools; coding = repository/edit/verify/document/git only
+    # (SWE-bench and other isolated coding runs).
+    mana_auto_chat_tool_surface: str = Field(
+        default="full", alias="MANA_AUTO_CHAT_TOOL_SURFACE"
+    )
     mana_github_autopilot_enabled: bool = Field(
         default=False, alias="MANA_GITHUB_AUTOPILOT_ENABLED"
     )

@@ -39,6 +39,34 @@ def test_list_auto_chat_tools_includes_core_connectors() -> None:
     assert by_name["web_search"].category == "search"
 
 
+def test_coding_tool_surface_excludes_non_coding_catalog(monkeypatch) -> None:
+    """SWE-bench isolation must not advertise canvas/server/email/mcp tools."""
+    from mana_agent.config import user_config
+
+    monkeypatch.setattr(
+        user_config,
+        "get_setting",
+        lambda key, default=None: (
+            "coding" if key == "MANA_AUTO_CHAT_TOOL_SURFACE" else default
+        ),
+    )
+    tools = list_auto_chat_tools(include_mcp_discovery=False)
+    names = {entry.name for entry in tools}
+    categories = {entry.category for entry in tools}
+
+    assert "read_file" in names
+    assert "repo_search" in names
+    assert "apply_patch" in names
+    assert "web_search" not in names
+    assert "email_read" not in names
+    assert "canvas_create_surface" not in names
+    assert not any(name.startswith("server_") for name in names)
+    assert "mcp" not in categories
+    assert "canvas" not in categories
+    assert "server" not in categories
+    assert "email" not in categories
+
+
 def test_tool_catalog_grouping_and_summary() -> None:
     tools = list_auto_chat_tools(include_mcp_discovery=False)
     grouped = group_tool_catalog(tools)

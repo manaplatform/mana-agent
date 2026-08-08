@@ -2001,6 +2001,9 @@ def chat(
         # turn (and any model-queued follow-ups) then exit. Do not block forever
         # waiting for further stdin once the queue is empty.
         single_shot_noninteractive = bool(prompt) and not _is_interactive_terminal()
+        # Write-required coding failures must not exit 0 for harnesses that treat
+        # returncode as success (SWE-bench empty_patch previously looked like ok).
+        single_shot_exit_code = 0
 
         # TUI for interactive terminals (the enhanced experience).
         # For non-TTY (tests/CliRunner, pipes, CI, or explicit --no-tui) fall back
@@ -3769,6 +3772,28 @@ def chat(
                 # Optional: if you want quick diff visibility without full diff spam:
                 # console.print("\n[dim]Tip: run with your own :diff command if you add history later.[/dim]")
 
+                terminal_for_exit = (
+                    str((result or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
+                    if isinstance(result, dict)
+                    else ""
+                )
+                run_status_for_exit = (
+                    str(
+                        (result or {}).get("run_status")
+                        or (result or {}).get("status")
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                    if isinstance(result, dict)
+                    else ""
+                )
+                if single_shot_noninteractive and (
+                    terminal_for_exit.startswith("mutation_required_but_")
+                    or run_status_for_exit in {"failed", "blocked", "error"}
+                    or terminal_for_exit in {"codex_failed", "codex_cancelled"}
+                ):
+                    single_shot_exit_code = 1
                 chat_ui_state.record_event(
                     make_event(
                         "agent.decision",
@@ -3797,3 +3822,5 @@ def chat(
             tmp_root.cleanup()
         if tmp_base is not None:
             tmp_base.cleanup()
+    if single_shot_noninteractive and single_shot_exit_code:
+        raise typer.Exit(code=int(single_shot_exit_code))

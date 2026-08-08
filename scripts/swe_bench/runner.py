@@ -1280,6 +1280,13 @@ def _benchmark_config_overrides(
         "MANA_MODEL_TOOL": model,
         "MANA_MODEL_TOOL_WORKER": model,
         "MANA_MODEL_SUMMARIZER": model,
+        # Operator ~/.mana often pins MANA_CODEX_MODEL to a leftover OpenAI id
+        # (e.g. gpt-5.6-luna) from an older setup. Force Codex onto the same
+        # measured agent model and require the Codex coding backend so coding
+        # never falls through to the internal runtime mid-bench.
+        "MANA_CODEX_MODEL": model,
+        "MANA_CODEX_ENABLED": True,
+        "MANA_CODING_BACKEND": "codex",
         # Coding-only surface: operator ~/.mana often enables desktop/server
         # integrations that dump 100+ irrelevant tools into SWE-bench logs and
         # dilute the coding agent.
@@ -1292,6 +1299,9 @@ def _benchmark_config_overrides(
         "MANA_A2A_SERVER_ENABLED": False,
         "MANA_FLEET_ENABLED": False,
         "MANA_WORKER_GATEWAY_ENABLED": False,
+        # Restrict auto-chat tool catalog to repository/edit/verify tools so
+        # the header no longer advertises canvas/server/email/api (~116 tools).
+        "MANA_AUTO_CHAT_TOOL_SURFACE": "coding",
         # Bench isolation: edit the SWE worktree in place (not a nested managed
         # worktree under ~/.mana/repositories) and auto-allow shell/git
         # transactional REQUIRE_APPROVAL outcomes so non-interactive runs do not
@@ -1300,6 +1310,10 @@ def _benchmark_config_overrides(
         "MANA_MANAGED_WORKTREES_ENABLED": False,
         "MANA_CODEX_WORKTREE_ISOLATION": False,
         "MANA_TRANSACTIONAL_ALWAYS_APPROVE": True,
+        # Avoid 16k unknown-model fallback when Codex/DeepSeek ids are not yet
+        # in every local catalog (DeepSeek V4 supports ~1M context).
+        "MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW": 1_000_000,
+        "MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS": 65_536,
     }
     if timeout_seconds is not None:
         # Keep Codex task timeout aligned with the runner wall clock.

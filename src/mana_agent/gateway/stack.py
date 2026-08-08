@@ -383,9 +383,23 @@ def build_chat_stack(
             repository=routing_repository,
             **route_context,
         )
+        # Coding model precedence for the Codex path:
+        # 1) explicit gateway coding_model
+        # 2) CLI/gateway main model (e.g. SWE-bench --model)
+        # 3) MANA_CODEX_MODEL only when set (may be a stale operator pin such as
+        #    gpt-5.6-luna from an older OpenAI setup)
+        # 4) effective main model
+        # Preferring CLI/main over a leftover MANA_CODEX_MODEL keeps measured
+        # runs on the selected provider/model instead of a silent luna pin.
+        coding_global_model = (
+            str(cfg.coding_model or "").strip()
+            or str(cfg.model or "").strip()
+            or str(getattr(settings, "mana_codex_model", "") or "").strip()
+            or effective_model
+        )
         coding_model_assignment = resolve_model_for_role(
             AgentRole.CODING,
-            global_model=getattr(settings, "mana_codex_model", None) or effective_model,
+            global_model=coding_global_model,
             repository=routing_repository,
             **route_context,
         )
@@ -556,8 +570,18 @@ def build_chat_stack(
 
     if isinstance(coding_agent_instance, CodexCodingAgentShim):
         coding_backend = "codex"
-        coding_model = str(getattr(settings, "mana_codex_model", "") or "router-managed")
-        routed_coding_model = coding_agent_instance.codex_settings.model or "app-server-default"
+        # Report the model Codex will actually use (resolved/routed), not a
+        # stale MANA_CODEX_MODEL pin that may disagree with the active provider.
+        coding_model = (
+            coding_model_assignment.resolved_model
+            or str(getattr(settings, "mana_codex_model", "") or "").strip()
+            or "router-managed"
+        )
+        routed_coding_model = (
+            coding_agent_instance.codex_settings.model
+            or coding_model_assignment.resolved_model
+            or "app-server-default"
+        )
         planner_model = "codex-owned"
     elif coding_agent_instance is not None:
         coding_backend = "internal" if isinstance(coding_agent_instance, InternalCodingAgentShim) else type(coding_agent_instance).__name__
