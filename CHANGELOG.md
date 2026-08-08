@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed confusing `mana-agent eval run` errors when a baseline JSON is passed
+  instead of a suite YAML (e.g. `./evals/baselines/routing-smoke.json`).
+  - `load_suite` now detects checked-in baseline documents and fails closed with
+    an actionable message pointing at the suite path and gate/baseline commands.
+  - Other suite schema failures are wrapped as `EvalConfigurationError` instead
+    of dumping raw multi-field Pydantic noise.
+  - CLI help for `eval run` states that suite YAML is required, not baseline JSON.
+  - User verification required:
+    `python -m pytest tests/evals/test_eval_lab.py -k "baseline_document or invalid_suite or protected_suite"`
+    then intentionally:
+    `mana-agent eval run ./evals/baselines/routing-smoke.json --json`
+    (expect exit 2 and a baseline-not-suite message), then the correct command:
+    `mana-agent eval run ./evals/suites/routing-smoke.yaml --help`.
+
 - Clarified SWE-bench instance selection: **no ids entered → all dataset ids**.
   - If neither `--instance-ids` nor `--instance-ids-file` is set, the runner
     loads **every** instance id from the SWE-bench dataset split (~500 Verified

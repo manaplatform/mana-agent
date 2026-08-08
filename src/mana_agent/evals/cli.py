@@ -66,14 +66,23 @@ def _suite_from_run(storage: EvalStorage, run_id: str) -> EvalSuite:
 
 @eval_app.command("run")
 def run_command(
-    suite_path: Path = typer.Argument(..., exists=True, readable=True),
+    suite_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        readable=True,
+        help="Suite YAML path (e.g. evals/suites/routing-smoke.yaml). Not a baseline JSON.",
+    ),
     variant: list[str] = typer.Option([], "--variant", help="Run only this variant ID (repeatable)."),
     task: list[str] = typer.Option([], "--task", help="Run only this task ID (repeatable)."),
     eval_root: Path = typer.Option(Path(".mana/evals"), "--eval-root"),
     concurrency: int | None = typer.Option(None, "--concurrency", min=1),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Execute tasks × variants × trials in isolated Git worktrees."""
+    """Execute tasks × variants × trials in isolated Git worktrees.
+
+    Pass a suite definition under evals/suites/*.yaml. Checked-in baselines under
+    evals/baselines/*.json are results snapshots for gate/compare, not runnable suites.
+    """
     try:
         suite = load_suite(suite_path)
         storage = _storage(eval_root)
