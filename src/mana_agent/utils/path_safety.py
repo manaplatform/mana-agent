@@ -76,6 +76,40 @@ def resolve_user_path(raw: str) -> Path:
         raise ValueError("Invalid path.") from exc
 
 
+def safe_cwd(*, fallback: str | Path | None = None) -> Path:
+    """Return the process CWD, or a stable fallback when it was deleted.
+
+    Unix processes can keep running after their working directory is unlinked
+    (common when a SWE-bench worktree is recreated under a live agent). In that
+    state ``os.getcwd()`` / ``Path.cwd()`` raise ``FileNotFoundError``. Callers
+    that only need a stable path for log naming or child ``cwd`` must not crash.
+    """
+    try:
+        return Path.cwd().resolve()
+    except (FileNotFoundError, OSError):
+        pass
+    if fallback is not None:
+        candidate = Path(fallback).expanduser()
+        try:
+            if candidate.is_dir():
+                return candidate.resolve(strict=False)
+        except OSError:
+            pass
+    # Prefer Mana-managed state, then the user's home, then filesystem root.
+    try:
+        from mana_agent.config.settings import mana_home
+
+        home = mana_home()
+        if home.is_dir():
+            return home.resolve(strict=False)
+    except Exception:
+        pass
+    try:
+        return Path.home().resolve(strict=False)
+    except Exception:
+        return Path("/").resolve()
+
+
 def resolve_within_allowed_roots(
     raw: str,
     allowed_roots: Sequence[Path],

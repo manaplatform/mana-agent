@@ -24,6 +24,7 @@ from mana_agent.integrations.codex.runtime_environment import CodexRuntimeContex
 from mana_agent.context_cost import ContextCostGovernor
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.context_cost.models import ContextSegment
+from mana_agent.utils.path_safety import safe_cwd
 
 ClientFactory = Callable[[tuple[str, ...]], AsyncCodexAppServer]
 
@@ -68,11 +69,12 @@ class CodexCodingBackend:
         if not self.settings.enabled:
             raise CodexUnavailableError("Codex integration is disabled. No fallback backend was executed.")
         executable = self.settings.codex_bin
+        health_root = _existing_directory(repository_path) or safe_cwd()
         if self._uses_default_client:
             report = await asyncio.to_thread(
                 check_codex_health,
                 self.settings,
-                repository_path or Path.cwd(),
+                health_root,
             )
             if not report.healthy or report.executable is None:
                 detail = "; ".join(report.errors) or "unknown health-check failure"
@@ -88,11 +90,16 @@ class CodexCodingBackend:
         command = (executable, "app-server")
         if self._uses_default_client:
             self._runtime_context = CodexRuntimeEnvironment.create(runtime_config)
+            # Prefer the repository as the child CWD so Codex project discovery
+            # is correct; fall back to the isolated CODEX_HOME when the repo was
+            # deleted under a live process (SWE-bench thrash).
+            child_cwd = _existing_directory(repository_path) or self._runtime_context.home
             self._client = AsyncCodexAppServer(
                 command,
                 environment=self._runtime_context.environment,
                 provider_name=runtime_config.provider_display_name,
                 model=runtime_config.model,
+                cwd=child_cwd,
             )
         else:
             self._client = self._client_factory(command)
@@ -118,8 +125,14 @@ class CodexCodingBackend:
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
         self._validate_workspace(task, workspace)
+        execution_dir = _execution_directory(workspace)
+        if not execution_dir.is_dir():
+            raise CodexExecutionError(
+                f"Codex execution directory does not exist: {execution_dir}. "
+                "The worktree may have been removed while the agent was running."
+            )
         await self.start(
-            workspace.repository_path,
+            execution_dir,
             sandbox_mode=_codex_sandbox(workspace),
         )
         if self._client is None:
@@ -401,6 +414,19 @@ class CodexCodingBackend:
 
 def _execution_directory(workspace: WorkspaceContext) -> Path:
     return (workspace.working_directory or workspace.worktree_path).resolve()
+
+
+def _existing_directory(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    try:
+        path = Path(value).expanduser().resolve(strict=False)
+    except OSError:
+        return None
+    try:
+        return path if path.is_dir() else None
+    except OSError:
+        return None
 
 
 def _response_id(response: dict[str, Any], key: str) -> str:

@@ -5,15 +5,19 @@ import logging
 from pathlib import Path
 import sys
 
-from mana_agent.config.settings import default_logs_dir
+from mana_agent.config.settings import default_logs_dir, mana_home
+from mana_agent.utils.path_safety import safe_cwd
 
 
 def setup_logging(verbose: bool = False, log_dir: str | Path | None = None) -> Path:
     level = logging.DEBUG if verbose else logging.INFO
-    project_root = Path.cwd().resolve()
+    project_root = safe_cwd(fallback=mana_home())
     project_name = project_root.name or "project"
     date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    root = Path(log_dir).resolve() if log_dir else default_logs_dir(project_root)
+    if log_dir:
+        root = Path(log_dir).expanduser().resolve(strict=False)
+    else:
+        root = default_logs_dir(project_root)
     root.mkdir(parents=True, exist_ok=True)
     log_file = root / f"{date_tag}-{project_name}.log"
 

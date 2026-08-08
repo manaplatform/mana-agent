@@ -4,6 +4,33 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Windows CI failure for SWE-bench `agent_bin` Python PATH shim.
+  - `prepare_agent_python_path` now writes `python.cmd` / `python3.cmd` on
+    Windows (PATHEXT) and keeps executable shell scripts on POSIX.
+  - Test no longer asserts Unix `S_IXUSR` on NTFS, where `chmod` does not set
+    the execute bit the same way (`33206 & 64` failed on GitHub Windows runners).
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py -k prepare_agent_python_path -q`
+
+- Fixed SWE-bench hangs from deleted worktree CWD + opaque Codex config ENOENT.
+  - Symptom: mana-agent stayed “still running” with stderr stuck on
+    `FileNotFoundError: getcwd()` / `Path.cwd()` and
+    `Codex app-server stopped: error loading default config after config error:
+    No such file or directory`.
+  - Cause: concurrent or overlapping instance runs could remove a live SWE
+    worktree under the agent process. The process CWD became unlinked, so
+    gateway init (`LlmRunLogger`) crashed and Codex children inherited a dead
+    cwd.
+  - `safe_cwd()` fallback for loggers when `getcwd` fails (prefer `MANA_HOME`).
+  - Codex app-server always spawns with an explicit existing `cwd` (repo if
+    present, else isolated `CODEX_HOME`); stream fails clearly if the execution
+    directory is gone.
+  - SWE-bench runner: per-instance worktree lock, refuse recreate/remove while
+    another live pid holds the lock, require `.git` after checkout, kill the
+    agent if the worktree disappears mid-run (exit 125).
+  - User verification required:
+    `python -m pytest tests/test_path_safety_safe_cwd.py tests/test_llm_logging.py -k deleted_cwd tests/test_codex_runtime.py -k "cwd or startup_failure" tests/test_swe_bench_runner_config.py -k worktree_lock -q`
+
 - Fixed SWE-bench agent runs blocked by keyword Git intent + transactional policy.
   - Root cause (from `.swe-bench/logs/*`): prompts say "Do not commit, push…", but
     `_git_intent_from_request` keyword-matched those words, ran

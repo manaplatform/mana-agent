@@ -8,6 +8,8 @@ from mana_agent.analysis.models import SearchHit
 from mana_agent.context_cost.governor import ContextCostGovernor
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.multi_agent.runtime.qna_chain import QnAChain
+import pytest
+
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 
 
@@ -70,6 +72,28 @@ class _FakeLLM:
 
 def _read_rows(log_file: Path) -> list[dict]:
     return [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_llm_run_logger_survives_deleted_cwd(tmp_path: Path, monkeypatch) -> None:
+    """SWE-bench worktree thrash must not crash gateway init via Path.cwd()."""
+    import os
+    import shutil
+
+    work = tmp_path / "cwd"
+    work.mkdir()
+    mana = tmp_path / "mana-home"
+    mana.mkdir()
+    monkeypatch.setenv("MANA_HOME", str(mana))
+    monkeypatch.chdir(work)
+    shutil.rmtree(work)
+    with pytest.raises(FileNotFoundError):
+        os.getcwd()
+
+    logger = LlmRunLogger()
+    assert logger.log_file.is_absolute()
+    assert logger.log_file.name.endswith(".jsonl")
+    # Project name should come from the safe fallback (MANA_HOME), not crash.
+    assert "mana-home" in logger.log_file.name or "mana-home" in str(logger.log_file)
 
 
 def test_qna_chain_logs_each_run(tmp_path: Path) -> None:

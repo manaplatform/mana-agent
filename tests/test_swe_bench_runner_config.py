@@ -7,21 +7,27 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts.swe_bench.runner import (
     RunnerConfig,
+    SweBenchRunnerError,
     WorktreeChangeSummary,
     _benchmark_config_overrides,
     _disable_non_coding_integrations,
     _set_toml_table_key,
+    acquire_worktree_lock,
     build_prompt,
     capture_model_patch,
     format_timeout_label,
     load_operator_inference_defaults,
     prepare_agent_python_path,
+    release_worktree_lock,
     resolve_agent_inference,
     resolve_model_name_or_path,
     resolve_runner_timeout_seconds,
     summarize_worktree_changes,
+    worktree_lock_holder,
 )
 
 
@@ -193,19 +199,34 @@ def test_build_prompt_prefers_source_edits_and_python3() -> None:
 def test_prepare_agent_python_path_shims_python_to_python3(tmp_path: Path) -> None:
     env: dict[str, str] = {"PATH": "/usr/bin"}
     bin_dir = prepare_agent_python_path(run_dir=tmp_path, env=env)
-    python_shim = bin_dir / "python"
+    # POSIX: executable shell script named ``python``.
+    # Windows: PATHEXT resolves ``python.cmd`` (chmod/S_IXUSR is not reliable).
+    if os.name == "nt":
+        python_shim = bin_dir / "python.cmd"
+        python3_shim = bin_dir / "python3.cmd"
+    else:
+        python_shim = bin_dir / "python"
+        python3_shim = bin_dir / "python3"
     assert python_shim.is_file()
-    assert python_shim.stat().st_mode & stat.S_IXUSR
+    assert python3_shim.is_file()
+    if os.name != "nt":
+        assert python_shim.stat().st_mode & stat.S_IXUSR
+        assert python3_shim.stat().st_mode & stat.S_IXUSR
     assert str(bin_dir) in env["PATH"].split(os.pathsep)
     assert env["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    assert env.get("PYTHON")
     # Shim must invoke Python 3, not host Python 2.7.
+    # Windows cannot CreateProcess a .cmd file without going through cmd.exe.
+    argv = [str(python_shim), "-c", "import sys; print(sys.version_info[0])"]
+    if os.name == "nt":
+        argv = ["cmd", "/c", *argv]
     probe = subprocess.run(
-        [str(python_shim), "-c", "import sys; print(sys.version_info[0])"],
+        argv,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert probe.returncode == 0
+    assert probe.returncode == 0, (probe.stdout, probe.stderr)
     assert probe.stdout.strip() == "3"
 
 
@@ -250,3 +271,29 @@ def test_mass_delete_only_summary_and_capture_rejection(tmp_path: Path) -> None:
     patch, reason = capture_model_patch(repo, exclude_test_files=False)
     assert patch == ""
     assert "mass-delete" in reason
+
+
+def test_worktree_lock_blocks_second_holder(tmp_path: Path, monkeypatch) -> None:
+    worktrees = tmp_path / "worktrees"
+    lock = acquire_worktree_lock(worktrees, "astropy__astropy-13033")
+    assert lock.is_file()
+    assert worktree_lock_holder(worktrees, "astropy__astropy-13033") == os.getpid()
+
+    # Simulate another process by claiming a foreign live pid.
+    lock.write_text("1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.swe_bench.runner._pid_is_alive",
+        lambda pid: pid == 1,
+    )
+    with pytest.raises(SweBenchRunnerError, match="locked by live process"):
+        acquire_worktree_lock(worktrees, "astropy__astropy-13033")
+
+    # Stale lock from a dead pid is reclaimable.
+    monkeypatch.setattr(
+        "scripts.swe_bench.runner._pid_is_alive",
+        lambda pid: False,
+    )
+    reclaimed = acquire_worktree_lock(worktrees, "astropy__astropy-13033")
+    assert reclaimed.is_file()
+    release_worktree_lock(reclaimed)
+    assert worktree_lock_holder(worktrees, "astropy__astropy-13033") is None

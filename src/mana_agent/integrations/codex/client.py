@@ -6,11 +6,31 @@ import asyncio
 import json
 from collections import defaultdict
 from collections.abc import AsyncIterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from mana_agent._version import get_version
 from mana_agent.integrations.codex.exceptions import CodexProtocolError, CodexUnavailableError
 from mana_agent.utils.redaction import redact_json_line
+
+
+def _resolve_existing_directory(value: str | Path | None) -> str | None:
+    """Return an absolute existing directory path, or None when unavailable."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        path = Path(text).expanduser().resolve(strict=False)
+    except OSError:
+        return None
+    try:
+        if path.is_dir():
+            return str(path)
+    except OSError:
+        return None
+    return None
 
 
 class AsyncCodexAppServer:
@@ -24,6 +44,7 @@ class AsyncCodexAppServer:
         provider_name: str = "",
         model: str = "",
         request_timeout_seconds: int = 30,
+        cwd: str | Path | None = None,
     ) -> None:
         self.command = tuple(str(part) for part in command)
         self._environment = dict(environment) if environment is not None else None
@@ -35,6 +56,7 @@ class AsyncCodexAppServer:
         self._provider_name = str(provider_name or "selected provider")
         self._model = str(model or "selected model")
         self.request_timeout_seconds = max(1, int(request_timeout_seconds))
+        self._cwd = _resolve_existing_directory(cwd)
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -53,6 +75,12 @@ class AsyncCodexAppServer:
             return
         if not self.command:
             raise CodexUnavailableError("Codex app-server command is empty")
+        # Always pass an existing cwd. Inheriting a deleted process CWD (for
+        # example a reclaimed SWE-bench worktree) makes Codex fail config load
+        # with opaque ENOENT errors and can hang initialize.
+        spawn_cwd = self._cwd or _resolve_existing_directory(
+            (self._environment or {}).get("CODEX_HOME")
+        )
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *self.command,
@@ -60,22 +88,29 @@ class AsyncCodexAppServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._environment,
+                cwd=spawn_cwd,
             )
         except (FileNotFoundError, OSError) as exc:
             raise CodexUnavailableError(f"Unable to start Codex app-server: {exc}") from exc
         self._reader_task = asyncio.create_task(self._read_stdout(), name="codex-app-server-stdout")
         self._stderr_task = asyncio.create_task(self._read_stderr(), name="codex-app-server-stderr")
-        await self.request(
-            "initialize",
-            {
-                "clientInfo": {
-                    "name": "mana-agent",
-                    "title": "Mana-Agent",
-                    "version": get_version(),
+        try:
+            await self.request(
+                "initialize",
+                {
+                    "clientInfo": {
+                        "name": "mana-agent",
+                        "title": "Mana-Agent",
+                        "version": get_version(),
+                    },
+                    "capabilities": {},
                 },
-                "capabilities": {},
-            },
-        )
+            )
+        except CodexUnavailableError as exc:
+            detail = self._stderr[-1] if self._stderr else str(exc)
+            raise CodexUnavailableError(
+                f"Codex app-server failed during initialize: {detail}"
+            ) from exc
         await self.notify("initialized", {})
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

@@ -5,16 +5,19 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mana_agent.config.settings import default_llm_logs_dir
+from mana_agent.config.settings import default_llm_logs_dir, mana_home
 from mana_agent.config.user_config import get_setting
 from mana_agent.utils.io import ensure_dir
+from mana_agent.utils.path_safety import safe_cwd
 
 
 class LlmRunLogger:
     def __init__(self, log_file: str | Path | None = None) -> None:
         configured_path = str(get_setting("MANA_LLM_LOG_FILE", "") or "").strip()
 
-        project_root = Path.cwd().resolve()
+        # Never crash when the process CWD was deleted under a live agent
+        # (SWE-bench worktree thrash, concurrent runners, etc.).
+        project_root = safe_cwd(fallback=mana_home())
         project_name = project_root.name or "project"
         date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 

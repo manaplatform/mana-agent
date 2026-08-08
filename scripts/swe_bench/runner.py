@@ -548,6 +548,74 @@ def worktree_is_dirty(path: Path) -> bool:
     return bool(status.stdout.strip())
 
 
+def _worktree_lock_path(worktrees_dir: Path, instance_id: str) -> Path:
+    return worktrees_dir / f".{_sanitize_id(instance_id)}.lock"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is not owned by us — treat as live.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def worktree_lock_holder(worktrees_dir: Path, instance_id: str) -> int | None:
+    """Return the live PID holding the instance worktree lock, if any."""
+    lock_path = _worktree_lock_path(worktrees_dir, instance_id)
+    if not lock_path.is_file():
+        return None
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        pid = int(raw.splitlines()[0].strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    return pid if _pid_is_alive(pid) else None
+
+
+def acquire_worktree_lock(worktrees_dir: Path, instance_id: str) -> Path:
+    """Create an exclusive lock for one instance worktree.
+
+    Prevents concurrent runner processes from deleting a live worktree under an
+    active mana-agent (which surfaces as getcwd/Codex ENOENT failures).
+    """
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = _worktree_lock_path(worktrees_dir, instance_id)
+    holder = worktree_lock_holder(worktrees_dir, instance_id)
+    if holder is not None and holder != os.getpid():
+        raise SweBenchRunnerError(
+            f"Worktree for {instance_id} is locked by live process pid={holder} "
+            f"({lock_path}). Wait for that run to finish or remove the stale lock."
+        )
+    lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    return lock_path
+
+
+def release_worktree_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        if not lock_path.is_file():
+            return
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        pid = int(raw.splitlines()[0].strip())
+        if pid not in {0, os.getpid()} and _pid_is_alive(pid):
+            return
+        lock_path.unlink(missing_ok=True)
+    except (OSError, ValueError, IndexError):
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def create_isolated_worktree(
     repo_path: Path,
     *,
@@ -559,6 +627,13 @@ def create_isolated_worktree(
     worktrees_dir.mkdir(parents=True, exist_ok=True)
     slug = _sanitize_id(instance_id)
     target = worktrees_dir / slug
+
+    holder = worktree_lock_holder(worktrees_dir, instance_id)
+    if holder is not None and holder != os.getpid():
+        raise SweBenchRunnerError(
+            f"Refusing to recreate worktree for {instance_id}: locked by pid={holder}. "
+            "A concurrent SWE-bench run is still using this checkout."
+        )
 
     if target.exists():
         # Leftover from a prior failed run — remove before recreating.
@@ -578,6 +653,11 @@ def create_isolated_worktree(
 
     if not target.is_dir():
         raise SweBenchRunnerError(f"Worktree path missing after create: {target}")
+    if not (target / ".git").exists():
+        remove_worktree(repo_path, target, force=True)
+        raise SweBenchRunnerError(
+            f"Worktree for {instance_id} is missing .git after checkout: {target}"
+        )
 
     if worktree_is_dirty(target):
         remove_worktree(repo_path, target, force=True)
@@ -600,6 +680,18 @@ def create_isolated_worktree(
 def remove_worktree(repo_path: Path, worktree: Path, *, force: bool = True) -> None:
     if not worktree.exists():
         return
+    # Sibling lock lives next to the worktree directory.
+    lock_path = worktree.parent / f".{worktree.name}.lock"
+    holder = None
+    if lock_path.is_file():
+        try:
+            holder = int(lock_path.read_text(encoding="utf-8").strip().splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            holder = None
+    if holder is not None and holder != os.getpid() and _pid_is_alive(holder):
+        raise SweBenchRunnerError(
+            f"Refusing to remove worktree {worktree}: locked by live pid={holder}"
+        )
     args = ["worktree", "remove"]
     if force:
         args.append("--force")
@@ -796,19 +888,33 @@ def prepare_agent_python_path(*, run_dir: Path, env: dict[str, str]) -> Path:
     Hosts often expose Python 2.7 as ``python`` early on PATH (macOS Frameworks).
     Agents that run ``python -c '...'`` then hit SyntaxError on f-strings and
     derail into empty patches. A tiny shim keeps the rest of PATH intact.
+
+    On POSIX the shim is an executable shell script named ``python`` /
+    ``python3``. On Windows, PATHEXT only resolves ``.exe`` / ``.cmd`` /
+    ``.bat`` (not extensionless scripts), so ``python.cmd`` / ``python3.cmd``
+    are written instead. ``chmod`` execute bits are not meaningful on NTFS the
+    same way and are only applied on POSIX.
     """
     bin_dir = (run_dir / "agent_bin").resolve()
     bin_dir.mkdir(parents=True, exist_ok=True)
     python3 = resolve_python3_executable()
-    for name in ("python", "python3"):
-        shim = bin_dir / name
-        script = (
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            f'exec "{python3}" "$@"\n'
-        )
-        shim.write_text(script, encoding="utf-8")
-        shim.chmod(0o755)
+    if os.name == "nt":
+        # Windows: cmd shims so `python` / `python3` resolve via PATHEXT.
+        for name in ("python", "python3"):
+            shim = bin_dir / f"{name}.cmd"
+            # Quote the interpreter; forward all args with %*.
+            script = f'@echo off\r\n"{python3}" %*\r\n'
+            shim.write_text(script, encoding="utf-8", newline="\r\n")
+    else:
+        for name in ("python", "python3"):
+            shim = bin_dir / name
+            script = (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'exec "{python3}" "$@"\n'
+            )
+            shim.write_text(script, encoding="utf-8")
+            shim.chmod(0o755)
     existing = str(env.get("PATH") or os.environ.get("PATH") or "")
     env["PATH"] = f"{bin_dir}{os.pathsep}{existing}" if existing else str(bin_dir)
     # Hint for tools that honor PYTHON / VIRTUAL_ENV conventions without PATH.
@@ -1291,6 +1397,7 @@ def _wait_with_heartbeat(
     stdout_path: Path,
     stderr_path: Path,
     heartbeat_seconds: int = 30,
+    worktree: Path | None = None,
 ) -> tuple[int, bool]:
     """Wait for proc with periodic progress logs; return (returncode, timed_out).
 
@@ -1312,6 +1419,17 @@ def _wait_with_heartbeat(
             returncode = proc.wait(timeout=wait_for)
             return returncode, False
         except subprocess.TimeoutExpired:
+            if worktree is not None and not worktree.is_dir():
+                LOG.error(
+                    "Worktree disappeared under live mana-agent (pid=%s, path=%s); "
+                    "killing process group to avoid getcwd/Codex hang",
+                    proc.pid,
+                    worktree,
+                )
+                _kill_process_group(proc)
+                return (
+                    proc.returncode if proc.returncode is not None else 125
+                ), False
             elapsed = time.monotonic() - started
             out_size = stdout_path.stat().st_size if stdout_path.exists() else 0
             err_size = stderr_path.stat().st_size if stderr_path.exists() else 0
@@ -1461,6 +1579,7 @@ def run_mana_agent(
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             heartbeat_seconds=30,
+            worktree=worktree,
         )
         if timed_out:
             LOG.error(
@@ -1547,7 +1666,9 @@ def process_instance(
 
     repo_path: Path | None = None
     worktree: Path | None = None
+    worktree_lock: Path | None = None
     try:
+        worktree_lock = acquire_worktree_lock(worktrees_dir, instance_id)
         repo_path = ensure_repo_clone(repo, repos_dir)
         worktree = create_isolated_worktree(
             repo_path,
@@ -1583,6 +1704,11 @@ def process_instance(
             if rc == 124:
                 status = "timeout"
                 error = f"mana-agent exceeded hard timeout of {cfg.timeout_seconds}s"
+            elif rc == 125:
+                status = "agent_error"
+                error = (
+                    f"mana-agent worktree disappeared during the run: {worktree}"
+                )
             elif rc != 0:
                 status = "agent_error"
                 error = f"mana-agent exited with code {rc}"
@@ -1592,10 +1718,14 @@ def process_instance(
                 status = "ok"
                 error = ""
 
-            change_summary = summarize_worktree_changes(worktree)
-            patch, reject_reason = capture_model_patch(
-                worktree, exclude_test_files=cfg.exclude_test_files
-            )
+            if worktree is not None and worktree.is_dir():
+                change_summary = summarize_worktree_changes(worktree)
+                patch, reject_reason = capture_model_patch(
+                    worktree, exclude_test_files=cfg.exclude_test_files
+                )
+            else:
+                change_summary = WorktreeChangeSummary()
+                patch, reject_reason = "", "worktree missing after agent run"
             if reject_reason:
                 status = "destructive_patch"
                 error = reject_reason
@@ -1659,6 +1789,7 @@ def process_instance(
                 remove_worktree(repo_path, worktree, force=True)
             except Exception as cleanup_exc:  # pragma: no cover
                 LOG.warning("Cleanup failed for %s: %s", worktree, cleanup_exc)
+        release_worktree_lock(worktree_lock)
 
 
 def parse_instance_ids(values: Sequence[str] | None) -> list[str]:

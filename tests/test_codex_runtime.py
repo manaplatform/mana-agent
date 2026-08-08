@@ -189,13 +189,22 @@ def test_backend_cleans_runtime_after_app_server_startup_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured_home: Path | None = None
+    captured_cwd: Path | None = None
 
     class FailingClient:
         running = False
 
-        def __init__(self, _command: object, *, environment: dict[str, str], **_kwargs: object) -> None:
-            nonlocal captured_home
+        def __init__(
+            self,
+            _command: object,
+            *,
+            environment: dict[str, str],
+            cwd: object = None,
+            **_kwargs: object,
+        ) -> None:
+            nonlocal captured_home, captured_cwd
             captured_home = Path(environment["CODEX_HOME"])
+            captured_cwd = Path(str(cwd)) if cwd is not None else None
 
         async def start(self) -> None:
             raise OSError("startup failed")
@@ -218,6 +227,43 @@ def test_backend_cleans_runtime_after_app_server_startup_failure(
 
     assert captured_home is not None
     assert not captured_home.exists()
+    assert captured_cwd == tmp_path.resolve()
+
+
+def test_backend_uses_codex_home_cwd_when_repository_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class RecordingClient:
+        running = False
+
+        def __init__(self, _command: object, *, environment: dict[str, str], cwd: object = None, **_kwargs: object) -> None:
+            captured["cwd"] = Path(str(cwd)) if cwd is not None else None
+            captured["home"] = Path(environment["CODEX_HOME"])
+
+        async def start(self) -> None:
+            self.running = True
+
+        async def close(self) -> None:
+            self.running = False
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend.check_codex_health",
+        lambda _settings, _repository: type(
+            "Report", (), {"healthy": True, "executable": "/fake/codex", "errors": []}
+        )(),
+    )
+    monkeypatch.setattr("mana_agent.integrations.codex.backend.AsyncCodexAppServer", RecordingClient)
+    backend = CodexCodingBackend(_settings())
+    missing = tmp_path / "deleted-repo"
+    asyncio.run(backend.start(missing))
+    try:
+        assert captured["cwd"] == captured["home"]
+        assert Path(str(captured["home"])).is_dir()
+    finally:
+        asyncio.run(backend.close())
 
 
 def test_provider_errors_are_actionable_and_credentials_are_redacted() -> None:
