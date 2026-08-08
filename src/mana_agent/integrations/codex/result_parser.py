@@ -7,6 +7,19 @@ from typing import Any
 from mana_agent.coding.models import CodingTask, CodingTaskResult, WorkspaceContext
 
 
+# Codex item types that indicate a repository mutation was attempted.
+_MUTATION_ITEM_TYPES = frozenset(
+    {
+        "fileChange",
+        "file_change",
+        "applyPatch",
+        "apply_patch",
+        "patchApplication",
+        "patch_application",
+    }
+)
+
+
 def parse_codex_result(
     *,
     task: CodingTask,
@@ -25,6 +38,7 @@ def parse_codex_result(
     usage: dict[str, int] | None = None
     status = "completed"
     test_failures: list[str] = []
+    mutation_attempted = False
 
     for notification in notifications:
         method = str(notification.get("method") or "")
@@ -33,6 +47,8 @@ def parse_codex_result(
         item = payload.get("item")
         if isinstance(item, dict):
             item_type = str(item.get("type") or "")
+            if item_type in _MUTATION_ITEM_TYPES:
+                mutation_attempted = True
             command = str(item.get("command") or "").strip()
             if command and command not in commands:
                 commands.append(command)
@@ -75,6 +91,21 @@ def parse_codex_result(
 
     if test_failures:
         warnings.append("Test command failed: " + ", ".join(test_failures))
+
+    # Write-required turns that finish "successfully" with no repository diff are
+    # not complete. This is the SWE-bench empty_patch failure mode when the model
+    # emits free-form pseudo-tool text and never mutates the worktree.
+    if (
+        status == "completed"
+        and task.requires_repository_write
+        and not [path for path in changed_files if str(path).strip()]
+    ):
+        status = "failed"
+        if mutation_attempted:
+            errors.append("mutation_required_but_no_changed_files")
+        else:
+            errors.append("mutation_required_but_no_mutation_tool_attempted")
+
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
     return CodingTaskResult(
         task_id=task.task_id,

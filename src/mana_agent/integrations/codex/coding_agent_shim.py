@@ -457,6 +457,20 @@ class CodexCodingAgentShim:
             "failed": "codex_failed",
             "cancelled": "codex_cancelled",
         }[result.status]
+        # Prefer specific mutation-failure codes over the generic codex_failed
+        # label so full-auto / SWE-bench logs can diagnose empty patches.
+        if result.status == "failed":
+            for err in result.errors:
+                text = str(err or "").strip()
+                for code in (
+                    "mutation_required_but_no_changed_files",
+                    "mutation_required_but_no_mutation_tool_attempted",
+                ):
+                    if text == code or text.startswith(f"{code}:"):
+                        terminal_reason = code
+                        break
+                if terminal_reason != "codex_failed":
+                    break
         answer = result.summary
         if result.status == "failed" and result.errors:
             answer = f"{result.summary} Reason: {result.errors[0]}".strip()

@@ -274,11 +274,23 @@ def convert_responses_request_to_chat(
 
     # DeepSeek V4 on NVIDIA requires chat_template_kwargs; bare reasoning_effort
     # alone can hang, 4xx, or produce empty streams (seen as Codex systemError/410).
+    #
+    # When tools are attached, force thinking off. DeepSeek V4 with
+    # thinking=True + tools routinely emits free-form pseudo-tool text
+    # (DSML / <invoke name="exec_command">) instead of structured tool_calls,
+    # which Codex treats as a completed agentMessage with zero file changes
+    # (SWE-bench empty_patch / status=ok). Mirrors multi-agent compatibility:
+    # tools + chat reasoning is not supported for NVIDIA.
+    effective_effort = mapped or "high"
+    if tools and is_nvidia_deepseek_model(provider=upstream.provider, model=model):
+        effective_effort = "none"
+        # Mark explicit so shaping overrides nested request_overrides defaults.
+        payload["reasoning_effort"] = "none"
     apply_nvidia_chat_completion_shaping(
         payload,
         provider=upstream.provider,
         model=model,
-        default_effort=mapped or "high",
+        default_effort=effective_effort,
     )
 
     # For non-DeepSeek NVIDIA / other bridge hosts still ensure a stable sequence:

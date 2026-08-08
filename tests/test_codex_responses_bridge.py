@@ -114,8 +114,11 @@ def test_responses_to_chat_tools_and_function_outputs() -> None:
     chat = convert_responses_request_to_chat(body, upstream=upstream)
     assert chat["model"] == "deepseek-ai/deepseek-v4-pro"
     # DeepSeek on NVIDIA uses chat_template_kwargs, not bare reasoning_effort.
+    # Tools force thinking off so the model emits structured tool_calls rather
+    # than free-form DSML/invoke pseudo-tool text (SWE-bench empty_patch).
     assert "reasoning_effort" not in chat
-    assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "none"
+    assert chat["chat_template_kwargs"]["thinking"] is False
     assert chat["tools"][0]["function"]["name"] == "shell"
     roles = [message["role"] for message in chat["messages"]]
     assert roles[0] == "system"
@@ -362,6 +365,48 @@ def test_deepseek_v4_flash_default_chat_template_kwargs() -> None:
     )
     assert chat["chat_template_kwargs"]["thinking"] is True
     assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"
+
+
+def test_deepseek_tools_force_thinking_off() -> None:
+    """Regression: tools + thinking produced empty SWE-bench patches.
+
+    With thinking enabled, DeepSeek V4 on NVIDIA often emits free-form
+    pseudo-tool text instead of structured tool_calls. Codex then completes
+    with zero worktree changes (empty_patch / status=ok).
+    """
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
+            "input": "fix the bug",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                    },
+                }
+            ],
+            "reasoning": {"effort": "high"},
+            "stream": True,
+        },
+        upstream=upstream,
+    )
+    assert chat["tools"][0]["function"]["name"] == "shell"
+    assert "reasoning_effort" not in chat
+    assert chat["chat_template_kwargs"] == {
+        "thinking": False,
+        "reasoning_effort": "none",
+    }
 
 
 def test_deepseek_message_sequence_and_max_tokens_clamp() -> None:

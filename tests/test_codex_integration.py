@@ -187,7 +187,9 @@ def test_invalid_backend_decision_stops_safely() -> None:
         )
 
 
-def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path: Path) -> None:
+def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake: _FakeClient | None = None
 
     def factory(command: tuple[str, ...]) -> _FakeClient:
@@ -195,6 +197,11 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path:
         fake = _FakeClient(command)
         return fake
 
+    # Write-required turns require a non-empty diff to complete successfully.
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend._git_changed_files",
+        lambda *args, **kwargs: ["src/app.py"],
+    )
     backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
     result = asyncio.run(backend.execute(_task(), _workspace(tmp_path)))
 
@@ -202,6 +209,7 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path:
     assert result.backend == "codex"
     assert result.tests_run == ["pytest -q"]
     assert result.tests_passed is True
+    assert result.changed_files == ["src/app.py"]
     assert result.thread_id == "thread-1"
     assert fake is not None
     assert [method for method, _params in fake.requests] == ["thread/start", "turn/start"]
@@ -238,7 +246,9 @@ def test_codex_backend_translates_read_only_sandbox_for_protocol(tmp_path: Path)
     assert fake.requests[1][1]["sandbox"] == "read-only"
 
 
-def test_codex_backend_resumes_persisted_thread(tmp_path: Path) -> None:
+def test_codex_backend_resumes_persisted_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake: _FakeClient | None = None
 
     def factory(command: tuple[str, ...]) -> _FakeClient:
@@ -246,6 +256,10 @@ def test_codex_backend_resumes_persisted_thread(tmp_path: Path) -> None:
         fake = _FakeClient(command)
         return fake
 
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend._git_changed_files",
+        lambda *args, **kwargs: ["src/app.py"],
+    )
     backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory, resume_thread_id="thread-1")
     result = asyncio.run(backend.execute(_task(), _workspace(tmp_path)))
 
@@ -276,6 +290,26 @@ def test_codex_shim_failed_payload_retains_backend_error() -> None:
         "Codex task did not complete. Reason: turn/start rejected the sandbox value"
     )
     assert "turn/start rejected the sandbox value" in payload["warnings"]
+
+
+def test_codex_shim_surfaces_mutation_required_terminal_reason() -> None:
+    result = CodingTaskResult(
+        task_id="empty-patch-task",
+        worker_id="codex-test",
+        backend="codex",
+        status="failed",
+        summary="Codex task did not complete.",
+        errors=["mutation_required_but_no_mutation_tool_attempted"],
+    )
+    payload = CodexCodingAgentShim._result_payload(
+        result,
+        events=[],
+        workspace_path="/tmp/worktree",
+    )
+    assert payload["auto_execute_terminal_reason"] == (
+        "mutation_required_but_no_mutation_tool_attempted"
+    )
+    assert payload["status"] == "failed"
 
 
 class _ShimBackend:
@@ -603,7 +637,9 @@ def test_failed_test_command_is_not_reported_as_passing(tmp_path: Path) -> None:
         worker_id="worker-1",
         thread_id="thread-1",
         turn_id="turn-1",
-        changed_files=[],
+        # Write-required turn still needs a diff for overall success; supply one
+        # so this test isolates the tests_passed warning path.
+        changed_files=["src/app.py"],
         notifications=[
             {
                 "method": "item/completed",
@@ -622,6 +658,58 @@ def test_failed_test_command_is_not_reported_as_passing(tmp_path: Path) -> None:
     assert result.status == "completed"
     assert result.tests_passed is False
     assert result.warnings == ["Test command failed: pytest -q"]
+
+
+def test_write_required_turn_without_changed_files_fails(tmp_path: Path) -> None:
+    """Regression for SWE-bench empty_patch: completed + zero diff is not success."""
+    result = parse_codex_result(
+        task=_task(),
+        workspace=_workspace(tmp_path),
+        worker_id="worker-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        changed_files=[],
+        notifications=[
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "text": '<invoke name="exec_command"><cmd>ls</cmd></invoke>',
+                    }
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    assert result.errors == ["mutation_required_but_no_mutation_tool_attempted"]
+    assert result.tests_passed is False
+
+
+def test_write_required_turn_with_mutation_item_but_no_diff_fails(tmp_path: Path) -> None:
+    result = parse_codex_result(
+        task=_task(),
+        workspace=_workspace(tmp_path),
+        worker_id="worker-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        changed_files=[],
+        notifications=[
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "applyPatch",
+                        "status": "completed",
+                    }
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    assert result.errors == ["mutation_required_but_no_changed_files"]
 
 
 def test_interrupted_turn_is_cancelled(tmp_path: Path) -> None:

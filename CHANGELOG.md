@@ -4,6 +4,30 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed SWE-bench `empty_patch` when Codex + NVIDIA DeepSeek completed with
+  zero worktree changes (`astropy__astropy-12907` logs).
+  - Symptom: `Empty model_patch … (status=ok)` after a single-shot coding
+    turn; session answer was free-form DSML/`<invoke name="exec_command">`
+    text with no structured tool_calls and no file edits.
+  - Cause 1: Codex responses bridge left DeepSeek
+    `chat_template_kwargs.thinking=True` while tools were attached. With
+    thinking + tools, DeepSeek V4 often invents pseudo-tool syntax as plain
+    text instead of OpenAI-style `tool_calls`, so Codex finishes an
+    agentMessage-only turn as success.
+  - Cause 2: `parse_codex_result` treated any non-failed Codex turn as
+    `completed` even when `requires_repository_write` and `changed_files`
+    were empty, so mana-agent exited 0 and the harness wrote an empty
+    prediction.
+  - Fix: when tools are present, force DeepSeek thinking off
+    (`reasoning_effort=none`) in the responses bridge (parity with multi-
+    agent tools+reasoning compatibility); fail write-required Codex turns
+    with no repository diff using
+    `mutation_required_but_no_mutation_tool_attempted` /
+    `mutation_required_but_no_changed_files`, surfaced on
+    `auto_execute_terminal_reason`.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_codex_integration.py tests/test_result_parser_provider_errors.py -q`
+
 - Fixed `test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations`
   routing key mismatch.
   - Cause: multi-line fixture prompt ended with `\n`, while
