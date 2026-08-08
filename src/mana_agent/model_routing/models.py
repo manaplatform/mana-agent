@@ -45,6 +45,25 @@ def level_value(value: Complexity | RiskLevel) -> float:
 _SECRET_KEY_MARKERS = ("key", "token", "secret", "password", "credential", "authorization", "cookie")
 _SECRET_VALUE_RE = re.compile(r"(?i)(bearer\s+\S+|\b(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{8,})")
 
+# Routing/profile bookkeeping stored on ModelProfile.configuration. These must
+# never be forwarded as Chat Completions / Responses body fields — providers
+# such as NVIDIA reject unknown parameters (HTTP 400).
+INTERNAL_MODEL_CONFIGURATION_KEYS = frozenset(
+    {
+        "source_levels",
+        "source_level",
+        "capability_source",
+        "token_profile_confidence",
+    }
+)
+
+# Client/SDK-only keys that are not OpenAI-compatible HTTP body parameters.
+NON_HTTP_MODEL_CONFIGURATION_KEYS = frozenset(
+    {
+        "model_kwargs",  # LangChain ChatOpenAI init, not chat/completions JSON
+    }
+)
+
 
 def sanitize_configuration(value: Any) -> Any:
     if isinstance(value, dict):
@@ -58,6 +77,36 @@ def sanitize_configuration(value: Any) -> Any:
     if isinstance(value, str):
         return _SECRET_VALUE_RE.sub("[REDACTED]", value)
     return value
+
+
+def provider_request_overrides_from_configuration(
+    configuration: dict[str, Any] | None,
+    *,
+    for_http_body: bool = True,
+) -> dict[str, Any]:
+    """Extract provider request fields from model configuration.
+
+    Routing stores internal metadata (source_levels, capability_source, …)
+    alongside optional request fields (temperature, extra_body, …). Only the
+    latter may be sent upstream. Secrets are stripped.
+
+    When ``for_http_body`` is True (Codex Responses bridge / raw HTTP), also
+    drop SDK-only keys such as ``model_kwargs``.
+    """
+    if not isinstance(configuration, dict) or not configuration:
+        return {}
+    blocked = set(INTERNAL_MODEL_CONFIGURATION_KEYS)
+    if for_http_body:
+        blocked |= NON_HTTP_MODEL_CONFIGURATION_KEYS
+    result: dict[str, Any] = {}
+    for key, value in configuration.items():
+        name = str(key)
+        if name in blocked:
+            continue
+        if any(marker in name.lower() for marker in _SECRET_KEY_MARKERS):
+            continue
+        result[name] = value
+    return result
 
 
 @dataclass(frozen=True, slots=True)

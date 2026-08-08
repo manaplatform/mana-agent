@@ -398,3 +398,43 @@ def test_deepseek_message_sequence_and_max_tokens_clamp() -> None:
     assert chat["max_tokens"] <= 65_536
     assert chat["chat_template_kwargs"]["reasoning_effort"] == "max"
     assert "reasoning_effort" not in chat or chat.get("reasoning_effort") is None
+
+
+def test_bridge_strips_routing_metadata_from_request_overrides() -> None:
+    """Routing profile bookkeeping must not become NVIDIA Chat Completions params.
+
+    Regression: model_configuration (source_levels, capability_source, …) was
+    copied wholesale into bridge request_overrides, causing NVIDIA HTTP 400:
+    Unsupported parameter(s): source_levels, capability_source.
+    """
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash",
+        request_overrides={
+            "source_levels": ("pinned", "MODEL_LEVEL_1_FAST_TOOL"),
+            "capability_source": "maintained-token-limits",
+            "token_profile_confidence": "high",
+            "model_kwargs": {"unused": True},
+            "temperature": 0.2,
+            "reasoning_effort": "high",
+        },
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash",
+            "input": "hello",
+            "stream": False,
+        },
+        upstream=upstream,
+    )
+    assert "source_levels" not in chat
+    assert "capability_source" not in chat
+    assert "token_profile_confidence" not in chat
+    assert "model_kwargs" not in chat
+    assert chat["temperature"] == 0.2
+    # DeepSeek still shaped correctly; bare reasoning_effort is not forwarded.
+    assert chat["chat_template_kwargs"]["thinking"] is True
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"

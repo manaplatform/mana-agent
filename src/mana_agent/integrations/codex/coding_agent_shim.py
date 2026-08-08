@@ -21,7 +21,13 @@ from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
 from mana_agent.evals.recorder import record_current
-from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
+from mana_agent.model_routing.models import (
+    Complexity,
+    LatencyClass,
+    RiskLevel,
+    RoutingRequest,
+    provider_request_overrides_from_configuration,
+)
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
 from mana_agent.workspaces.preparation import validate_prepared_repository
 
@@ -242,7 +248,13 @@ class CodexCodingAgentShim:
             self.routing_authority.settings,
             provider=routing_decision.provider,
         )
-        request_overrides = dict(getattr(routing_decision, "model_configuration", None) or {})
+        # model_configuration mixes routing metadata (source_levels, …) with
+        # optional request fields. Only provider-safe request fields may become
+        # bridge overrides — NVIDIA rejects unknown body parameters with HTTP 400.
+        request_overrides = provider_request_overrides_from_configuration(
+            getattr(routing_decision, "model_configuration", None),
+            for_http_body=True,
+        )
         self.codex_settings = self.codex_settings.model_copy(
             update={
                 "model": routing_decision.selected_model,

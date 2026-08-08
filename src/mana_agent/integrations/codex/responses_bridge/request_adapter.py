@@ -12,6 +12,7 @@ from mana_agent.config.nvidia_model_requests import (
     normalize_nvidia_deepseek_effort,
 )
 from mana_agent.integrations.codex.responses_bridge.models import BridgeUpstreamConfig
+from mana_agent.model_routing.models import provider_request_overrides_from_configuration
 
 
 def normalize_reasoning_effort(
@@ -236,8 +237,14 @@ def convert_responses_request_to_chat(
         # Stash for NVIDIA DeepSeek shaping below.
         payload["reasoning_effort"] = mapped
 
-    # Optional provider/model overrides (never secrets).
-    for key, value in (upstream.request_overrides or {}).items():
+    # Optional provider/model overrides (never secrets / never routing metadata).
+    # Defense in depth: even if a caller stashes profile bookkeeping on
+    # request_overrides, strip keys providers reject (e.g. source_levels).
+    safe_overrides = provider_request_overrides_from_configuration(
+        dict(upstream.request_overrides or {}),
+        for_http_body=True,
+    )
+    for key, value in safe_overrides.items():
         if key in {"api_key", "authorization", "Authorization"}:
             continue
         if key == "extra_body" and isinstance(value, dict):

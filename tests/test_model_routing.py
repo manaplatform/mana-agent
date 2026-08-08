@@ -14,6 +14,7 @@ from mana_agent.model_routing.history import InMemoryRoutingHistory, JsonlRoutin
 from mana_agent.model_routing.models import (
     Complexity, LatencyClass, ModelProfile, RepositoryMetadata, RiskLevel,
     RoutingBudgets, RoutingFailure, RoutingOutcome, RoutingRequest,
+    provider_request_overrides_from_configuration,
 )
 from mana_agent.model_routing.profiles import configured_profiles, profiles_from_legacy_configuration
 from mana_agent.model_routing.router import ModelRouter
@@ -239,6 +240,28 @@ def test_candidates_are_isolated_judged_from_normalized_evidence_and_loser_clean
     assert result.cleaned_candidates == ("candidate-1",)
     assert judge.received[0]["diff"].startswith("diff --git")
     assert "patch_bytes" in judge.received[0]
+
+
+def test_provider_request_overrides_drop_routing_metadata() -> None:
+    overrides = provider_request_overrides_from_configuration(
+        {
+            "source_levels": ("pinned", "MODEL_LEVEL_1_FAST_TOOL"),
+            "capability_source": "maintained-token-limits",
+            "token_profile_confidence": "high",
+            "temperature": 0.1,
+            "extra_body": {"foo": 1},
+            "model_kwargs": {"bar": 2},
+            "api_key": "must-not-forward",
+        },
+        for_http_body=True,
+    )
+    assert overrides == {"temperature": 0.1, "extra_body": {"foo": 1}}
+    # LangChain path may keep model_kwargs; HTTP body path must not.
+    client_side = provider_request_overrides_from_configuration(
+        {"model_kwargs": {"bar": 2}, "source_levels": ("pinned",)},
+        for_http_body=False,
+    )
+    assert client_side == {"model_kwargs": {"bar": 2}}
 
 
 def test_history_persistence_redacts_secrets(tmp_path: Path) -> None:

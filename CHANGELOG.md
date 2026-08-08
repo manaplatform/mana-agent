@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed Codex Responses bridge sending routing profile metadata to NVIDIA,
+  which caused HTTP 400 `Unsupported parameter(s): source_levels, capability_source`
+  (and empty SWE-bench patches / `codex_failed`).
+  - `ModelProfile.configuration` may contain bookkeeping fields
+    (`source_levels`, `capability_source`, `token_profile_confidence`) alongside
+    optional request fields; only the latter are forwarded as request overrides.
+  - Coding-agent Codex path and the bridge request adapter both strip internal
+    keys (and SDK-only `model_kwargs`) before building Chat Completions bodies.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_model_routing.py -k "routing_metadata or provider_request_overrides or deepseek"`
+
 - SWE-bench runner now uses `~/.mana/config.toml` for provider/model when CLI
   flags are omitted.
   - No `--model` → `MANA_PRIMARY_MODEL` / `OPENAI_CHAT_MODEL` / `LLM_MODEL`.
