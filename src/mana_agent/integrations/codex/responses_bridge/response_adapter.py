@@ -117,16 +117,24 @@ def responses_error_body(
     code: str,
     status_code: int,
     response_id: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    error: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "type": "bridge_error" if status_code >= 500 else "invalid_request_error",
+    }
+    if extra:
+        # Attach structured classification for Codex/Mana diagnostics.
+        # Values must already be secret-redacted by the caller.
+        for key, value in extra.items():
+            if value is not None and key not in error:
+                error[key] = value
     return {
         "id": response_id or _new_id("resp"),
         "object": "response",
         "status": "failed",
-        "error": {
-            "code": code,
-            "message": message,
-            "type": "bridge_error" if status_code >= 500 else "invalid_request_error",
-        },
+        "error": error,
         "output": [],
     }
 

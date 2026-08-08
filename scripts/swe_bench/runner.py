@@ -8,15 +8,17 @@ JSONL prediction per instance in the official harness format:
 
     {
       "instance_id": "...",
-      "model_name_or_path": "mana-agent__gpt-4o-mini",
+      "model_name_or_path": "mana-agent__nvidia__deepseek-ai__deepseek-v4-flash",
       "agent_name": "mana-agent",
+      "agent_provider": "nvidia",
+      "agent_model": "deepseek-ai/deepseek-v4-flash",
       "model_patch": "..."
     }
 
 ``model_name_or_path`` identifies the **run system** (agent + LLM). The harness
 uses it for report filenames. ``agent_name`` is the coding agent (always
-``mana-agent`` unless overridden). The LLM id alone is not sufficient when
-comparing multiple agents that share a model.
+``mana-agent`` unless overridden). Provider/model default from
+``~/.mana/config.toml`` when ``--provider`` / ``--model`` are omitted.
 
 Instance selection (explicit contract):
 
@@ -53,12 +55,15 @@ DEFAULT_DATASET = "princeton-nlp/SWE-bench_Verified"
 DEFAULT_SPLIT = "test"
 # Coding agent identity written into every prediction row.
 DEFAULT_AGENT_NAME = "mana-agent"
-# Cheap/fast default LLM for smoke and cost-controlled initial runs.
+# Last-resort LLM only when ~/.mana/config.toml has no model and CLI omits --model.
 DEFAULT_AGENT_MODEL = "gpt-4o-mini"
+DEFAULT_AGENT_PROVIDER = "openai"
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_OUTPUT = "predictions.jsonl"
 DEFAULT_WORK_DIR = ".swe-bench"
 GITHUB_URL = "https://github.com/{repo}.git"
+# Mana provider ids that may appear as a MANA_PRIMARY_MODEL prefix.
+_KNOWN_MANA_PROVIDERS = frozenset({"openai", "nvidia", "openrouter", "custom"})
 
 SAFE_INSTANCE_ID = re.compile(r"[^A-Za-z0-9._-]+")
 # Paths that look like test code. SWE-bench applies the official ``test_patch``
@@ -102,6 +107,17 @@ class InstanceResult:
     empty_patch: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorInferenceDefaults:
+    """Model/provider resolved from the operator's Mana home config."""
+
+    provider: str
+    model: str
+    primary_model: str
+    config_path: str
+    source: str
+
+
 @dataclass
 class RunnerConfig:
     dataset_name: str = DEFAULT_DATASET
@@ -111,9 +127,13 @@ class RunnerConfig:
     output: Path = Path(DEFAULT_OUTPUT)
     work_dir: Path = Path(DEFAULT_WORK_DIR)
     agent_name: str = DEFAULT_AGENT_NAME
+    agent_provider: str = DEFAULT_AGENT_PROVIDER
     agent_model: str = DEFAULT_AGENT_MODEL
     # None → derive from agent_name + agent_model at write time.
     model_name_or_path: str | None = None
+    # Human-readable origin for logs (config path, cli, built-in default).
+    model_source: str = "built-in"
+    provider_source: str = "built-in"
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     mana_bin: str | None = None
     retain_worktrees: bool = False
@@ -143,10 +163,171 @@ def resolve_model_name_or_path(cfg: RunnerConfig) -> str:
     explicit = (cfg.model_name_or_path or "").strip()
     if explicit:
         return sanitize_model_token(explicit)
+    # Include provider for multi-host operators so nvidia/deepseek… does not
+    # collide with an OpenAI run of the same bare model id.
+    model_label = cfg.agent_model
+    provider = str(cfg.agent_provider or "").strip().lower()
+    if provider and provider not in {"", "openai"} and not model_label.lower().startswith(
+        f"{provider}/"
+    ):
+        model_label = f"{provider}/{model_label}"
     return compose_model_name_or_path(
         agent_name=cfg.agent_name,
-        agent_model=cfg.agent_model,
+        agent_model=model_label,
     )
+
+
+def operator_mana_home() -> Path:
+    """Return the operator Mana home used for credentials and default model."""
+    configured = str(os.getenv("MANA_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".mana").resolve()
+
+
+def _load_toml_mapping(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+            import tomli as tomllib  # type: ignore
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        LOG.warning("Could not parse Mana config %s: %s", path, exc)
+        return {}
+
+
+def _strip_provider_prefix(model: str, provider: str) -> str:
+    """Return upstream model id without a leading Mana provider segment."""
+    text = str(model or "").strip()
+    provider_id = str(provider or "").strip().lower()
+    if not text:
+        return ""
+    if provider_id and text.lower().startswith(provider_id + "/"):
+        return text[len(provider_id) + 1 :]
+    head, _, rest = text.partition("/")
+    if rest and head.lower() in _KNOWN_MANA_PROVIDERS:
+        # e.g. nvidia/deepseek-ai/... when provider was already resolved.
+        if provider_id and head.lower() == provider_id:
+            return rest
+    return text
+
+
+def load_operator_inference_defaults(
+    mana_home: Path | None = None,
+) -> OperatorInferenceDefaults:
+    """Read provider + model defaults from ``~/.mana/config.toml`` (or MANA_HOME)."""
+    home = mana_home if mana_home is not None else operator_mana_home()
+    config_path = home / "config.toml"
+    data = _load_toml_mapping(config_path)
+
+    provider = str(data.get("MANA_AI_PROVIDER") or "").strip().lower()
+    primary = str(data.get("MANA_PRIMARY_MODEL") or "").strip()
+    chat = str(
+        data.get("OPENAI_CHAT_MODEL")
+        or data.get("LLM_MODEL")
+        or data.get("MANA_MODEL_CODING")
+        or ""
+    ).strip()
+    # Role aliases like MODEL_LEVEL_2_CODING are not resolved here; prefer concrete ids.
+    if chat.startswith("MODEL_LEVEL_"):
+        chat = str(
+            data.get(chat)
+            or data.get("OPENAI_CHAT_MODEL")
+            or data.get("LLM_MODEL")
+            or ""
+        ).strip()
+
+    if not provider and primary:
+        head = primary.split("/", 1)[0].strip().lower()
+        if head in _KNOWN_MANA_PROVIDERS:
+            provider = head
+    if not provider:
+        provider = DEFAULT_AGENT_PROVIDER
+
+    model = ""
+    source = f"missing ({config_path})"
+    if primary:
+        model = _strip_provider_prefix(primary, provider)
+        source = f"MANA_PRIMARY_MODEL in {config_path}"
+    if not model and chat:
+        model = _strip_provider_prefix(chat, provider)
+        source = f"OPENAI_CHAT_MODEL/LLM_MODEL in {config_path}"
+    if not model:
+        model = DEFAULT_AGENT_MODEL
+        source = f"built-in default ({DEFAULT_AGENT_MODEL}); no model in {config_path}"
+
+    primary_model = primary or f"{provider}/{model}"
+    return OperatorInferenceDefaults(
+        provider=provider,
+        model=model,
+        primary_model=primary_model,
+        config_path=str(config_path),
+        source=source,
+    )
+
+
+def resolve_agent_inference(
+    *,
+    cli_model: str | None,
+    cli_provider: str | None,
+    mana_home: Path | None = None,
+) -> tuple[str, str, str, str]:
+    """Resolve ``(provider, model, provider_source, model_source)``.
+
+    Policy:
+    * Provider defaults to ``MANA_AI_PROVIDER`` in ``~/.mana/config.toml``.
+    * Model defaults to ``MANA_PRIMARY_MODEL`` / chat model in that config.
+    * CLI ``--model`` overrides only the model id; provider still comes from
+      config (or CLI ``--provider`` when set).
+    * CLI ``--provider`` overrides the configured provider.
+    """
+    defaults = load_operator_inference_defaults(mana_home)
+
+    cli_provider_text = str(cli_provider or "").strip().lower()
+    if cli_provider_text:
+        provider = cli_provider_text
+        provider_source = "cli --provider"
+    else:
+        provider = defaults.provider
+        provider_source = f"MANA_AI_PROVIDER in {defaults.config_path}"
+
+    cli_model_text = str(cli_model or "").strip()
+    if cli_model_text:
+        # Allow provider-qualified CLI models (nvidia/deepseek-ai/...).
+        head, _, rest = cli_model_text.partition("/")
+        if rest and head.lower() in _KNOWN_MANA_PROVIDERS:
+            if not cli_provider_text:
+                provider = head.lower()
+                provider_source = "cli --model prefix"
+            model = rest if head.lower() == provider else cli_model_text
+            if head.lower() != provider:
+                # Different known prefix than selected provider: keep full string
+                # as the upstream model id (OpenRouter-style openai/gpt-...).
+                model = cli_model_text
+            else:
+                model = rest
+        else:
+            model = cli_model_text
+        model_source = "cli --model"
+    else:
+        model_source = defaults.source
+        # Prefer primary (may be provider-qualified) under the selected provider.
+        candidate = defaults.primary_model or defaults.model
+        model = _strip_provider_prefix(candidate, provider) or defaults.model
+
+    if not model:
+        model = DEFAULT_AGENT_MODEL
+        model_source = f"built-in default ({DEFAULT_AGENT_MODEL})"
+    if not provider:
+        provider = DEFAULT_AGENT_PROVIDER
+        provider_source = "built-in default"
+
+    return provider, model, provider_source, model_source
 
 
 def _sanitize_id(instance_id: str) -> str:
@@ -570,6 +751,7 @@ def prediction_record(
     agent_name: str,
     model_patch: str,
     agent_model: str | None = None,
+    agent_provider: str | None = None,
 ) -> dict[str, str]:
     """Build one harness prediction row with agent + model identity fields."""
     record: dict[str, str] = {
@@ -583,6 +765,8 @@ def prediction_record(
     if agent_model:
         # Optional metadata for operators; not required by the harness.
         record["agent_model"] = agent_model
+    if agent_provider:
+        record["agent_provider"] = agent_provider
     return record
 
 
@@ -679,9 +863,15 @@ def _upsert_toml_keys(path: Path, updates: dict[str, str | bool | int]) -> None:
     path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 
 
-def _benchmark_config_overrides(agent_model: str) -> dict[str, str | bool | int]:
+def _benchmark_config_overrides(
+    agent_model: str,
+    *,
+    agent_provider: str = DEFAULT_AGENT_PROVIDER,
+) -> dict[str, str | bool | int]:
     """Settings that must be forced for reliable non-interactive SWE-bench runs."""
     model = str(agent_model).strip()
+    provider = str(agent_provider or DEFAULT_AGENT_PROVIDER).strip().lower() or DEFAULT_AGENT_PROVIDER
+    primary = model if model.lower().startswith(provider + "/") else f"{provider}/{model}"
     return {
         # External supermemory (or other hosted memory) serializes many HTTP
         # calls during chat startup and can look like a hang; use local memory.
@@ -691,11 +881,12 @@ def _benchmark_config_overrides(agent_model: str) -> dict[str, str | bool | int]
         "MANA_MEMORY_PROVIDER": "mana",
         "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
         "MANA_MEMORY_SECRET_REF": "",
-        # Pin every common model role so operator MODEL_LEVEL_* / MANA_MODEL_*
-        # preferences cannot rewrite the measured model mid-run.
+        # Pin provider + every common model role so operator MODEL_LEVEL_* /
+        # MANA_MODEL_* preferences cannot rewrite the measured model mid-run.
+        "MANA_AI_PROVIDER": provider,
         "OPENAI_CHAT_MODEL": model,
         "LLM_MODEL": model,
-        "MANA_PRIMARY_MODEL": model,
+        "MANA_PRIMARY_MODEL": primary,
         "OPENAI_TOOL_WORKER_MODEL": model,
         "OPENAI_CODING_PLANNER_MODEL": model,
         "MODEL_LEVEL_1_FAST_TOOL": model,
@@ -713,24 +904,24 @@ def _benchmark_config_overrides(agent_model: str) -> dict[str, str | bool | int]
     }
 
 
-def _seed_isolated_mana_home(target: Path, *, agent_model: str) -> Path:
+def _seed_isolated_mana_home(
+    target: Path,
+    *,
+    agent_model: str,
+    agent_provider: str = DEFAULT_AGENT_PROVIDER,
+) -> Path:
     """Create a per-instance MANA_HOME that still has user credentials/config.
 
     Isolation keeps run/session state out of the operator's primary ~/.mana while
     copying config.toml and secrets.toml so non-interactive chat can authenticate.
 
     Mana loads explicit file settings over process env, so this also rewrites the
-    isolated config for internal memory and the forced agent model.
+    isolated config for internal memory, the selected provider, and the model.
     """
     import shutil
 
     target.mkdir(parents=True, exist_ok=True)
-    configured = str(os.getenv("MANA_HOME") or "").strip()
-    source = (
-        Path(configured).expanduser().resolve()
-        if configured
-        else (Path.home() / ".mana").resolve()
-    )
+    source = operator_mana_home()
     if source.is_dir() and source != target.resolve():
         for name in ("config.toml", "secrets.toml"):
             src = source / name
@@ -742,7 +933,10 @@ def _seed_isolated_mana_home(target: Path, *, agent_model: str) -> Path:
                     LOG.warning("Could not copy %s into isolated MANA_HOME: %s", src, exc)
     config_path = target / "config.toml"
     try:
-        _upsert_toml_keys(config_path, _benchmark_config_overrides(agent_model))
+        _upsert_toml_keys(
+            config_path,
+            _benchmark_config_overrides(agent_model, agent_provider=agent_provider),
+        )
     except OSError as exc:
         LOG.warning("Could not apply SWE-bench isolation overrides to %s: %s", config_path, exc)
     return target
@@ -788,6 +982,7 @@ def run_mana_agent(
     worktree: Path,
     prompt: str,
     agent_model: str,
+    agent_provider: str = DEFAULT_AGENT_PROVIDER,
     timeout_seconds: int,
     mana_argv: Sequence[str],
     run_dir: Path,
@@ -805,14 +1000,20 @@ def run_mana_agent(
     prompt_path.write_text(prompt, encoding="utf-8")
 
     # Isolate mana state for this instance to avoid cross-run contamination, but
-    # seed credentials from the operator's real MANA_HOME / ~/.mana and force
-    # internal memory + pinned models in the isolated config file.
-    mana_home = _seed_isolated_mana_home(run_dir / "mana_home", agent_model=agent_model)
+    # seed credentials from the operator's real MANA_HOME / ~/.mana and pin
+    # provider + model + internal memory in the isolated config file.
+    mana_home = _seed_isolated_mana_home(
+        run_dir / "mana_home",
+        agent_model=agent_model,
+        agent_provider=agent_provider,
+    )
 
     env = os.environ.copy()
     env["MANA_HOME"] = str(mana_home)
     # Also set env (fills gaps if a key is missing from the rewritten config).
-    for key, value in _benchmark_config_overrides(agent_model).items():
+    for key, value in _benchmark_config_overrides(
+        agent_model, agent_provider=agent_provider
+    ).items():
         if isinstance(value, bool):
             env[key] = "true" if value else "false"
         else:
@@ -854,8 +1055,9 @@ def run_mana_agent(
     ]
 
     LOG.info(
-        "Starting mana-agent (timeout=%ss, model=%s, root=%s, mana_home=%s)",
+        "Starting mana-agent (timeout=%ss, provider=%s, model=%s, root=%s, mana_home=%s)",
         timeout_seconds,
+        agent_provider,
         agent_model,
         worktree,
         mana_home,
@@ -1006,6 +1208,7 @@ def process_instance(
                     worktree=worktree,
                     prompt=prompt,
                     agent_model=cfg.agent_model,
+                    agent_provider=cfg.agent_provider,
                     timeout_seconds=cfg.timeout_seconds,
                     mana_argv=mana_argv,
                     run_dir=run_dir,
@@ -1247,11 +1450,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_AGENT_MODEL,
+        default=None,
         help=(
-            "LLM id forced for mana-agent during the run "
-            f"(default: {DEFAULT_AGENT_MODEL}, cheap/fast for smoke). "
+            "LLM id for mana-agent during the run. When omitted, uses "
+            "MANA_PRIMARY_MODEL / OPENAI_CHAT_MODEL / LLM_MODEL from "
+            "~/.mana/config.toml (or $MANA_HOME/config.toml). "
             "Also used to compose default model_name_or_path."
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help=(
+            "Inference provider for mana-agent (e.g. nvidia, openai, openrouter). "
+            "When omitted, uses MANA_AI_PROVIDER from ~/.mana/config.toml. "
+            "If you pass --model without --provider, the configured provider is used."
         ),
     )
     parser.add_argument(
@@ -1267,8 +1480,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Value written into predictions as model_name_or_path. "
-            f"Default: {{agent_name}}__{{model}} "
-            f"(e.g. {DEFAULT_AGENT_NAME}__{DEFAULT_AGENT_MODEL}). "
+            f"Default: {{agent_name}}__{{provider}}__{{model}} when provider is not "
+            f"openai, else {{agent_name}}__{{model}}. "
             "Do not set this to the agent name alone."
         ),
     )
@@ -1351,7 +1564,16 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
     model_name_or_path = resolve_model_name_or_path(cfg)
     LOG.info("mana-agent argv: %s", mana_argv)
     LOG.info("Agent name: %s", cfg.agent_name)
-    LOG.info("Forced agent model (LLM): %s", cfg.agent_model)
+    LOG.info(
+        "Agent provider: %s (source: %s)",
+        cfg.agent_provider,
+        cfg.provider_source,
+    )
+    LOG.info(
+        "Agent model (LLM): %s (source: %s)",
+        cfg.agent_model,
+        cfg.model_source,
+    )
     LOG.info("Predictions model_name_or_path: %s", model_name_or_path)
     LOG.info("Exclude test files from model_patch: %s", cfg.exclude_test_files)
     LOG.info("Per-instance timeout: %ss", cfg.timeout_seconds)
@@ -1385,6 +1607,7 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
             model_name_or_path=model_name_or_path,
             agent_name=cfg.agent_name,
             agent_model=cfg.agent_model,
+            agent_provider=cfg.agent_provider,
             model_patch=result.model_patch,
         )
         write_prediction_line(output, record)
@@ -1399,6 +1622,7 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
                     "patch_chars": len(result.model_patch or ""),
                     "worktree": result.worktree,
                     "agent_name": cfg.agent_name,
+                    "agent_provider": cfg.agent_provider,
                     "agent_model": cfg.agent_model,
                     "model_name_or_path": model_name_or_path,
                 },
@@ -1429,13 +1653,16 @@ def run(cfg: RunnerConfig) -> list[InstanceResult]:
         results,
         output,
         agent_name=cfg.agent_name,
+        agent_provider=cfg.agent_provider,
         agent_model=cfg.agent_model,
         model_name_or_path=model_name_or_path,
     )
     LOG.info("Wrote %d prediction(s) to %s", len(results), output)
     LOG.info(
-        "Prediction identity: agent_name=%s agent_model=%s model_name_or_path=%s",
+        "Prediction identity: agent_name=%s agent_provider=%s agent_model=%s "
+        "model_name_or_path=%s",
         cfg.agent_name,
+        cfg.agent_provider,
         cfg.agent_model,
         model_name_or_path,
     )
@@ -1448,6 +1675,7 @@ def _write_run_summary(
     output: Path,
     *,
     agent_name: str,
+    agent_provider: str,
     agent_model: str,
     model_name_or_path: str,
 ) -> None:
@@ -1455,6 +1683,7 @@ def _write_run_summary(
     summary = {
         "predictions_path": str(output),
         "agent_name": agent_name,
+        "agent_provider": agent_provider,
         "agent_model": agent_model,
         "model_name_or_path": model_name_or_path,
         "count": len(rows),
@@ -1521,6 +1750,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if instances else 2
 
     explicit_model_name = getattr(args, "model_name_or_path", None)
+    provider, model, provider_source, model_source = resolve_agent_inference(
+        cli_model=getattr(args, "model", None),
+        cli_provider=getattr(args, "provider", None),
+    )
     cfg = RunnerConfig(
         dataset_name=str(args.dataset),
         split=str(args.split),
@@ -1529,7 +1762,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         output=Path(args.output),
         work_dir=Path(args.work_dir),
         agent_name=str(args.agent_name).strip() or DEFAULT_AGENT_NAME,
-        agent_model=str(args.model).strip() or DEFAULT_AGENT_MODEL,
+        agent_provider=provider,
+        agent_model=model,
+        model_source=model_source,
+        provider_source=provider_source,
         model_name_or_path=(
             str(explicit_model_name).strip() if explicit_model_name else None
         ),

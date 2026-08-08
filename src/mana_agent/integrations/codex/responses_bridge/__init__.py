@@ -11,11 +11,15 @@ from mana_agent.integrations.codex.responses_bridge.lifecycle import (
 from mana_agent.integrations.codex.responses_bridge.models import (
     BridgeUpstreamConfig,
     ResponsesBridgeError,
+    UpstreamProviderError,
 )
+from mana_agent.integrations.codex.responses_bridge.server import BRIDGE_TRANSPORT_MAX_ATTEMPTS
 
 __all__ = [
+    "BRIDGE_TRANSPORT_MAX_ATTEMPTS",
     "BridgeUpstreamConfig",
     "ResponsesBridgeError",
     "ResponsesBridgeHandle",
     "ResponsesBridgeManager",
+    "UpstreamProviderError",
 ]

@@ -234,11 +234,45 @@ class AsyncCodexAppServer:
     def _format_provider_error(self, value: str) -> str:
         detail = self._redact(value)
         lowered = detail.lower()
+        # Prefer structured classification signals from the Mana Responses bridge.
+        if "failure_kind" in lowered or "retryable" in lowered:
+            return detail
+        if (
+            "rejected the request" in lowered
+            or "invalid_request" in lowered
+            or "http 400" in lowered
+            or "(http 400)" in lowered
+        ):
+            return (
+                f"{self._provider_name} rejected the request (HTTP 400). Not retrying. "
+                f"Detail: {detail}"
+            )
+        if "http 410" in lowered or "model has been retired" in lowered or "model_retired" in lowered:
+            return (
+                f"The selected {self._provider_name} model has been retired (HTTP 410). "
+                f"Refresh the model catalog and choose another model. Detail: {detail}"
+            )
         if "401" in lowered or "unauthorized" in lowered or "authentication" in lowered:
-            return f"Provider authentication failed for {self._provider_name}. Codex detail: {detail}"
+            return (
+                f"Provider authentication failed for {self._provider_name}. Not retrying. "
+                f"Codex detail: {detail}"
+            )
+        if "403" in lowered or "permission denied" in lowered:
+            return (
+                f"Provider permission denied for {self._provider_name}. Not retrying. "
+                f"Codex detail: {detail}"
+            )
         if "model_not_found" in lowered or "model not found" in lowered or "does not exist" in lowered:
             return (
                 f"Provider {self._provider_name} could not find configured model {self._model}. "
+                f"Not retrying. Codex detail: {detail}"
+            )
+        if "rate limit" in lowered or "http 429" in lowered:
+            return f"{self._provider_name} rate limit reached. Codex detail: {detail}"
+        if "responseStreamDisconnected" in detail or "stream disconnected" in lowered:
+            # Surface upstream diagnostic without implying a blind reconnect is correct.
+            return (
+                f"{self._provider_name} stream ended before completion. "
                 f"Codex detail: {detail}"
             )
         return f"Codex JSON-RPC error: {detail}"

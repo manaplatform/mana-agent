@@ -50,12 +50,32 @@ class ChatToResponsesStreamAdapter:
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
     completed: bool = False
+    # Progress flags used to decide safe recovery after mid-stream failures.
+    received_stream_data: bool = False
+    tool_calls_started: bool = False
+    open_emitted: bool = False
 
     def _next_sequence(self) -> int:
         self.sequence += 1
         return self.sequence
 
+    @property
+    def tool_side_effects(self) -> bool:
+        """True when tool-call items were emitted (arguments may have been executed)."""
+        return self.tool_calls_started or bool(self.tool_calls)
+
+    def progress_snapshot(self) -> dict[str, Any]:
+        return {
+            "received_stream_data": self.received_stream_data,
+            "tool_side_effects": self.tool_side_effects,
+            "text_chars": sum(len(part) for part in self.text_parts),
+            "tool_call_count": len(self.tool_calls),
+            "open_emitted": self.open_emitted,
+            "completed": self.completed,
+        }
+
     def open_events(self) -> list[str]:
+        self.open_emitted = True
         seq = self._next_sequence()
         created = {
             "response": {
@@ -133,15 +153,18 @@ class ChatToResponsesStreamAdapter:
                     )
                 ),
             }
+            self.received_stream_data = True
         choices = chunk.get("choices") if isinstance(chunk.get("choices"), list) else []
         if not choices:
             return events
         choice = choices[0] if isinstance(choices[0], dict) else {}
         if choice.get("finish_reason"):
             self.finish_reason = str(choice.get("finish_reason"))
+            self.received_stream_data = True
         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
         content = delta.get("content")
         if content:
+            self.received_stream_data = True
             events.extend(self._ensure_message_item())
             text = str(content)
             self.text_parts.append(text)
@@ -161,6 +184,8 @@ class ChatToResponsesStreamAdapter:
         for tool_delta in tool_calls:
             if not isinstance(tool_delta, dict):
                 continue
+            self.received_stream_data = True
+            self.tool_calls_started = True
             index = int(tool_delta.get("index") or 0)
             state = self._tool_state(index)
             if tool_delta.get("id"):

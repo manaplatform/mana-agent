@@ -113,7 +113,9 @@ def test_responses_to_chat_tools_and_function_outputs() -> None:
     }
     chat = convert_responses_request_to_chat(body, upstream=upstream)
     assert chat["model"] == "deepseek-ai/deepseek-v4-pro"
-    assert chat["reasoning_effort"] == "high"
+    # DeepSeek on NVIDIA uses chat_template_kwargs, not bare reasoning_effort.
+    assert "reasoning_effort" not in chat
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"
     assert chat["tools"][0]["function"]["name"] == "shell"
     roles = [message["role"] for message in chat["messages"]]
     assert roles[0] == "system"
@@ -360,3 +362,39 @@ def test_deepseek_v4_flash_default_chat_template_kwargs() -> None:
     )
     assert chat["chat_template_kwargs"]["thinking"] is True
     assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"
+
+
+def test_deepseek_message_sequence_and_max_tokens_clamp() -> None:
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-pro",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-pro",
+            "instructions": "system first",
+            "input": [
+                {"type": "message", "role": "user", "content": "hello"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_x",
+                    "output": "tool-out",
+                },
+            ],
+            "max_output_tokens": 999_999,
+            "reasoning": {"effort": "xhigh"},
+            "stream": False,
+        },
+        upstream=upstream,
+    )
+    roles = [message["role"] for message in chat["messages"]]
+    assert roles[0] == "system"
+    assert chat["messages"][0]["content"] == "system first"
+    tool = next(message for message in chat["messages"] if message["role"] == "tool")
+    assert tool["tool_call_id"] == "call_x"
+    assert chat["max_tokens"] <= 65_536
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "max"
+    assert "reasoning_effort" not in chat or chat.get("reasoning_effort") is None

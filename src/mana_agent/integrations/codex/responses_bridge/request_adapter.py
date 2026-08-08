@@ -8,6 +8,7 @@ from typing import Any
 from mana_agent.config.nvidia_model_requests import (
     apply_nvidia_chat_completion_shaping,
     is_nvidia_deepseek_model,
+    normalize_nvidia_chat_messages,
     normalize_nvidia_deepseek_effort,
 )
 from mana_agent.integrations.codex.responses_bridge.models import BridgeUpstreamConfig
@@ -272,7 +273,33 @@ def convert_responses_request_to_chat(
         model=model,
         default_effort=mapped or "high",
     )
+
+    # For non-DeepSeek NVIDIA / other bridge hosts still ensure a stable sequence:
+    # system first, tool results retain tool_call_id.
+    if isinstance(payload.get("messages"), list):
+        if is_nvidia_deepseek_model(provider=upstream.provider, model=model):
+            # Already normalized inside apply_nvidia_chat_completion_shaping.
+            pass
+        elif str(upstream.provider or "").strip().lower() == "nvidia":
+            payload["messages"] = normalize_nvidia_chat_messages(payload["messages"])
+        else:
+            payload["messages"] = _ensure_system_first(payload["messages"])
     return payload
+
+
+def _ensure_system_first(messages: list[Any]) -> list[dict[str, Any]]:
+    """Move leading system messages to the front without other rewrites."""
+    systems: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for raw in messages:
+        if not isinstance(raw, dict):
+            continue
+        message = dict(raw)
+        if str(message.get("role") or "").strip().lower() == "system":
+            systems.append(message)
+        else:
+            rest.append(message)
+    return systems + rest
 
 
 __all__ = [

@@ -191,6 +191,13 @@ class CodexRuntimeConfigBuilder:
         else:
             # RESPONSES_BRIDGE: Codex talks only to the local bridge; the real
             # upstream credential never enters the Codex config or child argv.
+            #
+            # Retry ownership for the bridge path:
+            # * Bridge transport: exactly one upstream attempt per Codex request
+            #   (no nested HTTP retries that multiply with Codex).
+            # * Codex stream reconnect: only after HTTP 200 SSE accepted.
+            # * Invalid request / auth / model retired: no retry at any layer.
+            # * Task-level recovery: Resilient Execution Supervisor only.
             upstream = BridgeUpstreamConfig(
                 provider=provider,
                 display_name=settings.provider_display_name or provider,
@@ -199,6 +206,7 @@ class CodexRuntimeConfigBuilder:
                 model=model,
                 headers=dict(settings.http_headers or {}),
                 request_overrides=dict(settings.model_request_overrides or {}),
+                transport_max_attempts=1,
             )
             if not upstream.base_url:
                 raise CodexConfigurationError(
@@ -240,7 +248,15 @@ class CodexRuntimeConfigBuilder:
                 else {}
             ),
             query_params=query_params,
-            request_max_retries=settings.request_max_retries,
+            # For the bridge path, keep Codex request retries for genuine
+            # loopback/connect failures only. Non-retryable upstream HTTP
+            # statuses are returned as proper Responses errors (not stream
+            # disconnects), so Codex must not reconnect on HTTP 400/401/410.
+            request_max_retries=(
+                min(int(settings.request_max_retries), 2)
+                if transport is CodexTransport.RESPONSES_BRIDGE
+                else settings.request_max_retries
+            ),
             stream_max_retries=settings.stream_max_retries,
             stream_idle_timeout_ms=settings.stream_idle_timeout_ms,
             transport=transport,

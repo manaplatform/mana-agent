@@ -34,8 +34,14 @@ API credentials still come from your normal Mana config (`~/.mana/config.toml` /
 secrets), copied into an **isolated per-instance `MANA_HOME`**. The runner then
 rewrites that isolated config so:
 
-* `--model` (default `gpt-4o-mini`) pins **all** model roles (Mana file config
-  wins over process env, so env-only overrides are not enough).
+* **Provider** defaults to `MANA_AI_PROVIDER` from `~/.mana/config.toml` when
+  `--provider` is omitted.
+* **Model** defaults to `MANA_PRIMARY_MODEL` / `OPENAI_CHAT_MODEL` /
+  `LLM_MODEL` from that same config when `--model` is omitted.
+* If you pass `--model` without `--provider`, the **configured provider** is
+  still used (so NVIDIA models keep using NVIDIA credentials).
+* The resolved provider + model pin **all** model roles in the isolated config
+  (Mana file config wins over process env, so env-only overrides are not enough).
 * `MANA_MEMORY_MODE=internal` — external supermemory is disabled for the run so
   chat startup does not block on remote memory HTTP.
 * Chat is launched non-interactively (`--no-interactive --no-tui`), without a
@@ -49,10 +55,10 @@ From the repository root.
 **Full Verified suite** (no instance ids entered → load every id from SWE-bench):
 
 ```bash
+# Uses MANA_AI_PROVIDER + MANA_PRIMARY_MODEL from ~/.mana/config.toml
 python scripts/swe_bench/runner.py \
   --output predictions.jsonl \
-  --timeout 600 \
-  --model gpt-4o-mini
+  --timeout 600
 ```
 
 **List all dataset ids** without running the agent:
@@ -64,11 +70,12 @@ python scripts/swe_bench/runner.py --list-instance-ids
 **Specific ids only** (entered via flag or file):
 
 ```bash
+# Explicit model; provider still taken from ~/.mana/config.toml unless --provider is set
 python scripts/swe_bench/runner.py \
   --instance-ids astropy__astropy-12907,django__django-11099 \
   --output predictions.jsonl \
   --timeout 600 \
-  --model gpt-4o-mini
+  --model deepseek-ai/deepseek-v4-flash-0731
 ```
 
 **Smoke / cost-limited batch** (still loads all when no ids, then caps):
@@ -100,9 +107,10 @@ Field contract:
 | Field | Required by harness | Value |
 | --- | --- | --- |
 | `instance_id` | yes | SWE-bench Verified instance id |
-| `model_name_or_path` | yes | **System id for reports**, default `{agent_name}__{model}` (e.g. `mana-agent__gpt-4o-mini`). **Not** the agent name alone. Override with `--model-name-or-path`. |
+| `model_name_or_path` | yes | **System id for reports**, default `{agent_name}__{model}` (provider-qualified when not OpenAI). **Not** the agent name alone. Override with `--model-name-or-path`. |
 | `agent_name` | no (Mana always writes it) | Coding agent identity, default `mana-agent` (`--agent-name`) |
-| `agent_model` | no (Mana always writes it) | LLM id used for the run (`--model`) |
+| `agent_provider` | no (Mana always writes it) | Provider from `--provider` or `MANA_AI_PROVIDER` in `~/.mana/config.toml` |
+| `agent_model` | no (Mana always writes it) | LLM id from `--model` or config (`MANA_PRIMARY_MODEL` / chat model) |
 | `model_patch` | yes | Unified diff string (may be empty if the agent produced no changes) |
 
 **Naming rule:** do not put `mana-agent` in `model_name_or_path` by itself. That field is used by the harness / `sb-cli` as the system label for the run. Use agent + model (`mana-agent__gpt-5.6-luna`) or an explicit custom label via `--model-name-or-path`.
@@ -120,7 +128,8 @@ Field contract:
 | `--limit N` | Run at most N instances **after** id selection |
 | `--output PATH` | Predictions path (default `predictions.jsonl`) |
 | `--timeout SECONDS` | Hard per-instance wall-clock timeout (default `600`) |
-| `--model ID` | Forced LLM for mana-agent (default `gpt-4o-mini`); also used in default `model_name_or_path` |
+| `--model ID` | LLM for mana-agent; **omit to use `~/.mana/config.toml`** |
+| `--provider ID` | Inference provider; **omit to use `MANA_AI_PROVIDER` from config** |
 | `--agent-name NAME` | Agent identity written as `agent_name` (default `mana-agent`) |
 | `--model-name-or-path NAME` | Override harness system id (default `{agent}__{model}`) |
 | `--keep-test-files` | Keep test-file hunks in `model_patch` (off by default) |
@@ -141,22 +150,22 @@ python scripts/swe_bench/runner.py \
   --output predictions.jsonl
 ```
 
-**Single real instance** (cheap model, hard timeout):
+**Single real instance** (uses configured provider/model when flags omitted):
 
 ```bash
 python scripts/swe_bench/runner.py \
   --instance-ids astropy__astropy-12907 \
-  --model gpt-4o-mini \
   --timeout 600 \
   --output predictions.jsonl
 ```
 
-**Small batch**:
+**Small batch** (explicit cheap model; provider still from config unless `--provider`):
 
 ```bash
 python scripts/swe_bench/runner.py \
   --limit 3 \
   --model gpt-4o-mini \
+  --provider openai \
   --timeout 600 \
   --output predictions.jsonl
 ```
@@ -284,7 +293,7 @@ Inspect harness output under the report path printed by the harness
 | mana-agent hang | Heartbeat every ~30s; kill process group at `--timeout`; status `timeout`; empty or partial patch |
 | mana-agent non-zero exit | Status `agent_error`; still capture any partial patch |
 | Empty patch after success | Status `empty_patch`; still write a valid JSONL line |
-| Operator external memory / model pins | Isolated `MANA_HOME` rewritten to internal memory + forced `--model` |
+| Operator external memory / model pins | Isolated `MANA_HOME` rewritten to internal memory + resolved provider/model |
 | Large-repo semantic index | Not built synchronously (`--no-auto-index-missing`; no `--ephemeral-index`) |
 | Missing `datasets` package | Exit with install instructions |
 
@@ -294,7 +303,8 @@ Inspect harness output under the report path printed by the harness
   `--instance-ids` are entered; it is slow/expensive and needs disk + API budget.
   Leaderboard packaging/upload is still manual via the official harness / sb-cli.
 - Does not install project-specific conda/test environments; the agent only edits the tree. Official tests run later inside harness Docker images.
-- Default model is intentionally **cheap/fast** (`gpt-4o-mini`); quality will be lower than production coding models.
+- Default model comes from `~/.mana/config.toml`. If the config has no model, the
+  runner falls back to `gpt-4o-mini` only as a last resort.
 - Single-shot chat invocation: no multi-trial pass@k, no ensemble voting.
 - Repo clones can be large; disk under `--work-dir` grows with unique repositories.
 - Network required for HuggingFace dataset load and GitHub clones.

@@ -4,6 +4,39 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- SWE-bench runner now uses `~/.mana/config.toml` for provider/model when CLI
+  flags are omitted.
+  - No `--model` → `MANA_PRIMARY_MODEL` / `OPENAI_CHAT_MODEL` / `LLM_MODEL`.
+  - No `--provider` → `MANA_AI_PROVIDER` (e.g. `nvidia`).
+  - `--model` alone still uses the **configured** provider and credentials.
+  - Isolated per-instance `MANA_HOME` pins both `MANA_AI_PROVIDER` and model roles.
+  - Logs report provider/model **source** (config vs CLI vs built-in fallback).
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py`
+
+- Fixed Codex + NVIDIA reconnect loop for non-retryable provider errors
+  (HTTP 400 surfaced as `responseStreamDisconnected` / `Reconnecting... 1/5`).
+  - Introduced shared typed `ProviderFailure` / `ProviderFailureKind` classification
+    with retry ownership (`transport` / `codex_stream` / `supervisor` / `none`),
+    full-jitter backoff, `Retry-After` parsing, structured telemetry, and a
+    per-provider+endpoint circuit breaker that ignores 400/401/403/404/410/422.
+  - Responses bridge now opens the upstream Chat Completions request and inspects
+    HTTP status **before** returning `HTTP 200 text/event-stream`. Non-2xx
+    (including NVIDIA HTTP 400) is returned as a proper Responses error with
+    `retryable=false` and a sanitized upstream body snippet — Codex must not
+    reconnect.
+  - After SSE has started, mid-stream failures emit `response.failed` cleanly
+    instead of letting raw exceptions close the socket.
+  - Bridge transport attempts are fixed at 1 (no nested retry multiplication with
+    Codex). Bridge-path Codex `request_max_retries` is capped at 2 for loopback
+    connect failures only.
+  - NVIDIA DeepSeek request shaping clamps `max_tokens`, normalizes message
+    sequence (system first, tool_call_id retained), and maps unsupported
+    reasoning efforts (`xhigh`/`minimal`/`medium`) to NIM values (`none`/`high`/`max`).
+  - Model retired / not found (410/404) invalidates the cached model catalog.
+  - User verification required:
+    `python -m pytest tests/test_provider_failure.py tests/test_codex_responses_bridge_recovery.py tests/test_codex_responses_bridge.py tests/test_codex_runtime.py tests/test_nvidia_provider.py`
+
 - Fixed NVIDIA DeepSeek direct-chat TypeError:
   `Completions.create() got an unexpected keyword argument 'chat_template_kwargs'`.
   - LangChain / OpenAI Python SDK path now nests NIM `chat_template_kwargs`
