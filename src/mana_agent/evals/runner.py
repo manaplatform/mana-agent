@@ -312,7 +312,17 @@ class EvalRunner:
         payload = decision.to_dict() if callable(getattr(decision, "to_dict", None)) else (
             decision if isinstance(decision, dict) else {}
         )
-        entry_route = str((getattr(result, "payload", {}) or {}).get("entry_route") or payload.get("route") or "")
+        result_payload = getattr(result, "payload", {}) or {}
+        # Prefer the validated entry route over internal execution paths such as
+        # "auto_chat" that process_chat_turn may write into payload["route"].
+        internal_paths = {"auto_chat", "classic", "agent-tools"}
+        raw_payload_route = str(result_payload.get("route") or "").strip()
+        entry_route = str(
+            result_payload.get("entry_route")
+            or (raw_payload_route if raw_payload_route and raw_payload_route not in internal_paths else "")
+            or payload.get("route")
+            or ""
+        ).strip()
         if not payload and not entry_route:
             return None
         return RouteRecord(
@@ -323,7 +333,7 @@ class EvalRunner:
             execution_path=entry_route,
             selected_tools=list(payload.get("selected_tools") or []),
             tool_inputs=dict(payload.get("tool_inputs") or {}),
-            lane_selection=str((getattr(result, "payload", {}) or {}).get("lane_id") or ""),
+            lane_selection=str(result_payload.get("lane_id") or ""),
             confidence=float(payload.get("confidence") or 0.0),
             reasoning_summary=str(payload.get("reasoning_summary") or payload.get("reason") or ""),
             flow_action=str(payload.get("flow_action") or "none"),

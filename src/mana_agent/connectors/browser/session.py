@@ -25,7 +25,9 @@ SYSTEM_CHROMIUM_CANDIDATES = (
 )
 
 
-def _chromium_executable(managed: str | Path) -> Path | None:
+def _chromium_executable(managed: str | Path | None) -> Path | None:
+    if managed is None or str(managed).strip() == "":
+        return next((path for path in SYSTEM_CHROMIUM_CANDIDATES if path.is_file()), None)
     managed_path = Path(managed)
     if managed_path.is_file():
         return managed_path

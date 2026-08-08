@@ -163,6 +163,21 @@ def test_pinned_profiles_ignore_operator_model_levels(monkeypatch) -> None:
     assert pinned[0].model_id == "gpt-4.1-mini"
     assert pinned[0].context_window >= 100_000
     assert pinned[0].source_level == "pinned"
+    # Pinned models must satisfy interactive entry routing (head_decision).
+    assert pinned[0].latency_class is LatencyClass.INTERACTIVE
+    router = ModelRouter(pinned)
+    decision = router.route(
+        RoutingRequest(
+            role="head_decision",
+            task_description="Classify the gateway entry route for: fixture",
+            task_type="routing",
+            complexity=Complexity.MEDIUM,
+            risk=RiskLevel.MEDIUM,
+            required_capabilities=frozenset({"structured_output"}),
+            latency_requirement=LatencyClass.INTERACTIVE,
+        )
+    )
+    assert decision.selected_model == "gpt-4.1-mini"
 
 
 def test_legacy_profiles_apply_maintained_token_limits_for_known_models(monkeypatch) -> None:

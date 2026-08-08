@@ -105,6 +105,11 @@ def profiles_for_pinned_models(
 
     Does not read operator MODEL_LEVEL_* settings, so eval variants measure the
     models they declare rather than the host machine preferences.
+
+    A pinned model is the sole candidate for every gateway role, including
+    interactive entry routing (``LatencyClass.INTERACTIVE``). Profiles therefore
+    keep high-reasoning quality evidence while advertising interactive latency
+    so head_decision / entry routes are not rejected before execution.
     """
     from mana_agent.config.model_catalog import maintained_token_limits
 
@@ -112,6 +117,9 @@ def profiles_for_pinned_models(
     for value in models:
         model = str(value or "").strip()
         if model:
+            # Register as both fast-tool and high-reasoning so a single pinned
+            # model can satisfy interactive entry routing and coding/planning.
+            configured.append(("MODEL_LEVEL_1_FAST_TOOL", model))
             configured.append(("MODEL_LEVEL_3_HIGH_REASONING", model))
     if not configured:
         return ()
@@ -125,7 +133,23 @@ def profiles_for_pinned_models(
     profiles: list[ModelProfile] = []
     for (provider, model_id), levels in sorted(levels_by_model.items()):
         strongest = max(levels, key=lambda item: _LEVELS_INDEX[item])
-        reliability, logical_cost, latency, reasoning = _LEVEL_METADATA[strongest]
+        reliability, logical_cost, _latency, reasoning = _LEVEL_METADATA[strongest]
+        # Same multi-level rule as profiles_from_legacy_configuration: when a
+        # model also serves the fast-tool level, keep interactive latency so
+        # gateway entry routing (INTERACTIVE requirement) can select it.
+        latency = (
+            LatencyClass.INTERACTIVE
+            if "MODEL_LEVEL_1_FAST_TOOL" in levels
+            else _LEVEL_METADATA[strongest][2]
+        )
+        # Union reasoning settings and benchmarks across assigned levels.
+        reasoning_settings: set[str] = set()
+        benchmarks: dict[str, float] = {}
+        for level in levels:
+            reasoning_settings |= set(_LEVEL_METADATA[level][3])
+            benchmarks.update(_LEVEL_BENCHMARKS.get(level, {}))
+        if not reasoning_settings:
+            reasoning_settings = set(reasoning)
         maintained = maintained_token_limits(provider, model_id)
         window = int(maintained[0] if maintained else context_window)
         output = int(maintained[1] if maintained else max_output_tokens)
@@ -135,16 +159,16 @@ def profiles_for_pinned_models(
             model_id=model_id,
             supported_roles=_ALL_ROLES,
             supported_tools=frozenset({"*"}),
-            reasoning_settings=reasoning,
+            reasoning_settings=frozenset(reasoning_settings),
             context_window=window,
             max_output_tokens=output,
             latency_class=latency,
             logical_cost_per_1k_tokens=logical_cost,
             reliability_score=reliability,
-            benchmark_scores=dict(_LEVEL_BENCHMARKS[strongest]),
+            benchmark_scores=benchmarks or dict(_LEVEL_BENCHMARKS[strongest]),
             source_level="pinned",
             configuration={
-                "source_levels": ("pinned",),
+                "source_levels": ("pinned", *sorted(set(levels))),
                 "token_profile_confidence": "high" if maintained else "low",
                 "capability_source": (
                     "maintained-token-limits" if maintained else "configured-unknown-model-policy"

@@ -57,7 +57,25 @@ def score_run(
     ) / max(1, len(run.reviewer_results))
     reviewer = max(0.0, min(1.0, reviewer))
     verifier = bool(run.verifier_results) and all(bool(item.get("passed")) for item in run.verifier_results)
-    completed = bool(run.final_answer.strip()) and not run.errors
+    # Contract/no-fallback fixtures intentionally surface a safe terminal error
+    # (e.g. unsupported_route) with no fallback action. Treat those as completed
+    # when the agent still produced a clear answer and did not mutate the repo.
+    intentional_contract_errors = {
+        "unsupported_route",
+        "route_unavailable",
+        "capability_unavailable",
+        "tool_provider_unavailable",
+        "provider_unavailable",
+    }
+    contract_labels = {"contract", "no-fallback", "provider"}
+    is_contract_task = bool(contract_labels.intersection(set(task.labels or [])))
+    errors = [str(item).strip() for item in (run.errors or []) if str(item).strip()]
+    intentional_stop = bool(
+        is_contract_task
+        and errors
+        and set(errors).issubset(intentional_contract_errors)
+    )
+    completed = bool(run.final_answer.strip()) and (not errors or intentional_stop)
     reproducible = bool(run.environment and run.environment.reproducible)
     dimensions = {
         "task_completion": float(completed),

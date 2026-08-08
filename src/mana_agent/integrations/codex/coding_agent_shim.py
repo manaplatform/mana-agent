@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -30,6 +31,29 @@ if TYPE_CHECKING:
 
 BackendFactory = Callable[[], CodexCodingBackend]
 WorkspaceManagerFactory = Callable[[], WorkspaceManager]
+
+
+def _run_async(coro: Any) -> Any:
+    """Run a coroutine from sync code even when a parent event loop is active."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    result: list[Any] = []
+    failure: list[BaseException] = []
+
+    def _collect() -> None:
+        try:
+            result.append(asyncio.run(coro))
+        except BaseException as exc:  # re-raised on the caller thread
+            failure.append(exc)
+
+    thread = threading.Thread(target=_collect, daemon=True)
+    thread.start()
+    thread.join()
+    if failure:
+        raise failure[0]
+    return result[0]
 
 
 class CodexCodingAgentShim:
@@ -329,7 +353,7 @@ class CodexCodingAgentShim:
                 await backend.close()
 
         try:
-            result = asyncio.run(run())
+            result = _run_async(run())
         except Exception as exc:
             record_current("codex.turn.failed", {"task_id": task_id, "error_type": type(exc).__name__, "error": str(exc)})
             if manager is not None:

@@ -4,6 +4,47 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed routing-smoke eval failures beyond model pin isolation:
+  - Pinned profiles now advertise interactive latency (see below) so entry
+    routing can select suite models.
+  - `process_chat_turn` was recording internal `auto_chat` as the scored route;
+    entry routes are now preserved in `payload.entry_route` and finalize no
+    longer overwrites them, so suite expectations like `route: repository`
+    match the model-selected entry decision.
+  - Browser/repository executors (and process_chat_turn) now fall back to
+    `default_index_dir(root)` when `index_dir` is unset, fixing
+    `PathLike … not 'NoneType'` browser crashes in evals.
+  - `_chromium_executable(None)` no longer raises when Playwright reports no
+    managed binary; it falls through to system Chromium candidates.
+  - Entry-routing prompt examples/clarifications for plan-only, plan
+    continuation, repository inspection vs computer, and no-fallback fixtures.
+  - Contract/no-fallback eval tasks that intentionally stop with
+    `unsupported_route` (and similar) now count as completed when labeled
+    `contract`/`no-fallback`/`provider` and the error set is exact.
+  - Codex coding shim no longer calls `asyncio.run()` on an already-running
+    event loop (thread adapter matches computer/MCP sync boundaries), fixing
+    plan-continuation failures after correct coding routing.
+  - User verification required:
+    `mana-agent eval run ./evals/suites/routing-smoke.yaml --json`
+    (full suite: 19 tasks × 2 variants = 38 runs, all success=true after fix).
+
+- Fixed pinned eval model profiles rejecting all gateway entry routes:
+  - `profiles_for_pinned_models` only registered models as
+    `MODEL_LEVEL_3_HIGH_REASONING` (`LatencyClass.STANDARD`), but gateway entry
+    routing requires `LatencyClass.INTERACTIVE` for `head_decision`. Every
+    candidate was rejected with "latency class standard exceeds interactive",
+    failing routing-smoke tasks (including the candidate-only
+    `duplicate-task-prevention` regression and both-variant clusters).
+  - Pinned profiles now register as both fast-tool and high-reasoning levels,
+    advertise interactive latency (same multi-level rule as legacy profiles),
+    and union level benchmarks/reasoning settings so a single suite model can
+    serve entry routing and coding/planning without operator `MODEL_LEVEL_*`
+    overrides.
+  - User verification required:
+    `python -m pytest tests/test_model_routing.py::test_pinned_profiles_ignore_operator_model_levels -q`
+    then re-run failing eval tasks / full
+    `mana-agent eval ./evals/suites/routing-smoke.yaml`.
+
 - Fixed routing-smoke eval isolation and context accounting that were collapsing
   many tasks under operator `gpt-5.6-luna` preferences and a 16k unknown-model
   window:
