@@ -205,19 +205,34 @@ python scripts/swe_bench/runner.py \
    * The issue prompt tells the agent to prefer source edits, use `python3`,
      and not derail on package-import failures for uninstalled checkouts.
 
-   **Shell tip for multi-line commands**
+   **Shell tip for multi-line commands (critical)**
+
+   If the log says `Per-instance timeout: 600s (source: built-in default)`,
+   **your flags never reached the process**. Common zsh paste mistake:
 
    ```bash
-   # Correct — backslash continues the line, or put flags on one line:
+   # WRONG — first line runs alone with defaults; --timeout is dropped
+   python scripts/swe_bench/runner.py
+     --timeout 0 \
+     --output predictions.jsonl
+
+   # CORRECT — one line
+   python scripts/swe_bench/runner.py --timeout 0 --output predictions.jsonl
+
+   # CORRECT — continued lines (backslash after runner.py)
    python scripts/swe_bench/runner.py \
      --timeout 0 \
      --output predictions.jsonl
 
-   # Wrong — runs with defaults; shell then tries to execute --timeout as a command (exit 127):
-   python scripts/swe_bench/runner.py
-     --timeout 0 \
-     --output predictions.jsonl
+   # CORRECT — env (no multi-line flag risk)
+   MANA_SWE_BENCH_TIMEOUT=0 python scripts/swe_bench/runner.py --output predictions.jsonl
+
+   # CORRECT — local file (.swe-bench/runner.toml: timeout = 0)
+   # CORRECT — wrapper
+   bash scripts/swe_bench/run_unlimited.sh
    ```
+
+   The runner logs `Process argv: ...` at startup so you can verify flags.
 5. Capture `git add -A` + `git diff --cached` as `model_patch`, then **drop
    test-file hunks** by default so grading does not fail on test edits.
    Mass-delete-only trees (many deletions, zero modifications) are **not**

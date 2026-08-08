@@ -114,7 +114,7 @@ def test_benchmark_overrides_pin_provider_and_model() -> None:
     assert overrides["MANA_CODEX_TASK_TIMEOUT_SECONDS"] == 3600
 
 
-def test_resolve_runner_timeout_cli_env_and_unlimited() -> None:
+def test_resolve_runner_timeout_cli_env_and_unlimited(tmp_path: Path) -> None:
     seconds, source = resolve_runner_timeout_seconds(999999999)
     assert seconds == 999999999
     assert source == "cli --timeout"
@@ -130,9 +130,15 @@ def test_resolve_runner_timeout_cli_env_and_unlimited() -> None:
     assert seconds == 7200
     assert "MANA_SWE_BENCH_TIMEOUT" in source
 
-    seconds, source = resolve_runner_timeout_seconds(None, env={})
+    seconds, source = resolve_runner_timeout_seconds(None, env={}, work_dir=tmp_path)
     assert seconds == 600
     assert "built-in" in source
+
+    # File config under work-dir (shell-safe alternative to multi-line --timeout).
+    (tmp_path / "runner.toml").write_text("timeout = 0\n", encoding="utf-8")
+    seconds, source = resolve_runner_timeout_seconds(None, env={}, work_dir=tmp_path)
+    assert seconds == 0
+    assert "runner.toml" in source
 
 
 def test_disable_nested_computer_control_for_isolation(tmp_path: Path) -> None:

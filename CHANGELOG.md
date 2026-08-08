@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Hardened SWE-bench timeout configuration against multi-line shell flag drops.
+  - Logs `Process argv` at startup so missing `--timeout` is obvious.
+  - Warns loudly when falling back to the built-in 600s default.
+  - Timeout priority: CLI → `MANA_SWE_BENCH_TIMEOUT` / `SWE_BENCH_TIMEOUT` →
+    `.swe-bench/runner.toml` / `runner.env` → 600s default.
+  - Added `scripts/swe_bench/run_unlimited.sh` and default
+    `.swe-bench/runner.toml` with `timeout = 0`.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py -k timeout`
+
 - Fixed SWE-bench timeout + bloated auto-chat tool surface for coding runs.
   - Gateway/chat paths no longer hard-cap agent timeouts at 600s
     (`min(..., 600)`), so runner `--timeout` / `--agent-timeout-seconds`

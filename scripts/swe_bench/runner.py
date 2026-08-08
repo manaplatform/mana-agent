@@ -994,19 +994,71 @@ def _upsert_toml_keys(path: Path, updates: dict[str, str | bool | int]) -> None:
     path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 
 
+def _parse_timeout_int(raw: str, *, label: str) -> int:
+    try:
+        return int(str(raw).strip())
+    except ValueError as exc:
+        raise SweBenchRunnerError(
+            f"Invalid {label}={raw!r}; expected integer seconds (0 = unlimited)."
+        ) from exc
+
+
+def load_runner_file_timeout(work_dir: Path) -> tuple[int, str] | None:
+    """Optional timeout from ``<work-dir>/runner.toml`` or ``runner.env``.
+
+    runner.toml example::
+
+        timeout = 0
+
+    runner.env example::
+
+        MANA_SWE_BENCH_TIMEOUT=0
+    """
+    toml_path = work_dir / "runner.toml"
+    if toml_path.is_file():
+        data = _load_toml_mapping(toml_path)
+        if "timeout" in data and data["timeout"] is not None:
+            return int(data["timeout"]), f"file {toml_path}"
+        # Allow nested [runner] timeout = ...
+        nested = data.get("runner")
+        if isinstance(nested, dict) and nested.get("timeout") is not None:
+            return int(nested["timeout"]), f"file {toml_path} [runner]"
+
+    env_path = work_dir / "runner.env"
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, value = stripped.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key in _TIMEOUT_ENV_KEYS or key == "TIMEOUT":
+                return _parse_timeout_int(value, label=f"{env_path}:{key}"), f"file {env_path}"
+    return None
+
+
 def resolve_runner_timeout_seconds(
     cli_timeout: int | None,
     *,
     env: dict[str, str] | None = None,
+    work_dir: Path | None = None,
 ) -> tuple[int, str]:
-    """Resolve per-instance wall-clock timeout from CLI, env, or default.
+    """Resolve per-instance wall-clock timeout.
+
+    Priority: CLI ``--timeout`` → process env → ``<work-dir>/runner.toml|env`` →
+    built-in default (600).
 
     Returns ``(seconds, source)``. ``seconds <= 0`` means unlimited (no kill).
 
-    Important shell note: multi-line invocations need a trailing ``\\`` after
-    ``runner.py`` or flags on the same line. Otherwise the shell runs the
-    script with defaults and treats ``--timeout`` as a separate command
-    (exit 127).
+    **Shell trap:** multi-line commands need a trailing ``\\`` after ``runner.py``
+    **or put all flags on one line**. Without that, the shell runs the script
+    with defaults and drops ``--timeout`` (you will see
+    ``source: built-in default``). Prefer::
+
+        MANA_SWE_BENCH_TIMEOUT=0 python scripts/swe_bench/runner.py --output predictions.jsonl
+
+    or write ``timeout = 0`` into ``.swe-bench/runner.toml``.
     """
     if cli_timeout is not None:
         return int(cli_timeout), "cli --timeout"
@@ -1015,12 +1067,11 @@ def resolve_runner_timeout_seconds(
         raw = str(environ.get(key) or "").strip()
         if not raw:
             continue
-        try:
-            return int(raw), f"env {key}"
-        except ValueError as exc:
-            raise SweBenchRunnerError(
-                f"Invalid {key}={raw!r}; expected integer seconds (0 = unlimited)."
-            ) from exc
+        return _parse_timeout_int(raw, label=key), f"env {key}"
+    if work_dir is not None:
+        from_file = load_runner_file_timeout(Path(work_dir).expanduser())
+        if from_file is not None:
+            return from_file
     return int(DEFAULT_TIMEOUT_SECONDS), f"built-in default ({DEFAULT_TIMEOUT_SECONDS}s)"
 
 
@@ -1028,6 +1079,33 @@ def format_timeout_label(timeout_seconds: int) -> str:
     if int(timeout_seconds) <= 0:
         return "unlimited"
     return f"{int(timeout_seconds)}s"
+
+
+def warn_if_timeout_likely_dropped(
+    *,
+    timeout_source: str,
+    argv: Sequence[str],
+) -> None:
+    """Log a loud warning when timeout fell back to the built-in default."""
+    if not str(timeout_source).startswith("built-in"):
+        return
+    # If the user thought they passed --timeout but shell line-break ate it,
+    # argv will not contain --timeout.
+    has_timeout_flag = any(
+        arg == "--timeout" or arg.startswith("--timeout=") for arg in argv
+    )
+    LOG.warning(
+        "Using built-in default timeout (%ss). "
+        "CLI argv %s --timeout. "
+        "If you intended unlimited/long runs, use ONE of: "
+        "(1) single-line: python scripts/swe_bench/runner.py --timeout 0 --output predictions.jsonl ; "
+        "(2) env: MANA_SWE_BENCH_TIMEOUT=0 python scripts/swe_bench/runner.py --output predictions.jsonl ; "
+        "(3) file: echo 'timeout = 0' > .swe-bench/runner.toml ; "
+        "(4) wrapper: bash scripts/swe_bench/run_unlimited.sh. "
+        "Broken multi-line (no \\\\ after runner.py) silently drops flags.",
+        DEFAULT_TIMEOUT_SECONDS,
+        "included" if has_timeout_flag else "did not include",
+    )
 
 
 def _benchmark_config_overrides(
@@ -2009,9 +2087,12 @@ def _write_run_summary(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
     parser = build_arg_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(raw_argv)
     configure_logging(bool(args.verbose))
+    # Always show what the process actually received (catches broken multi-line shells).
+    LOG.info("Process argv: %s", " ".join(shlex.quote(a) for a in raw_argv) or "(empty)")
 
     try:
         requested_ids = resolve_requested_instance_ids(
@@ -2057,13 +2138,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         cli_model=getattr(args, "model", None),
         cli_provider=getattr(args, "provider", None),
     )
+    work_dir = Path(args.work_dir)
     try:
         timeout_seconds, timeout_source = resolve_runner_timeout_seconds(
-            getattr(args, "timeout", None)
+            getattr(args, "timeout", None),
+            work_dir=work_dir,
         )
     except SweBenchRunnerError as exc:
         LOG.error("%s", exc)
         return 2
+    warn_if_timeout_likely_dropped(timeout_source=timeout_source, argv=raw_argv)
     cfg = RunnerConfig(
         dataset_name=str(args.dataset),
         split=str(args.split),
