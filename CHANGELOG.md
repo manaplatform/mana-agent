@@ -4,6 +4,27 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Added SWE-bench Verified prediction generation for mana-agent:
+  - New focused runner: `scripts/swe_bench/runner.py` loads
+    `princeton-nlp/SWE-bench_Verified`, checks out each instance at
+    `base_commit` into an isolated git worktree, runs one non-interactive
+    mana-agent coding pass (`chat --no-tui --root-dir --full-auto`), captures
+    the final git diff as `model_patch`, and writes harness-compatible
+    `predictions.jsonl` lines
+    (`instance_id`, `model_name_or_path`, `model_patch`).
+  - Supports `--limit`, `--instance-ids`, `--output`, hard per-instance
+    `--timeout`, and a forced cheap/fast default model (`gpt-4o-mini`).
+  - Hardened against empty patches, dirty trees, checkout failures, and hung
+    agent processes (process-group kill on timeout).
+  - Docs: `docs/swe-bench.md` (generate command, official harness grade
+    command, smoke flags, limitations). Scope is prediction generation + smoke
+    grading only (not full 500-run, Pro, Terminal-Bench, pass@k, or
+    leaderboard submission).
+  - User verification required:
+    `python scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`
+    then
+    `python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path predictions.jsonl --max_workers 4 --run_id mana-agent-smoke`.
+
 - Fixed external memory capability boundary so agent routes no longer crash when
   `MANA_MEMORY_MODE=external`:
   - Split **AI/semantic memory** (hosted provider) from **system-state stores**

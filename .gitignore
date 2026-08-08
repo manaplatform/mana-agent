@@ -22,6 +22,9 @@ logs/
 .mana/evals/evals.sqlite3
 .mana/evals/evals.lock
 .ruff_cache/
+.swe-bench/
+predictions.jsonl
+mana-agent.*.json
 *.py[cod]
 *.pyc
 __pycache__/
