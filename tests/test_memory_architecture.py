@@ -33,7 +33,11 @@ def test_internal_mode_is_default_and_reuses_existing_store(tmp_path: Path, monk
     service = MemoryService(root=tmp_path)
     flow_id = service.ensure_flow(flow_id=None, request="Preserve existing memory")
     reopened = MemoryService(root=tmp_path)
-    assert service.status() == {"mode": "internal", "provider": "mana"}
+    status = service.status()
+    assert status["mode"] == "internal"
+    assert status["provider"] == "mana"
+    assert status["capabilities"]["evidence"] is True
+    assert status["capabilities"]["coding_flow"] is True
     assert reopened.get_flow_summary(flow_id).objective == "Preserve existing memory"
 
 
@@ -274,8 +278,14 @@ def test_mem0_client_is_lazy_reused_and_normalized(monkeypatch: pytest.MonkeyPat
         updated = await service.update("mem-1", MemoryUpdateRequest(MemoryContent("new"), scope))
         assert added.id == found[0].id == updated.id == "mem-1"
         assert len(instances) == 1
-        with pytest.raises(MemoryConfigurationError, match="no internal fallback"):
-            service.ensure_flow(flow_id=None, request="must not write locally")
+        # Semantic AI writes stay on the external backend. Local coding-flow
+        # continuity remains available as a system store.
+        flow_id = service.ensure_flow(flow_id=None, request="local coding flow is system state")
+        assert flow_id
+        assert service.capabilities.coding_flow is True
+        assert service.capabilities.semantic_search is True
+        with pytest.raises(MemoryConfigurationError, match="unmapped memory operation|no internal AI-memory fallback"):
+            _ = service.not_a_real_memory_operation
         await service.close()
 
     asyncio.run(run())

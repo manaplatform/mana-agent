@@ -276,21 +276,42 @@ MANA_MEMORY_FALLBACK_TO_INTERNAL=false
 
 Invalid mode/provider pairs, missing credentials, missing optional dependencies,
 authentication failures, connectivity failures, and provider failures stop with
-typed errors. There is no silent fallback or automatic upload of existing local
-memory. If a runtime explicitly permits degraded memory, it may continue the
-turn without memory, but it must report that state. Switch back with
+typed errors. There is no silent fallback that rewrites **semantic / conversation
+AI memory** to the local provider store, and no automatic upload of existing
+local memory. If a runtime explicitly permits degraded memory, it may continue
+the turn without semantic memory, but it must report that state. Switch back with
 `MANA_MEMORY_MODE=internal` and `MANA_MEMORY_PROVIDER=mana`.
+
+External mode selects the hosted provider for **AI memory only**
+(conversation, semantic search, and multi-agent records adapted through the
+external runtime). Local **system-state stores** remain available regardless of
+provider so agent routes do not crash:
+
+| Domain | External mode backend |
+| --- | --- |
+| Conversation / semantic search | Hosted provider (`mem0` / `supermemory`) |
+| Multi-agent task / decision records | External runtime adapter (hosted writes) |
+| Run evidence (file-read cache) | Local durable store under Mana runs |
+| Coding-flow checkpoints / turn history | Local SQLite system store |
+| Scoped capsules metadata | Local capsule service |
+
+`MemoryService.capabilities` declares these domains. Routes that need evidence
+or coding-flow continuity call the local system stores; they do not require the
+external provider to implement run evidence. Configuration errors are raised
+only when no safe backend exists for a requested domain.
 
 External memory has different privacy and retention implications because
 selected content, identity scopes, and metadata leave the local machine. Review
-the selected provider policy before enabling it.
+the selected provider policy before enabling it. Local system stores never send
+run evidence or coding-flow checkpoints to the hosted provider.
 
 Chat follow-ups use the gateway-owned shared memory service in addition to the
 durable session transcript. The service records successful user/assistant turn
 pairs and recalls relevant records only within the active conversation scope.
 A new conversation receives a new scope. The gateway explicitly permits
 degraded follow-up memory: provider failures are included in turn warnings while
-the transcript remains usable, and no internal fallback write occurs.
+the transcript remains usable, and no internal semantic AI-memory fallback write
+occurs.
 
 ## Core configuration keys
 

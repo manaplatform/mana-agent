@@ -58,18 +58,27 @@ without a default tool/provider/action. See
 Scoped sharing is implemented by the capsule service inside this same boundary; it is not a second application memory system. Central ACL decisions, trusted namespaces, reauthorization after provider retrieval, staging/merge, lineage, retention, and audit rules are described in [Scoped shared-memory capsules](30-scoped-memory-capsules.md).
 
 All application consumers import `mana_agent.memory.MemoryService`. The service
-owns one validated backend selected centrally by `memory/factory.py`; callers do
-not import internal or Mem0 implementations. Canonical asynchronous add, search,
-get, update, delete, clear, health, and close operations use provider-neutral
-models and a structured scope containing user, agent, session, workspace,
-repository, conversation, and task identities.
+owns one validated **AI/semantic** backend selected centrally by
+`memory/factory.py`; callers do not import internal or Mem0 implementations.
+Canonical asynchronous add, search, get, update, delete, clear, health, and
+close operations use provider-neutral models and a structured scope containing
+user, agent, session, workspace, repository, conversation, and task identities.
 
-The `internal/mana` adapter remains the default and wraps the existing SQLite
-coding-flow and JSON multi-agent stores without rewriting them. The optional
+`MemoryService.capabilities` separates domains:
+
+* **AI memory** (conversation, semantic search, external multi-agent runtime
+  adapter) — selected by mode/provider.
+* **System state** (run evidence, coding-flow checkpoints/turn history) —
+  always local durable stores so agent routes do not depend on hosted provider
+  mapping for file-read evidence or plan continuation.
+
+The `internal/mana` adapter remains the default for AI/semantic records and
+wraps the existing local store without rewriting it. The optional
 `external/mem0` and `external/supermemory` adapters are lazy, normalize provider
 responses and failures, map scope fields in one mapper, apply timeouts, and
 reuse their clients for the service lifecycle. Invalid configuration stops
-before execution; external failure never selects an internal backend implicitly.
+before execution; external failure never rewrites **semantic AI memory** to an
+internal provider backend. Local system stores remain available regardless.
 
 `ChatStack` owns one canonical service instance and rebinds its identity scope
 when the frontend opens a session; this does not construct a backend or create a

@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-08
 
+- Fixed external memory capability boundary so agent routes no longer crash when
+  `MANA_MEMORY_MODE=external`:
+  - Split **AI/semantic memory** (hosted provider) from **system-state stores**
+    (run evidence, coding-flow checkpoints/turn history).
+  - `MemoryCapabilities` contract on `MemoryService` declares conversation,
+    semantic search, evidence, checkpoints, coding flow, task state, and
+    multi-agent runtime availability.
+  - External mode keeps local run evidence and coding-flow stores enabled; only
+    semantic AI writes stay on the external provider (no silent AI-memory
+    fallback to the local provider store).
+  - `EvidenceMemory` façade opens the local run-evidence store without requiring
+    multi-agent or external provider mapping (fixes review, plan, verification,
+    repository search, and related ask-agent routes).
+  - Docs: `docs/05-configuration.md` documents the dual-domain model.
+  - User verification required:
+    `python -m pytest tests/memory/test_external_provider_capabilities.py tests/test_memory_architecture.py -q`
+    and `mana-agent eval ./evals/suites/routing-smoke.yaml`.
+
 - Fixed connector status and doctor UX for health checks:
   - `mana-agent connectors status` now runs a live safe probe by default so
     connectors leave `UNKNOWN` / `STARTUP_PENDING` after registration
