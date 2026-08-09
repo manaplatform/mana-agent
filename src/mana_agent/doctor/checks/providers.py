@@ -12,7 +12,7 @@ from mana_agent.doctor.models import DoctorContext, DoctorFinding, Severity
 def connectivity(context: DoctorContext) -> list[DoctorFinding]:
     """Test connectivity and authentication for configured AI providers."""
     config = user_config.load_effective_settings()
-    providers = config.get("mana_configured_providers", ["openai"])
+    providers = config.get("MANA_CONFIGURED_PROVIDERS", ["openai"])
     if isinstance(providers, str):
         providers = [p.strip() for p in providers.split(",")]
         
@@ -20,8 +20,8 @@ def connectivity(context: DoctorContext) -> list[DoctorFinding]:
     
     for provider in providers:
         if provider == "openai":
-            base_url = config.get("openai_base_url") or "https://api.openai.com/v1"
-            api_key = config.get("openai_api_key")
+            base_url = config.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            api_key = config.get("OPENAI_API_KEY")
             
             if not api_key:
                 findings.append(DoctorFinding("providers/openai-auth", Severity.ERROR, "OpenAI API Key Missing", "OPENAI_API_KEY is not set.", "Set OPENAI_API_KEY.", code="AUTH_MISSING"))
@@ -44,8 +44,8 @@ def connectivity(context: DoctorContext) -> list[DoctorFinding]:
                 findings.append(DoctorFinding("providers/openai-connect", Severity.ERROR, "OpenAI Connectivity Failed", str(e), "Check your network and base URL.", code="CONNECT_FAILED"))
 
         elif provider == "openrouter":
-            base_url = config.get("openrouter_base_url") or "https://openrouter.ai/api/v1"
-            api_key = config.get("openrouter_api_key")
+            base_url = config.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+            api_key = config.get("OPENROUTER_API_KEY")
             
             if not api_key:
                 findings.append(DoctorFinding("providers/openrouter-auth", Severity.ERROR, "OpenRouter API Key Missing", "OPENROUTER_API_KEY is not set.", "Set OPENROUTER_API_KEY.", code="AUTH_MISSING"))
