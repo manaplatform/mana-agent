@@ -57,6 +57,7 @@ _REASONING_PREFIXES = ("reasoning.",)
 _PROGRESS_TYPES = frozenset(
     {
         "backend.selected",
+        "turn.starting",
         "turn.started",
         "turn.completed",
         "turn.cancelled",
@@ -143,7 +144,7 @@ def semantic_kind_for_event_type(event_type: str, *, tool_name: str = "") -> Eve
         if any(marker in tool for marker in _COMMAND_ITEM_MARKERS):
             return EventSemanticKind.COMMAND
         return EventSemanticKind.TOOL_EXECUTION
-    if et in {"backend.selected", "turn.started", "turn.completed", "turn.cancelled", "coding.terminal"}:
+    if et in {"backend.selected", "turn.starting", "turn.started", "turn.completed", "turn.cancelled", "coding.terminal"}:
         return EventSemanticKind.LIFECYCLE
     if et.startswith("provider."):
         return EventSemanticKind.PROVIDER

@@ -17,6 +17,7 @@ Correct:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable
@@ -302,7 +303,33 @@ def build_bridge_app(
                 http_request = client.build_request(
                     "POST", url, headers=headers, json=chat_payload
                 )
-                response = await client.send(http_request, stream=True)
+                # Keep the long timeout for an accepted tool-using stream, but
+                # do not let a provider that never returns response headers pin
+                # the entire coding turn for ten minutes.  ``send(...,
+                # stream=True)`` completes when the stream is accepted, so this
+                # bound applies only to the initial upstream handshake.
+                response = await asyncio.wait_for(
+                    client.send(http_request, stream=True),
+                    timeout=upstream.stream_open_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                if client is not None:
+                    await client.aclose()
+                timeout_error = httpx.ReadTimeout(
+                    "Timed out waiting for the upstream streaming response to start."
+                )
+                failure = classify_transport_exception(
+                    timeout_error,
+                    provider=upstream.provider,
+                    model=model,
+                    operation="chat_completion_stream",
+                    endpoint=url,
+                    attempt=1,
+                    max_attempts=transport_max_attempts,
+                    display_name=upstream.display_name,
+                )
+                breaker.record_failure(scope, failure)
+                raise _failure_to_upstream_error(failure) from exc
             except httpx.TimeoutException as exc:
                 if client is not None:
                     await client.aclose()

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from mana_agent.coding.models import (
+    AgentEvent,
     CodingBackendDecision,
     CodingTask,
     CodingTaskResult,
@@ -244,6 +245,59 @@ def test_codex_backend_translates_read_only_sandbox_for_protocol(tmp_path: Path)
     assert fake is not None
     assert fake.requests[0][1]["sandbox"] == "read-only"
     assert fake.requests[1][1]["sandbox"] == "read-only"
+
+
+def test_codex_backend_reports_turn_started_only_after_turn_start_accepts(
+    tmp_path: Path,
+) -> None:
+    class _TurnStartGateClient(_FakeClient):
+        def __init__(self, command: tuple[str, ...]) -> None:
+            super().__init__(command)
+            self.turn_start_requested = asyncio.Event()
+            self.allow_turn_start = asyncio.Event()
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method != "turn/start":
+                return await super().request(method, params)
+            self.requests.append((method, params))
+            self.turn_start_requested.set()
+            await self.allow_turn_start.wait()
+            return {"turn": {"id": "turn-1"}}
+
+    client: _TurnStartGateClient | None = None
+
+    def factory(command: tuple[str, ...]) -> _TurnStartGateClient:
+        nonlocal client
+        client = _TurnStartGateClient(command)
+        return client
+
+    async def collect_events() -> list[AgentEvent]:
+        backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
+        task = _task().model_copy(update={"requires_repository_write": False})
+        iterator = backend.stream(task, _workspace(tmp_path)).__aiter__()
+        events = [await anext(iterator), await anext(iterator)]
+        assert events[-1].event_type == "turn.starting"
+        assert client is not None
+
+        pending = asyncio.create_task(anext(iterator))
+        await client.turn_start_requested.wait()
+        assert not pending.done()
+
+        client.allow_turn_start.set()
+        events.append(await pending)
+        async for event in iterator:
+            events.append(event)
+        await backend.close()
+        return events
+
+    events = asyncio.run(collect_events())
+
+    assert [event.event_type for event in events[:3]] == [
+        "backend.selected",
+        "turn.starting",
+        "turn.started",
+    ]
+    assert events[2].turn_id == "turn-1"
 
 
 def test_codex_backend_resumes_persisted_thread(

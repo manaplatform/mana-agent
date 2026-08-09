@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex/NVIDIA coding turns appearing to hang at `Turn Started` when the
+  upstream streaming request never returned response headers.
+  - The Responses bridge now limits only the initial stream-open wait to 45
+    seconds, returning a typed retryable timeout instead of waiting for the
+    10-minute stream timeout. Accepted streams retain their existing timeout.
+  - Codex lifecycle events now report `Starting Codex turn` before the
+    `turn/start` response, and report `Codex turn started` only after the
+    server returns a turn ID.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge_recovery.py tests/test_codex_integration.py -q`
+
 - Fixed Windows CI hanging while running Teach Mode tests.
   - Teach availability checks now probe optional desktop, browser, and input
     integrations without importing their platform adapters during normal

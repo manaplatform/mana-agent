@@ -77,6 +77,10 @@ class BridgeUpstreamConfig:
     headers: dict[str, str] = field(default_factory=dict)
     request_overrides: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: float = 600.0
+    # Limit only the period before an upstream streaming response is accepted.
+    # A provider that never sends response headers otherwise leaves the Codex
+    # turn in a misleading "started" state for the full stream timeout.
+    stream_open_timeout_seconds: float = 45.0
     # Bridge owns at most one transport attempt per Codex request. Nested retries
     # (Codex × bridge × HTTP client) are forbidden — see provider_failure module.
     transport_max_attempts: int = 1
@@ -88,6 +92,7 @@ class BridgeUpstreamConfig:
             "base_url": self.base_url,
             "model": self.model,
             "timeout_seconds": self.timeout_seconds,
+            "stream_open_timeout_seconds": self.stream_open_timeout_seconds,
             "has_request_overrides": bool(self.request_overrides),
             "transport_max_attempts": self.transport_max_attempts,
         }

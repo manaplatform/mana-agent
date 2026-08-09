@@ -186,11 +186,11 @@ class CodexCodingBackend:
                     raise CodexExecutionError("Codex thread/start returned no thread id")
                 sequence += 1
                 yield AgentEvent(
-                    event_type="turn.started",
+                    event_type="turn.starting",
                     task_id=task.task_id,
                     backend="codex",
                     sequence=sequence,
-                    title="Codex turn started",
+                    title="Starting Codex turn",
                     thread_id=thread_id,
                     model=self.settings.model or "",
                 )
@@ -251,6 +251,17 @@ class CodexCodingBackend:
                 if not turn_id:
                     raise CodexExecutionError("Codex turn/start returned no turn id")
                 self._active[task.task_id] = (thread_id, turn_id)
+                sequence += 1
+                yield AgentEvent(
+                    event_type="turn.started",
+                    task_id=task.task_id,
+                    backend="codex",
+                    sequence=sequence,
+                    title="Codex turn started",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    model=self.settings.model or "",
+                )
                 iterator = self._client.notifications(thread_id).__aiter__()
                 deadline = asyncio.get_running_loop().time() + self.settings.task_timeout_seconds
                 while True:
