@@ -917,15 +917,20 @@ def load_effective_settings(*, include_env: bool = False) -> dict[str, Any]:
     """Load Mana-managed settings exclusively from the user configuration.
 
     All settings are loaded from ~/.mana/config.toml and ~/.mana/secrets.toml.
-    Environment variables and .env files are deliberately not loaded.
+    Environment variables and .env files are deliberately not loaded by default,
+    but may be explicitly requested by internal components (like the API or
+    worker gateway) using include_env=True.
     """
     values = dict(DEFAULT_USER_CONFIG)
     user_values = load_user_config()
     values.update(user_values)
     secret_values = load_user_secrets()
     values.update(secret_values)
-    # The include_env parameter is retained for API compatibility, but environment
-    # variables are explicitly ignored as requested by the user.
+    if include_env:
+        explicit = {**user_values, **secret_values}
+        for key in set(DEFAULT_USER_CONFIG) | set(FIELD_NAME_BY_ENV) | SECRET_KEYS:
+            if key not in explicit and key in os.environ:
+                values[key] = os.environ[key]
     if user_values.get("LLM_MODEL") and not user_values.get("OPENAI_CHAT_MODEL"):
         values["OPENAI_CHAT_MODEL"] = user_values["LLM_MODEL"]
     if not values.get("LLM_MODEL") and values.get("OPENAI_CHAT_MODEL"):
