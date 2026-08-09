@@ -15,7 +15,9 @@ def setup_logging(verbose: bool = False, log_dir: str | Path | None = None) -> P
     project_name = project_root.name or "project"
     date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if log_dir:
-        root = Path(log_dir).expanduser().resolve(strict=False)
+        from mana_agent.utils.path_safety import safe_resolve
+
+        root = safe_resolve(log_dir)
     else:
         root = default_logs_dir(project_root)
     root.mkdir(parents=True, exist_ok=True)

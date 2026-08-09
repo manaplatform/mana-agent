@@ -4,6 +4,33 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex coding response leak where broken free-form tool-invocation XML
+  (e.g. `<danke:ultracall_calls>`, `<parameter name="cmd">`,
+  `max_output_tokens` padding soup, “Tools invocation syntax failed” meta-text)
+  was shown as the user-facing agentMessage / coding answer.
+  - Cause: `text_cleanup` only stripped think/DSML markers, not tool-call
+    protocol markup or high-density angle-bracket dumps from failed structured
+    tool routing. Live `adapt_codex_event` previews also forwarded raw text.
+  - Fix:
+    1. Expand `text_cleanup` to strip namespaced tool tags, parameter/function
+       markup, and detect ultracall / invocation-syntax / angle-bracket soup as
+       free-form tool garbage (redact to a short structured-tools diagnostic).
+    2. Sanitize assistant-visible text in `adapt_codex_event` for agentMessage
+       and assistant.delta so live previews match the final summary policy.
+  - User verification required:
+    `python -m pytest tests/test_codex_integration.py::test_ultracall_tool_invocation_leak_redacted_from_codex_summary tests/test_codex_integration.py::test_agent_message_event_strips_leaked_tool_markup tests/test_codex_responses_bridge.py::test_leaked_ultracall_tool_invocation_redacted_from_assistant_history tests/test_codex_integration.py::test_write_required_turn_without_changed_files_fails -q`
+
+- Fixed Windows CI failures when the process CWD is unusable
+  (`test_safe_cwd_*`, `test_llm_run_logger_survives_deleted_cwd`).
+  - Cause: on Windows, `ntpath.realpath` (used by `Path.resolve`) always calls
+    `os.getcwd()` even for absolute paths, so a broken/deleted CWD made
+    `safe_cwd`, `mana_home`, and `LlmRunLogger` raise `FileNotFoundError`.
+  - Fix: added `safe_resolve()` and used it in `safe_cwd`, both `mana_home`
+    implementations, and LLM run logging so absolute paths still work when
+    `getcwd` fails; final `safe_cwd` fallbacks never re-raise.
+  - User verification required:
+    `python -m pytest tests/test_path_safety_safe_cwd.py tests/test_llm_logging.py::test_llm_run_logger_survives_deleted_cwd -q`
+
 - Fixed Codex coding empty-patch failures observed in lane_coordinator for
   `bump version to v0.1.6` (DeepSeek V4 / NVIDIA Responses bridge).
   - Evidence (`workspace_cefe56a22992f27e13d8`, tasks `000008`/`000010`):

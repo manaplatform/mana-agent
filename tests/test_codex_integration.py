@@ -809,6 +809,73 @@ def test_write_required_turn_without_changed_files_fails(tmp_path: Path) -> None
     )
 
 
+def test_ultracall_tool_invocation_leak_redacted_from_codex_summary(tmp_path: Path) -> None:
+    """Broken tool-call XML must never become the coding answer text."""
+    leak = (
+        "There is a/_version.py file.\n"
+        "Let me inspect it.\n"
+        "<danke:ultracall_calls{... = ...;\n"
+        '<parameter name="cmd">cat src/mana_agent/_version.py</parameter>\n'
+        "Wait, my Tools invocation syntax above failed somehow - "
+        "looks like garbage output was produced.\n"
+        '{"padding": {"max_output_tokens": 2000}}'
+    )
+    result = parse_codex_result(
+        task=_task(),
+        workspace=_workspace(tmp_path),
+        worker_id="worker-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        changed_files=[],
+        notifications=[
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "text": leak,
+                    }
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    summary = result.summary or ""
+    assert "ultracall" not in summary.lower()
+    assert "parameter" not in summary.lower()
+    assert "max_output_tokens" not in summary.lower()
+    assert "Tools invocation" not in summary
+    assert "redacted" in summary.lower() or "structured tools" in summary.lower()
+    assert any(
+        str(w).startswith("assistant_freeform_tool_text_redacted")
+        for w in (result.warnings or [])
+    )
+
+
+def test_agent_message_event_strips_leaked_tool_markup() -> None:
+    """Live Codex agentMessage previews must not stream protocol soup."""
+    leak = (
+        '<danke:ultracall_calls><parameter name="cmd">ls</parameter>'
+        "</danke:ultracall_calls> Tools invocation syntax failed"
+    )
+    event = adapt_codex_event(
+        "task-1",
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "agentMessage",
+                    "text": leak,
+                }
+            },
+        },
+    )
+    assert "ultracall" not in (event.summary or "").lower()
+    assert "parameter" not in (event.summary or "").lower()
+    assert "ultracall" not in (event.output_preview or "").lower()
+
+
 def test_write_required_turn_with_mutation_item_but_no_diff_fails(tmp_path: Path) -> None:
     result = parse_codex_result(
         task=_task(),

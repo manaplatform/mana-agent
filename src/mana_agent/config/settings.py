@@ -18,14 +18,23 @@ def mana_home() -> Path:
 
     Repository source trees are deliberately not used as state stores.  Tests
     and managed installations can isolate state with ``MANA_HOME``.
+
+    Windows ``Path.resolve`` always calls ``os.getcwd`` via ``ntpath.realpath``;
+    when the process CWD is gone we still return a usable absolute path.
     """
 
     configured = str(os.getenv("MANA_HOME") or "").strip()
-    return (
-        Path(configured).expanduser().resolve()
+    candidate = (
+        Path(configured).expanduser()
         if configured
-        else (Path.home() / MANA_ROOT_DIRNAME).resolve()
+        else (Path.home() / MANA_ROOT_DIRNAME)
     )
+    try:
+        return candidate.resolve(strict=False)
+    except (FileNotFoundError, OSError, RuntimeError):
+        if candidate.is_absolute():
+            return Path(os.path.normpath(candidate))
+        return candidate
 
 
 # Default embedding models per provider. The chat and embedding endpoints share a

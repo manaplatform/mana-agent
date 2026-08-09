@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from mana_agent.utils.path_safety import safe_cwd
+from mana_agent.utils.path_safety import safe_cwd, safe_resolve
 
 
 def _make_cwd_unusable(work: Path, monkeypatch) -> None:
@@ -31,7 +31,7 @@ def _make_cwd_unusable(work: Path, monkeypatch) -> None:
 def test_safe_cwd_returns_existing_directory(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     resolved = safe_cwd()
-    assert resolved == tmp_path.resolve()
+    assert resolved == safe_resolve(tmp_path)
     assert resolved.is_dir()
 
 
@@ -44,7 +44,8 @@ def test_safe_cwd_falls_back_when_directory_deleted(
     fallback.mkdir()
     _make_cwd_unusable(work, monkeypatch)
     resolved = safe_cwd(fallback=fallback)
-    assert resolved == fallback.resolve()
+    # Do not call Path.resolve() here: on Windows realpath always uses getcwd().
+    assert resolved == safe_resolve(fallback)
     assert resolved.is_dir()
 
 
@@ -58,4 +59,4 @@ def test_safe_cwd_prefers_mana_home_when_no_fallback(
     _make_cwd_unusable(work, monkeypatch)
     monkeypatch.setenv("MANA_HOME", str(mana))
     resolved = safe_cwd()
-    assert resolved == mana.resolve()
+    assert resolved == safe_resolve(mana)

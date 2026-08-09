@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from mana_agent.coding.models import AgentEvent
+from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
 
 
 _METHOD_TYPES = {
@@ -53,6 +54,14 @@ def adapt_codex_event(
     command = _first_text(item, "command", "cmd") or _first_text(payload, "command")
     path = _first_text(item, "path", "filePath") or _first_text(payload, "path", "filePath")
     output = _first_text(payload, "delta", "output", "text") or _first_text(item, "output", "text")
+    summary = _summary(payload, item)
+    # Agent message text can contain free-form tool/think protocol soup. Never
+    # surface that as live event previews or user-facing summaries.
+    if _is_assistant_visible_text(method, event_type, item_type):
+        if summary:
+            summary = sanitize_assistant_visible_text(summary)
+        if output:
+            output = sanitize_assistant_visible_text(output)
     usage = _usage(payload)
     error = _error(payload) if status == "failed" or event_type == "error" else ""
     event_id = _event_id(notification)
@@ -65,7 +74,7 @@ def adapt_codex_event(
         sequence=sequence,
         status=status,
         title=_title(event_type, item_type, command, path),
-        summary=_summary(payload, item),
+        summary=summary,
         thread_id=thread_id,
         turn_id=turn_id,
         tool_name=item_type or _first_text(payload, "toolName"),
@@ -79,6 +88,18 @@ def adapt_codex_event(
         output_preview=output,
         payload=payload,
     )
+
+
+def _is_assistant_visible_text(method: str, event_type: str, item_type: str) -> bool:
+    lowered_method = method.lower()
+    lowered_item = item_type.lower()
+    if event_type == "assistant.delta":
+        return True
+    if "agentmessage" in lowered_method or "agent_message" in lowered_method:
+        return True
+    if "agentmessage" in lowered_item or "agent_message" in lowered_item:
+        return True
+    return False
 
 
 def _item_event_type(method: str, item_type: str) -> str:

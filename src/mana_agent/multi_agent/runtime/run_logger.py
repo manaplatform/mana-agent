@@ -8,7 +8,7 @@ from typing import Any
 from mana_agent.config.settings import default_llm_logs_dir, mana_home
 from mana_agent.config.user_config import get_setting
 from mana_agent.utils.io import ensure_dir
-from mana_agent.utils.path_safety import safe_cwd
+from mana_agent.utils.path_safety import safe_cwd, safe_resolve
 
 
 class LlmRunLogger:
@@ -33,7 +33,8 @@ class LlmRunLogger:
         else:
             resolved = default_llm_logs_dir(project_root) / f"{date_tag}-{project_name}-runs.jsonl"
 
-        resolved = resolved.expanduser().resolve()
+        # safe_resolve: Windows realpath always calls getcwd().
+        resolved = safe_resolve(resolved)
 
         # ✅ FIX: if path is directory → generate file inside it
         if resolved.exists() and resolved.is_dir():

@@ -71,9 +71,33 @@ def resolve_user_path(raw: str) -> Path:
     """Expand and resolve a user path after rejecting null bytes."""
     text = reject_unsafe_path_text(raw)
     try:
-        return Path(text).expanduser().resolve(strict=False)
+        return safe_resolve(text)
     except OSError as exc:
         raise ValueError("Invalid path.") from exc
+
+
+def safe_resolve(path: str | Path, *, strict: bool = False) -> Path:
+    """Resolve *path* without crashing when the process CWD is unusable.
+
+    On Windows, ``ntpath.realpath`` (used by ``Path.resolve``) always calls
+    ``os.getcwd()`` even for absolute paths. When the CWD was deleted—or tests
+    simulate that by making ``getcwd`` raise—every ``resolve()`` fails.
+
+    Prefer a real resolve when possible. If it fails and the path is already
+    absolute, return a normalized absolute path. Relative paths that cannot be
+    made absolute without a working CWD are returned normalized as-is.
+    """
+    candidate = Path(path).expanduser()
+    try:
+        return candidate.resolve(strict=strict)
+    except (FileNotFoundError, OSError, RuntimeError):
+        if candidate.is_absolute():
+            return Path(os.path.normpath(candidate))
+        try:
+            cwd = os.getcwd()
+        except (FileNotFoundError, OSError):
+            return Path(os.path.normpath(candidate))
+        return Path(os.path.normpath(os.path.join(cwd, str(candidate))))
 
 
 def safe_cwd(*, fallback: str | Path | None = None) -> Path:
@@ -83,31 +107,43 @@ def safe_cwd(*, fallback: str | Path | None = None) -> Path:
     (common when a SWE-bench worktree is recreated under a live agent). In that
     state ``os.getcwd()`` / ``Path.cwd()`` raise ``FileNotFoundError``. Callers
     that only need a stable path for log naming or child ``cwd`` must not crash.
+
+    On Windows the process normally locks its CWD, but ``Path.resolve`` still
+    calls ``os.getcwd`` via ``ntpath.realpath``; fallbacks must not re-raise.
     """
     try:
-        return Path.cwd().resolve()
+        return safe_resolve(Path.cwd())
     except (FileNotFoundError, OSError):
         pass
     if fallback is not None:
         candidate = Path(fallback).expanduser()
         try:
             if candidate.is_dir():
-                return candidate.resolve(strict=False)
+                return safe_resolve(candidate)
         except OSError:
             pass
-    # Prefer Mana-managed state, then the user's home, then filesystem root.
+    # Prefer Mana-managed state, then the user's home, then a stable absolute root.
     try:
         from mana_agent.config.settings import mana_home
 
         home = mana_home()
         if home.is_dir():
-            return home.resolve(strict=False)
+            return safe_resolve(home)
     except Exception:
         pass
     try:
-        return Path.home().resolve(strict=False)
+        return safe_resolve(Path.home())
     except Exception:
-        return Path("/").resolve()
+        pass
+    try:
+        import tempfile
+
+        return safe_resolve(Path(tempfile.gettempdir()))
+    except Exception:
+        # Never raise: last-ditch absolute roots differ by platform.
+        if os.name == "nt":
+            return Path(os.path.normpath("C:\\"))
+        return Path("/")
 
 
 def resolve_within_allowed_roots(
@@ -183,4 +219,6 @@ __all__ = [
     "resolve_under_base",
     "resolve_user_path",
     "resolve_within_allowed_roots",
+    "safe_cwd",
+    "safe_resolve",
 ]

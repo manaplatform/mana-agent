@@ -501,6 +501,72 @@ def test_freeform_tool_garbage_redacted_from_assistant_history() -> None:
     assert "structured tools" in content.lower() or "redacted" in content.lower()
 
 
+def test_leaked_ultracall_tool_invocation_redacted_from_assistant_history() -> None:
+    """Codex coding response-leak: broken tool XML must not re-enter history."""
+    from mana_agent.integrations.codex.text_cleanup import (
+        looks_like_freeform_tool_garbage,
+        sanitize_assistant_visible_text,
+    )
+
+    # Condensed form of a real agentMessage leak: malformed tool-call wrappers,
+    # parameter tags, and meta-apology about failed tool syntax.
+    garbage = (
+        'There is a/_version.py file.\n'
+        'Let me inspect it to see if version appears elsewhere too.\n\n'
+        '<danke:ultracall_calls{... = ...;\n\n'
+        '<birdswithering>?\n\n'
+        '<danke:ultracall_calls>\n\n'
+        '<` "padding": {"max_output_tokens": 2000}">\n'
+        ' <parameter name="cmd">"\'\n'
+        'Done="<?))(var c =...;cat src/mana_agent/_version.py</span>'
+        'badge.symbol "></span></span></danke:ultracall_calls>,\n\n'
+        '<parameter name="cmd">"grep -rn "0\\.1\\.5" .\n'
+        "Wait, my Tools invocation syntax above failed somehow - "
+        "looks like garbage output was produced.\n"
+        "I apologize for that garbled mechanical response above."
+    )
+    assert looks_like_freeform_tool_garbage(garbage) is True
+    cleaned = sanitize_assistant_visible_text(garbage)
+    assert "ultracall" not in cleaned.lower()
+    assert "parameter" not in cleaned.lower()
+    assert "max_output_tokens" not in cleaned.lower()
+    assert "birdswithering" not in cleaned.lower()
+    assert "Tools invocation" not in cleaned
+    assert "structured tools" in cleaned.lower() or "redacted" in cleaned.lower()
+
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
+            "input": [
+                {"type": "message", "role": "user", "content": "inspect version files"},
+                {"type": "message", "role": "assistant", "content": garbage},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        upstream=upstream,
+    )
+    assistant = next(
+        message for message in chat["messages"] if message.get("role") == "assistant"
+    )
+    content = str(assistant.get("content") or "")
+    assert "ultracall" not in content.lower()
+    assert "<parameter" not in content.lower()
+    assert "max_output_tokens" not in content.lower()
+
+
 def test_nvidia_runtime_uses_bridge_and_never_exposes_upstream_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
