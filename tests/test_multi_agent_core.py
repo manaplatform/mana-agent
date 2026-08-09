@@ -95,8 +95,22 @@ def _route_payload(
     repo_context_needed: bool = False,
     web_search_needed: bool = False,
     code_editing_needed: bool = False,
+    required_subagents: list[str] | None = None,
     reasoning_summary: str = "Model selected route.",
 ) -> dict:
+    semantic_contract = {
+        "answer": ("none", "conversation"),
+        "repo_search": ("read", "repository"),
+        "analyze": ("read", "repository"),
+        "review": ("read", "repository"),
+        "edit": ("write", "repository"),
+        "web_research": ("read", "web"),
+        "tool": ("execute", "local_system"),
+        "verify": ("execute", "local_system"),
+        "high_risk_tool": ("execute", "local_system"),
+        "plan": ("none", "conversation"),
+    }
+    requested_effect, target_surface = semantic_contract[intent]
     return {
         "intent": intent,
         "confidence": confidence,
@@ -105,6 +119,9 @@ def _route_payload(
         "repo_context_needed": repo_context_needed,
         "web_search_needed": web_search_needed,
         "code_editing_needed": code_editing_needed,
+        "requested_effect": requested_effect,
+        "target_surface": target_surface,
+        "required_subagents": required_subagents or [],
         "reasoning_summary": reasoning_summary,
     }
 
@@ -516,6 +533,7 @@ def test_router_selects_required_routes():
                         selected_tools=["repo_search", "read_file", "apply_patch"],
                         repo_context_needed=True,
                         code_editing_needed=True,
+                        required_subagents=["repo_inventory", "docs"],
                         reasoning_summary="Update README documentation.",
                     ),
                 }
@@ -839,10 +857,11 @@ def test_reviewer_rejects_planned_verification_without_queue_job(tmp_path):
 
 
 def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
-    assert MainAgent(tmp_path).run_user_request("hello", entrypoint="chat").route_name == "simple"
+    conversation_model = _RouteModel({"hello": _route_payload("answer")})
+    assert MainAgent(tmp_path, routing_llm=conversation_model).run_user_request("hello", entrypoint="chat").route_name == "simple"
     analyze_model = _RouteModel(
         {
-            "analyze scan repo": _route_payload(
+            "scan repo": _route_payload(
                 "analyze",
                 selected_tools=["repo_search", "read_file"],
                 repo_context_needed=True,
@@ -852,7 +871,7 @@ def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     )
     plan_model = _RouteModel(
         {
-            "plan update docs": _route_payload(
+            "update docs": _route_payload(
                 "plan",
                 reasoning_summary="Plan the requested docs update.",
             )
@@ -860,6 +879,30 @@ def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     )
     assert MainAgent(tmp_path, routing_llm=analyze_model).run_user_request("scan repo", entrypoint="analyze").route_name == "analyze"
     assert MainAgent(tmp_path, routing_llm=plan_model).run_user_request("update docs", entrypoint="plan").route_name == "planning"
+
+
+def test_main_agent_preserves_semantic_request_and_passes_entrypoint_as_metadata(tmp_path):
+    class CapturingModel:
+        def __init__(self) -> None:
+            self.routing_payload: dict | None = None
+
+        def invoke(self, messages):  # noqa: ANN001
+            payload = json.loads(messages[-1].content)
+            if "tools" in payload:
+                self.routing_payload = payload
+            return SimpleNamespace(content=json.dumps(_route_payload("answer")))
+
+    model = CapturingModel()
+    main = MainAgent(tmp_path, routing_llm=model)
+    result = main.run_user_request("chat command", entrypoint="chat")
+    task = main.taskboard.get_task(result.task_id)
+
+    assert result.route_name == "simple"
+    assert task.user_request == "chat command"
+    assert task.normalized_goal == "chat command"
+    assert model.routing_payload is not None
+    assert model.routing_payload["user_request"] == "chat command"
+    assert model.routing_payload["command_hint"] == "chat"
 
 
 def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
@@ -875,6 +918,9 @@ def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
                         "repo_context_needed": False,
                         "web_search_needed": True,
                         "code_editing_needed": False,
+                        "requested_effect": "read",
+                        "target_surface": "web",
+                        "required_subagents": [],
                         "reasoning_summary": "Model selected public web research.",
                     }
                 )
@@ -893,11 +939,12 @@ def test_main_agent_records_large_docs_subagents_and_deactivates_them(tmp_path):
         tmp_path,
         routing_llm=_RouteModel(
             {
-                "chat project architecture changed, update README.md, cannot use diff": _route_payload(
+                "project architecture changed, update README.md, cannot use diff": _route_payload(
                     "edit",
                     selected_tools=["repo_search", "read_file", "apply_patch"],
                     repo_context_needed=True,
                     code_editing_needed=True,
+                    required_subagents=["repo_inventory", "docs"],
                     reasoning_summary="Update README documentation.",
                 )
             }
@@ -920,7 +967,7 @@ def test_main_agent_coding_route_has_queue_worker_verifier_and_review_evidence(t
         tmp_path,
         routing_llm=_RouteModel(
             {
-                "chat fix README.md heading": _route_payload(
+                "fix README.md heading": _route_payload(
                     "edit",
                     selected_tools=["repo_search", "read_file", "apply_patch"],
                     repo_context_needed=True,
@@ -1069,8 +1116,8 @@ def test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations(tmp_pat
     `git switch -c and` + failed `origin/and` verification.
     """
     repo = _init_git_repo(tmp_path / "repo")
-    # Strip so the fixture key matches MainAgent.run_user_request, which
-    # normalizes with str(...).strip() before routing as f"{entrypoint} {request}".
+    # Strip so the fixture key matches MainAgent.run_user_request's semantic
+    # request normalization without embedding entrypoint metadata.
     prompt = (
         "You are solving a single SWE-bench issue inside an isolated git checkout.\n"
         "Do not commit, push, rebase, or rewrite git history.\n"
@@ -1081,7 +1128,7 @@ def test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations(tmp_pat
         repo,
         routing_llm=_RouteModel(
             {
-                f"chat {prompt}": _route_payload(
+                prompt: _route_payload(
                     "edit",
                     selected_tools=["repo_search", "read_file", "apply_patch"],
                     repo_context_needed=True,

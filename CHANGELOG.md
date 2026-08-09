@@ -4,6 +4,29 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Updated the multi-agent route fixture to model-select documentation
+  subagents for the large README update workflow.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
+
+## 2026-08-09
+
+- Corrected the semantic routing invariant for standalone planning.
+  - `requested_effect=none` with `target_surface=conversation` now permits a
+    model-selected `plan` intent with no tools, while retaining strict simple
+    conversation and mutation/tool invariants.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/test_agent_decision_routing.py -q`.
+
+## 2026-08-09
+
+- Fixed multi-agent routing so entrypoint metadata is passed as `command_hint`
+  instead of being prepended to the semantic user request.
+  - Routing decisions now declare model-generated requested effect and target
+    surface fields, invalid decisions block before route or tool execution, and
+    model-selected subagents replace the prior documentation keyword heuristic.
+  - User verification required: `python -m pytest tests/test_agent_decision_routing.py tests/test_multi_agent_core.py tests/test_browser_routing_config.py tests/gateway/test_gateway_repository_preparation.py -q`.
+
+## 2026-08-09
+
 - Fixed the Windows CI suite stalling in the tool-worker import isolation test.
   - The test no longer captures subprocess pipes that optional dependency
     descendants can inherit on Windows; it exchanges its tiny assertion payload

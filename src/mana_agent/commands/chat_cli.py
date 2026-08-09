@@ -2438,6 +2438,14 @@ def chat(
                 ),
                 event_type="RoutingStarted",
             )
+            if not agent_decision.verifier_passed:
+                console.print(
+                    "[red]Model decision failed: routing verification.[/red] "
+                    "No route or tool action was executed. Reason: "
+                    + agent_decision.verifier_summary
+                )
+                _finish_ui_turn(current_turn_id)
+                continue
             if (
                 active_flow_id
                 and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)

@@ -793,6 +793,17 @@ def process_chat_turn(
                 error=f"Model decision failed: {exc}. No fallback action was executed.",
             )
 
+    if not agent_decision.verifier_passed:
+        return ChatTurnResult(
+            answer=(
+                "Model decision failed: routing verification. "
+                "No route or tool action was executed. Reason: "
+                + agent_decision.verifier_summary
+            ),
+            error="routing_decision_invalid",
+            decision=agent_decision,
+        )
+
     if (
         active_flow_id
         and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)
