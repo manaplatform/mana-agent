@@ -61,14 +61,10 @@ def config_validate() -> None:
 @app.command("explain")
 def config_explain() -> None:
     """Explain configuration precedence and sources (secrets redacted)."""
-    # This is a stub for the config explain output. True implementation would require 
-    # tracking env vars vs user config. pydantic_settings handles this internally,
-    # but pulling the exact source needs custom logic or inspection of pydantic internals.
     typer.echo("Configuration precedence:")
-    typer.echo("1. Environment variables (highest)")
-    typer.echo("2. ~/.mana/secrets.toml")
-    typer.echo("3. ~/.mana/config.toml")
-    typer.echo("4. Defaults (lowest)\n")
+    typer.echo("1. ~/.mana/secrets.toml (highest)")
+    typer.echo("2. ~/.mana/config.toml")
+    typer.echo("3. Defaults (lowest)\n")
     
     settings = Settings()
     # Mask secrets

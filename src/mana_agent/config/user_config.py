@@ -899,7 +899,7 @@ def has_user_config() -> bool:
 
 
 def is_user_config_valid() -> bool:
-    effective = load_effective_settings(include_env=True)
+    effective = load_effective_settings(include_env=False)
     provider = str(effective.get("MANA_AI_PROVIDER") or "openai").strip().lower()
     if provider == "openrouter":
         api_key = effective.get("OPENROUTER_API_KEY", "")
@@ -913,23 +913,19 @@ def is_user_config_valid() -> bool:
     )
 
 
-def load_effective_settings(*, include_env: bool = True) -> dict[str, Any]:
+def load_effective_settings(*, include_env: bool = False) -> dict[str, Any]:
     """Load Mana-managed settings exclusively from the user configuration.
 
-    Explicit Mana configuration wins over environment variables. Environment
-    variables may fill missing values for CI and automation, but repository
-    ``.env`` files are deliberately never loaded here.
+    All settings are loaded from ~/.mana/config.toml and ~/.mana/secrets.toml.
+    Environment variables and .env files are deliberately not loaded.
     """
     values = dict(DEFAULT_USER_CONFIG)
     user_values = load_user_config()
     values.update(user_values)
     secret_values = load_user_secrets()
     values.update(secret_values)
-    if include_env:
-        explicit = {**user_values, **secret_values}
-        for key in set(DEFAULT_USER_CONFIG) | set(FIELD_NAME_BY_ENV) | SECRET_KEYS:
-            if key not in explicit and key in os.environ:
-                values[key] = os.environ[key]
+    # The include_env parameter is retained for API compatibility, but environment
+    # variables are explicitly ignored as requested by the user.
     if user_values.get("LLM_MODEL") and not user_values.get("OPENAI_CHAT_MODEL"):
         values["OPENAI_CHAT_MODEL"] = user_values["LLM_MODEL"]
     if not values.get("LLM_MODEL") and values.get("OPENAI_CHAT_MODEL"):

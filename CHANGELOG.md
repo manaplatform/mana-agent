@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-10
 
+- Updated configuration loading to exclusively read from `~/.mana/config.toml` and `~/.mana/secrets.toml`, intentionally ignoring environment variables and `.env` files.
+  - User verification required: `./venv/bin/mana-agent config explain`
+
 - Implemented a Schema-First Configuration Doctor to validate config before runtime startup.
   - Added CLI `config` group (`schema`, `validate`, `explain`, `migrate`).
   - Expanded `doctor` checks with environment, providers, secrets, and MCP validations.
