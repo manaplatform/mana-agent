@@ -1368,7 +1368,10 @@ class AskAgent:
                 if not command_cwd.is_dir():
                     raise FileNotFoundError("command cwd does not exist")
                 execution_manager = getattr(self, "execution_manager", None)
-                shell_argv = ["cmd.exe", "/d", "/s", "/c", executed_cmd] if os.name == "nt" else ["/bin/sh", "-lc", executed_cmd]
+                from mana_agent.utils.shell_argv import local_shell_argv
+
+                # Non-login shell: preserve PATH (SWE-bench python3 shims). Never use -lc.
+                shell_argv = local_shell_argv(executed_cmd)
 
                 def transactional_runner(argv, **_kwargs):  # noqa: ANN001
                     if execution_manager is None:

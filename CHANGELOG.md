@@ -4,6 +4,23 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed SWE-bench verification shell using login shells that drop the Python 3 PATH shim (`astropy__astropy-12907`).
+  - Symptom: after Codex read `separable.py` and mutation recovery, the multi-agent verifier ran
+    `["/bin/sh", "-lc", "python -m compileall ."]` with exit 1 and ~133KB of SyntaxError
+    output; task ended `mutation_required_but_no_mutation_tool_attempted` / empty_patch.
+  - Cause: `tool_manager` / `ask_agent` wrapped shell tools as `sh -lc`. Login shells re-source
+    profile PATH and put host Python 2.7 ahead of the runner's `agent_bin` shim, so bare
+    `python -m compileall` compiled modern sources as 2.x and failed. Codex recovery also
+    re-attempted package import and then emitted analysis-only text.
+  - Fix:
+    1. `local_shell_argv()` builds non-login `sh -c` / `cmd /c` argv so inherited PATH
+       (including SWE-bench python3 shims) is preserved; both shell entry points use it.
+    2. Default verification commands prefer `python3 -m compileall` (allowlisted).
+    3. Codex mutation-recovery prompt forbids re-importing uninstalled packages and
+       requires an immediate production-source mutation.
+  - User verification required:
+    `python -m pytest tests/test_shell_argv.py tests/test_codex_integration.py::test_coding_agent_shim_mutation_recovery_retries_empty_write_turn tests/test_multi_agent_core.py::test_tools_manager_blocks_dangerous_shell_commands -q`
+
 - Fixed CI failures on Windows deleted-cwd tests and Python 3.10 `tomllib`.
   - Symptom: Windows runners failed
     `test_llm_run_logger_survives_deleted_cwd`,

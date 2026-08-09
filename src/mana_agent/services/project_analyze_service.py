@@ -858,7 +858,7 @@ class ProjectAnalyzeService:
                 dependencies.get("manifests", []),
                 "Dependency manifests have lock-file warnings.",
                 ["Document the intended package manager and lock workflow.", "CI verifies dependency installation from the chosen files."],
-                "python -m compileall src",
+                "python3 -m compileall src",
             ))
         if inventory.get("test_files_count", 0) == 0:
             items.append(self._recommendation(
@@ -1470,7 +1470,7 @@ class ProjectAnalyzeService:
         return {"title": title, "priority": priority, "files": files, "reason": reason, "acceptance_criteria": acceptance, "verification": verification}
 
     def _verification_commands(self, inventory: dict[str, Any], dependencies: dict[str, Any]) -> list[str]:
-        commands = ["python -m compileall ."]
+        commands = ["python3 -m compileall ."]
         if inventory.get("test_files_count", 0):
             commands.append("pytest")
         if "npm" in dependencies.get("package_managers", []):

@@ -194,7 +194,10 @@ python scripts/swe_bench/runner.py \
    * A per-instance `agent_bin/` is prepended to `PATH` so bare `python`
      invokes the runner's Python 3 (many macOS hosts still put Python 2.7
      first as `python`; that produced SyntaxError on f-strings and empty
-     patches for `astropy__astropy-12907`).
+     patches for `astropy__astropy-12907`). Shell tools use non-login
+     `sh -c` (not `sh -lc`) so that shim stays first on `PATH`; login shells
+     re-source profile files and often restore host Python 2.7. Default
+     verification commands prefer `python3 -m compileall`.
    * Isolated `MANA_HOME` disables browser / computer-control / canvas / web
      search / fleet / gateway noise so the coding agent is not flooded with
      100+ unrelated tools copied from the operator config.

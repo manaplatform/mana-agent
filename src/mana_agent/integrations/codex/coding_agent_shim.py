@@ -435,7 +435,11 @@ class CodexCodingAgentShim:
                 "You MUST apply the production-source fix now with apply_patch (or an "
                 "equivalent repository file mutation tool). Do not finish with analysis, "
                 "questions, or chat text only. Success requires uncommitted edits under "
-                "the repository root."
+                "the repository root.\n"
+                "Do not re-import or run the uninstalled package to reproduce the bug; "
+                "source checkouts may be non-importable. Read the relevant production "
+                "file(s) if needed, then mutate them immediately. Do not write long "
+                "analysis-only messages."
             )
             record_current(
                 "codex.mutation_recovery.started",

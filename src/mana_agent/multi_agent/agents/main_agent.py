@@ -839,9 +839,11 @@ class MainAgent:
         return None
 
     def _verification_commands(self, commands: list[str]) -> list[str]:
+        # Prefer python3 so hosts where bare `python` is 2.x do not SyntaxError
+        # on modern packages (astropy, etc.) even if a PATH shim is missing.
         if (self.root / "src").exists():
-            return ["python -m compileall src"]
-        return ["python -m compileall ."]
+            return ["python3 -m compileall src"]
+        return ["python3 -m compileall ."]
 
 
 def _git_args(job: QueueJob) -> list[str]:

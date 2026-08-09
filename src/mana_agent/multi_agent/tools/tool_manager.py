@@ -339,7 +339,10 @@ class ToolsManager:
                 resources=ResourceLimits(),
                 network=NetworkPolicy(),
             )
-        shell_argv = ["cmd.exe", "/d", "/s", "/c", command] if os.name == "nt" else ["/bin/sh", "-lc", command]
+        from mana_agent.utils.shell_argv import local_shell_argv
+
+        # Non-login shell: preserve PATH (SWE-bench python3 shims). Never use -lc.
+        shell_argv = local_shell_argv(command)
         spec = SandboxSpec(
             provider_override=routing.explicit_provider,
             repository_source=cwd,
