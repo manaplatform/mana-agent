@@ -51,19 +51,19 @@ def is_within_any_root(path: Path, roots: Sequence[Path]) -> bool:
 
 
 def reject_unsafe_path_text(raw: str) -> str:
-    """Reject empty, null-byte, or segment-traversal path text before resolve."""
+    """Reject empty, null-byte, or traversal-like path text before resolve."""
     text = str(raw or "").strip()
     if not text or _NULL_BYTE in text:
         raise ValueError("Invalid path.")
     # Normalize separators for segment inspection without resolving.
     normalized = text.replace("\\", "/")
+    if "//" in normalized:
+        raise ValueError("Invalid path.")
     for segment in normalized.split("/"):
-        if not segment or segment == ".":
+        if not segment:
             continue
-        if segment == ".." or _UNSAFE_SEGMENT.match(segment):
-            # Allow ".." only when absolute resolution will later confine the path.
-            # We still reject repeated traversal-only inputs that never name a file.
-            pass
+        if _UNSAFE_SEGMENT.match(segment):
+            raise ValueError("Invalid path.")
     return text
 
 
