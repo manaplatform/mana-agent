@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.doctor.checks import codex, configuration, connectors, execution, filesystem, fleet, human_inbox, protocols, routing, runtime
+from mana_agent.doctor.checks import codex, configuration, connectors, execution, filesystem, fleet, human_inbox, protocols, routing, runtime, environment, providers, secrets, mcp
 from mana_agent.doctor.models import DoctorCheck
 
 
@@ -24,6 +24,12 @@ CHECKS: tuple[DoctorCheck, ...] = (
     DoctorCheck("protocols/acp-sdk", "Protocols", "Validate the optional ACP SDK.", protocols.acp_sdk),
     DoctorCheck("protocols/a2a-sdk", "Protocols", "Validate the optional A2A SDK.", protocols.a2a_sdk),
     DoctorCheck("protocols/security-config", "Protocols", "Validate protocol authentication and network safety.", protocols.configuration),
+    DoctorCheck("environment/os", "Environment", "Report OS and platform information.", environment.os_info),
+    DoctorCheck("environment/network-dns", "Environment", "Check basic DNS resolution.", environment.network_dns, network=True),
+    DoctorCheck("environment/docker", "Environment", "Detect container environment and localhost issues.", environment.docker_env),
+    DoctorCheck("providers/connectivity", "Providers", "Test connectivity and authentication for configured AI providers.", providers.connectivity, network=True),
+    DoctorCheck("secrets/references", "Secrets", "Validate that referenced secrets exist without exposing their values.", secrets.check_secrets),
+    DoctorCheck("mcp/health", "MCP", "Basic checks for MCP configuration and server tokens.", mcp.mcp_health),
 )
 
 _BY_ID = {check.check_id: check for check in CHECKS}

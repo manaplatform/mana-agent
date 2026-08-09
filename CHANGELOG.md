@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-10
+
+- Implemented a Schema-First Configuration Doctor to validate config before runtime startup.
+  - Added CLI `config` group (`schema`, `validate`, `explain`, `migrate`).
+  - Expanded `doctor` checks with environment, providers, secrets, and MCP validations.
+  - Added deterministic semantic schema validation and a migration registry.
+  - User verification required: `mana-agent config validate` and `mana-agent doctor --providers`.
+
 ## 2026-08-09
 
 - Hardened user-controlled path handling after CodeQL path-injection analysis.

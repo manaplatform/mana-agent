@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mana_agent.config.user_config import settings_source_for_pydantic
@@ -66,6 +66,7 @@ def resolve_embed_model(
 
 
 class Settings(BaseSettings):
+    mana_config_schema_version: int = Field(default=2, alias="MANA_CONFIG_SCHEMA_VERSION")
     mana_ai_provider: str = Field(default="openai", alias="MANA_AI_PROVIDER")
     mana_primary_model: str = Field(
         default="openai/gpt-4.1-mini", alias="MANA_PRIMARY_MODEL"
@@ -743,6 +744,12 @@ class Settings(BaseSettings):
             user_config_settings,
             file_secret_settings,
         )
+
+    @model_validator(mode="after")
+    def validate_semantics(self) -> Settings:
+        if self.mana_memory_mode == "external" and not self.mana_memory_provider:
+            raise ValueError("External memory mode requires a memory provider to be configured.")
+        return self
 
     def model_post_init(self, __context: object) -> None:
         _ = __context
