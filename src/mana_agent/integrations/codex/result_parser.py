@@ -1,4 +1,10 @@
-"""Normalize a completed Codex turn into a coding task result."""
+"""Normalize a completed Codex turn into a coding task result.
+
+Success and failure are determined from structured notifications and repository
+evidence (changed files, mutation item types, command exit codes). Agent message
+text is never the correctness signal and is not used as the user-facing answer
+for failed write turns.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +29,8 @@ _MUTATION_ITEM_TYPES = frozenset(
     }
 )
 
+_ASSISTANT_ITEM_TYPES = frozenset({"agentMessage", "agent_message"})
+
 
 def parse_codex_result(
     *,
@@ -38,7 +46,9 @@ def parse_codex_result(
     tests: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
-    summary = ""
+    # Internal last agent message (may be sanitized). Not used as the coding
+    # answer for failed write turns — see terminal_summary.
+    agent_message_text = ""
     usage: dict[str, int] | None = None
     status = "completed"
     test_failures: list[str] = []
@@ -60,22 +70,30 @@ def parse_codex_result(
                     tests.append(command)
                     exit_code = item.get("exitCode")
                     command_status = str(item.get("status") or "").lower()
-                    if (isinstance(exit_code, int) and exit_code != 0) or command_status in {"failed", "error"}:
+                    if (isinstance(exit_code, int) and exit_code != 0) or command_status in {
+                        "failed",
+                        "error",
+                    }:
                         test_failures.append(command)
-            if item_type in {"agentMessage", "agent_message"}:
+            if item_type in _ASSISTANT_ITEM_TYPES:
                 text = str(item.get("text") or item.get("message") or "").strip()
                 if text:
-                    # Never surface multi-KB think/DSML soup as the turn summary.
-                    summary = sanitize_assistant_visible_text(text)
+                    # Keep for plan-mode terminal notes / internal warnings only.
                     if looks_like_freeform_tool_garbage(text):
                         warnings.append(
                             "assistant_freeform_tool_text_redacted: model emitted "
-                            "think/DSML protocol soup instead of structured tools"
+                            "protocol soup instead of structured tools"
                         )
+                        agent_message_text = sanitize_assistant_visible_text(text)
+                    else:
+                        agent_message_text = sanitize_assistant_visible_text(text)
         if method == "warning":
             message = str(payload.get("message") or "").strip()
             if message:
                 warnings.append(message)
+                # Explicit capability degradation when Codex lacks model metadata.
+                if "fallback metadata" in message.lower() or "model metadata" in message.lower():
+                    warnings.append("codex_model_metadata_fallback")
         if method in {"turn/failed", "error"}:
             status = "failed"
             errors.append(_format_turn_failure(payload))
@@ -103,8 +121,7 @@ def parse_codex_result(
         warnings.append("Test command failed: " + ", ".join(test_failures))
 
     # Write-required turns that finish "successfully" with no repository diff are
-    # not complete. This is the SWE-bench empty_patch failure mode when the model
-    # emits free-form pseudo-tool text and never mutates the worktree.
+    # not complete. Mutation success is repository state, not agentMessage prose.
     if (
         status == "completed"
         and task.requires_repository_write
@@ -116,13 +133,24 @@ def parse_codex_result(
         else:
             errors.append("mutation_required_but_no_mutation_tool_attempted")
 
+    # Summary stored on the result is evidence-oriented. Terminal user answers are
+    # built separately by terminal_summary (failed write → no draft).
+    if status == "failed" and task.requires_repository_write:
+        summary = ""
+    elif status == "completed":
+        summary = agent_message_text or "Codex task completed."
+    elif status == "cancelled":
+        summary = "Codex task cancelled."
+    else:
+        summary = ""
+
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
     return CodingTaskResult(
         task_id=task.task_id,
         worker_id=worker_id,
         backend="codex",
         status=status,  # type: ignore[arg-type]
-        summary=summary or ("Codex task completed." if status == "completed" else "Codex task did not complete."),
+        summary=summary,
         changed_files=changed_files,
         commands_run=commands,
         tests_run=tests,
@@ -138,7 +166,18 @@ def parse_codex_result(
 
 def _is_test_command(command: str) -> bool:
     executable = command.strip().split(maxsplit=1)[0] if command.strip() else ""
-    return executable in {"pytest", "tox", "nox", "npm", "pnpm", "yarn", "cargo", "go", "mvn", "gradle"}
+    return executable in {
+        "pytest",
+        "tox",
+        "nox",
+        "npm",
+        "pnpm",
+        "yarn",
+        "cargo",
+        "go",
+        "mvn",
+        "gradle",
+    }
 
 
 def _format_turn_failure(payload: dict[str, Any]) -> str:
@@ -164,8 +203,6 @@ def _format_turn_failure(payload: dict[str, Any]) -> str:
                 text = f"{text} | failure_kind={kind}"
             if info.get("retryable") is False and "retryable=false" not in text:
                 text = f"{text} | retryable=false"
-        # When Codex reported a stream disconnect that was actually a non-retryable
-        # upstream rejection, stamp retryable=false even if the banner was dropped.
         if (
             isinstance(info, dict)
             and "responseStreamDisconnected" in info

@@ -13,6 +13,7 @@ from mana_agent.config.nvidia_model_requests import (
 )
 from mana_agent.integrations.codex.responses_bridge.models import BridgeUpstreamConfig
 from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
+from mana_agent.integrations.codex.tool_conversion import convert_responses_tools
 from mana_agent.model_routing.models import provider_request_overrides_from_configuration
 
 
@@ -82,34 +83,24 @@ def _reasoning_item_to_text(item: dict[str, Any]) -> str:
     return ""
 
 
-def _convert_tools(tools: Any) -> list[dict[str, Any]]:
-    if not isinstance(tools, list):
-        return []
-    converted: list[dict[str, Any]] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        tool_type = str(tool.get("type") or "function")
-        if tool_type != "function":
-            # Pass through non-function tools only when already Chat Completions shaped.
-            if "function" in tool:
-                converted.append(dict(tool))
-            continue
-        if isinstance(tool.get("function"), dict):
-            converted.append(dict(tool))
-            continue
-        name = str(tool.get("name") or "").strip()
-        if not name:
-            continue
-        function: dict[str, Any] = {
-            "name": name,
-            "description": str(tool.get("description") or ""),
-            "parameters": tool.get("parameters") or tool.get("input_schema") or {"type": "object", "properties": {}},
-        }
-        if "strict" in tool:
-            function["strict"] = tool["strict"]
-        converted.append({"type": "function", "function": function})
-    return converted
+def _convert_tools(
+    tools: Any,
+    *,
+    provider: str = "",
+    model: str = "",
+) -> list[dict[str, Any]]:
+    """Convert Responses tools to Chat Completions; fail on unsupported shapes.
+
+    Silent dropping of Codex tools is forbidden. See ``tool_conversion``.
+    """
+    report = convert_responses_tools(
+        tools,
+        provider=provider,
+        model=model,
+        transport="responses_bridge",
+        fail_on_unsupported=True,
+    )
+    return list(report.converted_tools)
 
 
 def _convert_tool_choice(tool_choice: Any) -> Any:
@@ -249,7 +240,11 @@ def convert_responses_request_to_chat(
         "messages": messages,
         "stream": bool(body.get("stream")),
     }
-    tools = _convert_tools(body.get("tools"))
+    tools = _convert_tools(
+        body.get("tools"),
+        provider=upstream.provider,
+        model=model,
+    )
     if tools:
         payload["tools"] = tools
     tool_choice = _convert_tool_choice(body.get("tool_choice"))

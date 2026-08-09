@@ -101,7 +101,12 @@ class WorkspaceContext(BaseModel):
 
 
 class AgentEvent(BaseModel):
-    """Backend-neutral, persistence-safe live coding event."""
+    """Backend-neutral, persistence-safe live coding event.
+
+    ``visibility`` and ``semantic_kind`` are protocol/state labels. They decide
+    whether an event may reach user-facing surfaces; raw model prose is never
+    inferred safe from text content.
+    """
 
     event_id: str = Field(default_factory=lambda: f"coding-{uuid.uuid4().hex}")
     event_type: str
@@ -123,6 +128,10 @@ class AgentEvent(BaseModel):
     model: str = ""
     error: str = ""
     output_preview: str = ""
+    # internal | progress | terminal — see coding.event_visibility
+    visibility: Literal["internal", "progress", "terminal"] = "internal"
+    # Normalized semantic category (assistant_generation, tool_execution, …)
+    semantic_kind: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_utc_now)
 

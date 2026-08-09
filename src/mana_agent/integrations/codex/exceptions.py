@@ -21,4 +21,15 @@ class CodexConfigurationError(CodexError):
     pass
 
 
-__all__ = ["CodexConfigurationError", "CodexError", "CodexExecutionError", "CodexProtocolError", "CodexUnavailableError"]
+class CodexCapabilityError(CodexConfigurationError):
+    """Selected provider/model/transport cannot satisfy required coding capabilities."""
+
+
+__all__ = [
+    "CodexCapabilityError",
+    "CodexConfigurationError",
+    "CodexError",
+    "CodexExecutionError",
+    "CodexProtocolError",
+    "CodexUnavailableError",
+]

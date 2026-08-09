@@ -1,4 +1,9 @@
-"""Normalize Codex app-server notifications at the integration boundary."""
+"""Normalize Codex app-server notifications at the integration boundary.
+
+Maps Codex protocol methods/item types onto Mana semantic categories and
+visibility labels. Higher layers consume semantic_kind / visibility — they must
+not re-implement provider-specific string matching for safety.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +11,15 @@ import hashlib
 import json
 from typing import Any
 
+from mana_agent.coding.event_visibility import (
+    EventSemanticKind,
+    EventVisibility,
+    classify_coding_event,
+)
 from mana_agent.coding.models import AgentEvent
-from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
 
 
+# Direct method → event_type mappings for well-known Codex notifications.
 _METHOD_TYPES = {
     "thread/started": "backend.selected",
     "turn/started": "turn.started",
@@ -33,6 +43,28 @@ _METHOD_TYPES = {
     "applyPatchApproval": "warning",
 }
 
+# Item types that are assistant text, not tools.
+_ASSISTANT_ITEM_TYPES = frozenset(
+    {
+        "agentmessage",
+        "agent_message",
+        "message",
+        "usermessage",
+        "user_message",
+    }
+)
+
+_MUTATION_ITEM_TYPES = frozenset(
+    {
+        "filechange",
+        "file_change",
+        "applypatch",
+        "apply_patch",
+        "patchapplication",
+        "patch_application",
+    }
+)
+
 
 def adapt_codex_event(
     task_id: str,
@@ -40,6 +72,7 @@ def adapt_codex_event(
     *,
     sequence: int = 0,
     model: str = "",
+    requires_repository_write: bool = True,
 ) -> AgentEvent:
     method = str(notification.get("method") or "")
     params = notification.get("params")
@@ -55,16 +88,33 @@ def adapt_codex_event(
     path = _first_text(item, "path", "filePath") or _first_text(payload, "path", "filePath")
     output = _first_text(payload, "delta", "output", "text") or _first_text(item, "output", "text")
     summary = _summary(payload, item)
-    # Agent message text can contain free-form tool/think protocol soup. Never
-    # surface that as live event previews or user-facing summaries.
-    if _is_assistant_visible_text(method, event_type, item_type):
-        if summary:
-            summary = sanitize_assistant_visible_text(summary)
-        if output:
-            output = sanitize_assistant_visible_text(output)
     usage = _usage(payload)
     error = _error(payload) if status == "failed" or event_type == "error" else ""
     event_id = _event_id(notification)
+
+    semantic_kind, visibility = classify_coding_event(
+        event_type,
+        tool_name=item_type,
+        requires_repository_write=requires_repository_write,
+    )
+    # Assistant generation / reasoning stay internal: keep full text on the
+    # event for traces, but visibility prevents user-surface publication.
+    if semantic_kind is EventSemanticKind.ASSISTANT_GENERATION:
+        # Prefer explicit assistant.* types over misclassified tool.call.*
+        if event_type.startswith("tool.call."):
+            event_type = (
+                "assistant.completed"
+                if event_type.endswith("completed")
+                else "assistant.started"
+                if event_type.endswith("started")
+                else "assistant.message"
+            )
+            semantic_kind, visibility = classify_coding_event(
+                event_type,
+                tool_name=item_type,
+                requires_repository_write=requires_repository_write,
+            )
+
     return AgentEvent(
         event_id=event_id,
         event_type=event_type,
@@ -73,7 +123,7 @@ def adapt_codex_event(
         backend="codex",
         sequence=sequence,
         status=status,
-        title=_title(event_type, item_type, command, path),
+        title=_title(event_type, item_type, command, path, semantic_kind),
         summary=summary,
         thread_id=thread_id,
         turn_id=turn_id,
@@ -86,28 +136,30 @@ def adapt_codex_event(
         model=str(payload.get("model") or model or ""),
         error=error,
         output_preview=output,
+        visibility=visibility.value,  # type: ignore[arg-type]
+        semantic_kind=semantic_kind.value,
         payload=payload,
     )
 
 
-def _is_assistant_visible_text(method: str, event_type: str, item_type: str) -> bool:
-    lowered_method = method.lower()
-    lowered_item = item_type.lower()
-    if event_type == "assistant.delta":
-        return True
-    if "agentmessage" in lowered_method or "agent_message" in lowered_method:
-        return True
-    if "agentmessage" in lowered_item or "agent_message" in lowered_item:
-        return True
-    return False
-
-
 def _item_event_type(method: str, item_type: str) -> str:
-    phase = "started" if method == "item/started" else "completed" if method == "item/completed" else "update"
+    phase = (
+        "started"
+        if method == "item/started"
+        else "completed"
+        if method == "item/completed"
+        else "update"
+    )
     lowered = item_type.lower()
+    if lowered in _ASSISTANT_ITEM_TYPES or "agentmessage" in lowered:
+        if phase == "started":
+            return "assistant.started"
+        if phase == "completed":
+            return "assistant.completed"
+        return "assistant.message"
     if "command" in lowered:
         return f"command.{phase}"
-    if "filechange" in lowered or "patch" in lowered:
+    if lowered in _MUTATION_ITEM_TYPES or "filechange" in lowered or "patch" in lowered:
         return "patch.applied" if phase == "completed" else "file.changed"
     if "reasoning" in lowered:
         return "reasoning.started" if phase == "started" else "reasoning.update"
@@ -126,7 +178,10 @@ def _status(method: str, event_type: str, item: dict[str, Any]) -> str:
         return "cancelled"
     if method.endswith("/failed") or raw in {"failed", "error"}:
         return "failed"
-    if method.endswith("/completed") or event_type.endswith(".completed") or raw in {"completed", "success"}:
+    if method.endswith("/completed") or event_type.endswith(".completed") or raw in {
+        "completed",
+        "success",
+    }:
         return "success"
     return "running"
 
@@ -157,7 +212,10 @@ def _usage(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _summary(payload: dict[str, Any], item: dict[str, Any]) -> str:
-    return (_first_text(payload, "message", "summary", "delta", "text") or _first_text(item, "summary", "text", "message", "command"))[:1000]
+    return (
+        _first_text(payload, "message", "summary", "delta", "text")
+        or _first_text(item, "summary", "text", "message", "command")
+    )[:1000]
 
 
 def _error(payload: dict[str, Any]) -> str:
@@ -190,7 +248,17 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def _title(event_type: str, item_type: str, command: str, path: str) -> str:
+def _title(
+    event_type: str,
+    item_type: str,
+    command: str,
+    path: str,
+    semantic_kind: EventSemanticKind,
+) -> str:
+    if semantic_kind is EventSemanticKind.ASSISTANT_GENERATION:
+        return "Assistant generation"
+    if semantic_kind is EventSemanticKind.REASONING:
+        return "Reasoning"
     if command:
         return command[:160]
     if path:

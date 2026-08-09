@@ -4,6 +4,32 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex/NVIDIA DeepSeek coding turns leaking raw assistant drafts into the
+  user-facing answer (e.g. `bump version to v0.1.6` with hundreds of
+  `assistant.delta` events and `mutation_required_but_no_mutation_tool_attempted`).
+  - Root cause: coding success/failure was validated correctly from repository
+    evidence, but the user answer was still taken from agentMessage prose, and
+    live `assistant.delta` events were published to chat sinks. `text_cleanup`
+    regexes could not cover unknown DSML/XML garbage.
+  - Architectural fix (provider-neutral, protocol/state based):
+    1. `coding.event_visibility` classifies events by type into
+       internal / progress / terminal; assistant generation and reasoning are
+       never user-publishable.
+    2. `CodexCodingAgentShim` records full traces internally but only emits safe
+       progress + one evidence-based terminal answer (`terminal_summary`).
+    3. Failed write turns return a concise deterministic failure (no model draft).
+    4. Mutation recovery is a bounded attempt loop (max 2) using structured
+       terminal reasons, not model prose.
+    5. Responses→Chat tool conversion fail-fasts on unsupported tool shapes with
+       structured diagnostics (no silent drops); catalog fixture covers Codex
+       function tools.
+    6. Write turns validate transport + Mana catalog `tool_calling` before start;
+       unknown models fail closed for writes.
+    7. Mana model limits/capabilities are bridged into Codex runtime config
+       (`model_context_window`, auto-compact) to reduce fallback metadata.
+  - User verification required:
+    `python -m pytest tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/test_codex_responses_bridge.py tests/test_codex_responses_bridge_recovery.py tests/test_codex_runtime.py -q`
+
 - Fixed Codex coding response leak where broken free-form tool-invocation XML
   (e.g. `<danke:ultracall_calls>`, `<parameter name="cmd">`,
   `max_output_tokens` padding soup, “Tools invocation syntax failed” meta-text)

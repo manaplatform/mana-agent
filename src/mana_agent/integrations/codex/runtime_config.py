@@ -67,6 +67,10 @@ class CodexRuntimeConfig:
     # Accounting always attributes usage to the real inference provider/model.
     accounting_provider: str = ""
     accounting_model: str = ""
+    # Optional model capability bridge from Mana catalog → Codex config.
+    model_context_window: int | None = None
+    model_auto_compact_token_limit: int | None = None
+    supports_tool_calls: bool | None = None
 
     @property
     def credential_fingerprint(self) -> str:
@@ -113,17 +117,32 @@ class CodexRuntimeConfig:
             'forced_login_method = "api"',
             f"approval_policy = {_toml_string(self.approval_policy)}",
             f"sandbox_mode = {_toml_string(self.sandbox_mode)}",
-            "",
-            f"[model_providers.{RUNTIME_PROVIDER_ID}]",
-            f"name = {_toml_string('Mana-Agent runtime provider')}",
-            f"base_url = {_toml_string(self.base_url)}",
-            f"env_key = {_toml_string(RUNTIME_API_KEY_ENV)}",
-            # Current Codex requires Responses; the bridge presents that API locally.
-            'wire_api = "responses"',
-            f"request_max_retries = {self.request_max_retries}",
-            f"stream_max_retries = {self.stream_max_retries}",
-            f"stream_idle_timeout_ms = {self.stream_idle_timeout_ms}",
         ]
+        # Supply explicit limits so Codex does not silently degrade to fallback
+        # model metadata for unknown/third-party model ids (e.g. NVIDIA DeepSeek).
+        if self.model_context_window is not None and self.model_context_window > 0:
+            lines.append(f"model_context_window = {int(self.model_context_window)}")
+        if (
+            self.model_auto_compact_token_limit is not None
+            and self.model_auto_compact_token_limit > 0
+        ):
+            lines.append(
+                f"model_auto_compact_token_limit = {int(self.model_auto_compact_token_limit)}"
+            )
+        lines.extend(
+            [
+                "",
+                f"[model_providers.{RUNTIME_PROVIDER_ID}]",
+                f"name = {_toml_string('Mana-Agent runtime provider')}",
+                f"base_url = {_toml_string(self.base_url)}",
+                f"env_key = {_toml_string(RUNTIME_API_KEY_ENV)}",
+                # Current Codex requires Responses; the bridge presents that API locally.
+                'wire_api = "responses"',
+                f"request_max_retries = {self.request_max_retries}",
+                f"stream_max_retries = {self.stream_max_retries}",
+                f"stream_idle_timeout_ms = {self.stream_idle_timeout_ms}",
+            ]
+        )
         if self.http_headers:
             lines.append(f"http_headers = {_toml_inline_table(self.http_headers)}")
         if self.env_http_headers:
@@ -233,6 +252,10 @@ class CodexRuntimeConfigBuilder:
             http_headers = {}
             query_params = {}
 
+        context_window, auto_compact, supports_tools = _mana_model_capability_bridge(
+            provider=provider,
+            model=model,
+        )
         return CodexRuntimeConfig(
             provider=provider,
             provider_display_name=settings.provider_display_name or provider,
@@ -263,7 +286,47 @@ class CodexRuntimeConfigBuilder:
             bridge=bridge,
             accounting_provider=provider,
             accounting_model=model,
+            model_context_window=context_window,
+            model_auto_compact_token_limit=auto_compact,
+            supports_tool_calls=supports_tools,
         )
+
+
+def _mana_model_capability_bridge(
+    *,
+    provider: str,
+    model: str,
+) -> tuple[int | None, int | None, bool | None]:
+    """Translate Mana catalog limits/capabilities into Codex runtime knobs.
+
+    Provider-neutral: no hard-coded model-id branches beyond the shared catalog
+    lookup. Returns (context_window, auto_compact_token_limit, supports_tool_calls).
+    """
+    try:
+        from mana_agent.config.model_catalog import (
+            ModelCapability,
+            maintained_token_limits,
+            normalize_capabilities,
+        )
+    except Exception:
+        return None, None, None
+
+    limits = maintained_token_limits(provider, model)
+    context_window: int | None = None
+    auto_compact: int | None = None
+    if limits is not None:
+        context_window = int(limits[0])
+        # Compact before the hard window; keep headroom for tool payloads.
+        auto_compact = max(1024, int(context_window * 0.85))
+
+    supports_tools: bool | None = None
+    try:
+        caps = normalize_capabilities(provider, model)
+        if caps:
+            supports_tools = ModelCapability.TOOL_CALLING in caps
+    except Exception:
+        supports_tools = None
+    return context_window, auto_compact, supports_tools
 
 
 def _toml_string(value: str) -> str:

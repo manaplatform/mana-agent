@@ -287,9 +287,11 @@ def test_codex_shim_failed_payload_retains_backend_error() -> None:
 
     assert payload["auto_execute_terminal_reason"] == "codex_failed"
     assert payload["answer"] == (
-        "Codex task did not complete. Reason: turn/start rejected the sandbox value"
+        "Codex coding turn failed: turn/start rejected the sandbox value"
     )
     assert "turn/start rejected the sandbox value" in payload["warnings"]
+    # Model draft must not be concatenated into the terminal answer.
+    assert "did not complete. Reason:" not in payload["answer"]
 
 
 def test_codex_shim_surfaces_mutation_required_terminal_reason() -> None:
@@ -801,8 +803,20 @@ def test_write_required_turn_without_changed_files_fails(tmp_path: Path) -> None
     assert result.status == "failed"
     assert result.errors == ["mutation_required_but_no_mutation_tool_attempted"]
     assert result.tests_passed is False
-    # Free-form invoke/DSML soup must not become the user-facing summary.
+    # Failed write turns do not keep agentMessage drafts as the result summary.
     assert "exec_command" not in (result.summary or "")
+    assert (result.summary or "") == ""
+    # Terminal user answer is evidence-based, not the free-form draft.
+    from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+
+    payload = CodexCodingAgentShim._result_payload(
+        result,
+        events=[],
+        workspace_path="",
+        requires_repository_write=True,
+    )
+    assert "exec_command" not in payload["answer"]
+    assert "No mutation tool was executed" in payload["answer"]
     assert any(
         str(w).startswith("assistant_freeform_tool_text_redacted")
         for w in (result.warnings or [])
@@ -841,12 +855,22 @@ def test_ultracall_tool_invocation_leak_redacted_from_codex_summary(tmp_path: Pa
         ],
     )
     assert result.status == "failed"
-    summary = result.summary or ""
-    assert "ultracall" not in summary.lower()
-    assert "parameter" not in summary.lower()
-    assert "max_output_tokens" not in summary.lower()
-    assert "Tools invocation" not in summary
-    assert "redacted" in summary.lower() or "structured tools" in summary.lower()
+    # Correctness is protocol/evidence based: failed write keeps no draft summary.
+    assert (result.summary or "") == ""
+    from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+
+    payload = CodexCodingAgentShim._result_payload(
+        result,
+        events=[],
+        workspace_path="",
+        requires_repository_write=True,
+    )
+    answer = payload["answer"]
+    assert "ultracall" not in answer.lower()
+    assert "parameter" not in answer.lower()
+    assert "max_output_tokens" not in answer.lower()
+    assert "Tools invocation" not in answer
+    assert "No mutation tool was executed" in answer
     assert any(
         str(w).startswith("assistant_freeform_tool_text_redacted")
         for w in (result.warnings or [])
@@ -854,7 +878,7 @@ def test_ultracall_tool_invocation_leak_redacted_from_codex_summary(tmp_path: Pa
 
 
 def test_agent_message_event_strips_leaked_tool_markup() -> None:
-    """Live Codex agentMessage previews must not stream protocol soup."""
+    """Assistant generation is internal — not published as tool progress."""
     leak = (
         '<danke:ultracall_calls><parameter name="cmd">ls</parameter>'
         "</danke:ultracall_calls> Tools invocation syntax failed"
@@ -871,9 +895,13 @@ def test_agent_message_event_strips_leaked_tool_markup() -> None:
             },
         },
     )
-    assert "ultracall" not in (event.summary or "").lower()
-    assert "parameter" not in (event.summary or "").lower()
-    assert "ultracall" not in (event.output_preview or "").lower()
+    assert event.event_type in {
+        "assistant.completed",
+        "assistant.message",
+        "assistant.started",
+    }
+    assert event.visibility == "internal"
+    assert event.semantic_kind == "assistant_generation"
 
 
 def test_write_required_turn_with_mutation_item_but_no_diff_fails(tmp_path: Path) -> None:

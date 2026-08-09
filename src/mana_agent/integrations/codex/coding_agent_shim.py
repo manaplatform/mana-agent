@@ -15,10 +15,20 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from mana_agent.coding.event_visibility import (
+    EventVisibility,
+    is_user_publishable,
+    progress_event_payload,
+)
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.coding.live_events import publish_coding_event
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
+from mana_agent.integrations.codex.exceptions import CodexCapabilityError
+from mana_agent.integrations.codex.terminal_summary import (
+    build_coding_terminal_answer,
+    terminal_reason_from_result,
+)
 from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
 from mana_agent.evals.recorder import record_current
 from mana_agent.model_routing.models import (
@@ -30,6 +40,7 @@ from mana_agent.model_routing.models import (
 )
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
 from mana_agent.workspaces.preparation import validate_prepared_repository
+from mana_agent.config.provider_registry import CodexTransport
 
 if TYPE_CHECKING:
     from mana_agent.gateway.routing import GatewayRoutingAuthority
@@ -204,6 +215,7 @@ class CodexCodingAgentShim:
             "mutation_required_but_no_changed_files",
         }
     )
+    _MAX_MUTATION_ATTEMPTS = 2  # initial + one recovery
 
     def _execute_turn(
         self,
@@ -214,10 +226,109 @@ class CodexCodingAgentShim:
         gateway_task_id: Any = None,
         _mutation_recovery: bool = False,
     ) -> dict[str, Any]:
+        """Run a coding turn with bounded mutation recovery (explicit attempt loop).
+
+        User-facing output is only the validated terminal summary. Raw assistant
+        generation is recorded internally and never published as chat answer.
+        """
         goal = str(request or "").strip()
         if not goal:
             raise ValueError("Codex coding request is required")
         validate_prepared_repository(self.repo_root, self.working_directory)
+
+        original_goal = goal
+        # When called as recovery from the attempt loop, goal already includes
+        # recovery instructions; track the user-facing original separately only
+        # on the public entry path (_mutation_recovery=False).
+        prior_terminal = ""
+        combined_warnings: list[str] = []
+        last_payload: dict[str, Any] | None = None
+
+        max_attempts = (
+            1
+            if _mutation_recovery or not requires_repository_write
+            else self._MAX_MUTATION_ATTEMPTS
+        )
+
+        for attempt_index in range(max_attempts):
+            is_recovery = attempt_index > 0 or _mutation_recovery
+            attempt_goal = goal
+            if attempt_index > 0:
+                attempt_goal = self._mutation_recovery_goal(
+                    original_goal if not _mutation_recovery else goal.split("\n\n[mutation_required recovery]")[0],
+                    prior_terminal,
+                )
+                record_current(
+                    "codex.mutation_recovery.started",
+                    {
+                        "attempt": attempt_index + 1,
+                        "prior_terminal_reason": prior_terminal,
+                    },
+                )
+
+            payload = self._run_single_attempt(
+                attempt_goal,
+                requires_repository_write=requires_repository_write,
+                flow_id=None if is_recovery else flow_id,
+                gateway_task_id=gateway_task_id,
+                is_recovery=is_recovery,
+            )
+            last_payload = payload
+            combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
+            terminal = str(payload.get("auto_execute_terminal_reason") or "").strip()
+            if not requires_repository_write:
+                break
+            if terminal not in self._MUTATION_FAILURE_REASONS:
+                break
+            if attempt_index + 1 >= max_attempts:
+                break
+            prior_terminal = terminal
+            if is_recovery or attempt_index > 0:
+                # Already consumed recovery budget.
+                break
+
+        assert last_payload is not None
+        if prior_terminal:
+            last_payload = dict(last_payload)
+            last_payload["mutation_recovery"] = True
+            last_payload["prior_terminal_reason"] = prior_terminal
+            last_payload["warnings"] = [
+                *combined_warnings,
+                f"mutation_recovery_after:{prior_terminal}",
+            ]
+        else:
+            last_payload = dict(last_payload)
+            if combined_warnings:
+                last_payload["warnings"] = list(dict.fromkeys(combined_warnings))
+        return last_payload
+
+    def _mutation_recovery_goal(self, goal: str, terminal: str) -> str:
+        return (
+            f"{goal}\n\n"
+            "[mutation_required recovery]\n"
+            f"Prior turn terminal reason: {terminal}.\n"
+            "You inspected or discussed the issue but left the worktree unchanged.\n"
+            "You MUST apply the production-source fix now with apply_patch (or an "
+            "equivalent repository file mutation tool). Do not finish with analysis, "
+            "questions, chat text, or free-form DSML/think markup only. Success "
+            "requires uncommitted edits under the repository root.\n"
+            "Do not re-import or run the uninstalled package to reproduce the bug; "
+            "source checkouts may be non-importable. Do not spend the recovery turn "
+            "re-searching tests or CHANGELOG unless required to locate the production "
+            "file. Read the relevant production file(s) if needed, then mutate them "
+            "immediately. Prefer the fewest structured tool calls that complete the "
+            "edit."
+        )
+
+    def _run_single_attempt(
+        self,
+        goal: str,
+        *,
+        requires_repository_write: bool,
+        flow_id: Any = None,
+        gateway_task_id: Any = None,
+        is_recovery: bool = False,
+    ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
         # connector must not manufacture a second task identity after routing:
         # context-cost admission, transactional ownership, live events, and
@@ -278,6 +389,12 @@ class CodexCodingAgentShim:
                 "model_request_overrides": request_overrides,
             }
         )
+        self._validate_write_transport_capability(
+            requires_repository_write=requires_repository_write,
+            model=str(self.codex_settings.model or ""),
+            provider=str(self.codex_settings.provider or ""),
+            transport=self.codex_settings.codex_transport,
+        )
         record_current(
             "codex.turn.started",
             {
@@ -288,13 +405,10 @@ class CodexCodingAgentShim:
                 "repository_identity": str(self.repo_root),
                 "routing_decision_id": routing_decision.decision_id,
                 "routing_mode": routing_decision.routing_mode.value,
+                "is_recovery": is_recovery,
             },
         )
-        # Write turns must prefer structured mutation over endless inspection.
-        # Conflicting "ask for clarification" language caused DeepSeek+Codex
-        # empty-patch failures (shell-only exploration, then free-form DSML soup
-        # instead of apply_patch) on concrete goals such as version bumps.
-        if requires_repository_write and _mutation_recovery:
+        if requires_repository_write and is_recovery:
             requirements = [
                 "Apply the required production-source mutation now with apply_patch "
                 "(or an equivalent repository file mutation tool).",
@@ -396,7 +510,10 @@ class CodexCodingAgentShim:
             try:
                 async for event in backend.stream(task, workspace):
                     events.append(event)
-                    self._emit_event(event)
+                    self._emit_event(
+                        event,
+                        requires_repository_write=requires_repository_write,
+                    )
                 return backend.result_for(task_id)
             finally:
                 await backend.close()
@@ -436,69 +553,68 @@ class CodexCodingAgentShim:
             result,
             events=events,
             workspace_path=(str(workspace.worktree_path) if requires_repository_write else ""),
+            requires_repository_write=requires_repository_write,
         )
         selected_flow_id = str(result.thread_id or flow_id or task_id).strip()
         payload["flow_id"] = selected_flow_id
         self._active_flow_id = selected_flow_id
         self._flow_results[selected_flow_id] = dict(payload)
-        record_current("codex.turn.finished", {"task_id": task_id, "result": result.model_dump(mode="json"), "workspace_path": str(workspace.worktree_path)})
-
-        # Write-required turns that finish without a repository mutation get one
-        # forced recovery turn (parity with multi-agent forced_mutation_retry).
-        # This is deterministic recovery after a validated mutation failure, not
-        # keyword routing or a silent backend switch.
-        terminal = str(payload.get("auto_execute_terminal_reason") or "").strip()
-        if (
-            requires_repository_write
-            and not _mutation_recovery
-            and terminal in self._MUTATION_FAILURE_REASONS
-        ):
-            recovery_goal = (
-                f"{goal}\n\n"
-                "[mutation_required recovery]\n"
-                f"Prior turn terminal reason: {terminal}.\n"
-                "You inspected or discussed the issue but left the worktree unchanged.\n"
-                "You MUST apply the production-source fix now with apply_patch (or an "
-                "equivalent repository file mutation tool). Do not finish with analysis, "
-                "questions, chat text, or free-form DSML/think markup only. Success "
-                "requires uncommitted edits under the repository root.\n"
-                "Do not re-import or run the uninstalled package to reproduce the bug; "
-                "source checkouts may be non-importable. Do not spend the recovery turn "
-                "re-searching tests or CHANGELOG unless required to locate the production "
-                "file. Read the relevant production file(s) if needed, then mutate them "
-                "immediately. Prefer the fewest structured tool calls that complete the "
-                "edit."
-            )
-            record_current(
-                "codex.mutation_recovery.started",
-                {
-                    "task_id": task_id,
-                    "prior_terminal_reason": terminal,
-                    "prior_thread_id": result.thread_id,
-                },
-            )
-            # Fresh turn identity: do not resume the prior flow/thread. Prior
-            # free-form DSML agentMessages poison multi-turn tool history.
-            recovery_payload = self._execute_turn(
-                recovery_goal,
-                requires_repository_write=True,
-                flow_id=None,
-                gateway_task_id=gateway_task_id,
-                _mutation_recovery=True,
-            )
-            recovery_payload = dict(recovery_payload)
-            recovery_payload["mutation_recovery"] = True
-            recovery_payload["prior_terminal_reason"] = terminal
-            prior_warnings = list(payload.get("warnings") or [])
-            recovery_warnings = list(recovery_payload.get("warnings") or [])
-            recovery_payload["warnings"] = [
-                *prior_warnings,
-                f"mutation_recovery_after:{terminal}",
-                *recovery_warnings,
-            ]
-            return recovery_payload
-
+        record_current(
+            "codex.turn.finished",
+            {
+                "task_id": task_id,
+                "result": result.model_dump(mode="json"),
+                "workspace_path": str(workspace.worktree_path),
+                "user_answer": payload.get("answer"),
+            },
+        )
+        # Emit a single terminal user-facing event (never mid-turn drafts).
+        self._emit_terminal_result(payload, task_id=task_id, model=str(self.codex_settings.model or ""))
         return payload
+
+    def _validate_write_transport_capability(
+        self,
+        *,
+        requires_repository_write: bool,
+        model: str,
+        provider: str,
+        transport: CodexTransport | Any,
+    ) -> None:
+        """Fail write jobs when the selected stack cannot represent tool/mutation work."""
+        if not requires_repository_write:
+            return
+        transport_value = getattr(transport, "value", str(transport or ""))
+        if transport is CodexTransport.UNSUPPORTED or transport_value in {"", "unsupported"}:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: selected provider has no supported "
+                f"Codex transport (provider={provider!r}, model={model!r}). "
+                "No fallback coding backend was executed."
+            )
+        # Catalog capability after routing. When Mana knows the model and it
+        # lacks tool_calling, refuse the write. Unknown models fail closed for
+        # write turns (no silent degraded path). Bridge conversion still
+        # fail-fasts if Codex tools cannot be represented mid-request.
+        try:
+            from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
+
+            caps = normalize_capabilities(provider, model)
+        except Exception as exc:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model capability metadata is unavailable. "
+                f"provider={provider!r} model={model!r}. No fallback was executed."
+            ) from exc
+        if not caps:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model capabilities are unknown "
+                f"(provider={provider!r}, model={model!r}, transport={transport_value!r}). "
+                "Refusing to claim write/tool support without explicit capability metadata."
+            )
+        if ModelCapability.TOOL_CALLING not in caps:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model does not declare tool_calling "
+                f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
+                "No silent degraded write path was started."
+            )
 
     def _repository_has_head(self) -> bool:
         completed = subprocess.run(
@@ -510,18 +626,65 @@ class CodexCodingAgentShim:
         )
         return completed.returncode == 0
 
-    def _emit_event(self, event: AgentEvent) -> None:
-        record_current(event.event_type, event.model_dump(mode="json"))
-        publish_coding_event(event)
+    def _emit_event(
+        self,
+        event: AgentEvent,
+        *,
+        requires_repository_write: bool = True,
+    ) -> None:
+        """Record every event internally; publish only safe progress to user surfaces.
+
+        There is no path from assistant.delta / model drafts to chat. Visibility
+        is determined by event_type / semantic_kind, not text content.
+        """
+        _ = requires_repository_write  # reserved for phase-aware policies
+        full = event.model_dump(mode="json")
+        # Internal observability always keeps full fidelity (including drafts).
+        record_current(event.event_type, full)
+
+        visibility = str(event.visibility or EventVisibility.INTERNAL.value)
+        if not is_user_publishable(visibility):
+            # Do not publish assistant generation / reasoning / raw dumps to chat UI.
+            return
+
+        safe = progress_event_payload(event)
+        # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
+        progress = AgentEvent(
+            event_id=str(safe.get("event_id") or event.event_id),
+            event_type=str(safe.get("event_type") or event.event_type),
+            task_id=event.task_id,
+            backend=event.backend,
+            sequence=event.sequence,
+            status=event.status,
+            title=str(safe.get("title") or ""),
+            summary=str(safe.get("summary") or ""),
+            thread_id=event.thread_id,
+            turn_id=event.turn_id,
+            tool_name=str(safe.get("tool_name") or ""),
+            command=str(safe.get("command") or ""),
+            path=str(safe.get("path") or ""),
+            duration_ms=event.duration_ms,
+            token_usage=event.token_usage,
+            model=event.model,
+            error=str(safe.get("error") or ""),
+            output_preview="",
+            visibility="progress",
+            semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
+            payload={},
+        )
+        publish_coding_event(progress)
         if self.session_id and self.repository_id:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
             get_execution_event_hub().publish(
                 {
-                    **event.model_dump(mode="json"),
-                    "type": event.event_type,
-                    "event_id": event.event_id,
-                    "metadata": event.payload,
+                    **progress.model_dump(mode="json"),
+                    "type": progress.event_type,
+                    "event_id": progress.event_id,
+                    "metadata": {
+                        "visibility": progress.visibility,
+                        "semantic_kind": progress.semantic_kind,
+                    },
                 },
                 conversation_id=self.session_id,
                 execution_id=event.task_id,
@@ -529,11 +692,47 @@ class CodexCodingAgentShim:
             )
         if self.event_sink is None:
             return
-        payload = event.model_dump(mode="json")
+        payload = progress.model_dump(mode="json")
         try:
-            self.event_sink(event.event_type, payload)
+            self.event_sink(progress.event_type, payload)
         except TypeError:
             self.event_sink(payload)
+
+    def _emit_terminal_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        task_id: str,
+        model: str,
+    ) -> None:
+        """Publish one validated terminal coding result to user-facing surfaces."""
+        answer = str(payload.get("answer") or "").strip()
+        status = str(payload.get("status") or "failed")
+        event = AgentEvent(
+            event_type="coding.terminal",
+            task_id=task_id,
+            backend="codex",
+            sequence=10_000,
+            status="success" if status == "completed" else "failed" if status == "failed" else "cancelled",
+            title="Coding result",
+            summary=answer[:1000],
+            model=model,
+            visibility="terminal",
+            semantic_kind="lifecycle",
+            payload={
+                "auto_execute_terminal_reason": payload.get("auto_execute_terminal_reason"),
+                "changed_files": list(payload.get("changed_files") or []),
+                "status": status,
+            },
+        )
+        record_current("coding.terminal", event.model_dump(mode="json"))
+        publish_coding_event(event)
+        if self.event_sink is not None:
+            data = event.model_dump(mode="json")
+            try:
+                self.event_sink(event.event_type, data)
+            except TypeError:
+                self.event_sink(data)
 
     @staticmethod
     def _result_payload(
@@ -541,29 +740,14 @@ class CodexCodingAgentShim:
         *,
         events: list[AgentEvent],
         workspace_path: str,
+        requires_repository_write: bool = True,
     ) -> dict[str, Any]:
-        terminal_reason = {
-            "completed": "completed",
-            "failed": "codex_failed",
-            "cancelled": "codex_cancelled",
-        }[result.status]
-        # Prefer specific mutation-failure codes over the generic codex_failed
-        # label so full-auto / SWE-bench logs can diagnose empty patches.
-        if result.status == "failed":
-            for err in result.errors:
-                text = str(err or "").strip()
-                for code in (
-                    "mutation_required_but_no_changed_files",
-                    "mutation_required_but_no_mutation_tool_attempted",
-                ):
-                    if text == code or text.startswith(f"{code}:"):
-                        terminal_reason = code
-                        break
-                if terminal_reason != "codex_failed":
-                    break
-        answer = result.summary
-        if result.status == "failed" and result.errors:
-            answer = f"{result.summary} Reason: {result.errors[0]}".strip()
+        terminal_reason = terminal_reason_from_result(result)
+        answer = build_coding_terminal_answer(
+            result,
+            requires_repository_write=requires_repository_write,
+            terminal_reason=terminal_reason,
+        )
         return {
             "answer": answer,
             "backend": result.backend,
@@ -580,6 +764,7 @@ class CodexCodingAgentShim:
             "turn_id": result.turn_id,
             "branch_name": result.branch_name,
             "workspace_path": workspace_path,
+            # Full internal trace (includes assistant.delta for debugging).
             "trace": [event.model_dump(mode="json") for event in events],
             "actions_taken": [event.model_dump(mode="json") for event in events],
             "token_usage": result.token_usage,

@@ -1,0 +1,113 @@
+{
+  "description": "Codex app-server Responses tool catalog shapes for bridge conversion regression.",
+  "source": "codex-cli 0.147 coding turn tool shapes (function tools with flat name/parameters + nested function).",
+  "tools": [
+    {
+      "type": "function",
+      "name": "shell",
+      "description": "Runs a shell command and returns its output.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workdir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "apply_patch",
+      "description": "Apply a patch to files under the workspace.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "update_plan",
+      "description": "Update the current step plan.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "view_image",
+      "description": "Attach a local image for visual inspection.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "type": "function",
+      "name": "list_dir",
+      "description": "List directory entries.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_files",
+        "description": "Search file contents.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    }
+  ]
+}

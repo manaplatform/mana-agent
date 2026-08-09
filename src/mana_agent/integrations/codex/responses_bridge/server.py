@@ -198,6 +198,12 @@ def build_bridge_app(
         except ResponsesBridgeError:
             raise
         except Exception as exc:
+            from mana_agent.integrations.codex.tool_conversion import BridgeToolCompatibilityError
+
+            if isinstance(exc, BridgeToolCompatibilityError):
+                # Structured diagnostics; never include secrets. Message embeds
+                # original/converted/unsupported counts for operators.
+                raise ResponsesBridgeError(str(exc), status_code=400) from exc
             raise ResponsesBridgeError(
                 f"Failed to convert Responses request: {type(exc).__name__}.",
                 status_code=400,
