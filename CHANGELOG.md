@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Bumped the package and documented version to `v0.1.6`.
+  - User verification required: `python -m pytest tests/test_package_version.py -q`.
+
+## 2026-08-09
+
 - Updated the multi-agent route fixture to model-select documentation
   subagents for the large README update workflow.
   - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
