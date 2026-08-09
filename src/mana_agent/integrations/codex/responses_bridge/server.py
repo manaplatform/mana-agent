@@ -31,6 +31,7 @@ from mana_agent.integrations.codex.responses_bridge.models import (
     UpstreamProviderError,
 )
 from mana_agent.integrations.codex.responses_bridge.request_adapter import (
+    MANA_BRIDGE_META_KEY,
     convert_responses_request_to_chat,
 )
 from mana_agent.integrations.codex.responses_bridge.response_adapter import (
@@ -203,11 +204,34 @@ def build_bridge_app(
             if isinstance(exc, BridgeToolCompatibilityError):
                 # Structured diagnostics; never include secrets. Message embeds
                 # original/converted/unsupported counts for operators.
+                logger.error(
+                    "responses_bridge.tool_conversion_failed provider=%s model=%s diagnostics=%s",
+                    getattr(exc, "provider", ""),
+                    getattr(exc, "model", ""),
+                    exc.diagnostics(),
+                )
                 raise ResponsesBridgeError(str(exc), status_code=400) from exc
             raise ResponsesBridgeError(
                 f"Failed to convert Responses request: {type(exc).__name__}.",
                 status_code=400,
             ) from exc
+
+        # Local-only conversion metadata must never reach the upstream provider.
+        bridge_meta = chat_payload.pop(MANA_BRIDGE_META_KEY, None)
+        tool_origins: dict[str, str] = {}
+        response_tool_names: dict[str, str] = {}
+        tool_namespaces: dict[str, str] = {}
+        if isinstance(bridge_meta, dict):
+            for key, target in (
+                ("tool_origins", tool_origins),
+                ("response_tool_names", response_tool_names),
+                ("tool_namespaces", tool_namespaces),
+            ):
+                raw_values = bridge_meta.get(key)
+                if isinstance(raw_values, dict):
+                    target.update(
+                        {str(k): str(v) for k, v in raw_values.items() if str(k).strip()}
+                    )
 
         stream = bool(chat_payload.get("stream"))
         url = upstream.base_url.rstrip("/") + "/chat/completions"
@@ -224,15 +248,24 @@ def build_bridge_app(
             thinking = template.get("thinking")
             effort = template.get("reasoning_effort")
             template_summary = f"thinking={thinking!r} reasoning_effort={effort!r}"
+        tool_names = []
+        for tool in chat_payload.get("tools") or []:
+            if isinstance(tool, dict):
+                fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+                name = fn.get("name") or tool.get("name")
+                if name:
+                    tool_names.append(str(name))
         logger.info(
             "responses_bridge.upstream_request provider=%s model=%s stream=%s host=%s "
-            "has_tools=%s has_chat_template_kwargs=%s chat_template_kwargs=%s "
-            "transport_max_attempts=%s",
+            "has_tools=%s tool_count=%s tool_names=%s has_chat_template_kwargs=%s "
+            "chat_template_kwargs=%s transport_max_attempts=%s",
             upstream.provider,
             model,
             stream,
             httpx.URL(url).host,
             bool(chat_payload.get("tools")),
+            len(tool_names),
+            tool_names[:20],
             isinstance(template, dict),
             template_summary or "none",
             transport_max_attempts,
@@ -332,6 +365,9 @@ def build_bridge_app(
                     url=url,
                     circuit_key=scope,
                     circuit_breaker=breaker,
+                    tool_origins=tool_origins,
+                    response_tool_names=response_tool_names,
+                    tool_namespaces=tool_namespaces,
                 ),
                 media_type="text/event-stream",
             )
@@ -397,7 +433,11 @@ def build_bridge_app(
                 status_code=502,
             )
         converted = convert_chat_completion_to_response(
-            chat, model=str(chat_payload.get("model") or upstream.model)
+            chat,
+            model=str(chat_payload.get("model") or upstream.model),
+            tool_origins=tool_origins,
+            response_tool_names=response_tool_names,
+            tool_namespaces=tool_namespaces,
         )
         return JSONResponse(converted)
 
@@ -451,6 +491,9 @@ async def _stream_accepted_upstream(
     url: str,
     circuit_key: str,
     circuit_breaker,
+    tool_origins: dict[str, str] | None = None,
+    response_tool_names: dict[str, str] | None = None,
+    tool_namespaces: dict[str, str] | None = None,
 ):
     """Yield Responses SSE from an already-accepted (2xx) upstream stream.
 
@@ -459,7 +502,12 @@ async def _stream_accepted_upstream(
     failure rather than an unexplained socket EOF.
     """
     model = str(chat_payload.get("model") or upstream.model)
-    adapter = ChatToResponsesStreamAdapter(model=model)
+    adapter = ChatToResponsesStreamAdapter(
+        model=model,
+        tool_origins=dict(tool_origins or {}),
+        response_tool_names=dict(response_tool_names or {}),
+        tool_namespaces=dict(tool_namespaces or {}),
+    )
     try:
         for event in adapter.open_events():
             yield event

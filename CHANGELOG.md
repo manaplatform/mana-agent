@@ -4,6 +4,26 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex Responses bridge rejecting coding turns with
+  `original=10 converted=8 unsupported=2` or
+  `original=10 converted=9 unsupported=1` on NVIDIA DeepSeek
+  (`deepseek-ai/deepseek-v4-flash-0731`).
+  - Cause: fail-fast tool conversion only accepted `type=function`. With Codex
+    fallback model metadata, `apply_patch` is freeform (`type=custom`) and
+    host tools such as `web_search` / `local_shell` are non-function Responses
+    types — so the two unconverted tools aborted the request. Previously those
+    shapes were silently dropped, which also stripped mutation tools.
+  - Fix: convert known host tools (`custom` freeform, `local_shell`,
+    `web_search*`, built-in `apply_patch`) into Chat Completions function tools;
+    round-trip freeform calls as `custom_tool_call` via tool origin metadata;
+    still fail explicitly for truly unrepresentable types (`file_search`,
+    `computer_use_preview`, …) with typed diagnostics.
+  - Added namespace expansion for Codex `multi_agent_v1`: each nested function
+    is exposed as a Chat Completions function and translated back to the
+    original `(namespace, name)` pair for Codex dispatch.
+  - User verification required:
+    `python -m pytest tests/test_codex_coding_visibility.py tests/test_codex_responses_bridge.py -q`
+
 - Fixed Codex/NVIDIA DeepSeek coding turns leaking raw assistant drafts into the
   user-facing answer (e.g. `bump version to v0.1.6` with hundreds of
   `assistant.delta` events and `mutation_required_but_no_mutation_tool_attempted`).

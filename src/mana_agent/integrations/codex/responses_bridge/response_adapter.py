@@ -8,6 +8,11 @@ import uuid
 from typing import Any
 
 from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
+from mana_agent.integrations.codex.tool_conversion import (
+    freeform_input_from_function_arguments,
+    responses_item_type_for_tool_call,
+    responses_tool_call_identity,
+)
 
 
 def _new_id(prefix: str) -> str:
@@ -43,9 +48,15 @@ def convert_chat_completion_to_response(
     *,
     model: str,
     response_id: str | None = None,
+    tool_origins: dict[str, str] | None = None,
+    response_tool_names: dict[str, str] | None = None,
+    tool_namespaces: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a non-streaming Responses object from a Chat Completions payload."""
     response_id = response_id or _new_id("resp")
+    origins = dict(tool_origins or {})
+    response_names = dict(response_tool_names or {})
+    namespaces = dict(tool_namespaces or {})
     choices = chat.get("choices") if isinstance(chat.get("choices"), list) else []
     choice = choices[0] if choices and isinstance(choices[0], dict) else {}
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
@@ -99,16 +110,33 @@ def convert_chat_completion_to_response(
         arguments = function.get("arguments")
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments or {}, ensure_ascii=False)
-        output.append(
-            {
+        item_type = responses_item_type_for_tool_call(name, tool_origins=origins)
+        response_name, namespace = responses_tool_call_identity(
+            name,
+            response_tool_names=response_names,
+            tool_namespaces=namespaces,
+        )
+        if item_type == "custom_tool_call":
+            item: dict[str, Any] = {
+                "type": "custom_tool_call",
+                "id": _new_id("ctc"),
+                "call_id": call_id,
+                "name": response_name,
+                "input": freeform_input_from_function_arguments(arguments),
+                "status": "completed",
+            }
+        else:
+            item = {
                 "type": "function_call",
                 "id": _new_id("fc"),
                 "call_id": call_id,
-                "name": name,
+                "name": response_name,
                 "arguments": arguments,
                 "status": "completed",
             }
-        )
+        if namespace:
+            item["namespace"] = namespace
+        output.append(item)
 
     finish = str(choice.get("finish_reason") or "stop")
     status = "completed"

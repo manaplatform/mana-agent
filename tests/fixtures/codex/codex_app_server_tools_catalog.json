@@ -1,6 +1,6 @@
 {
   "description": "Codex app-server Responses tool catalog shapes for bridge conversion regression.",
-  "source": "codex-cli 0.147 coding turn tool shapes (function tools with flat name/parameters + nested function).",
+  "source": "codex-cli 0.147 coding turn tool shapes: function tools + host tools (local_shell, web_search, freeform custom apply_patch).",
   "tools": [
     {
       "type": "function",
@@ -26,21 +26,18 @@
       }
     },
     {
-      "type": "function",
+      "type": "custom",
       "name": "apply_patch",
-      "description": "Apply a patch to files under the workspace.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "input": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "input"
-        ],
-        "additionalProperties": false
+      "description": "Freeform apply_patch tool (Codex apply_patch_tool_type=freeform / fallback model metadata).",
+      "format": {
+        "type": "text"
       }
+    },
+    {
+      "type": "local_shell"
+    },
+    {
+      "type": "web_search"
     },
     {
       "type": "function",

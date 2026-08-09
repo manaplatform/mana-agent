@@ -16,6 +16,10 @@ from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visibl
 from mana_agent.integrations.codex.tool_conversion import convert_responses_tools
 from mana_agent.model_routing.models import provider_request_overrides_from_configuration
 
+# Non-HTTP metadata key attached to the chat payload for the local bridge only.
+# The server must strip this before sending the body upstream.
+MANA_BRIDGE_META_KEY = "_mana_bridge"
+
 
 def normalize_reasoning_effort(
     *,
@@ -88,10 +92,11 @@ def _convert_tools(
     *,
     provider: str = "",
     model: str = "",
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
     """Convert Responses tools to Chat Completions; fail on unsupported shapes.
 
     Silent dropping of Codex tools is forbidden. See ``tool_conversion``.
+    Returns the converted tools and their local call metadata.
     """
     report = convert_responses_tools(
         tools,
@@ -100,7 +105,14 @@ def _convert_tools(
         transport="responses_bridge",
         fail_on_unsupported=True,
     )
-    return list(report.converted_tools)
+    return (
+        list(report.converted_tools),
+        {
+            "tool_origins": dict(report.tool_origins),
+            "response_tool_names": dict(report.response_tool_names),
+            "tool_namespaces": dict(report.tool_namespaces),
+        },
+    )
 
 
 def _convert_tool_choice(tool_choice: Any) -> Any:
@@ -200,7 +212,14 @@ def convert_responses_request_to_chat(
             if item_type in {"function_call", "custom_tool_call"}:
                 call_id = str(item.get("call_id") or item.get("id") or "")
                 name = str(item.get("name") or "")
+                # Freeform/custom tools use ``input``; function tools use ``arguments``.
                 arguments = item.get("arguments")
+                if arguments is None and item.get("input") is not None:
+                    freeform = item.get("input")
+                    if isinstance(freeform, str):
+                        arguments = json.dumps({"input": freeform}, ensure_ascii=False)
+                    else:
+                        arguments = json.dumps({"input": freeform}, ensure_ascii=False)
                 if not isinstance(arguments, str):
                     arguments = json.dumps(arguments or {}, ensure_ascii=False)
                 pending_tool_calls.append(
@@ -208,6 +227,8 @@ def convert_responses_request_to_chat(
                         "id": call_id or f"call_{len(pending_tool_calls)+1}",
                         "type": "function",
                         "function": {"name": name, "arguments": arguments},
+                        # Local-only marker removed before the Chat request.
+                        "_mana_namespace": str(item.get("namespace") or ""),
                     }
                 )
                 continue
@@ -240,13 +261,23 @@ def convert_responses_request_to_chat(
         "messages": messages,
         "stream": bool(body.get("stream")),
     }
-    tools = _convert_tools(
+    tools, tool_metadata = _convert_tools(
         body.get("tools"),
         provider=upstream.provider,
         model=model,
     )
     if tools:
         payload["tools"] = tools
+    _remap_namespaced_tool_calls(
+        messages,
+        response_tool_names=tool_metadata["response_tool_names"],
+        tool_namespaces=tool_metadata["tool_namespaces"],
+    )
+    if tool_metadata["tool_origins"]:
+        # Local-only metadata for stream/response adapters; stripped before HTTP.
+        meta = dict(payload.get(MANA_BRIDGE_META_KEY) or {})
+        meta.update(tool_metadata)
+        payload[MANA_BRIDGE_META_KEY] = meta
     tool_choice = _convert_tool_choice(body.get("tool_choice"))
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
@@ -374,7 +405,38 @@ def _ensure_system_first(messages: list[Any]) -> list[dict[str, Any]]:
     return systems + rest
 
 
+def _remap_namespaced_tool_calls(
+    messages: list[dict[str, Any]],
+    *,
+    response_tool_names: dict[str, str],
+    tool_namespaces: dict[str, str],
+) -> None:
+    """Replace Responses ``(namespace, name)`` pairs with Chat function names."""
+    for message in messages:
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            namespace = str(tool_call.pop("_mana_namespace", "") or "")
+            if not namespace:
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            response_name = str(function.get("name") or "")
+            matches = [
+                chat_name
+                for chat_name, name in response_tool_names.items()
+                if name == response_name and tool_namespaces.get(chat_name) == namespace
+            ]
+            if len(matches) == 1:
+                function["name"] = matches[0]
+
+
 __all__ = [
+    "MANA_BRIDGE_META_KEY",
     "convert_responses_request_to_chat",
     "normalize_reasoning_effort",
 ]

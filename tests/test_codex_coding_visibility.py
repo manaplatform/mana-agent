@@ -557,6 +557,10 @@ def test_codex_tool_catalog_survives_responses_to_chat_conversion() -> None:
     names = {t["function"]["name"] for t in report.converted_tools}
     assert "shell" in names
     assert "apply_patch" in names
+    assert "local_shell" in names
+    assert "web_search" in names
+    # Freeform custom apply_patch must be marked for custom_tool_call round-trip.
+    assert report.tool_origins.get("apply_patch") == "custom"
 
     chat = convert_responses_request_to_chat(
         {
@@ -575,13 +579,16 @@ def test_codex_tool_catalog_survives_responses_to_chat_conversion() -> None:
     )
     assert len(chat["tools"]) == len(tools)
     assert all(t["type"] == "function" and "function" in t for t in chat["tools"])
+    # Local-only origins metadata for stream adapters; never an upstream secret.
+    meta = chat.get("_mana_bridge") or {}
+    assert meta.get("tool_origins", {}).get("apply_patch") == "custom"
 
 
 def test_unsupported_tool_shape_fails_explicitly() -> None:
     tools = [
         {"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {}}},
-        {"type": "web_search_preview"},
         {"type": "file_search", "vector_store_ids": ["vs_1"]},
+        {"type": "computer_use_preview"},
     ]
     with pytest.raises(BridgeToolCompatibilityError) as exc_info:
         convert_responses_tools(
@@ -595,7 +602,9 @@ def test_unsupported_tool_shape_fails_explicitly() -> None:
     assert diag["converted_tool_count"] == 1
     assert diag["unsupported_tool_count"] == 2
     assert diag["provider"] == "nvidia"
-    assert "secret" not in json.dumps(diag).lower() or "api_key" not in json.dumps(diag)
+    # Error names the unsupported types so operators can act.
+    assert "file_search" in str(exc_info.value)
+    assert "api_key" not in json.dumps(diag)
 
     with pytest.raises(BridgeToolCompatibilityError):
         convert_responses_request_to_chat(
@@ -612,6 +621,71 @@ def test_unsupported_tool_shape_fails_explicitly() -> None:
                 model="deepseek-ai/deepseek-v4-flash-0731",
             ),
         )
+
+
+def test_host_tools_ten_of_ten_match_production_failure_shape() -> None:
+    """Regression for original=10 converted=8 unsupported=2 (freeform + host tools)."""
+    tools = [
+        {"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "list_dir", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "grep_files", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "read_file", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "update_plan", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "view_image", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "exec_command", "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "write_stdin", "parameters": {"type": "object", "properties": {}}},
+        # The two that previously failed conversion under fallback metadata:
+        {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch",
+            "format": {"type": "text"},
+        },
+        {"type": "web_search"},
+    ]
+    report = convert_responses_tools(
+        tools,
+        provider="nvidia",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+        fail_on_unsupported=True,
+    )
+    assert report.original_count == 10
+    assert report.converted_count == 10
+    assert not report.unsupported
+    assert report.tool_origins["apply_patch"] == "custom"
+    assert report.tool_origins["web_search"].startswith("web_search")
+
+
+def test_freeform_apply_patch_streams_as_custom_tool_call() -> None:
+    adapter = ChatToResponsesStreamAdapter(
+        model="deepseek-ai/deepseek-v4-flash-0731",
+        tool_origins={"apply_patch": "custom"},
+    )
+    adapter.open_events()
+    adapter.ingest_chat_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_patch",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": '{"input":"*** Begin Patch\\n*** End Patch"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    close = "".join(adapter.close_events())
+    assert "custom_tool_call" in close
+    assert "apply_patch" in close
+    assert "*** Begin Patch" in close
 
 
 # ---------------------------------------------------------------------------

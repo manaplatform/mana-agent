@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
+from mana_agent.integrations.codex.tool_conversion import (
+    freeform_input_from_function_arguments,
+    responses_item_type_for_tool_call,
+    responses_tool_call_identity,
+)
 
 
 def _new_id(prefix: str) -> str:
@@ -61,10 +66,22 @@ class ChatToResponsesStreamAdapter:
     received_stream_data: bool = False
     tool_calls_started: bool = False
     open_emitted: bool = False
+    # Original Responses tool types keyed by function name (from conversion).
+    tool_origins: dict[str, str] = field(default_factory=dict)
+    # Chat function name → original Responses function name / namespace.
+    response_tool_names: dict[str, str] = field(default_factory=dict)
+    tool_namespaces: dict[str, str] = field(default_factory=dict)
 
     def _next_sequence(self) -> int:
         self.sequence += 1
         return self.sequence
+
+    def _response_tool_identity(self, chat_name: str) -> tuple[str, str | None]:
+        return responses_tool_call_identity(
+            chat_name,
+            response_tool_names=self.response_tool_names,
+            tool_namespaces=self.tool_namespaces,
+        )
 
     @property
     def tool_side_effects(self) -> bool:
@@ -256,35 +273,63 @@ class ChatToResponsesStreamAdapter:
                 state.arguments += str(function["arguments"])
             if not state.added:
                 state.added = True
+                item_type = responses_item_type_for_tool_call(
+                    state.name, tool_origins=self.tool_origins
+                )
+                response_name, namespace = self._response_tool_identity(state.name)
+                item: dict[str, Any] = {
+                    "type": item_type,
+                    "id": state.item_id,
+                    "call_id": state.call_id,
+                    "name": response_name,
+                    "status": "in_progress",
+                }
+                if namespace:
+                    item["namespace"] = namespace
+                if item_type == "custom_tool_call":
+                    item["input"] = ""
+                else:
+                    item["arguments"] = ""
                 events.append(
                     _sse(
                         "response.output_item.added",
                         {
                             "output_index": state.output_index,
-                            "item": {
-                                "type": "function_call",
-                                "id": state.item_id,
-                                "call_id": state.call_id,
-                                "name": state.name,
-                                "arguments": "",
-                                "status": "in_progress",
-                            },
+                            "item": item,
                         },
                         sequence=self._next_sequence(),
                     )
                 )
             if function.get("arguments"):
-                events.append(
-                    _sse(
-                        "response.function_call_arguments.delta",
-                        {
-                            "item_id": state.item_id,
-                            "output_index": state.output_index,
-                            "delta": str(function["arguments"]),
-                        },
-                        sequence=self._next_sequence(),
-                    )
+                item_type = responses_item_type_for_tool_call(
+                    state.name, tool_origins=self.tool_origins
                 )
+                if item_type == "custom_tool_call":
+                    # Freeform tools stream as input text; keep fragments as-is
+                    # until close_events normalizes JSON wrappers when present.
+                    events.append(
+                        _sse(
+                            "response.custom_tool_call_input.delta",
+                            {
+                                "item_id": state.item_id,
+                                "output_index": state.output_index,
+                                "delta": str(function["arguments"]),
+                            },
+                            sequence=self._next_sequence(),
+                        )
+                    )
+                else:
+                    events.append(
+                        _sse(
+                            "response.function_call_arguments.delta",
+                            {
+                                "item_id": state.item_id,
+                                "output_index": state.output_index,
+                                "delta": str(function["arguments"]),
+                            },
+                            sequence=self._next_sequence(),
+                        )
+                    )
         return events
 
     def close_events(self, *, failed: bool = False, error: dict[str, Any] | None = None) -> list[str]:
@@ -395,30 +440,59 @@ class ChatToResponsesStreamAdapter:
 
         for index in sorted(self.tool_calls):
             state = self.tool_calls[index]
-            events.append(
-                _sse(
-                    "response.function_call_arguments.done",
-                    {
-                        "item_id": state.item_id,
-                        "output_index": state.output_index,
-                        "arguments": state.arguments,
-                    },
-                    sequence=self._next_sequence(),
-                )
+            item_type = responses_item_type_for_tool_call(
+                state.name, tool_origins=self.tool_origins
             )
+            response_name, namespace = self._response_tool_identity(state.name)
+            if item_type == "custom_tool_call":
+                freeform_input = freeform_input_from_function_arguments(state.arguments)
+                events.append(
+                    _sse(
+                        "response.custom_tool_call_input.done",
+                        {
+                            "item_id": state.item_id,
+                            "output_index": state.output_index,
+                            "input": freeform_input,
+                        },
+                        sequence=self._next_sequence(),
+                    )
+                )
+                done_item: dict[str, Any] = {
+                    "type": "custom_tool_call",
+                    "id": state.item_id,
+                    "call_id": state.call_id,
+                    "name": response_name,
+                    "input": freeform_input,
+                    "status": "completed",
+                }
+            else:
+                events.append(
+                    _sse(
+                        "response.function_call_arguments.done",
+                        {
+                            "item_id": state.item_id,
+                            "output_index": state.output_index,
+                            "arguments": state.arguments,
+                        },
+                        sequence=self._next_sequence(),
+                    )
+                )
+                done_item = {
+                    "type": "function_call",
+                    "id": state.item_id,
+                    "call_id": state.call_id,
+                    "name": response_name,
+                    "arguments": state.arguments,
+                    "status": "completed",
+                }
+            if namespace:
+                done_item["namespace"] = namespace
             events.append(
                 _sse(
                     "response.output_item.done",
                     {
                         "output_index": state.output_index,
-                        "item": {
-                            "type": "function_call",
-                            "id": state.item_id,
-                            "call_id": state.call_id,
-                            "name": state.name,
-                            "arguments": state.arguments,
-                            "status": "completed",
-                        },
+                        "item": done_item,
                     },
                     sequence=self._next_sequence(),
                 )
@@ -459,16 +533,31 @@ class ChatToResponsesStreamAdapter:
             )
         for index in sorted(self.tool_calls):
             state = self.tool_calls[index]
-            output.append(
-                {
+            item_type = responses_item_type_for_tool_call(
+                state.name, tool_origins=self.tool_origins
+            )
+            response_name, namespace = self._response_tool_identity(state.name)
+            if item_type == "custom_tool_call":
+                item: dict[str, Any] = {
+                    "type": "custom_tool_call",
+                    "id": state.item_id,
+                    "call_id": state.call_id,
+                    "name": response_name,
+                    "input": freeform_input_from_function_arguments(state.arguments),
+                    "status": "completed",
+                }
+            else:
+                item = {
                     "type": "function_call",
                     "id": state.item_id,
                     "call_id": state.call_id,
-                    "name": state.name,
+                    "name": response_name,
                     "arguments": state.arguments,
                     "status": "completed",
                 }
-            )
+            if namespace:
+                item["namespace"] = namespace
+            output.append(item)
         status = "completed"
         if self.finish_reason == "length":
             status = "incomplete"

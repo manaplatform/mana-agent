@@ -164,6 +164,134 @@ def test_chat_completion_to_responses_with_tool_calls() -> None:
     assert call["name"] == "shell"
 
 
+def test_multi_agent_namespace_round_trips_through_chat_functions() -> None:
+    """NVIDIA Chat receives flat functions; Codex receives a namespaced call."""
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    tools = [
+        {
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "description": "Tools for spawning and managing sub-agents.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "description": "Spawn a sub-agent.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                    },
+                }
+            ],
+        }
+    ]
+    chat = convert_responses_request_to_chat(
+        {
+            "model": upstream.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_spawn",
+                    "namespace": "multi_agent_v1",
+                    "name": "spawn_agent",
+                    "arguments": '{"message":"inspect the bridge"}',
+                }
+            ],
+            "tools": tools,
+        },
+        upstream=upstream,
+    )
+    assert chat["tools"][0]["function"]["name"] == "multi_agent_v1__spawn_agent"
+    assert (
+        chat["messages"][0]["tool_calls"][0]["function"]["name"]
+        == "multi_agent_v1__spawn_agent"
+    )
+    metadata = chat["_mana_bridge"]
+    assert metadata["response_tool_names"] == {
+        "multi_agent_v1__spawn_agent": "spawn_agent"
+    }
+    assert metadata["tool_namespaces"] == {"multi_agent_v1__spawn_agent": "multi_agent_v1"}
+
+    upstream_response = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_spawn",
+                            "type": "function",
+                            "function": {
+                                "name": "multi_agent_v1__spawn_agent",
+                                "arguments": '{"message":"inspect the bridge"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    response = convert_chat_completion_to_response(
+        upstream_response,
+        model=upstream.model,
+        tool_origins=metadata["tool_origins"],
+        response_tool_names=metadata["response_tool_names"],
+        tool_namespaces=metadata["tool_namespaces"],
+    )
+    call = next(item for item in response["output"] if item["type"] == "function_call")
+    assert call["name"] == "spawn_agent"
+    assert call["namespace"] == "multi_agent_v1"
+
+    adapter = ChatToResponsesStreamAdapter(
+        model=upstream.model,
+        tool_origins=metadata["tool_origins"],
+        response_tool_names=metadata["response_tool_names"],
+        tool_namespaces=metadata["tool_namespaces"],
+    )
+    adapter.open_events()
+    adapter.ingest_chat_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_spawn",
+                                "function": {
+                                    "name": "multi_agent_v1__spawn_agent",
+                                    "arguments": '{"message":"inspect the bridge"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    completed = json.loads(
+        next(
+            event.split("data:", 1)[1].strip()
+            for event in adapter.close_events()
+            if "response.completed" in event
+        )
+    )
+    stream_call = next(
+        item
+        for item in completed["response"]["output"]
+        if item["type"] == "function_call"
+    )
+    assert stream_call["name"] == "spawn_agent"
+    assert stream_call["namespace"] == "multi_agent_v1"
+
+
 def test_stream_adapter_fragmented_tool_arguments() -> None:
     adapter = ChatToResponsesStreamAdapter(model="deepseek-ai/deepseek-v4-pro")
     events = list(adapter.open_events())
