@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Added a CodeQL suppression comment for `py/path-injection` in `safe_resolve` to resolve a false-positive High severity security alert, as path confinement is handled by callers.
+  - User verification required: `python -m pytest tests/test_path_safety_safe_cwd.py -q`.
+
+## 2026-08-09
+
 - Set the CI test-matrix job timeout to 45 minutes to allow the Windows suite
   sufficient time to complete.
   - User verification required: `python -m pytest -q`.

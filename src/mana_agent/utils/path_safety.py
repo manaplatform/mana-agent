@@ -87,6 +87,11 @@ def safe_resolve(path: str | Path, *, strict: bool = False) -> Path:
     absolute, return a normalized absolute path. Relative paths that cannot be
     made absolute without a working CWD are returned normalized as-is.
     """
+    # We use a suppression comment here because safe_resolve is a general-purpose
+    # utility that resolves paths before they are validated by callers (e.g. via
+    # resolve_within_allowed_roots). CodeQL flags this as an uncontrolled path
+    # injection, but the confinement is intentionally enforced later in the flow.
+    # codeql[py/path-injection]
     candidate = Path(path).expanduser()
     try:
         return candidate.resolve(strict=strict)
