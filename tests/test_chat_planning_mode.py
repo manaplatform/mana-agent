@@ -7,8 +7,28 @@ from typer.testing import CliRunner
 
 from mana_agent.analysis.models import AskResponse, SearchHit
 from mana_agent.commands import cli
+from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _validated_chat_route(monkeypatch) -> None:
+    """Keep planning-flow tests independent of the routing-model transport."""
+    monkeypatch.setattr(
+        "mana_agent.commands.chat_cli._decide_chat_route",
+        lambda **_kwargs: AgentDecision(
+            intent="answer",
+            confidence=1.0,
+            selected_tools=[],
+            requested_effect="none",
+            target_surface="conversation",
+            required_subagents=[],
+            reasoning_summary="Test fixture supplied a validated conversational route.",
+            verifier_passed=True,
+            verifier_summary="selected tools are consistent with the routed intent",
+        ),
+    )
 
 
 class DummySettings:

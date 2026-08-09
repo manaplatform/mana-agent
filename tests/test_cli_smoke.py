@@ -17,8 +17,22 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _isolated_mana_home(tmp_path: Path, monkeypatch) -> None:
-    """Keep persistent chat identity isolated between independent CLI tests."""
+    """Keep persistent state and model routing isolated between CLI tests."""
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana-home"))
+    monkeypatch.setattr(
+        "mana_agent.commands.chat_cli._decide_chat_route",
+        lambda **_kwargs: AgentDecision(
+            intent="answer",
+            confidence=1.0,
+            selected_tools=[],
+            requested_effect="none",
+            target_surface="conversation",
+            required_subagents=[],
+            reasoning_summary="Test fixture supplied a validated conversational route.",
+            verifier_passed=True,
+            verifier_summary="selected tools are consistent with the routed intent",
+        ),
+    )
 
 
 class FakeIndexService:

@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Updated chat CLI and planning-flow tests to supply an explicit validated
+  routing decision, preserving fail-closed production routing without relying
+  on an absent fake-service model.
+  - User verification required: `python -m pytest tests/test_chat_planning_mode.py tests/test_cli_smoke.py -q`.
+
+## 2026-08-09
+
 - Bumped the package and documented version to `v0.1.6`.
   - User verification required: `python -m pytest tests/test_package_version.py -q`.
 
