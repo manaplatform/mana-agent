@@ -12,21 +12,31 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout }}
+
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             python: "3.10"
+            timeout: 45
+
           - os: ubuntu-latest
             python: "3.12"
+            timeout: 45
+
           - os: ubuntu-latest
             python: "3.14"
+            timeout: 45
+
           - os: windows-latest
             python: "3.12"
+            timeout: 75
+
           - os: macos-latest
             python: "3.12"
+            timeout: 45
 
     env:
       PYTHONPATH: src
