@@ -2,6 +2,815 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-09
+
+- Hardened user-controlled path handling after CodeQL path-injection analysis.
+  - Separated best-effort internal path resolution from security-sensitive
+    user path canonicalization.
+  - User-controlled paths now fail closed when canonicalization fails and
+    must pass allowed-root confinement before filesystem use.
+  - `safe_resolve()` remains limited to trusted/internal broken-CWD recovery.
+- Added a CodeQL suppression comment for `py/path-injection` in `safe_resolve` to resolve a false-positive High severity security alert, as path confinement is handled by callers.
+  - User verification required: `python -m pytest tests/test_path_safety_safe_cwd.py -q`.
+
+## 2026-08-09
+
+- Set the CI test-matrix job timeout to 45 minutes to allow the Windows suite
+  sufficient time to complete.
+  - User verification required: `python -m pytest -q`.
+
+## 2026-08-09
+
+- Updated chat CLI and planning-flow tests to supply an explicit validated
+  routing decision, preserving fail-closed production routing without relying
+  on an absent fake-service model.
+  - User verification required: `python -m pytest tests/test_chat_planning_mode.py tests/test_cli_smoke.py -q`.
+
+## 2026-08-09
+
+- Bumped the package and documented version to `v0.1.6`.
+  - User verification required: `python -m pytest tests/test_package_version.py -q`.
+
+## 2026-08-09
+
+- Updated the multi-agent route fixture to model-select documentation
+  subagents for the large README update workflow.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
+
+## 2026-08-09
+
+- Corrected the semantic routing invariant for standalone planning.
+  - `requested_effect=none` with `target_surface=conversation` now permits a
+    model-selected `plan` intent with no tools, while retaining strict simple
+    conversation and mutation/tool invariants.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/test_agent_decision_routing.py -q`.
+
+## 2026-08-09
+
+- Fixed multi-agent routing so entrypoint metadata is passed as `command_hint`
+  instead of being prepended to the semantic user request.
+  - Routing decisions now declare model-generated requested effect and target
+    surface fields, invalid decisions block before route or tool execution, and
+    model-selected subagents replace the prior documentation keyword heuristic.
+  - User verification required: `python -m pytest tests/test_agent_decision_routing.py tests/test_multi_agent_core.py tests/test_browser_routing_config.py tests/gateway/test_gateway_repository_preparation.py -q`.
+
+## 2026-08-09
+
+- Fixed the Windows CI suite stalling in the tool-worker import isolation test.
+  - The test no longer captures subprocess pipes that optional dependency
+    descendants can inherit on Windows; it exchanges its tiny assertion payload
+    through a temporary file and limits the child interpreter to 30 seconds.
+  - User verification required: `python -m pytest tests/test_tool_worker_process.py -q`
+
+- Fixed NVIDIA DeepSeek coding turns that inspected files but then completed
+  without a structured mutation.
+  - The Responses bridge now sends `tool_choice="auto"` whenever Codex
+    supplies tools but omits a choice. NVIDIA requires the pair to enable its
+    tool-call parser; without it, the provider can return XML/DSML-like tool
+    text in ordinary assistant content instead of a callable tool event.
+  - Coding prompts now require a structured mutation tool registered for the
+    current turn rather than naming `apply_patch` when that tool is not exposed
+    by the active Codex tool set.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge.py tests/test_codex_integration.py -q`
+
+- Fixed Codex/NVIDIA coding turns appearing to hang at `Turn Started` when the
+  upstream streaming request never returned response headers.
+  - The Responses bridge now limits only the initial stream-open wait to 45
+    seconds, returning a typed retryable timeout instead of waiting for the
+    10-minute stream timeout. Accepted streams retain their existing timeout.
+  - Codex lifecycle events now report `Starting Codex turn` before the
+    `turn/start` response, and report `Codex turn started` only after the
+    server returns a turn ID.
+  - Provider-level `turn/completed` now remains `turn.finalizing` until Mana
+    has parsed the trace and published the validated `coding.terminal` summary
+    to the live event stream, event sink, and execution event hub.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge_recovery.py tests/test_codex_integration.py tests/test_codex_coding_visibility.py -q`
+
+- Fixed Windows CI hanging while running Teach Mode tests.
+  - Teach availability checks now probe optional desktop, browser, and input
+    integrations without importing their platform adapters during normal
+    semantic recording and doctor checks. Native desktop capture still performs
+    its real dependency and OS-permission validation when explicitly requested.
+  - User verification required: `python -m pytest tests/test_teach_mode.py -q`
+
+- Fixed Codex Responses bridge rejecting coding turns with
+  `original=10 converted=8 unsupported=2` or
+  `original=10 converted=9 unsupported=1` on NVIDIA DeepSeek
+  (`deepseek-ai/deepseek-v4-flash-0731`).
+  - Cause: fail-fast tool conversion only accepted `type=function`. With Codex
+    fallback model metadata, `apply_patch` is freeform (`type=custom`) and
+    host tools such as `web_search` / `local_shell` are non-function Responses
+    types — so the two unconverted tools aborted the request. Previously those
+    shapes were silently dropped, which also stripped mutation tools.
+  - Fix: convert known host tools (`custom` freeform, `local_shell`,
+    `web_search*`, built-in `apply_patch`) into Chat Completions function tools;
+    round-trip freeform calls as `custom_tool_call` via tool origin metadata;
+    still fail explicitly for truly unrepresentable types (`file_search`,
+    `computer_use_preview`, …) with typed diagnostics.
+  - Added namespace expansion for Codex `multi_agent_v1`: each nested function
+    is exposed as a Chat Completions function and translated back to the
+    original `(namespace, name)` pair for Codex dispatch.
+  - User verification required:
+    `python -m pytest tests/test_codex_coding_visibility.py tests/test_codex_responses_bridge.py -q`
+
+- Fixed Codex/NVIDIA DeepSeek coding turns leaking raw assistant drafts into the
+  user-facing answer (e.g. `bump version to v0.1.6` with hundreds of
+  `assistant.delta` events and `mutation_required_but_no_mutation_tool_attempted`).
+  - Root cause: coding success/failure was validated correctly from repository
+    evidence, but the user answer was still taken from agentMessage prose, and
+    live `assistant.delta` events were published to chat sinks. `text_cleanup`
+    regexes could not cover unknown DSML/XML garbage.
+  - Architectural fix (provider-neutral, protocol/state based):
+    1. `coding.event_visibility` classifies events by type into
+       internal / progress / terminal; assistant generation and reasoning are
+       never user-publishable.
+    2. `CodexCodingAgentShim` records full traces internally but only emits safe
+       progress + one evidence-based terminal answer (`terminal_summary`).
+    3. Failed write turns return a concise deterministic failure (no model draft).
+    4. Mutation recovery is a bounded attempt loop (max 2) using structured
+       terminal reasons, not model prose.
+    5. Responses→Chat tool conversion fail-fasts on unsupported tool shapes with
+       structured diagnostics (no silent drops); catalog fixture covers Codex
+       function tools.
+    6. Write turns validate transport + Mana catalog `tool_calling` before start;
+       unknown models fail closed for writes.
+    7. Mana model limits/capabilities are bridged into Codex runtime config
+       (`model_context_window`, auto-compact) to reduce fallback metadata.
+  - User verification required:
+    `python -m pytest tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/test_codex_responses_bridge.py tests/test_codex_responses_bridge_recovery.py tests/test_codex_runtime.py -q`
+
+- Fixed Codex coding response leak where broken free-form tool-invocation XML
+  (e.g. `<danke:ultracall_calls>`, `<parameter name="cmd">`,
+  `max_output_tokens` padding soup, “Tools invocation syntax failed” meta-text)
+  was shown as the user-facing agentMessage / coding answer.
+  - Cause: `text_cleanup` only stripped think/DSML markers, not tool-call
+    protocol markup or high-density angle-bracket dumps from failed structured
+    tool routing. Live `adapt_codex_event` previews also forwarded raw text.
+  - Fix:
+    1. Expand `text_cleanup` to strip namespaced tool tags, parameter/function
+       markup, and detect ultracall / invocation-syntax / angle-bracket soup as
+       free-form tool garbage (redact to a short structured-tools diagnostic).
+    2. Sanitize assistant-visible text in `adapt_codex_event` for agentMessage
+       and assistant.delta so live previews match the final summary policy.
+  - User verification required:
+    `python -m pytest tests/test_codex_integration.py::test_ultracall_tool_invocation_leak_redacted_from_codex_summary tests/test_codex_integration.py::test_agent_message_event_strips_leaked_tool_markup tests/test_codex_responses_bridge.py::test_leaked_ultracall_tool_invocation_redacted_from_assistant_history tests/test_codex_integration.py::test_write_required_turn_without_changed_files_fails -q`
+
+- Fixed Windows CI failures when the process CWD is unusable
+  (`test_safe_cwd_*`, `test_llm_run_logger_survives_deleted_cwd`).
+  - Cause: on Windows, `ntpath.realpath` (used by `Path.resolve`) always calls
+    `os.getcwd()` even for absolute paths, so a broken/deleted CWD made
+    `safe_cwd`, `mana_home`, and `LlmRunLogger` raise `FileNotFoundError`.
+  - Fix: added `safe_resolve()` and used it in `safe_cwd`, both `mana_home`
+    implementations, and LLM run logging so absolute paths still work when
+    `getcwd` fails; final `safe_cwd` fallbacks never re-raise.
+  - User verification required:
+    `python -m pytest tests/test_path_safety_safe_cwd.py tests/test_llm_logging.py::test_llm_run_logger_survives_deleted_cwd -q`
+
+- Fixed Codex coding empty-patch failures observed in lane_coordinator for
+  `bump version to v0.1.6` (DeepSeek V4 / NVIDIA Responses bridge).
+  - Evidence (`workspace_cefe56a22992f27e13d8`, tasks `000008`/`000010`):
+    bridge ran with tools + `thinking=False`; shell tools succeeded; turn ended
+    with free-form `</think>` / DSML / fake patch narration and
+    `mutation_required_but_no_mutation_tool_attempted` (no `apply_patch`).
+  - Causes: (1) write-turn requirements told Codex to “ask for clarification
+    instead of applying an arbitrary edit”, which blocked concrete mutations and
+    encouraged inspection-only loops; (2) leaked think/DSML agent text re-entered
+    multi-turn history and user summaries; (3) CoT/orphan tool order (below).
+  - Fix:
+    1. Write + mutation-recovery requirements prefer structured `apply_patch`
+       and forbid free-form tool markup; clarification only when targets are
+       truly ambiguous. Recovery starts a fresh flow (no poisoned thread resume).
+    2. Shared `text_cleanup` strips/redacts think/DSML free-form tool soup in
+       Responses↔Chat adapters and Codex result summaries.
+    3. Keep DeepSeek reasoning_content round-trip + orphan tool pairing (below).
+  - User verification required:
+    `python -m pytest tests/test_codex_integration.py::test_coding_agent_shim_mutation_recovery_retries_empty_write_turn tests/test_codex_integration.py::test_write_required_turn_without_changed_files_fails tests/test_codex_responses_bridge.py -k "reasoning or orphan or leaked or freeform or tools_force" -q`
+
+- Fixed Codex Responses→Chat adapter multi-turn DeepSeek tool loops that produced
+  analysis-only / DSML garbage (`mutation_required_but_no_mutation_tool_attempted`)
+  on version bumps and SWE-bench coding turns.
+  - Symptom: bridge had tools + `thinking=False`, shell sometimes ran, but later
+    turns ended in confused `</think>` / `<|DSML|>` soup with no `apply_patch`
+    (e.g. `bump version to v0.1.6`, `astropy__astropy-12907` empty_patch).
+  - Cause: (1) DeepSeek `reasoning_content` was never captured from chat streams
+    or non-stream messages and never reattached on the next request—CoT was
+    either dropped or leaked into ordinary `content`, poisoning tool history;
+    (2) orphan `function_call_output` items could land without a preceding
+    assistant `tool_calls` message, violating DeepSeek message order.
+  - Fix:
+    1. Stream + non-stream chat→Responses adapters emit CoT as `reasoning`
+       items (never as assistant text).
+    2. Responses→Chat reattaches reasoning items as `reasoning_content` on the
+       following assistant tool/message turn (DeepSeek tool multi-turn contract).
+    3. Strip leaked think/DSML markers from assistant history content.
+    4. `normalize_nvidia_chat_messages` enforces assistant→tool pairing and
+       synthesizes a minimal assistant `tool_calls` pair for orphan tool results.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py -k "reasoning or orphan or leaked or tools_force or fragmented or sequence" -q`
+
+- Fixed Codex Responses bridge NVIDIA HTTP 400 for catalog model-object fields
+  (`created`, `id`, `object`, `owned_by`) on DeepSeek V4 coding turns.
+  - Symptom: `change version to v0.1.6` (and peers) failed with
+    `upstream_invalid_request` /
+    `Unsupported parameter(s): created, id, object, owned_by` for
+    `deepseek-ai/deepseek-v4-flash-0731`.
+  - Cause: gateway routing merged the full `/v1/models` catalog record into
+    `ModelProfile.configuration`; the Codex shim copied that into bridge
+    `request_overrides`, and the adapter forwarded those keys as Chat
+    Completions body fields. NVIDIA rejects catalog identity parameters.
+  - Fix:
+    1. Stop merging raw catalog metadata into profile configuration; keep
+       limits/pricing on profile fields and set `capability_source` only.
+    2. Strip OpenAI model-object / catalog-only keys in
+       `provider_request_overrides_from_configuration` (bridge + shim).
+    3. Re-filter flattened `extra_body` in the Responses→Chat adapter so
+       nested catalog junk cannot reappear as top-level body keys.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py::test_bridge_strips_catalog_model_object_fields_from_request_overrides tests/test_codex_responses_bridge.py::test_bridge_strips_routing_metadata_from_request_overrides tests/test_model_routing.py::test_provider_request_overrides_drop_catalog_model_object_fields tests/test_model_routing.py::test_provider_request_overrides_drop_routing_metadata -q`
+
+- Fixed gateway Codex stack test expecting stale `MANA_CODEX_MODEL` in runtime logs.
+  - Symptom: `test_gateway_uses_codex_shim_without_legacy_coding_workers` failed
+    because it asserted `coding=codex-test-model` while stack logging reports the
+    resolved/routed coding model (e.g. `coding=gpt-4.1-mini`).
+  - Fix: update the test to assert the Codex shim path, disabled legacy workers,
+    and that a leftover `MANA_CODEX_MODEL` pin is not reported as `coding=`.
+  - User verification required:
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_uses_codex_shim_without_legacy_coding_workers -q`
+
+- Fixed SWE-bench verification shell using login shells that drop the Python 3 PATH shim (`astropy__astropy-12907`).
+  - Symptom: after Codex read `separable.py` and mutation recovery, the multi-agent verifier ran
+    `["/bin/sh", "-lc", "python -m compileall ."]` with exit 1 and ~133KB of SyntaxError
+    output; task ended `mutation_required_but_no_mutation_tool_attempted` / empty_patch.
+  - Cause: `tool_manager` / `ask_agent` wrapped shell tools as `sh -lc`. Login shells re-source
+    profile PATH and put host Python 2.7 ahead of the runner's `agent_bin` shim, so bare
+    `python -m compileall` compiled modern sources as 2.x and failed. Codex recovery also
+    re-attempted package import and then emitted analysis-only text.
+  - Fix:
+    1. `local_shell_argv()` builds non-login `sh -c` / `cmd /c` argv so inherited PATH
+       (including SWE-bench python3 shims) is preserved; both shell entry points use it.
+    2. Default verification commands prefer `python3 -m compileall` (allowlisted).
+    3. Codex mutation-recovery prompt forbids re-importing uninstalled packages and
+       requires an immediate production-source mutation.
+  - User verification required:
+    `python -m pytest tests/test_shell_argv.py tests/test_codex_integration.py::test_coding_agent_shim_mutation_recovery_retries_empty_write_turn tests/test_multi_agent_core.py::test_tools_manager_blocks_dangerous_shell_commands -q`
+
+- Fixed CI failures on Windows deleted-cwd tests and Python 3.10 `tomllib`.
+  - Symptom: Windows runners failed
+    `test_llm_run_logger_survives_deleted_cwd`,
+    `test_safe_cwd_falls_back_when_directory_deleted`, and
+    `test_safe_cwd_prefers_mana_home_when_no_fallback` with
+    `PermissionError: [WinError 32]` when `shutil.rmtree` targeted the process
+    CWD; Ubuntu Python 3.10 failed
+    `test_upsert_toml_keys_inserts_before_nested_tables` with
+    `ModuleNotFoundError: No module named 'tomllib'`.
+  - Fix: on Windows, deleted-cwd tests simulate the Unix
+    `FileNotFoundError` from `os.getcwd()` instead of rmtree'ing the locked
+    process CWD; the TOML upsert test falls back to `tomli` on Python < 3.11.
+  - User verification required:
+    `python -m pytest tests/test_path_safety_safe_cwd.py tests/test_llm_logging.py::test_llm_run_logger_survives_deleted_cwd tests/test_swe_bench_runner_config.py::test_upsert_toml_keys_inserts_before_nested_tables -q`
+
+- Fixed Codex coding model pin and SWE-bench empty-mutation recovery.
+  - Symptom: isolated SWE-bench config still had
+    `MANA_CODEX_MODEL = "gpt-5.6-luna"` (copied from operator `~/.mana`), while
+    the measured model was NVIDIA DeepSeek; logs showed
+    `coding=gpt-5.6-luna; coding_routed=deepseek…` and runs finished with
+    `mutation_required_but_no_mutation_tool_attempted` + exit 0 /
+    `Empty model_patch (status=ok)`.
+  - Cause: SWE-bench isolation rewrote role models but not `MANA_CODEX_MODEL`;
+    stack logging reported the stale pin; write-required Codex turns that only
+    read files never got a forced mutation recovery; single-shot chat exited 0
+    on mutation failure; auto-chat catalog still listed ~116 tools
+    (canvas/server/email); DeepSeek V4 lacked maintained token limits so
+    accounting fell back to 16k.
+  - Fix:
+    1. SWE-bench overrides pin `MANA_CODEX_MODEL` to the agent model, force
+       `MANA_CODING_BACKEND=codex` / `MANA_CODEX_ENABLED=true`, set
+       `MANA_AUTO_CHAT_TOOL_SURFACE=coding`, and raise unknown-model context
+       defaults for long-context DeepSeek.
+    2. Gateway coding model prefers CLI/gateway model over a leftover
+       `MANA_CODEX_MODEL` pin; runtime logs report the resolved Codex model.
+    3. Codex write-required empty turns get one forced mutation recovery turn.
+    4. Single-shot non-interactive chat exits non-zero on mutation / failed
+       coding terminals so the harness does not treat empty patches as ok.
+    5. DeepSeek V4 Flash/Pro maintained token limits (1M / 65_536).
+    6. Responses bridge logs `chat_template_kwargs` thinking/effort on each
+       upstream request.
+    7. Coding tool surface filters auto-chat catalog to repo/edit/verify tools.
+  - Note: clear or update operator `~/.mana/config.toml`
+    `MANA_CODEX_MODEL` if interactive runs should not keep a stale luna pin;
+    empty means router/CLI-managed.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py tests/test_codex_integration.py tests/test_auto_chat_tools_catalog.py tests/test_codex_responses_bridge.py -q`
+
+- Fixed SWE-bench `empty_patch` when Codex + NVIDIA DeepSeek completed with
+  zero worktree changes (`astropy__astropy-12907` logs).
+  - Symptom: `Empty model_patch … (status=ok)` after a single-shot coding
+    turn; session answer was free-form DSML/`<invoke name="exec_command">`
+    text with no structured tool_calls and no file edits.
+  - Cause 1: Codex responses bridge left DeepSeek
+    `chat_template_kwargs.thinking=True` while tools were attached. With
+    thinking + tools, DeepSeek V4 often invents pseudo-tool syntax as plain
+    text instead of OpenAI-style `tool_calls`, so Codex finishes an
+    agentMessage-only turn as success.
+  - Cause 2: `parse_codex_result` treated any non-failed Codex turn as
+    `completed` even when `requires_repository_write` and `changed_files`
+    were empty, so mana-agent exited 0 and the harness wrote an empty
+    prediction.
+  - Fix: when tools are present, force DeepSeek thinking off
+    (`reasoning_effort=none`) in the responses bridge (parity with multi-
+    agent tools+reasoning compatibility); fail write-required Codex turns
+    with no repository diff using
+    `mutation_required_but_no_mutation_tool_attempted` /
+    `mutation_required_but_no_changed_files`, surfaced on
+    `auto_execute_terminal_reason`.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_codex_integration.py tests/test_result_parser_provider_errors.py -q`
+
+- Fixed `test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations`
+  routing key mismatch.
+  - Cause: multi-line fixture prompt ended with `\n`, while
+    `MainAgent.run_user_request` strips the request before looking up the
+    route as `f"{entrypoint} {request}"`, so `_RouteModel` missed the
+    payload and fell through to the unavailable-model `simple` route.
+  - Fix: strip the fixture prompt so the mock key matches the normalized
+    request used by the router.
+  - User verification required:
+    `python -m pytest tests/test_multi_agent_core.py::test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations -q`
+
+- Fixed SWE-bench isolation overrides not reaching `Settings` (empty_patch
+  root cause for managed-worktree hijacks).
+  - Symptom: `astropy__astropy-12907` (and peers) finished `empty_patch`
+    after MainAgent created
+    `mana/you-are-solving-a-single-swe-bench-issue-inside-…` worktrees and
+    failed `python -m compileall .` verification, despite runner writing
+    `MANA_MANAGED_WORKTREES_ENABLED = false` and
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE = true`.
+  - Cause 1: `MANA_MANAGED_WORKTREES_ENABLED` was on `Settings` and in
+    seeded `config.toml`, but missing from `FIELD_NAME_BY_ENV` /
+    `DEFAULT_USER_CONFIG`, so `settings_source_for_pydantic()` never
+    passed it and the default stayed `True`.
+  - Cause 2: `_upsert_toml_keys` appended *new* keys at EOF. Operator
+    configs with nested tables (e.g. `[telegram.attachments]`) made
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE = true` parse as a nested key, so
+    top-level always-approve stayed `False`.
+  - Fix: register the managed-worktrees key in user-config maps; insert
+    missing top-level isolation keys *before* the first `[table]` header.
+  - Quiet mode (`MANA_CHAT_QUIET=1`) was already correct and is unrelated.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py -k "upsert or isolation or benchmark_overrides" tests/test_tui_user_config.py -k "settings_source" -q`
+
+- Fixed pytest collection of `tests/test_swe_bench_runner_config.py`
+  (`ModuleNotFoundError: No module named 'scripts'`).
+  - `tests/conftest.py` now puts the repository root on `sys.path` after
+    `src/`, so `from scripts.swe_bench.runner import …` resolves regardless
+    of cwd.
+  - Added `scripts/__init__.py` so `scripts` is an explicit package.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py --collect-only -q`
+
+- Fixed gateway `checkpoint_resume` failing on NVIDIA DeepSeek with
+  `LengthFinishReasonError` / truncated structured JSON.
+  - Symptom: Gmail (and other) entry turns returned
+    `Model decision failed: checkpoint_resume… length limit was reached`
+    with `completion_tokens=512` while the router model was
+    `deepseek-ai/deepseek-v4-flash` (thinking/reasoning enabled by default).
+  - Cause: `CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS` was 512; provider thinking
+    tokens share that budget, so the decision schema never completed.
+  - Raised the explicit output budget to 4096 and clarified length-limit
+    errors. Still no fallback resume/start when the decision is incomplete.
+  - User verification required:
+    `python -m pytest tests/gateway/test_checkpoint_resume.py -q`
+
+- Fixed Windows CI failure for SWE-bench `agent_bin` Python PATH shim.
+  - `prepare_agent_python_path` now writes `python.cmd` / `python3.cmd` on
+    Windows (PATHEXT) and keeps executable shell scripts on POSIX.
+  - Test no longer asserts Unix `S_IXUSR` on NTFS, where `chmod` does not set
+    the execute bit the same way (`33206 & 64` failed on GitHub Windows runners).
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py -k prepare_agent_python_path -q`
+
+- Fixed SWE-bench hangs from deleted worktree CWD + opaque Codex config ENOENT.
+  - Symptom: mana-agent stayed “still running” with stderr stuck on
+    `FileNotFoundError: getcwd()` / `Path.cwd()` and
+    `Codex app-server stopped: error loading default config after config error:
+    No such file or directory`.
+  - Cause: concurrent or overlapping instance runs could remove a live SWE
+    worktree under the agent process. The process CWD became unlinked, so
+    gateway init (`LlmRunLogger`) crashed and Codex children inherited a dead
+    cwd.
+  - `safe_cwd()` fallback for loggers when `getcwd` fails (prefer `MANA_HOME`).
+  - Codex app-server always spawns with an explicit existing `cwd` (repo if
+    present, else isolated `CODEX_HOME`); stream fails clearly if the execution
+    directory is gone.
+  - SWE-bench runner: per-instance worktree lock, refuse recreate/remove while
+    another live pid holds the lock, require `.git` after checkout, kill the
+    agent if the worktree disappears mid-run (exit 125).
+  - User verification required:
+    `python -m pytest tests/test_path_safety_safe_cwd.py tests/test_llm_logging.py -k deleted_cwd tests/test_codex_runtime.py -k "cwd or startup_failure" tests/test_swe_bench_runner_config.py -k worktree_lock -q`
+
+- Fixed SWE-bench agent runs blocked by keyword Git intent + transactional policy.
+  - Root cause (from `.swe-bench/logs/*`): prompts say "Do not commit, push…", but
+    `_git_intent_from_request` keyword-matched those words, ran
+    `git switch -c and`, then verifier failed on `git rev-parse origin/and`
+    (`git_verification_failed_or_blocked`). Empty patches followed.
+  - Removed keyword `GitIntent` inference. Git workflows require an explicit
+    structured `GitIntent` argument (model decision), not text matching.
+  - Added transactional `PolicyConfig.always_approve` /
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE`: converts `REQUIRE_APPROVAL` → `ALLOW`
+    for non-interactive bench; `DENY` stays deny.
+  - SWE-bench runner isolation now sets
+    `MANA_TRANSACTIONAL_ALWAYS_APPROVE=true`,
+    `MANA_MANAGED_WORKTREES_ENABLED=false`, and
+    `MANA_CODEX_WORKTREE_ISOLATION=false` so edits land in the SWE worktree and
+    shell/git mutations do not stall on human inbox approvals.
+  - User verification required:
+    `python -m pytest tests/test_multi_agent_core.py -k "git or swe_bench" tests/transactional_actions/test_policy_gated_actions.py -k always_approve tests/test_swe_bench_runner_config.py -k benchmark_overrides -q`
+
+- Hardened SWE-bench timeout configuration against multi-line shell flag drops.
+  - Logs `Process argv` at startup so missing `--timeout` is obvious.
+  - Warns loudly when falling back to the built-in 600s default.
+  - Timeout priority: CLI → `MANA_SWE_BENCH_TIMEOUT` / `SWE_BENCH_TIMEOUT` →
+    `.swe-bench/runner.toml` / `runner.env` → 600s default.
+  - Added `scripts/swe_bench/run_unlimited.sh` and default
+    `.swe-bench/runner.toml` with `timeout = 0`.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py -k timeout`
+
+- Fixed SWE-bench timeout + bloated auto-chat tool surface for coding runs.
+  - Gateway/chat paths no longer hard-cap agent timeouts at 600s
+    (`min(..., 600)`), so runner `--timeout` / `--agent-timeout-seconds`
+    multi-hour values actually apply (shared `normalize_agent_timeout_seconds`).
+  - Runner `--timeout` default remains 600; supports `0` = unlimited, env
+    `MANA_SWE_BENCH_TIMEOUT` / `SWE_BENCH_TIMEOUT`, and logs timeout **source**.
+  - Isolated SWE-bench `MANA_HOME` disables browser, computer control, canvas,
+    web/github search, fleet, and worker gateway; nested
+    `[computer_control]` / `[telegram]` / media tables forced `enabled=false`.
+  - Runner sets `MANA_CHAT_QUIET=1` so non-interactive startup skips dumping
+    the full ~179-tool catalog into `mana_stdout.log`.
+  - Docs note: multi-line shell invocations need `\\` after `runner.py` or
+    flags are dropped (exit 127 on the next line).
+  - User verification required:
+    `python -m pytest tests/test_timeouts_normalize.py tests/test_swe_bench_runner_config.py tests/test_auto_chat_tools_catalog.py -k "timeout or quiet or browser or python or mass_delete or prompt or shim"`
+
+## 2026-08-08
+
+- Fixed SWE-bench empty-patch failures driven by host Python 2.7 and
+  destructive/no-op worktree states after Codex+NVIDIA DeepSeek runs.
+  - Observed on `astropy__astropy-12907`: agent `python -c` hit the host
+    Frameworks Python 2.7, failed on f-strings in `astropy/__init__.py`, then
+    the model emitted DSML/garbage text and finished with `model_patch=""`.
+  - Runner now installs a per-instance `agent_bin` PATH shim so bare `python`
+    always execs the runner's Python 3 interpreter.
+  - Issue prompt now prefers source edits, requires `python3`, and warns that
+    the checkout may not be importable (do not spend the turn on env debug).
+  - Mass-delete-only worktrees (many deletes, no modifications) are rejected
+    as `destructive_patch` instead of shipping a huge delete-only prediction.
+  - Model catalog treats `deepseek-ai/deepseek-v4-flash-0731` (and other
+    family-suffixed DeepSeek V4 ids) as tool/code/reasoning capable so NIM
+    agent routing does not drop tools for dated build ids.
+  - Restored accidental deleted tracked files in the local
+    `.swe-bench/worktrees/astropy__astropy-13033` worktree used for diagnosis.
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py tests/test_nvidia_provider.py -k "deepseek or python or mass_delete or prompt or shim or flash-0731 or capabilities"`
+
+- Fixed Codex Responses bridge sending routing profile metadata to NVIDIA,
+  which caused HTTP 400 `Unsupported parameter(s): source_levels, capability_source`
+  (and empty SWE-bench patches / `codex_failed`).
+  - `ModelProfile.configuration` may contain bookkeeping fields
+    (`source_levels`, `capability_source`, `token_profile_confidence`) alongside
+    optional request fields; only the latter are forwarded as request overrides.
+  - Coding-agent Codex path and the bridge request adapter both strip internal
+    keys (and SDK-only `model_kwargs`) before building Chat Completions bodies.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_model_routing.py -k "routing_metadata or provider_request_overrides or deepseek"`
+
+- SWE-bench runner now uses `~/.mana/config.toml` for provider/model when CLI
+  flags are omitted.
+  - No `--model` → `MANA_PRIMARY_MODEL` / `OPENAI_CHAT_MODEL` / `LLM_MODEL`.
+  - No `--provider` → `MANA_AI_PROVIDER` (e.g. `nvidia`).
+  - `--model` alone still uses the **configured** provider and credentials.
+  - Isolated per-instance `MANA_HOME` pins both `MANA_AI_PROVIDER` and model roles.
+  - Logs report provider/model **source** (config vs CLI vs built-in fallback).
+  - User verification required:
+    `python -m pytest tests/test_swe_bench_runner_config.py`
+
+- Fixed Codex + NVIDIA reconnect loop for non-retryable provider errors
+  (HTTP 400 surfaced as `responseStreamDisconnected` / `Reconnecting... 1/5`).
+  - Introduced shared typed `ProviderFailure` / `ProviderFailureKind` classification
+    with retry ownership (`transport` / `codex_stream` / `supervisor` / `none`),
+    full-jitter backoff, `Retry-After` parsing, structured telemetry, and a
+    per-provider+endpoint circuit breaker that ignores 400/401/403/404/410/422.
+  - Responses bridge now opens the upstream Chat Completions request and inspects
+    HTTP status **before** returning `HTTP 200 text/event-stream`. Non-2xx
+    (including NVIDIA HTTP 400) is returned as a proper Responses error with
+    `retryable=false` and a sanitized upstream body snippet — Codex must not
+    reconnect.
+  - After SSE has started, mid-stream failures emit `response.failed` cleanly
+    instead of letting raw exceptions close the socket.
+  - Bridge transport attempts are fixed at 1 (no nested retry multiplication with
+    Codex). Bridge-path Codex `request_max_retries` is capped at 2 for loopback
+    connect failures only.
+  - NVIDIA DeepSeek request shaping clamps `max_tokens`, normalizes message
+    sequence (system first, tool_call_id retained), and maps unsupported
+    reasoning efforts (`xhigh`/`minimal`/`medium`) to NIM values (`none`/`high`/`max`).
+  - Model retired / not found (410/404) invalidates the cached model catalog.
+  - User verification required:
+    `python -m pytest tests/test_provider_failure.py tests/test_codex_responses_bridge_recovery.py tests/test_codex_responses_bridge.py tests/test_codex_runtime.py tests/test_nvidia_provider.py`
+
+- Fixed NVIDIA DeepSeek direct-chat TypeError:
+  `Completions.create() got an unexpected keyword argument 'chat_template_kwargs'`.
+  - LangChain / OpenAI Python SDK path now nests NIM `chat_template_kwargs`
+    under `extra_body` (SDK merges into the HTTP body) instead of spreading it
+    as a top-level create() kwarg.
+  - Codex Responses bridge continues to send top-level `chat_template_kwargs`
+    via raw HTTP Chat Completions.
+  - Upstream 4xx/410 stream failures now log kind, tools flag, template flag,
+    and a truncated body snippet for diagnosis (still redacted from user UI).
+  - User verification required:
+    `python -m pytest tests/test_nvidia_provider.py tests/test_codex_responses_bridge.py -k "deepseek or chat_template or first_class"`
+
+- Fixed two Windows CI failures in connector health storage and eval suite load.
+  - Skip legacy colon-filename snapshot migration on Windows (`os.name == "nt"`);
+    colon names are illegal or NTFS ADS syntax there, not real directory entries.
+  - Eval baseline-not-suite error hints now use portable POSIX path separators
+    (`evals/suites/...`) instead of platform-local `Path` stringification.
+  - User verification required:
+    `python -m pytest tests/connectors/health/test_connector_health_core.py -k "migrate_legacy or fs_names_encode" tests/evals/test_eval_lab.py -k "baseline_document"`
+
+- Fixed NVIDIA DeepSeek V4 request shaping for both direct chat and the Codex
+  Responses bridge.
+  - Inject `chat_template_kwargs` (`thinking` + `reasoning_effort`) required by
+    NVIDIA NIM for `deepseek-ai/deepseek-v4-flash` / `deepseek-v4-pro`.
+  - Avoid sending bare top-level `reasoning_effort` alone to NVIDIA DeepSeek
+    (can hang, 4xx/410, or disconnect Codex streams as `systemError`).
+  - Improve provider error logs with HTTP status and NVIDIA-specific messaging.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_nvidia_provider.py -k "deepseek or chat_template or fragmented or first_class"`
+
+- Fixed the Responses bridge fragmented tool-argument test assertion to account
+  for JSON-escaped SSE payloads while still verifying full argument reconstruction.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py::test_stream_adapter_fragmented_tool_arguments`
+
+- Added a Mana-managed OpenAI Responses compatibility bridge so Codex can use
+  Chat Completions-only providers such as NVIDIA NIM (`deepseek-ai/deepseek-v4-pro`).
+  - Introduced explicit `CodexTransport` (`direct_responses` / `responses_bridge`
+    / `unsupported`) separate from native `supports_responses_api`.
+  - NVIDIA remains `supports_responses_api=false` and uses `RESPONSES_BRIDGE`.
+  - Codex still receives `wire_api = "responses"` against a loopback bridge;
+    `NVIDIA_API_KEY` never enters Codex config, logs, or child argv.
+  - Bridge converts Responses requests/tools/streams to Chat Completions and
+    back, including fragmented tool-call argument streaming.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py tests/test_codex_runtime.py tests/test_codex_integration.py tests/test_nvidia_provider.py`
+
+- Fixed `split_qualified_model_id` so fully qualified OpenRouter IDs such as
+  `openrouter/anthropic/claude-sonnet` keep provider `openrouter` even when the
+  default provider is `openai` (regression from the NVIDIA nested-ID work).
+  - User verification required:
+    `python -m pytest tests/test_openrouter_provider.py tests/test_nvidia_provider.py -k "first_class or qualified"`
+
+- Completed first-class NVIDIA Build / NVIDIA NIM inference provider support.
+  - Canonical provider id `nvidia` uses `NVIDIA_API_KEY` and
+    `NVIDIA_BASE_URL` (default `https://integrate.api.nvidia.com/v1`).
+  - Runtime connection resolution no longer falls back to OpenAI credentials.
+  - Dynamic model discovery preserves nested upstream IDs
+    (e.g. `deepseek-ai/deepseek-v4-flash`, `nvidia/nemotron-...`).
+  - Configuration TUI, model management, wizard, embeddings, and CLI paths
+    resolve NVIDIA credentials in isolation.
+  - Chat Completions transport (streaming, tools, optional model-specific
+    `extra_body` / `chat_template_kwargs`) works through the existing adapter.
+  - Docs and `.env.example` document NVIDIA setup and the open-model benchmark
+    profile (`deepseek-ai/deepseek-v4-flash`) without making it the product default.
+  - User verification required:
+    `python -m pytest tests/test_nvidia_provider.py tests/test_openrouter_provider.py tests/test_llm_compatibility.py tests/test_tui_user_config.py`
+
+- Fixed confusing `mana-agent eval run` errors when a baseline JSON is passed
+  instead of a suite YAML (e.g. `./evals/baselines/routing-smoke.json`).
+  - `load_suite` now detects checked-in baseline documents and fails closed with
+    an actionable message pointing at the suite path and gate/baseline commands.
+  - Other suite schema failures are wrapped as `EvalConfigurationError` instead
+    of dumping raw multi-field Pydantic noise.
+  - CLI help for `eval run` states that suite YAML is required, not baseline JSON.
+  - User verification required:
+    `python -m pytest tests/evals/test_eval_lab.py -k "baseline_document or invalid_suite or protected_suite"`
+    then intentionally:
+    `mana-agent eval run ./evals/baselines/routing-smoke.json --json`
+    (expect exit 2 and a baseline-not-suite message), then the correct command:
+    `mana-agent eval run ./evals/suites/routing-smoke.yaml --help`.
+
+- Clarified SWE-bench instance selection: **no ids entered → all dataset ids**.
+  - If neither `--instance-ids` nor `--instance-ids-file` is set, the runner
+    loads **every** instance id from the SWE-bench dataset split (~500 Verified
+    `test` rows) and runs them (optional `--limit` still caps after selection).
+  - If ids are entered via `--instance-ids` and/or `--instance-ids-file`, only
+    those specific ids run.
+  - New flags: `--instance-ids-file` (text / JSON array / JSONL),
+    `--list-instance-ids` (print selected ids and exit).
+  - Docs updated for full-suite generation and grading without forcing a single
+    hardcoded harness `--instance_ids` (omit harness ids to grade all submitted
+    prediction rows). Your report with `submitted_instances: 1` and ~499
+    `incomplete_ids` is expected for a one-id smoke; re-run without id filters
+    to generate/grade the full suite.
+  - User verification required:
+    `python3 scripts/swe_bench/runner.py --list-instance-ids | wc -l`
+    then
+    `python3 scripts/swe_bench/runner.py --instance-ids astropy__astropy-12907 --list-instance-ids`
+    then
+    `python3 scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`.
+
+- Fixed SWE-bench prediction identity and smoke-eval failure modes:
+  - Predictions no longer write `model_name_or_path: "mana-agent"`. Default is
+    now `{agent_name}__{model}` (e.g. `mana-agent__gpt-5.6-luna`).
+  - Each prediction line also includes `agent_name` (default `mana-agent`) and
+    `agent_model` (the LLM from `--model`).
+  - New flags: `--agent-name`, corrected `--model-name-or-path` default, and
+    `--keep-test-files` (test hunks are stripped from `model_patch` by default
+    because official `test_patch` is applied later; agent test edits often
+    produce report `failed_ids` instead of resolved/unresolved).
+  - Docs explain incomplete vs failed vs unresolved in sb-cli/harness reports
+    (499 incomplete ids are expected when only 1 of 500 Verified rows is
+    submitted) and recommend grading with `--instance_ids` + a run_id that
+    includes agent and model.
+  - User verification required:
+    `python3 scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`
+    then
+    `python3 -c "import json; r=json.loads(open('predictions.jsonl').readline()); assert r['agent_name']=='mana-agent'; assert r['model_name_or_path'].startswith('mana-agent__'); assert 'agent_model' in r"`
+    and for a real grade of one row:
+    `python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path predictions.jsonl --instance_ids astropy__astropy-12907 --max_workers 1 --run_id mana-agent__gpt-5.6-luna-smoke`.
+
+- Fixed connector health storage on Windows (13 CI failures, WinError 87 /
+  errno 22 “The parameter is incorrect”):
+  - Connector ids use `type:instance` (colon). Writing
+    `health/fake:1.json` / `receipts/gmail:a_m1.json` is illegal on Windows.
+  - `ConnectorHealthStore` now maps identities to filesystem-safe stems
+    (`:` → `=`, bijective for the validated id charset) for snapshots, probe
+    logs, receipts, and incident indexes.
+  - Atomic temp files use a fixed `.tmp.*.partial` prefix instead of embedding
+    the destination basename (which reintroduced illegal characters).
+  - Legacy POSIX colon-named files are migrated to the safe name on first
+    resolve/write so restarts keep working.
+  - User verification required:
+    `python -m pytest -q tests/connectors/health/test_connector_health_core.py tests/connectors/health/test_connector_health_integrations.py`
+
+- Fixed SWE-bench runner freeze after `Starting mana-agent` (benchmark never
+  produced predictions):
+  - Isolated per-instance `MANA_HOME` now **rewrites** copied `config.toml`
+    (Mana file settings beat process env): force `MANA_MEMORY_MODE=internal`,
+    `MANA_MEMORY_PROVIDER=mana`, `MANA_MEMORY_FALLBACK_TO_INTERNAL=false`, clear
+    secret ref, and pin all model roles to `--model`. Operator external
+    supermemory and `MODEL_LEVEL_*` pins no longer stall startup or rewrite the
+    measured model.
+  - Dropped synchronous `--ephemeral-index` (full-repo index blocked large
+    instances such as astropy); use `--no-auto-index-missing` so chat starts
+    with direct project search immediately.
+  - Launch with `--no-interactive --no-banner --no-coding-memory` and aligned
+    `--agent-timeout-seconds`; emit PID + 30s heartbeats (log sizes / stderr
+    tail) while waiting; write `mana_cmd.txt` / line-buffered agent logs.
+  - Non-TTY chat with an initial prompt now exits after the single-shot queue
+    drains instead of waiting for further interactive input.
+  - Docs: `docs/swe-bench.md` updated for the isolation and invocation contract.
+  - User verification required:
+    `python3 scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`
+    then
+    `python3 scripts/swe_bench/runner.py --limit 1 --model gpt-5.6-luna --timeout 600 --output predictions.jsonl -v`
+    (expect heartbeats, logs under `.swe-bench/logs/<instance_id>/`, and a
+    `predictions.jsonl` line; agent run needs API credentials).
+
+- Fixed routing-smoke eval failures beyond model pin isolation:
+  - Pinned profiles now advertise interactive latency (see below) so entry
+    routing can select suite models.
+  - `process_chat_turn` was recording internal `auto_chat` as the scored route;
+    entry routes are now preserved in `payload.entry_route` and finalize no
+    longer overwrites them, so suite expectations like `route: repository`
+    match the model-selected entry decision.
+  - Browser/repository executors (and process_chat_turn) now fall back to
+    `default_index_dir(root)` when `index_dir` is unset, fixing
+    `PathLike … not 'NoneType'` browser crashes in evals.
+  - `_chromium_executable(None)` no longer raises when Playwright reports no
+    managed binary; it falls through to system Chromium candidates.
+  - Entry-routing prompt examples/clarifications for plan-only, plan
+    continuation, repository inspection vs computer, and no-fallback fixtures.
+  - Contract/no-fallback eval tasks that intentionally stop with
+    `unsupported_route` (and similar) now count as completed when labeled
+    `contract`/`no-fallback`/`provider` and the error set is exact.
+  - Codex coding shim no longer calls `asyncio.run()` on an already-running
+    event loop (thread adapter matches computer/MCP sync boundaries), fixing
+    plan-continuation failures after correct coding routing.
+  - User verification required:
+    `mana-agent eval run ./evals/suites/routing-smoke.yaml --json`
+    (full suite: 19 tasks × 2 variants = 38 runs, all success=true after fix).
+
+- Fixed pinned eval model profiles rejecting all gateway entry routes:
+  - `profiles_for_pinned_models` only registered models as
+    `MODEL_LEVEL_3_HIGH_REASONING` (`LatencyClass.STANDARD`), but gateway entry
+    routing requires `LatencyClass.INTERACTIVE` for `head_decision`. Every
+    candidate was rejected with "latency class standard exceeds interactive",
+    failing routing-smoke tasks (including the candidate-only
+    `duplicate-task-prevention` regression and both-variant clusters).
+  - Pinned profiles now register as both fast-tool and high-reasoning levels,
+    advertise interactive latency (same multi-level rule as legacy profiles),
+    and union level benchmarks/reasoning settings so a single suite model can
+    serve entry routing and coding/planning without operator `MODEL_LEVEL_*`
+    overrides.
+  - User verification required:
+    `python -m pytest tests/test_model_routing.py::test_pinned_profiles_ignore_operator_model_levels -q`
+    then re-run failing eval tasks / full
+    `mana-agent eval ./evals/suites/routing-smoke.yaml`.
+
+- Fixed routing-smoke eval isolation and context accounting that were collapsing
+  many tasks under operator `gpt-5.6-luna` preferences and a 16k unknown-model
+  window:
+  - Eval gateway construction now sets `ChatGatewayConfig.pin_models=True` with
+    the suite variant models, so `MODEL_LEVEL_*` / `MANA_MODEL_*` no longer
+    rewrite measured runtime models (suite `gpt-4.1-mini` was becoming
+    `gpt-5.6-luna` from `~/.mana/config.toml`).
+  - New `profiles_for_pinned_models` and `pin_model_for_role` build isolated
+    routing profiles/assignments without reading operator level settings.
+  - Maintained token limits for common OpenAI families (`gpt-4.1*`, `gpt-4o*`,
+    `gpt-5*`, `o3`/`o4`) fill catalog gaps so accounting no longer treats
+    modern models as 16 384-token unknowns (fixes
+    `effective limit is 0` / `context_limit_deficit` blocks on agent prompts).
+  - Budget-overrun finalization prompt now requires `safe_to_continue=true` for
+    valid `require_review` decisions (models were returning `false` and failing
+    schema validation mid-handoff).
+  - Observe-mode governor errors prefer the policy-free estimate so residual `0`
+    is not misreported when the real deficit is model context capacity.
+  - User verification required:
+    `python -m pytest tests/test_model_routing.py::test_pinned_profiles_ignore_operator_model_levels tests/test_model_routing.py::test_legacy_profiles_apply_maintained_token_limits_for_known_models tests/test_multi_agent_core.py::test_pin_model_for_role_bypasses_operator_model_levels tests/execution_supervisor/test_supervisor_core.py::test_budget_overrun_prompt_requires_safe_to_continue_for_require_review -q`
+    then re-run `mana-agent eval ./evals/suites/routing-smoke.yaml`.
+
+- Added SWE-bench Verified prediction generation for mana-agent:
+  - New focused runner: `scripts/swe_bench/runner.py` loads
+    `princeton-nlp/SWE-bench_Verified`, checks out each instance at
+    `base_commit` into an isolated git worktree, runs one non-interactive
+    mana-agent coding pass (`chat --no-tui --root-dir --full-auto`), captures
+    the final git diff as `model_patch`, and writes harness-compatible
+    `predictions.jsonl` lines
+    (`instance_id`, `model_name_or_path`, `model_patch`).
+  - Supports `--limit`, `--instance-ids`, `--output`, hard per-instance
+    `--timeout`, and a forced cheap/fast default model (`gpt-4o-mini`).
+  - Hardened against empty patches, dirty trees, checkout failures, and hung
+    agent processes (process-group kill on timeout).
+  - Docs: `docs/swe-bench.md` (generate command, official harness grade
+    command, smoke flags, limitations). Scope is prediction generation + smoke
+    grading only (not full 500-run, Pro, Terminal-Bench, pass@k, or
+    leaderboard submission).
+  - User verification required:
+    `python scripts/swe_bench/runner.py --limit 1 --skip-agent --output predictions.jsonl`
+    then
+    `python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path predictions.jsonl --max_workers 4 --run_id mana-agent-smoke`.
+
+- Fixed external memory capability boundary so agent routes no longer crash when
+  `MANA_MEMORY_MODE=external`:
+  - Split **AI/semantic memory** (hosted provider) from **system-state stores**
+    (run evidence, coding-flow checkpoints/turn history).
+  - `MemoryCapabilities` contract on `MemoryService` declares conversation,
+    semantic search, evidence, checkpoints, coding flow, task state, and
+    multi-agent runtime availability.
+  - External mode keeps local run evidence and coding-flow stores enabled; only
+    semantic AI writes stay on the external provider (no silent AI-memory
+    fallback to the local provider store).
+  - `EvidenceMemory` façade opens the local run-evidence store without requiring
+    multi-agent or external provider mapping (fixes review, plan, verification,
+    repository search, and related ask-agent routes).
+  - Docs: `docs/05-configuration.md` documents the dual-domain model.
+  - User verification required:
+    `python -m pytest tests/memory/test_external_provider_capabilities.py tests/test_memory_architecture.py -q`
+    and `mana-agent eval ./evals/suites/routing-smoke.yaml`.
+
+- Fixed connector status and doctor UX for health checks:
+  - `mana-agent connectors status` now runs a live safe probe by default so
+    connectors leave `UNKNOWN` / `STARTUP_PENDING` after registration
+    (`--no-probe` keeps the cached pre-verification snapshot).
+  - `mana-agent doctor --only` / `--skip` accept comma-separated check IDs as
+    well as repeated flags (e.g. `--only connectors/health,connectors/credentials`).
+  - User verification required:
+    `python -m pytest tests/connectors/health/test_connector_health_integrations.py::test_cli_status_probes_by_default tests/test_doctor.py::test_doctor_only_accepts_comma_separated_ids -q`.
+
+- Added **Connector Health and Self-Healing** so connectors are never treated as
+  online merely because a process, gateway, or adapter is running:
+  - Universal typed health contract (`ConnectorHealthState`, path signals,
+    probe categories, reason codes, delivery receipts, incidents, SLO metrics).
+  - Central `ConnectorHealthManager` with probe scheduling, exponential backoff
+    + jitter, circuit breakers, deterministic recovery, incident timelines, and
+    durable storage under `~/.mana/connectors/`.
+  - Real adapters for **Gmail** (profile/auth, safe ingress list, receipt-based
+    egress/ack) and **Telegram** (getMe, poller/webhook path, subscription
+    probe, false-online detection when process is alive but ingress is broken).
+  - Supervisor bridge pauses dependent branches while a required connector is
+    unavailable and resumes them exactly once after recovery; auth failures can
+    create durable HITL interventions; webhook/subscription repairs require
+    transactional policy authorization.
+  - CLI: `mana-agent connectors status|health|incidents|recover` (also under
+    `connector health`); doctor checks `connectors/credentials` and
+    `connectors/health`; dashboard and API expose real health states.
+  - Routine probes are fully deterministic (no LLM). Synthetic active messages
+    are disabled by default.
+  - Documentation: `docs/33-connector-health.md`.
+  - User verification required:
+    `python -m pytest tests/connectors/health/test_connector_health_core.py tests/connectors/health/test_connector_health_integrations.py tests/execution_supervisor/test_supervisor_core.py tests/human_inbox/test_durable_inbox.py -q`.
+
 ## 2026-08-07
 
 - Fixed gateway task control and chat-turn auto recovery so messages do not

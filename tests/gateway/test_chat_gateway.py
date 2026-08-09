@@ -881,6 +881,8 @@ def test_gateway_uses_codex_shim_without_legacy_coding_workers(
             agent_tools=True,
             tool_worker_process=True,
             auto_execute_plan=True,
+            # Stale MANA_CODEX_MODEL pin must not be reported as the runtime
+            # coding model; the log must show the resolved/routed model.
             settings=Settings(MANA_CODEX_MODEL="codex-test-model"),
         )
 
@@ -896,7 +898,9 @@ def test_gateway_uses_codex_shim_without_legacy_coding_workers(
     assert "main=" in model_log
     assert "router=" in model_log
     assert "coding_backend=codex" in model_log
-    assert "coding=codex-test-model" in model_log
+    assert "coding=codex-test-model" not in model_log
+    assert "coding=" in model_log
+    assert "coding_routed=" in model_log
     assert "planner=codex-owned" in model_log
     assert "tool_worker=disabled" in model_log
 

@@ -1,7 +1,7 @@
 """Public provider-neutral memory API."""
 
 from mana_agent.memory.config import CapsuleConfig, CapsuleRetentionConfig, MemoryConfig, MemorySecretStore
-from mana_agent.memory.contracts import CapsuleBackend, MemoryBackend
+from mana_agent.memory.contracts import CapsuleBackend, MemoryBackend, MemoryCapabilities
 from mana_agent.memory.capsules.models import (
     AuthorizationDecision,
     CapsuleLineage,
@@ -89,6 +89,7 @@ __all__ = [
     "FlowSummary",
     "MemoryAuthenticationError",
     "MemoryBackend",
+    "MemoryCapabilities",
     "MemoryCapsule",
     "MemoryConfig",
     "MemoryConfigurationError",

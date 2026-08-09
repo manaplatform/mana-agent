@@ -491,6 +491,35 @@ def _add_mcp_entries(
     return warnings
 
 
+# Categories kept when MANA_AUTO_CHAT_TOOL_SURFACE=coding (SWE-bench / isolated
+# coding runs). Everything else (canvas, server, email, api, media, browser, …)
+# is omitted from the auto-chat catalog so the agent surface stays coding-only.
+_CODING_SURFACE_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "repository",
+        "document",
+        "git",
+        "verify",
+        "edit",
+        "search",
+    }
+)
+_CODING_SURFACE_SEARCH_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "semantic_search",
+        "repo_search",
+        "repo_batch_search",
+    }
+)
+
+
+def _auto_chat_tool_surface() -> str:
+    from mana_agent.config.user_config import get_setting
+
+    raw = str(get_setting("MANA_AUTO_CHAT_TOOL_SURFACE", "full") or "full").strip().lower()
+    return "coding" if raw in {"coding", "code", "repo", "repository"} else "full"
+
+
 def list_auto_chat_tools(
     *,
     include_mcp_discovery: bool = False,
@@ -501,22 +530,44 @@ def list_auto_chat_tools(
     Always includes first-party tools (email, web_search, repo, browser when
     enabled). MCP providers are listed from config without starting servers
     unless ``include_mcp_discovery`` is True.
+
+    When ``MANA_AUTO_CHAT_TOOL_SURFACE=coding``, only repository / document /
+    git / verify / edit / local-search tools are listed (SWE-bench isolation).
     """
     by_name: dict[str, ToolCatalogEntry] = {}
+    surface = _auto_chat_tool_surface()
+    coding_surface = surface == "coding"
+
+    from mana_agent.config.user_config import get_setting
+
+    canvas_enabled = bool(get_setting("MANA_CANVAS_ENABLED", True))
+    search_web = bool(get_setting("MANA_SEARCH_ENABLE_WEB", True))
+    search_github = bool(get_setting("MANA_SEARCH_ENABLE_GITHUB", True))
 
     for name, description, category in _BUILTIN_AUTO_CHAT_TOOLS:
+        if coding_surface and category not in _CODING_SURFACE_CATEGORIES:
+            continue
+        if coding_surface and category == "search" and name not in _CODING_SURFACE_SEARCH_ALLOWLIST:
+            continue
+        if category == "canvas" and not canvas_enabled:
+            continue
+        if name == "web_search" and not search_web:
+            continue
+        if name == "github_search" and not search_github:
+            continue
         _merge_entry(by_name, name, description, category)
 
-    from mana_agent.server.tools import SERVER_TOOL_SPECS
+    if not coding_surface:
+        from mana_agent.server.tools import SERVER_TOOL_SPECS
 
-    for spec in SERVER_TOOL_SPECS.values():
-        access = "Inspect" if spec.read_only else "Manage"
-        _merge_entry(
-            by_name,
-            spec.name,
-            f"{access} an explicitly enrolled server through a validated server decision.",
-            "server",
-        )
+        for spec in SERVER_TOOL_SPECS.values():
+            access = "Inspect" if spec.read_only else "Manage"
+            _merge_entry(
+                by_name,
+                spec.name,
+                f"{access} an explicitly enrolled server through a validated server decision.",
+                "server",
+            )
 
     # Enrich descriptions for tools already in the catalog. Do not add
     # contract-only names that are not wired into auto-chat AskAgent.
@@ -539,14 +590,15 @@ def list_auto_chat_tools(
     except Exception:
         pass
 
-    _add_browser_tools(by_name)
-    _add_computer_tools(by_name)
-    _add_teach_tools(by_name)
-    _add_mcp_entries(
-        by_name,
-        include_mcp_discovery=include_mcp_discovery,
-        mcp_overrides=mcp_overrides,
-    )
+    if not coding_surface:
+        _add_browser_tools(by_name)
+        _add_computer_tools(by_name)
+        _add_teach_tools(by_name)
+        _add_mcp_entries(
+            by_name,
+            include_mcp_discovery=include_mcp_discovery,
+            mcp_overrides=mcp_overrides,
+        )
 
     return sort_tool_catalog(by_name.values())
 

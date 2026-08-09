@@ -15,7 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 class QnAChain:
-    def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        *,
+        provider: str | None = None,
+        default_headers: dict[str, str] | None = None,
+    ) -> None:
         logger.debug("Initializing QnA chain with model=%s", model)
         self.prompt = ChatPromptTemplate.from_messages(
             [
@@ -23,8 +31,15 @@ class QnAChain:
                 ("human", HUMAN_TEMPLATE),
             ]
         )
-        self.llm = create_chat_model(api_key=api_key, model=model, base_url=base_url)
+        self.llm = create_chat_model(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            default_headers=default_headers,
+        )
         self.model = model
+        self.provider = str(provider or getattr(self.llm, "selected_provider", "") or "unknown")
         self.run_logger = LlmRunLogger()
 
     def update_model_assignment(self, provider: str, model: str, *, settings: Any | None = None) -> None:

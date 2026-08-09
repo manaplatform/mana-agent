@@ -688,6 +688,14 @@ def test_token_and_cost_overrun_requires_a_fresh_model_finalization_decision(run
     assert finalized.budget_overrun["status"] == "requires_human_review"
 
 
+def test_budget_overrun_prompt_requires_safe_to_continue_for_require_review() -> None:
+    from mana_agent.execution_supervisor.budget_decision import _PROMPT
+
+    text = _PROMPT.casefold()
+    assert "safe_to_continue must be true" in text
+    assert "require_review is a valid finalization" in text
+
+
 def test_budget_overrun_rejects_stale_model_decision_evidence(runtime):
     supervisor, _clock, tmp_path = runtime
     task = create(supervisor, tmp_path, token_budget=1)

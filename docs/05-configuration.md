@@ -178,13 +178,55 @@ mana-agent
 
 When no saved user config exists, the CLI prints the Mana banner first, then starts a keyboard-selectable setup wizard. The wizard can:
 
-- Configure OpenAI, OpenAI-compatible, NVIDIA OpenAI-compatible, or manual provider settings.
-- Enter API keys without echoing them back to the terminal.
-- Fetch models from `GET {OPENAI_BASE_URL}/models`.
+- Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), or a custom OpenAI-compatible endpoint.
+- Enter the selected provider's API key without echoing it back (NVIDIA uses `NVIDIA_API_KEY`, never `OPENAI_API_KEY`).
+- Fetch models dynamically from `GET {provider_base_url}/models`.
 - Select chat, tool-worker, coding-planner, and embedding models.
 - Assign model levels for Mana roles such as main, planner, coding, verifier, reviewer, tool, and summarizer.
 - Configure web and GitHub search providers.
 - Save a masked config summary for review.
+
+### NVIDIA Build / NVIDIA NIM
+
+1. Create an API key at [NVIDIA Build](https://build.nvidia.com/).
+2. Run `mana-agent configure` (or `mana-agent --configure`) and select **NVIDIA**.
+3. Enter `NVIDIA_API_KEY` and keep the default base URL
+   `https://integrate.api.nvidia.com/v1`, or point `NVIDIA_BASE_URL` at a
+   self-hosted OpenAI-compatible NIM endpoint.
+4. Validate the connection, fetch models, and assign role models.
+5. Start Mana-Agent normally; chat, tools, streaming, and agent workflows use
+   the selected NVIDIA-hosted model through the shared OpenAI-compatible transport.
+
+Canonical upstream model IDs are preserved exactly (including nested org
+namespaces such as `deepseek-ai/deepseek-v4-flash` or
+`nvidia/nemotron-3-nano-30b-a3b`). Mana persists a provider-qualified form
+(`nvidia/<upstream_id>`) while API requests send only the upstream ID.
+
+The Build model catalog changes over time; Mana does not ship a static copy.
+Unknown models remain selectable via Advanced/manual entry.
+
+**Benchmark profile (not the product default):** for open-model agent/coding
+benchmarks, a recommended configuration is
+`MANA_AI_PROVIDER=nvidia` with model `deepseek-ai/deepseek-v4-pro` and
+`reasoning_effort=high` (maximum-capability runs may use `reasoning_effort=max`).
+A lighter baseline when available is `deepseek-ai/deepseek-v4-flash` or
+`nvidia/nemotron-3-nano-30b-a3b`.
+
+**Codex + NVIDIA:** current Codex requires the OpenAI Responses API. NVIDIA NIM
+exposes Chat Completions only. Mana therefore starts a loopback Responses
+compatibility bridge automatically when Codex is selected with NVIDIA (or other
+Chat Completions-only hosts). Codex receives a temporary local token and never
+sees `NVIDIA_API_KEY`. Mana still attributes context/cost accounting to
+`provider=nvidia` with transport `codex_responses_bridge`.
+
+**DeepSeek V4 on NVIDIA:** models such as `deepseek-ai/deepseek-v4-flash` and
+`deepseek-ai/deepseek-v4-pro` require NIM `chat_template_kwargs` (`thinking` +
+`reasoning_effort` in `none`/`high`/`max`). Mana injects these automatically for
+both direct chat and the Codex bridge. Direct LangChain/OpenAI-SDK calls nest
+them under `extra_body` (required by `Completions.create`); the Codex Responses
+bridge sends them as top-level Chat Completions JSON fields. Without them,
+NVIDIA may hang, return 4xx/410, or disconnect the Codex stream as a generic
+`systemError`.
 
 Saved files:
 
@@ -239,7 +281,7 @@ Use `--no-interactive` in CI or scripts:
 mana-agent --no-interactive chat --root-dir .
 ```
 
-In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if required values such as `OPENAI_API_KEY` are missing.
+In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if the selected provider's key is missing (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `NVIDIA_API_KEY`).
 
 ## Memory providers
 
@@ -276,29 +318,58 @@ MANA_MEMORY_FALLBACK_TO_INTERNAL=false
 
 Invalid mode/provider pairs, missing credentials, missing optional dependencies,
 authentication failures, connectivity failures, and provider failures stop with
-typed errors. There is no silent fallback or automatic upload of existing local
-memory. If a runtime explicitly permits degraded memory, it may continue the
-turn without memory, but it must report that state. Switch back with
+typed errors. There is no silent fallback that rewrites **semantic / conversation
+AI memory** to the local provider store, and no automatic upload of existing
+local memory. If a runtime explicitly permits degraded memory, it may continue
+the turn without semantic memory, but it must report that state. Switch back with
 `MANA_MEMORY_MODE=internal` and `MANA_MEMORY_PROVIDER=mana`.
+
+External mode selects the hosted provider for **AI memory only**
+(conversation, semantic search, and multi-agent records adapted through the
+external runtime). Local **system-state stores** remain available regardless of
+provider so agent routes do not crash:
+
+| Domain | External mode backend |
+| --- | --- |
+| Conversation / semantic search | Hosted provider (`mem0` / `supermemory`) |
+| Multi-agent task / decision records | External runtime adapter (hosted writes) |
+| Run evidence (file-read cache) | Local durable store under Mana runs |
+| Coding-flow checkpoints / turn history | Local SQLite system store |
+| Scoped capsules metadata | Local capsule service |
+
+`MemoryService.capabilities` declares these domains. Routes that need evidence
+or coding-flow continuity call the local system stores; they do not require the
+external provider to implement run evidence. Configuration errors are raised
+only when no safe backend exists for a requested domain.
 
 External memory has different privacy and retention implications because
 selected content, identity scopes, and metadata leave the local machine. Review
-the selected provider policy before enabling it.
+the selected provider policy before enabling it. Local system stores never send
+run evidence or coding-flow checkpoints to the hosted provider.
 
 Chat follow-ups use the gateway-owned shared memory service in addition to the
 durable session transcript. The service records successful user/assistant turn
 pairs and recalls relevant records only within the active conversation scope.
 A new conversation receives a new scope. The gateway explicitly permits
 degraded follow-up memory: provider failures are included in turn warnings while
-the transcript remains usable, and no internal fallback write occurs.
+the transcript remains usable, and no internal semantic AI-memory fallback write
+occurs.
 
 ## Core configuration keys
 
 Set these through the Settings menu; Mana-Agent writes them to `~/.mana`.
 
 ```bash
+# OpenAI
 OPENAI_API_KEY="sk-..."
 OPENAI_BASE_URL="https://api.openai.com/v1"
+
+# NVIDIA Build / NIM (isolated credentials; do not reuse OPENAI_API_KEY)
+# NVIDIA_API_KEY="nvapi-..."
+# NVIDIA_BASE_URL="https://integrate.api.nvidia.com/v1"
+# MANA_AI_PROVIDER="nvidia"
+# OPENAI_CHAT_MODEL="deepseek-ai/deepseek-v4-flash"
+
 OPENAI_CHAT_MODEL="gpt-4.1"
 LLM_MODEL="gpt-4.1"
 OPENAI_TOOL_WORKER_MODEL="gpt-4.1"
@@ -379,6 +450,16 @@ checkout. Explicit merge intent is still required after review
 (`mana-agent worktree merge <task-id> --yes`).
 
 Set `MANA_MANAGED_WORKTREES_ENABLED=false` to preserve the legacy in-checkout coding path.
+
+### Transactional always-approve (bench / non-interactive)
+
+`MANA_TRANSACTIONAL_ALWAYS_APPROVE` (default `false`) converts transactional
+policy `require_approval` outcomes to `allow` so shell, local git mutations, and
+destructive-but-policy-gated file actions do not wait on a human inbox grant.
+`deny` outcomes still fail closed (workspace escapes, secrets, destructive
+shell/git, unclassified tools). The SWE-bench runner enables this automatically
+in each isolated instance `MANA_HOME`. Do not enable it for normal interactive
+operator sessions unless you intentionally want unattended execution.
 
 All LLM credentials, base URLs, chat/planner/tool-worker models, role mappings,
 reasoning options, and provider capability flags are resolved from

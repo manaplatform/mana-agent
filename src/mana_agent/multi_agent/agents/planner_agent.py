@@ -6,7 +6,7 @@ from mana_agent.multi_agent.core.types import PlanResult
 
 class PlannerAgent(BaseAgent):
     def plan(self, task_id: str, user_request: str, route_name: str) -> PlanResult:
-        commands = ["python -m compileall src"]
+        commands = ["python3 -m compileall src"]
         if route_name in {"coding", "tool", "high_risk_tool"}:
             commands.append("pytest")
         result = PlanResult(

@@ -24,6 +24,7 @@ from mana_agent.integrations.codex.runtime_environment import CodexRuntimeContex
 from mana_agent.context_cost import ContextCostGovernor
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.context_cost.models import ContextSegment
+from mana_agent.utils.path_safety import safe_cwd
 
 ClientFactory = Callable[[tuple[str, ...]], AsyncCodexAppServer]
 
@@ -68,11 +69,12 @@ class CodexCodingBackend:
         if not self.settings.enabled:
             raise CodexUnavailableError("Codex integration is disabled. No fallback backend was executed.")
         executable = self.settings.codex_bin
+        health_root = _existing_directory(repository_path) or safe_cwd()
         if self._uses_default_client:
             report = await asyncio.to_thread(
                 check_codex_health,
                 self.settings,
-                repository_path or Path.cwd(),
+                health_root,
             )
             if not report.healthy or report.executable is None:
                 detail = "; ".join(report.errors) or "unknown health-check failure"
@@ -88,11 +90,16 @@ class CodexCodingBackend:
         command = (executable, "app-server")
         if self._uses_default_client:
             self._runtime_context = CodexRuntimeEnvironment.create(runtime_config)
+            # Prefer the repository as the child CWD so Codex project discovery
+            # is correct; fall back to the isolated CODEX_HOME when the repo was
+            # deleted under a live process (SWE-bench thrash).
+            child_cwd = _existing_directory(repository_path) or self._runtime_context.home
             self._client = AsyncCodexAppServer(
                 command,
                 environment=self._runtime_context.environment,
                 provider_name=runtime_config.provider_display_name,
                 model=runtime_config.model,
+                cwd=child_cwd,
             )
         else:
             self._client = self._client_factory(command)
@@ -118,8 +125,14 @@ class CodexCodingBackend:
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
         self._validate_workspace(task, workspace)
+        execution_dir = _execution_directory(workspace)
+        if not execution_dir.is_dir():
+            raise CodexExecutionError(
+                f"Codex execution directory does not exist: {execution_dir}. "
+                "The worktree may have been removed while the agent was running."
+            )
         await self.start(
-            workspace.repository_path,
+            execution_dir,
             sandbox_mode=_codex_sandbox(workspace),
         )
         if self._client is None:
@@ -139,6 +152,8 @@ class CodexCodingBackend:
             last_usage: dict[str, Any] | None = None
             prompt = build_codex_prompt(task, workspace)
             sequence += 1
+            transport = getattr(self.settings, "codex_transport", None)
+            transport_value = getattr(transport, "value", str(transport or ""))
             yield AgentEvent(
                 event_type="backend.selected",
                 task_id=task.task_id,
@@ -147,6 +162,14 @@ class CodexCodingBackend:
                 title="Codex backend selected",
                 summary=self.worker_id,
                 model=self.settings.model or "",
+                payload={
+                    "provider": self.settings.provider,
+                    "transport": transport_value or (
+                        "codex_responses_bridge"
+                        if not self.settings.supports_responses_api
+                        else "direct_responses"
+                    ),
+                },
             )
             try:
                 if self.resume_thread_id:
@@ -163,11 +186,11 @@ class CodexCodingBackend:
                     raise CodexExecutionError("Codex thread/start returned no thread id")
                 sequence += 1
                 yield AgentEvent(
-                    event_type="turn.started",
+                    event_type="turn.starting",
                     task_id=task.task_id,
                     backend="codex",
                     sequence=sequence,
-                    title="Codex turn started",
+                    title="Starting Codex turn",
                     thread_id=thread_id,
                     model=self.settings.model or "",
                 )
@@ -197,7 +220,7 @@ class CodexCodingBackend:
                             ),
                         ),
                         model=self.settings.model or "app-server-default",
-                        provider=self.settings.provider,
+                        provider=self.settings.provider,  # real inference provider, not the bridge
                         turn_id=task.task_id,
                         task_id=task.task_id,
                         agent_id=self.worker_id,
@@ -228,6 +251,17 @@ class CodexCodingBackend:
                 if not turn_id:
                     raise CodexExecutionError("Codex turn/start returned no turn id")
                 self._active[task.task_id] = (thread_id, turn_id)
+                sequence += 1
+                yield AgentEvent(
+                    event_type="turn.started",
+                    task_id=task.task_id,
+                    backend="codex",
+                    sequence=sequence,
+                    title="Codex turn started",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    model=self.settings.model or "",
+                )
                 iterator = self._client.notifications(thread_id).__aiter__()
                 deadline = asyncio.get_running_loop().time() + self.settings.task_timeout_seconds
                 while True:
@@ -249,6 +283,19 @@ class CodexCodingBackend:
                     seen_event_ids.add(event.event_id)
                     sequence += 1
                     notifications.append(notification)
+                    # A provider-level turn/completed notification only means
+                    # Codex has stopped streaming. Mana still has to parse the
+                    # trace, verify the repository outcome, and publish the
+                    # validated terminal answer. Keep the UI in an explicit
+                    # finalizing state until that work is done.
+                    if event.event_type == "turn.completed":
+                        event = event.model_copy(
+                            update={
+                                "event_type": "turn.finalizing",
+                                "status": "running",
+                                "title": "Codex response received — preparing result",
+                            }
+                        )
                     if event.token_usage:
                         last_usage = dict(event.token_usage)
                         hard_reason = self.context_cost_governor.active_hard_limit_reason(
@@ -391,6 +438,19 @@ class CodexCodingBackend:
 
 def _execution_directory(workspace: WorkspaceContext) -> Path:
     return (workspace.working_directory or workspace.worktree_path).resolve()
+
+
+def _existing_directory(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    try:
+        path = Path(value).expanduser().resolve(strict=False)
+    except OSError:
+        return None
+    try:
+        return path if path.is_dir() else None
+    except OSError:
+        return None
 
 
 def _response_id(response: dict[str, Any], key: str) -> str:

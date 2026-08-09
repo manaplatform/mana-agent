@@ -18,14 +18,23 @@ def mana_home() -> Path:
 
     Repository source trees are deliberately not used as state stores.  Tests
     and managed installations can isolate state with ``MANA_HOME``.
+
+    Windows ``Path.resolve`` always calls ``os.getcwd`` via ``ntpath.realpath``;
+    when the process CWD is gone we still return a usable absolute path.
     """
 
     configured = str(os.getenv("MANA_HOME") or "").strip()
-    return (
-        Path(configured).expanduser().resolve()
+    candidate = (
+        Path(configured).expanduser()
         if configured
-        else (Path.home() / MANA_ROOT_DIRNAME).resolve()
+        else (Path.home() / MANA_ROOT_DIRNAME)
     )
+    try:
+        return candidate.resolve(strict=False)
+    except (FileNotFoundError, OSError, RuntimeError):
+        if candidate.is_absolute():
+            return Path(os.path.normpath(candidate))
+        return candidate
 
 
 # Default embedding models per provider. The chat and embedding endpoints share a
@@ -36,16 +45,22 @@ OPENAI_DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 NVIDIA_DEFAULT_EMBED_MODEL = "nvidia/nv-embedqa-e5-v5"
 
 
-def resolve_embed_model(base_url: str | None, explicit_model: str | None = None) -> str:
-    """Return the embedding model to use for the given base URL.
+def resolve_embed_model(
+    base_url: str | None,
+    explicit_model: str | None = None,
+    *,
+    provider: str | None = None,
+) -> str:
+    """Return the embedding model to use for the given base URL / provider.
 
     An explicitly configured model always wins. Otherwise the model is inferred
-    from the base URL: NVIDIA endpoints get an NVIDIA embedding model, everything
-    else falls back to the OpenAI default.
+    from the provider or base URL: NVIDIA endpoints get an NVIDIA embedding
+    model, everything else falls back to the OpenAI default.
     """
     if explicit_model and explicit_model.strip():
         return explicit_model.strip()
-    if base_url and "nvidia" in base_url.lower():
+    provider_id = str(provider or "").strip().lower()
+    if provider_id == "nvidia" or (base_url and "nvidia" in base_url.lower()):
         return NVIDIA_DEFAULT_EMBED_MODEL
     return OPENAI_DEFAULT_EMBED_MODEL
 
@@ -71,6 +86,10 @@ class Settings(BaseSettings):
     openrouter_title: str = Field(default="Mana-Agent", alias="OPENROUTER_TITLE")
     openrouter_provider_preferences: dict[str, Any] | str = Field(
         default_factory=dict, alias="OPENROUTER_PROVIDER_PREFERENCES"
+    )
+    nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
+    nvidia_base_url: str = Field(
+        default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL"
     )
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_tool_worker_model: str | None = Field(
@@ -487,6 +506,11 @@ class Settings(BaseSettings):
     mana_managed_worktrees_enabled: bool = Field(
         default=True, alias="MANA_MANAGED_WORKTREES_ENABLED"
     )
+    # Non-interactive / bench mode: auto-allow transactional REQUIRE_APPROVAL
+    # outcomes (shell, destructive file ops, remote git). DENY stays deny.
+    mana_transactional_always_approve: bool = Field(
+        default=False, alias="MANA_TRANSACTIONAL_ALWAYS_APPROVE"
+    )
     # Empty preserves pre-0.0.19 configurations: Codex when enabled, internal otherwise.
     mana_coding_backend: str = Field(default="", alias="MANA_CODING_BACKEND")
     mana_codex_enabled: bool = Field(default=True, alias="MANA_CODEX_ENABLED")
@@ -505,6 +529,11 @@ class Settings(BaseSettings):
     )
     mana_codex_model: str | None = Field(default=None, alias="MANA_CODEX_MODEL")
     mana_codex_bin: str = Field(default="codex", alias="MANA_CODEX_BIN")
+    # full = all auto-chat tools; coding = repository/edit/verify/document/git only
+    # (SWE-bench and other isolated coding runs).
+    mana_auto_chat_tool_surface: str = Field(
+        default="full", alias="MANA_AUTO_CHAT_TOOL_SURFACE"
+    )
     mana_github_autopilot_enabled: bool = Field(
         default=False, alias="MANA_GITHUB_AUTOPILOT_ENABLED"
     )

@@ -24,7 +24,7 @@ from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.coding.selection import resolve_coding_backend
 from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.multi_agent.core.types import AgentRole
-from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
+from mana_agent.multi_agent.runtime.model_levels import pin_model_for_role, resolve_model_for_role
 from mana_agent.model_routing.repository import RepositoryMetadataInspector
 from mana_agent.gateway.routing import GatewayRoutingAuthority
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient
@@ -260,9 +260,28 @@ def build_chat_stack(
             workspace_id = None
             repository_id = None
 
+    pinned_profiles = None
+    if cfg.pin_models:
+        from mana_agent.model_routing.profiles import profiles_for_pinned_models
+
+        pinned_main = str(cfg.model or settings.openai_chat_model or "").strip()
+        pinned_models = [
+            pinned_main,
+            str(cfg.router_model or "").strip(),
+            str(cfg.coding_model or "").strip(),
+            str(cfg.reviewer_model or "").strip(),
+            str(cfg.verifier_model or "").strip(),
+        ]
+        pinned_profiles = profiles_for_pinned_models(
+            pinned_models,
+            default_provider=str(getattr(settings, "mana_ai_provider", "openai") or "openai"),
+            context_window=int(getattr(settings, "mana_context_unknown_model_context_window", 16_384)),
+            max_output_tokens=int(getattr(settings, "mana_context_unknown_model_max_output_tokens", 4_096)),
+        )
     routing_authority = GatewayRoutingAuthority(
         root,
         settings=settings,
+        profiles=pinned_profiles,
         event_sink=cfg.event_sink,
     )
     context_cost_governor = ContextCostGovernor(
@@ -328,36 +347,74 @@ def build_chat_stack(
         "workspace_id": str(workspace_id or ""),
         "repository_id": str(repository_id or ""),
     }
-    effective_model = resolve_model_for_role(
-        AgentRole.MAIN,
-        global_model=cfg.model or settings.openai_chat_model,
-        repository=routing_repository,
-        **route_context,
-    ).resolved_model
-    router_model_assignment = resolve_model_for_role(
-        AgentRole.HEAD_DECISION,
-        global_model=effective_model,
-        repository=routing_repository,
-        **route_context,
-    )
-    coding_model_assignment = resolve_model_for_role(
-        AgentRole.CODING,
-        global_model=getattr(settings, "mana_codex_model", None) or effective_model,
-        repository=routing_repository,
-        **route_context,
-    )
-    planner_model_assignment = resolve_model_for_role(
-        AgentRole.PLANNER,
-        global_model=settings.openai_coding_planner_model or effective_model,
-        repository=routing_repository,
-        **route_context,
-    )
-    tool_worker_model_assignment = resolve_model_for_role(
-        AgentRole.TOOL_WORKER,
-        global_model=settings.openai_tool_worker_model or effective_model,
-        repository=routing_repository,
-        **route_context,
-    )
+    if cfg.pin_models:
+        # Eval / isolated runs: honor explicit suite models only.
+        pinned_main = str(cfg.model or settings.openai_chat_model or "").strip()
+        if not pinned_main:
+            raise ValueError("pin_models requires an explicit main model")
+        main_assignment = pin_model_for_role(AgentRole.MAIN, pinned_main)
+        effective_model = main_assignment.resolved_model
+        router_model_assignment = pin_model_for_role(
+            AgentRole.HEAD_DECISION,
+            str(cfg.router_model or pinned_main).strip(),
+        )
+        coding_model_assignment = pin_model_for_role(
+            AgentRole.CODING,
+            str(cfg.coding_model or pinned_main).strip(),
+        )
+        planner_model_assignment = pin_model_for_role(
+            AgentRole.PLANNER,
+            str(cfg.coding_model or pinned_main).strip(),
+        )
+        tool_worker_model_assignment = pin_model_for_role(
+            AgentRole.TOOL_WORKER,
+            str(cfg.model or pinned_main).strip(),
+        )
+    else:
+        effective_model = resolve_model_for_role(
+            AgentRole.MAIN,
+            global_model=cfg.model or settings.openai_chat_model,
+            repository=routing_repository,
+            **route_context,
+        ).resolved_model
+        router_model_assignment = resolve_model_for_role(
+            AgentRole.HEAD_DECISION,
+            global_model=effective_model,
+            repository=routing_repository,
+            **route_context,
+        )
+        # Coding model precedence for the Codex path:
+        # 1) explicit gateway coding_model
+        # 2) CLI/gateway main model (e.g. SWE-bench --model)
+        # 3) MANA_CODEX_MODEL only when set (may be a stale operator pin such as
+        #    gpt-5.6-luna from an older OpenAI setup)
+        # 4) effective main model
+        # Preferring CLI/main over a leftover MANA_CODEX_MODEL keeps measured
+        # runs on the selected provider/model instead of a silent luna pin.
+        coding_global_model = (
+            str(cfg.coding_model or "").strip()
+            or str(cfg.model or "").strip()
+            or str(getattr(settings, "mana_codex_model", "") or "").strip()
+            or effective_model
+        )
+        coding_model_assignment = resolve_model_for_role(
+            AgentRole.CODING,
+            global_model=coding_global_model,
+            repository=routing_repository,
+            **route_context,
+        )
+        planner_model_assignment = resolve_model_for_role(
+            AgentRole.PLANNER,
+            global_model=settings.openai_coding_planner_model or effective_model,
+            repository=routing_repository,
+            **route_context,
+        )
+        tool_worker_model_assignment = resolve_model_for_role(
+            AgentRole.TOOL_WORKER,
+            global_model=settings.openai_tool_worker_model or effective_model,
+            repository=routing_repository,
+            **route_context,
+        )
     effective_tool_worker_model = tool_worker_model_assignment.resolved_model
     # Stack construction is deliberately credential-free for diagnostics and
     # injected test services. The actual model construction validates keys.
@@ -513,8 +570,18 @@ def build_chat_stack(
 
     if isinstance(coding_agent_instance, CodexCodingAgentShim):
         coding_backend = "codex"
-        coding_model = str(getattr(settings, "mana_codex_model", "") or "router-managed")
-        routed_coding_model = coding_agent_instance.codex_settings.model or "app-server-default"
+        # Report the model Codex will actually use (resolved/routed), not a
+        # stale MANA_CODEX_MODEL pin that may disagree with the active provider.
+        coding_model = (
+            coding_model_assignment.resolved_model
+            or str(getattr(settings, "mana_codex_model", "") or "").strip()
+            or "router-managed"
+        )
+        routed_coding_model = (
+            coding_agent_instance.codex_settings.model
+            or coding_model_assignment.resolved_model
+            or "app-server-default"
+        )
         planner_model = "codex-owned"
     elif coding_agent_instance is not None:
         coding_backend = "internal" if isinstance(coding_agent_instance, InternalCodingAgentShim) else type(coding_agent_instance).__name__

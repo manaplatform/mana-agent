@@ -3,9 +3,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from mana_agent.commands.chat_cli import _decide_chat_route
-from mana_agent.multi_agent.routing.agent_decision import AgentDecisionEngine
-from mana_agent.multi_agent.routing.router import Router
+from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine, verify_agent_decision
+from mana_agent.multi_agent.routing.router import Router, RoutingDecisionError
+
+
+def _semantic_contract(intent: str) -> dict[str, str]:
+    return {
+        "answer": {"requested_effect": "none", "target_surface": "conversation"},
+        "repo_search": {"requested_effect": "read", "target_surface": "repository"},
+        "analyze": {"requested_effect": "read", "target_surface": "repository"},
+        "review": {"requested_effect": "read", "target_surface": "repository"},
+        "edit": {"requested_effect": "write", "target_surface": "repository"},
+        "web_research": {"requested_effect": "read", "target_surface": "web"},
+        "tool": {"requested_effect": "execute", "target_surface": "local_system"},
+        "verify": {"requested_effect": "execute", "target_surface": "local_system"},
+        "high_risk_tool": {"requested_effect": "execute", "target_surface": "local_system"},
+        "plan": {"requested_effect": "none", "target_surface": "conversation"},
+    }[intent]
 
 
 class _DecisionModel:
@@ -15,7 +32,10 @@ class _DecisionModel:
     def invoke(self, messages):  # noqa: ANN001
         body = json.loads(messages[-1].content)
         request = body["user_request"]
-        return type("Msg", (), {"content": json.dumps(self.payloads[request])})()
+        payload = dict(self.payloads[request])
+        payload.update({key: value for key, value in _semantic_contract(payload["intent"]).items() if key not in payload})
+        payload.setdefault("required_subagents", [])
+        return type("Msg", (), {"content": json.dumps(payload)})()
 
 
 def _engine() -> AgentDecisionEngine:
@@ -202,6 +222,7 @@ def test_agent_decision_without_model_stops_without_static_route() -> None:
     assert decision.confidence == 0.0
     assert decision.selected_tools == []
     assert decision.source == "model_unavailable"
+    assert decision.verifier_passed is False
     assert "fallback" not in decision.reasoning_summary.lower()
 
 
@@ -223,6 +244,138 @@ def test_router_preserves_github_search_capability() -> None:
     assert route.required_capabilities == ["web_search", "github_search", "summarization"]
 
 
+def test_router_keeps_entrypoint_metadata_out_of_semantic_user_text() -> None:
+    class RecordingModel:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def invoke(self, messages):  # noqa: ANN001
+            payload = json.loads(messages[-1].content)
+            self.payloads.append(payload)
+            return type(
+                "Msg",
+                (),
+                {"content": json.dumps({
+                    "intent": "answer",
+                    "confidence": 0.9,
+                    "selected_tools": [],
+                    "tool_inputs": {},
+                    "repo_context_needed": False,
+                    "web_search_needed": False,
+                    "code_editing_needed": False,
+                    "requested_effect": "none",
+                    "target_surface": "conversation",
+                    "required_subagents": [],
+                    "reasoning_summary": "Plain conversation.",
+                })},
+            )()
+
+    model = RecordingModel()
+    router = Router(decision_engine=AgentDecisionEngine(llm=model))
+    for entrypoint, request in (
+        ("chat", "chat command"),
+        ("cli", "cli command is broken"),
+        ("api", "api routing bug"),
+    ):
+        assert router.route(task_id=f"task-{entrypoint}", user_request=request, command_hint=entrypoint).route_name == "simple"
+    decision_payloads = [payload for payload in model.payloads if "tools" in payload]
+    assert [(payload["user_request"], payload["command_hint"]) for payload in decision_payloads] == [
+        ("chat command", "chat"),
+        ("cli command is broken", "cli"),
+        ("api routing bug", "api"),
+    ]
+
+
+def test_router_keeps_coding_request_semantic_text_when_entered_through_chat() -> None:
+    class CodingModel:
+        def __init__(self) -> None:
+            self.decision_payload: dict | None = None
+
+        def invoke(self, messages):  # noqa: ANN001
+            payload = json.loads(messages[-1].content)
+            if "tools" in payload:
+                self.decision_payload = payload
+            return type(
+                "Msg",
+                (),
+                {"content": json.dumps({
+                    "intent": "edit",
+                    "confidence": 0.95,
+                    "selected_tools": ["repo_search", "read_file", "apply_patch"],
+                    "tool_inputs": {"repo_search": {"query": "chat command routing"}},
+                    "repo_context_needed": True,
+                    "web_search_needed": False,
+                    "code_editing_needed": True,
+                    "requested_effect": "write",
+                    "target_surface": "repository",
+                    "required_subagents": [],
+                    "reasoning_summary": "Repository routing code needs a mutation.",
+                })},
+            )()
+
+    model = CodingModel()
+    route = Router(decision_engine=AgentDecisionEngine(llm=model)).route(
+        task_id="task-coding",
+        user_request="fix the chat command routing bug",
+        command_hint="chat",
+    )
+
+    assert route.route_name == "coding"
+    assert model.decision_payload is not None
+    assert model.decision_payload["user_request"] == "fix the chat command routing bug"
+    assert model.decision_payload["command_hint"] == "chat"
+
+
+def test_router_rejects_invalid_semantic_decision_instead_of_using_simple_route() -> None:
+    decision = AgentDecision(
+        intent="answer",
+        confidence=0.9,
+        selected_tools=[],
+        requested_effect="write",
+        target_surface="repository",
+    )
+    assert verify_agent_decision(decision, user_request="fix the routing bug").passed is False
+
+    class InvalidDecisionEngine:
+        def decide(self, **_kwargs):  # noqa: ANN003
+            decision.verifier_passed = False
+            decision.verifier_summary = "write+repository requires intent=edit and code_editing_needed=true"
+            return decision
+
+    with pytest.raises(RoutingDecisionError, match="No route was executed"):
+        Router(decision_engine=InvalidDecisionEngine()).route(
+            task_id="task-invalid",
+            user_request="fix the routing bug",
+            command_hint="chat",
+        )
+
+
+def test_router_blocks_when_model_omits_required_semantic_contract() -> None:
+    class IncompleteModel:
+        def invoke(self, _messages):  # noqa: ANN001
+            return type(
+                "Msg",
+                (),
+                {"content": json.dumps({
+                    "intent": "answer",
+                    "confidence": 0.9,
+                    "selected_tools": [],
+                    "tool_inputs": {},
+                    "repo_context_needed": False,
+                    "web_search_needed": False,
+                    "code_editing_needed": False,
+                    "reasoning_summary": "Missing the semantic contract.",
+                })},
+            )()
+
+    with pytest.raises(RoutingDecisionError, match="routing model decision is unavailable"):
+        Router(decision_engine=AgentDecisionEngine(llm=IncompleteModel())).route(
+            task_id="task-incomplete",
+            user_request="hello",
+            command_hint="chat",
+        )
+
+
 def test_chat_route_uses_direct_agent_decision_without_search_repair() -> None:
     class AnswerModel:
         def invoke(self, _messages):  # noqa: ANN001
@@ -239,6 +392,9 @@ def test_chat_route_uses_direct_agent_decision_without_search_repair() -> None:
                             "repo_context_needed": False,
                             "web_search_needed": False,
                             "code_editing_needed": False,
+                            "requested_effect": "none",
+                            "target_surface": "conversation",
+                            "required_subagents": [],
                             "reasoning_summary": "Answered through the standard chat service path.",
                         }
                     )

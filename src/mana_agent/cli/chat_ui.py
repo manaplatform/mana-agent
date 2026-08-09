@@ -464,8 +464,15 @@ def compact_path(path: str | Path, *, width: int = 72) -> str:
     return text[: max(0, width - 1)] + "…"
 
 
+def _chat_quiet_startup() -> bool:
+    """SWE-bench / CI single-shot runs set MANA_CHAT_QUIET to skip tool spam."""
+    raw = str(os.getenv("MANA_CHAT_QUIET") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def render_startup_header(console: Console, state: ChatUIState) -> None:
     tools_summary = format_tool_catalog_summary(state.available_tools)
+    quiet = _chat_quiet_startup()
     if state.ui_mode == "json":
         event = make_event(
             "session.started",
@@ -484,12 +491,17 @@ def render_startup_header(console: Console, state: ChatUIState) -> None:
             session_id=state.session_id,
             message=tools_summary,
             metadata={
-                "tools": [entry.to_dict() for entry in state.available_tools],
+                "tools": (
+                    []
+                    if quiet
+                    else [entry.to_dict() for entry in state.available_tools]
+                ),
                 "count": len(state.available_tools),
             },
         ).finish(status="success")
         state.record_event(tools_event)
-        console.print(state.renderer.render_event(tools_event))
+        if not quiet:
+            console.print(state.renderer.render_event(tools_event))
         ready = make_event(
             "session.ready",
             title="Ready",
@@ -499,12 +511,48 @@ def render_startup_header(console: Console, state: ChatUIState) -> None:
             metadata={"prompt": "mana ❯"},
         ).finish(status="success")
         state.record_event(ready)
-        console.print(state.renderer.render_event(ready))
+        if not quiet:
+            console.print(state.renderer.render_event(ready))
         return
     branch = git_branch(state.repo_root)
     width = max(60, int(getattr(console, "width", 100) or 100))
     cwd_text = compact_path(state.repo_root, width=max(36, width - 4))
     header = Text()
+    if quiet:
+        # Compact one-block header for non-interactive runners (no 179-tool dump).
+        console.print(
+            "\n".join(
+                [
+                    f"Mana-Agent v{__version__}  repo: {state.repo_root.name}  branch: {branch}",
+                    f"model {state.model}   mode {state.mode}   tools {'auto' if state.tools_enabled else 'off'}   "
+                    f"memory {'on' if state.memory_enabled else 'off'}   skills {state.skills_status}",
+                    f"cwd {cwd_text}",
+                    f"auto tools  {tools_summary}",
+                    "Quiet startup (MANA_CHAT_QUIET); full tool catalog omitted.",
+                ]
+            )
+        )
+        state.record_event(
+            make_event(
+                "session.started",
+                title="Mana-Agent session started",
+                status="success",
+                session_id=state.session_id,
+                message=str(state.repo_root),
+                metadata={**startup_metadata(state), "quiet": True},
+            ).finish(status="success")
+        )
+        state.record_event(
+            make_event(
+                "session.tools",
+                title="Auto-chat tools",
+                status="success",
+                session_id=state.session_id,
+                message=tools_summary,
+                metadata={"count": len(state.available_tools), "quiet": True},
+            ).finish(status="success")
+        )
+        return
     if state.ui_mode == "plain":
         lines = [
             f"Mana-Agent v{__version__}  repo: {state.repo_root.name}  branch: {branch}",

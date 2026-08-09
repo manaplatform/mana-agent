@@ -183,6 +183,26 @@ def test_configuration_loads_protected_suite_and_rejects_missing_environment(tmp
         load_suite(path)
 
 
+def test_load_suite_rejects_baseline_document_with_actionable_error() -> None:
+    baseline_path = Path("evals/baselines/routing-smoke.json")
+    with pytest.raises(EvalConfigurationError, match="baseline.*not a suite") as exc_info:
+        load_suite(baseline_path, validate_runtime=False)
+    message = str(exc_info.value)
+    assert "evals/suites/routing-smoke.yaml" in message
+    assert "eval gate" in message or "baseline show" in message
+
+
+def test_load_suite_wraps_invalid_suite_validation_errors(tmp_path: Path) -> None:
+    path = tmp_path / "not-a-suite.yaml"
+    path.write_text(
+        "schema_version: 1\nname: broken\nversion: '1'\ntasks:\n"
+        "- id: only-id\nvariants: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvalConfigurationError, match="invalid evaluation suite"):
+        load_suite(path, validate_runtime=False)
+
+
 def test_invalid_weights_and_duplicate_ids_fail(repository: Path) -> None:
     with pytest.raises(ValueError):
         ScoreWeights(task_completion=-1)

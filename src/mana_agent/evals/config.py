@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mana_agent.gateway.lanes import LaneId
 from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
@@ -133,6 +133,35 @@ def _resolve_env(value: Any) -> Any:
     return _ENV.sub(replace, value)
 
 
+def _looks_like_baseline(raw: dict[str, Any]) -> bool:
+    """Return True when *raw* matches a checked-in baseline, not a suite definition."""
+    baseline_keys = {"suite_name", "variant_fingerprint", "aggregate_metrics", "mana_agent_commit"}
+    if baseline_keys.issubset(raw):
+        return True
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return False
+    if "variants" in raw:
+        return False
+    first = tasks[0]
+    if not isinstance(first, dict):
+        return False
+    outcome_markers = {"score", "success", "artifact_hash"}
+    suite_markers = {"prompt", "expected", "description", "repository"}
+    return outcome_markers.issubset(first) and not suite_markers.intersection(first)
+
+
+def _suite_path_hint_for_baseline(path: Path, raw: dict[str, Any]) -> str:
+    """Return a portable suite path hint for error messages (POSIX separators)."""
+    suite_name = str(raw.get("suite_name") or raw.get("name") or path.stem).strip() or path.stem
+    relative = f"evals/suites/{suite_name}.yaml"
+    candidate = Path(relative)
+    if candidate.exists():
+        # Prefer relative repo path with stable separators for CLI copy/paste.
+        return candidate.as_posix()
+    return relative
+
+
 def load_suite(path: str | Path, *, validate_runtime: bool = True) -> EvalSuite:
     path = Path(path).expanduser().resolve()
     try:
@@ -145,8 +174,23 @@ def load_suite(path: str | Path, *, validate_runtime: bool = True) -> EvalSuite:
         raise EvalConfigurationError(f"cannot read evaluation suite {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise EvalConfigurationError("evaluation suite must be a YAML mapping")
+    if _looks_like_baseline(raw):
+        suite_hint = _suite_path_hint_for_baseline(path, raw)
+        raise EvalConfigurationError(
+            f"{path} is an evaluation baseline (checked-in results snapshot), not a suite definition. "
+            f"Run tasks with: mana-agent eval run {suite_hint}. "
+            f"Use baselines for regression with: mana-agent eval gate --baseline {path} --candidate <experiment_id>, "
+            f"or inspect with: mana-agent eval baseline show {path.stem}."
+        )
     raw = _resolve_env(raw)
-    suite = _normalize_suite(raw, path.parent)
+    try:
+        suite = _normalize_suite(raw, path.parent)
+    except ValidationError as exc:
+        raise EvalConfigurationError(
+            f"invalid evaluation suite {path}: {exc.error_count()} validation error(s). "
+            "Suites require name, version, tasks (id/prompt/expected), and variants. "
+            f"Details: {exc}"
+        ) from exc
     if validate_runtime:
         validate_suite_runtime(suite)
     return suite

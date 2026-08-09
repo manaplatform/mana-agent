@@ -179,6 +179,36 @@ class TransactionalActionRuntime:
                     self.store.save_request(record)
 
 
+def policy_config_for_workspace(
+    workspace_root: Path,
+    *,
+    allowed_http_hosts: tuple[str, ...] = (),
+) -> PolicyConfig:
+    """Build PolicyConfig for a workspace, including bench always-approve mode."""
+    return PolicyConfig(
+        workspace_roots=(workspace_root.resolve(),),
+        allowed_http_hosts=allowed_http_hosts,
+        always_approve=_always_approve_enabled(),
+    )
+
+
+def _always_approve_enabled() -> bool:
+    """Read MANA_TRANSACTIONAL_ALWAYS_APPROVE from env or persisted settings."""
+    import os
+
+    raw = str(os.getenv("MANA_TRANSACTIONAL_ALWAYS_APPROVE") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    try:
+        from mana_agent.config.settings import Settings
+
+        return bool(getattr(Settings(), "mana_transactional_always_approve", False))
+    except Exception:
+        return False
+
+
 def create_transactional_runtime(
     workspace_root: Path,
     *,
@@ -192,7 +222,7 @@ def create_transactional_runtime(
     inbox = inbox_service or default_human_inbox_service()
     gateway = ActionGateway(
         store=store,
-        policy=ActionPolicy(PolicyConfig(workspace_roots=(workspace_root.resolve(),), allowed_http_hosts=allowed_http_hosts)),
+        policy=ActionPolicy(policy_config_for_workspace(workspace_root, allowed_http_hosts=allowed_http_hosts)),
         approvals=ApprovalRegistry(root / "approvals"),
         inbox_service=inbox,
         event_sink=lambda event: (
@@ -223,10 +253,7 @@ def default_action_gateway(
     hub = get_execution_event_hub()
     return ActionGateway(
         store=ActionStore(root),
-        policy=ActionPolicy(PolicyConfig(
-            workspace_roots=(workspace_root.resolve(),),
-            allowed_http_hosts=allowed_http_hosts,
-        )),
+        policy=ActionPolicy(policy_config_for_workspace(workspace_root, allowed_http_hosts=allowed_http_hosts)),
         approvals=ApprovalRegistry(root / "approvals"),
         # Gateway startup prepares the transactional store before route
         # selection. Do not materialize the durable human inbox until a route

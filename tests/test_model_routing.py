@@ -14,6 +14,7 @@ from mana_agent.model_routing.history import InMemoryRoutingHistory, JsonlRoutin
 from mana_agent.model_routing.models import (
     Complexity, LatencyClass, ModelProfile, RepositoryMetadata, RiskLevel,
     RoutingBudgets, RoutingFailure, RoutingOutcome, RoutingRequest,
+    provider_request_overrides_from_configuration,
 )
 from mana_agent.model_routing.profiles import configured_profiles, profiles_from_legacy_configuration
 from mana_agent.model_routing.router import ModelRouter
@@ -151,6 +152,47 @@ def test_configured_and_legacy_profiles_migrate_without_role_lock(monkeypatch) -
     assert "coding" in migrated[0].supported_roles
 
 
+def test_pinned_profiles_ignore_operator_model_levels(monkeypatch) -> None:
+    from mana_agent.model_routing.profiles import profiles_for_pinned_models
+
+    monkeypatch.setattr(
+        "mana_agent.model_routing.profiles.get_setting",
+        lambda name, default="": {"MODEL_LEVEL_3_HIGH_REASONING": "openai/gpt-5.6-luna"}.get(name, default),
+    )
+    pinned = profiles_for_pinned_models(["gpt-4.1-mini", "gpt-4.1-mini"])
+    assert len(pinned) == 1
+    assert pinned[0].model_id == "gpt-4.1-mini"
+    assert pinned[0].context_window >= 100_000
+    assert pinned[0].source_level == "pinned"
+    # Pinned models must satisfy interactive entry routing (head_decision).
+    assert pinned[0].latency_class is LatencyClass.INTERACTIVE
+    router = ModelRouter(pinned)
+    decision = router.route(
+        RoutingRequest(
+            role="head_decision",
+            task_description="Classify the gateway entry route for: fixture",
+            task_type="routing",
+            complexity=Complexity.MEDIUM,
+            risk=RiskLevel.MEDIUM,
+            required_capabilities=frozenset({"structured_output"}),
+            latency_requirement=LatencyClass.INTERACTIVE,
+        )
+    )
+    assert decision.selected_model == "gpt-4.1-mini"
+
+
+def test_legacy_profiles_apply_maintained_token_limits_for_known_models(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "mana_agent.model_routing.profiles.get_setting",
+        lambda name, default="": {"MODEL_LEVEL_3_HIGH_REASONING": "openai/gpt-5.6-luna"}.get(name, default),
+    )
+    migrated = profiles_from_legacy_configuration(context_window=16_384, max_output_tokens=4_096)
+    assert len(migrated) == 1
+    assert migrated[0].model_id == "gpt-5.6-luna"
+    assert migrated[0].context_window == 400_000
+    assert migrated[0].max_output_tokens == 128_000
+
+
 class FakeExecutor:
     def __init__(self, root: Path) -> None:
         self.active_repository_root = root / "active"
@@ -198,6 +240,62 @@ def test_candidates_are_isolated_judged_from_normalized_evidence_and_loser_clean
     assert result.cleaned_candidates == ("candidate-1",)
     assert judge.received[0]["diff"].startswith("diff --git")
     assert "patch_bytes" in judge.received[0]
+
+
+def test_provider_request_overrides_drop_routing_metadata() -> None:
+    overrides = provider_request_overrides_from_configuration(
+        {
+            "source_levels": ("pinned", "MODEL_LEVEL_1_FAST_TOOL"),
+            "capability_source": "maintained-token-limits",
+            "token_profile_confidence": "high",
+            "temperature": 0.1,
+            "extra_body": {"foo": 1},
+            "model_kwargs": {"bar": 2},
+            "api_key": "must-not-forward",
+        },
+        for_http_body=True,
+    )
+    assert overrides == {"temperature": 0.1, "extra_body": {"foo": 1}}
+    # LangChain path may keep model_kwargs; HTTP body path must not.
+    client_side = provider_request_overrides_from_configuration(
+        {"model_kwargs": {"bar": 2}, "source_levels": ("pinned",)},
+        for_http_body=False,
+    )
+    assert client_side == {"model_kwargs": {"bar": 2}}
+
+
+def test_provider_request_overrides_drop_catalog_model_object_fields() -> None:
+    """Catalog /v1/models records must not become chat/completions body params.
+
+    Regression: gateway routing merged full NVIDIA model objects into
+    profile.configuration; the Codex bridge then forwarded id/object/created/
+    owned_by and NVIDIA returned HTTP 400 Unsupported parameter(s).
+    """
+    overrides = provider_request_overrides_from_configuration(
+        {
+            "id": "deepseek-ai/deepseek-v4-flash-0731",
+            "object": "model",
+            "created": 735790403,
+            "owned_by": "deepseek-ai",
+            "capabilities": ["text_generation"],
+            "pricing": {"prompt": "0.1"},
+            "temperature": 0.2,
+            "extra_body": {
+                "id": "nested-must-drop",
+                "owned_by": "nested-must-drop",
+                "chat_template_kwargs": {"thinking": False},
+            },
+        },
+        for_http_body=True,
+    )
+    assert overrides == {
+        "temperature": 0.2,
+        "extra_body": {"chat_template_kwargs": {"thinking": False}},
+    }
+    for key in ("id", "object", "created", "owned_by", "capabilities", "pricing"):
+        assert key not in overrides
+    assert "id" not in overrides["extra_body"]
+    assert "owned_by" not in overrides["extra_body"]
 
 
 def test_history_persistence_redacts_secrets(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from mana_agent.gateway.checkpoint_resume import (
+    CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
     CheckpointResumeDecider,
     CheckpointResumeError,
 )
@@ -103,7 +104,11 @@ def test_model_may_resume_exact_non_stale_checkpoint() -> None:
 
     assert decision.action == "resume_checkpoint"
     assert decision.task_id == "task_existing"
-    assert model.invocation_kwargs == [{"max_tokens": 512}]
+    assert model.invocation_kwargs == [
+        {"max_tokens": CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS}
+    ]
+    # Headroom for providers whose thinking/reasoning tokens share max_tokens.
+    assert CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS >= 4_096
 
 
 def test_model_may_replan_the_same_stopped_task() -> None:
@@ -173,6 +178,39 @@ def test_context_budget_block_is_reported_as_a_typed_checkpoint_decision_error()
         )
 
     assert raised.value.code == "context_budget_blocked"
+
+
+class LengthLimitedDecisionModel:
+    def with_structured_output(self, _schema, *, method: str, strict: bool):
+        assert method == "json_schema"
+        assert strict is True
+        return self
+
+    def invoke(self, _messages, **_kwargs):
+        class LengthFinishReasonError(Exception):
+            pass
+
+        raise LengthFinishReasonError(
+            "Could not parse response content as the length limit was reached - "
+            "CompletionUsage(completion_tokens=512, prompt_tokens=1348, total_tokens=1860)"
+        )
+
+
+def test_output_length_limit_fails_safely_without_fallback_action() -> None:
+    """Truncated structured output must stop; no resume/start-fresh fallback."""
+    decider = CheckpointResumeDecider(LengthLimitedDecisionModel())
+
+    with pytest.raises(CheckpointResumeError, match="length limit was reached") as raised:
+        decider.decide(
+            current_request="test mine latest gmail.",
+            route="gmail",
+            requires_live_data=True,
+            candidates=[],
+        )
+
+    assert raised.value.code == "checkpoint_resume_invalid"
+    assert "max_tokens=" in str(raised.value)
+    assert "No task was resumed or started" in str(raised.value)
 
 
 def test_live_data_route_cannot_reuse_checkpoint_even_if_model_requests_it() -> None:

@@ -85,7 +85,9 @@ class MediaConfig(BaseModel):
         settings = values or load_effective_settings(include_env=False)
         reference = modality.credential_ref
         if not reference:
-            reference = "OPENROUTER_API_KEY" if modality.provider == "openrouter" else "OPENAI_API_KEY"
+            from mana_agent.config.provider_registry import provider_credential_env_names
+
+            reference = provider_credential_env_names(str(modality.provider or "openai"))[0]
         return str(settings.get(reference) or "").strip()
 
     def require(self, media_type: MediaType) -> MediaModalityConfig:

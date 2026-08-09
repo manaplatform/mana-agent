@@ -23,6 +23,8 @@ Failure, cancellation, expiration, compensation, and manual-recovery states are 
 
 The deterministic policy evaluates normalized adapter data. Its outcomes are `allow`, `require_approval`, and `deny`. Unknown tools, unknown disclosure for HTTP, workspace escapes, malformed argv/URLs, secret disclosure, and unsafe destinations fail closed. The initial rules allow bounded reversible file writes inside configured workspace roots, require exact approval for destructive file actions and shell/remote mutations, and deny destructive shell executables, unclassified tools, insecure HTTP by default, and disallowed hosts.
 
+For non-interactive benchmark runs, set `MANA_TRANSACTIONAL_ALWAYS_APPROVE=true` (also available as `PolicyConfig.always_approve`). That mode converts `require_approval` outcomes to `allow` so shell and local git mutations do not wait on a human inbox grant. `deny` outcomes (workspace escapes, secrets, destructive shell/git, unclassified tools) still fail closed. The SWE-bench runner enables this automatically in the isolated per-instance `MANA_HOME`.
+
 Narrow infrastructure exceptions are typed policy rules rather than bypasses. The workspace coordinator may create a verified managed worktree, and may merge or remove it only with its existing validated explicit-intent checks. A persisted verification queue job may execute a bounded command and commit from an exit-status/output-hash receipt. Validated task Git workflows may perform local staging, branch, and commit operations; remote writes still require exact approval. These contexts are injected by internal coordinators and are not exposed as model tool arguments.
 
 An approval is bound to the policy fingerprint, scope, and expiration. Scope is one of:

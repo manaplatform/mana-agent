@@ -793,6 +793,17 @@ def process_chat_turn(
                 error=f"Model decision failed: {exc}. No fallback action was executed.",
             )
 
+    if not agent_decision.verifier_passed:
+        return ChatTurnResult(
+            answer=(
+                "Model decision failed: routing verification. "
+                "No route or tool action was executed. Reason: "
+                + agent_decision.verifier_summary
+            ),
+            error="routing_decision_invalid",
+            decision=agent_decision,
+        )
+
     if (
         active_flow_id
         and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)
@@ -1024,7 +1035,11 @@ def process_chat_turn(
     if analysis_context:
         request_for_generation = f"{analysis_context}\n\n{request_for_generation}"
 
-    timeout = min(max(agent_timeout_seconds, 60), 600)
+    from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
+
+    # Do not hard-cap at 600s: SWE-bench / full-auto runners pass multi-hour
+    # --agent-timeout-seconds and must not be silently truncated.
+    timeout = normalize_agent_timeout_seconds(agent_timeout_seconds, floor=60, default=600)
     pending_prechecklist = session_state.get("pending_prechecklist")
     pending_source = str(session_state.get("pending_prechecklist_source") or "")
     pending_warning = str(session_state.get("pending_prechecklist_warning") or "")

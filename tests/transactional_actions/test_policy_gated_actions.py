@@ -296,6 +296,45 @@ def test_shell_preview_uses_exact_argv_and_policy_requires_approval(tmp_path: Pa
     assert decision.outcome is PolicyOutcome.REQUIRE_APPROVAL
 
 
+def test_always_approve_converts_require_approval_but_keeps_deny(tmp_path: Path) -> None:
+    shell = ShellActionAdapter(
+        argv=["python", "-c", "print('ok')"],
+        cwd=tmp_path,
+        environment={},
+        expected_outputs=[],
+        parent_task_id="task",
+        actor="user",
+        originating_agent="agent",
+        idempotency_key="shell-always-approve",
+    )
+    shell_action = shell.build_intent()
+    allowed = ActionPolicy(
+        PolicyConfig(workspace_roots=(tmp_path,), always_approve=True)
+    ).evaluate(shell_action)
+    assert allowed.outcome is PolicyOutcome.ALLOW
+    assert "always_approve" in allowed.reason_codes
+
+    outside = ActionIntent(
+        parent_task_id="task",
+        actor="user",
+        originating_agent="agent",
+        tool_name="file",
+        operation_name="edit",
+        target_resources=[str((tmp_path / ".." / "escape.txt").resolve())],
+        normalized_arguments={"path": str((tmp_path / ".." / "escape.txt").resolve())},
+        requested_capabilities=["file.write"],
+        expected_side_effects=["write outside workspace"],
+        idempotency_key="outside-workspace-key",
+        verification_plan=["hash check"],
+        reversibility=Reversibility.FULLY_REVERSIBLE,
+    )
+    denied = ActionPolicy(
+        PolicyConfig(workspace_roots=(tmp_path,), always_approve=True)
+    ).evaluate(outside)
+    assert denied.outcome is PolicyOutcome.DENY
+    assert "outside_workspace" in denied.reason_codes
+
+
 def test_shell_commits_only_when_declared_output_is_observed(tmp_path: Path) -> None:
     def runner(argv, **kwargs):  # noqa: ANN001
         (Path(kwargs["cwd"]) / "declared.txt").write_text("observed", encoding="utf-8")

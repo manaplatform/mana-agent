@@ -36,6 +36,8 @@ def test_user_config_save_load_and_settings_source(isolated_user_config: Path) -
             "OPENAI_BASE_URL": "https://api.example.test/v1",
             "OPENAI_CHAT_MODEL": "model-a",
             "MANA_SEARCH_ENABLE_WEB": False,
+            "MANA_MANAGED_WORKTREES_ENABLED": False,
+            "MANA_TRANSACTIONAL_ALWAYS_APPROVE": True,
         },
         merge=False,
     )
@@ -46,6 +48,8 @@ def test_user_config_save_load_and_settings_source(isolated_user_config: Path) -
     assert settings.openai_base_url == "https://api.example.test/v1"
     assert settings.openai_chat_model == "model-a"
     assert settings.mana_search_enable_web is False
+    assert settings.mana_managed_worktrees_enabled is False
+    assert settings.mana_transactional_always_approve is True
     assert (isolated_user_config / "secrets.toml").exists()
 
 

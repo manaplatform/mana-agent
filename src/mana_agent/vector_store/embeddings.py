@@ -67,14 +67,16 @@ def build_embeddings(
     api_key: str | None,
     base_url: str | None,
     model: str | None = None,
+    provider: str | None = None,
 ) -> OpenAIEmbeddings:
-    """Build an embedding client appropriate for ``base_url``.
+    """Build an embedding client appropriate for ``base_url`` / provider.
 
-    The embedding model is auto-selected from the base URL when ``model`` is not
-    provided (see :func:`resolve_embed_model`).
+    The embedding model is auto-selected from the base URL or provider when
+    ``model`` is not provided (see :func:`resolve_embed_model`).
     """
-    resolved_model = resolve_embed_model(base_url, model)
-    if is_nvidia_base_url(base_url):
+    resolved_model = resolve_embed_model(base_url, model, provider=provider)
+    use_nvidia = str(provider or "").strip().lower() == "nvidia" or is_nvidia_base_url(base_url)
+    if use_nvidia:
         return NvidiaOpenAIEmbeddings(
             api_key=api_key,
             base_url=base_url,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import re
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +15,11 @@ from mana_agent.multi_agent.agents.tool_agent import ToolAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
 from mana_agent.multi_agent.communication.decision_room import DecisionRoom
 from mana_agent.multi_agent.communication.message_bus import MessageBus
-from mana_agent.multi_agent.core.types import AgentRole, AgentState, GitIntent, QueueJob, QueueJobStatus, QueueJobType, RiskLevel, TaskStatus
+from mana_agent.multi_agent.core.types import AgentRole, AgentState, GitIntent, QueueJob, QueueJobStatus, QueueJobType, RiskLevel, RouteDecision, TaskStatus
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
 from mana_agent.multi_agent.routing.hierarchy import AgentFactory, HierarchyPolicy
-from mana_agent.multi_agent.routing.router import Router
+from mana_agent.multi_agent.routing.router import Router, RoutingDecisionError
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.memory.memory_bundle import AgentMemoryBundle
 from mana_agent.multi_agent.memory.repo_context import RepoContext
@@ -168,19 +167,25 @@ class MainAgent:
         self.decision_room = DecisionRoom(self.root, self.taskboard, self.message_bus)
         self.agents = self._build_agents()
 
-    def run_user_request(self, user_request: str, *, entrypoint: str = "chat") -> MainAgentResult:
+    def run_user_request(
+        self,
+        user_request: str,
+        *,
+        entrypoint: str = "chat",
+        git_intent: GitIntent | None = None,
+    ) -> MainAgentResult:
         request = str(user_request or "").strip()
         try:
             scope = self.scope_engine.decide(request=request, context=self.workspace_context)
         except ScopeDecisionError as exc:
             return MainAgentResult("", "blocked", "scope_error", str(exc), [], [], [])
-        self.memory.remember_task(f"User request received via {entrypoint}: {request[:500]}")
+        self.memory.remember_task(f"User request received: {request[:500]}")
         self.memory.remember_repo_fact(f"Repository root: {self.root}")
         title = request[:80] or entrypoint
         main_node = self.registry.find_by_role(AgentRole.MAIN)
         self.memory.remember_agent(
             main_node.agent_id,
-            f"Main agent received request via {entrypoint}: {request[:500]}",
+            f"Main agent received request: {request[:500]}",
         )
         self.memory_service.record_decision(
             agent_id=main_node.agent_id,
@@ -194,13 +199,14 @@ class MainAgent:
         task = self.taskboard.create_task(
             title=title,
             user_request=request,
-            normalized_goal=f"{entrypoint}: {request}",
+            normalized_goal=request,
             owner_agent_id=main_node.agent_id,
             workspace_id=scope.workspace_id,
             session_id=scope.session_id,
             primary_repository_id=scope.primary_repository_id,
             repository_ids=scope.repository_ids,
         )
+        self.taskboard.add_evidence(task.task_id, f"Routing command hint: {entrypoint}")
         duplicate_of = str(task.memory_status.get("duplicate_of") or "")
         if duplicate_of:
             self.memory_service.update_task(
@@ -211,22 +217,65 @@ class MainAgent:
             answer = f"Skipped duplicate task; reused existing task {duplicate_of}."
             self.memory.remember_task(answer)
             return MainAgentResult(task.task_id, "skipped", "duplicate", answer, [], [], scope.repository_ids)
-        self.memory_service.record_decision(
-            agent_id=main_node.agent_id,
-            task_id=task.task_id,
-            decision_type="route_request",
-            input_summary=request,
-            memory_used=[str(task.memory_status.get("memory_bundle_id") or "")],
-            decision="query_router",
-            reason="route after task duplicate and bundle checks",
-        )
-        route = self.router.route(task_id=task.task_id, user_request=f"{entrypoint} {request}")
-        git_intent = self._git_intent_from_request(request)
+        # GitIntent must be an explicit structured decision (caller/model). Keyword
+        # inference is forbidden: SWE-bench prompts say "Do not commit, push..." and
+        # keyword matchers hijacked those runs into branch/push workflows.
         if git_intent is not None:
-            route = self._route_with_git_contract(route, git_intent)
+            self.memory_service.record_decision(
+                agent_id=main_node.agent_id,
+                task_id=task.task_id,
+                decision_type="route_request",
+                input_summary=request,
+                memory_used=[str(task.memory_status.get("memory_bundle_id") or "")],
+                decision="apply_git_intent_contract",
+                reason="an explicit GitIntent contract selects the Git workflow",
+            )
+            route = self._route_with_git_contract(task.task_id, git_intent)
             task.risk_level = RiskLevel.HIGH
             task.required_capabilities = list(route.required_capabilities)
             self.taskboard.add_evidence(task.task_id, f"GitIntent contract established: {git_intent}")
+        else:
+            self.memory_service.record_decision(
+                agent_id=main_node.agent_id,
+                task_id=task.task_id,
+                decision_type="route_request",
+                input_summary=request,
+                memory_used=[str(task.memory_status.get("memory_bundle_id") or "")],
+                decision="query_router",
+                reason="route after task duplicate and bundle checks",
+            )
+            try:
+                route = self.router.route(
+                    task_id=task.task_id,
+                    user_request=request,
+                    command_hint=entrypoint,
+                )
+            except RoutingDecisionError as exc:
+                self.memory_service.record_decision(
+                    agent_id=main_node.agent_id,
+                    task_id=task.task_id,
+                    decision_type="route_request_failed",
+                    input_summary=request,
+                    memory_used=[str(task.memory_status.get("memory_bundle_id") or "")],
+                    decision="blocked",
+                    reason=str(exc),
+                )
+                self.memory_service.update_task(
+                    task.task_id,
+                    status=TaskStatus.BLOCKED.value,
+                    result_summary=str(exc),
+                )
+                self.taskboard.add_blocker(task.task_id, str(exc))
+                self.memory.remember_task(f"Routing blocked for task {task.task_id}: {exc}")
+                return MainAgentResult(
+                    task.task_id,
+                    "blocked",
+                    "routing_error",
+                    str(exc),
+                    [],
+                    [],
+                    scope.repository_ids,
+                )
         self.memory.remember_task(
             "Route selected: "
             f"{route.route_name}; size={route.task_size}; "
@@ -741,31 +790,7 @@ class MainAgent:
         self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
         return job
 
-    def _git_intent_from_request(self, request: str) -> GitIntent | None:
-        text = str(request or "").strip().lower()
-        action_re = r"\b(commit|push|branch|checkout|switch|merge|rebase|tag|release)\b"
-        if not re.search(action_re, text):
-            return None
-        wants_commit = bool(re.search(r"\bcommit\b", text))
-        wants_push = bool(re.search(r"\bpush\b", text))
-        wants_branch = bool(re.search(r"\b(branch|checkout|switch)\b", text))
-        target = "main" if re.search(r"\bmain\b", text) else None
-        branch_match = re.search(r"\b(?:branch|checkout|switch)\s+(?:to\s+|new\s+|create\s+|create\s+new\s+)?([A-Za-z0-9._/-]+)", text)
-        if wants_branch and branch_match:
-            target = branch_match.group(1)
-        return GitIntent(
-            wants_status=True,
-            wants_diff=True,
-            wants_commit=wants_commit,
-            wants_push=wants_push,
-            wants_branch=wants_branch,
-            target_branch=target,
-            commit_message=None,
-            requires_remote=wants_push,
-            risk_level="high",
-        )
-
-    def _route_with_git_contract(self, route, intent: GitIntent):
+    def _route_with_git_contract(self, task_id: str, intent: GitIntent) -> RouteDecision:
         capabilities = ["repo_state", "git_status", "git_diff", "verification"]
         if intent.wants_commit:
             capabilities.append("git_commit")
@@ -773,15 +798,18 @@ class MainAgent:
             capabilities.append("git_push")
         if intent.wants_branch:
             capabilities.append("git_branch")
-        route.route_name = "high_risk_tool"
-        route.task_size = "medium"
-        route.required_agents = ["main", "head_decision", "tool", "verifier", "reviewer", "summarizer"]
-        route.required_capabilities = capabilities
-        route.requires_discussion = True
-        route.requires_verification = True
-        route.risk_level = RiskLevel.HIGH
-        route.reason_summary = "Git intent requires repository-state inspection, queued Git execution, verification, and review."
-        return route
+        return RouteDecision(
+            task_id=task_id,
+            route_name="high_risk_tool",
+            task_size="medium",
+            required_agents=["main", "head_decision", "tool", "verifier", "reviewer", "summarizer"],
+            required_subagents=[],
+            required_capabilities=capabilities,
+            requires_discussion=True,
+            requires_verification=True,
+            risk_level=RiskLevel.HIGH,
+            reason_summary="Git intent requires repository-state inspection, queued Git execution, verification, and review.",
+        )
 
     def _commit_message_from_diff(self, *, diff_stat: str, diff: str, paths: list[str]) -> str:
         primary = Path(paths[0]).stem.replace("_", "-").replace(" ", "-") if paths else "repository"
@@ -856,9 +884,11 @@ class MainAgent:
         return None
 
     def _verification_commands(self, commands: list[str]) -> list[str]:
+        # Prefer python3 so hosts where bare `python` is 2.x do not SyntaxError
+        # on modern packages (astropy, etc.) even if a PATH shim is missing.
         if (self.root / "src").exists():
-            return ["python -m compileall src"]
-        return ["python -m compileall ."]
+            return ["python3 -m compileall src"]
+        return ["python3 -m compileall ."]
 
 
 def _git_args(job: QueueJob) -> list[str]:

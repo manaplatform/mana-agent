@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from mana_agent.coding.models import (
+    AgentEvent,
     CodingBackendDecision,
     CodingTask,
     CodingTaskResult,
@@ -187,7 +188,9 @@ def test_invalid_backend_decision_stops_safely() -> None:
         )
 
 
-def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path: Path) -> None:
+def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake: _FakeClient | None = None
 
     def factory(command: tuple[str, ...]) -> _FakeClient:
@@ -195,6 +198,11 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path:
         fake = _FakeClient(command)
         return fake
 
+    # Write-required turns require a non-empty diff to complete successfully.
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend._git_changed_files",
+        lambda *args, **kwargs: ["src/app.py"],
+    )
     backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
     result = asyncio.run(backend.execute(_task(), _workspace(tmp_path)))
 
@@ -202,6 +210,7 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path:
     assert result.backend == "codex"
     assert result.tests_run == ["pytest -q"]
     assert result.tests_passed is True
+    assert result.changed_files == ["src/app.py"]
     assert result.thread_id == "thread-1"
     assert fake is not None
     assert [method for method, _params in fake.requests] == ["thread/start", "turn/start"]
@@ -238,7 +247,64 @@ def test_codex_backend_translates_read_only_sandbox_for_protocol(tmp_path: Path)
     assert fake.requests[1][1]["sandbox"] == "read-only"
 
 
-def test_codex_backend_resumes_persisted_thread(tmp_path: Path) -> None:
+def test_codex_backend_reports_turn_started_only_after_turn_start_accepts(
+    tmp_path: Path,
+) -> None:
+    class _TurnStartGateClient(_FakeClient):
+        def __init__(self, command: tuple[str, ...]) -> None:
+            super().__init__(command)
+            self.turn_start_requested = asyncio.Event()
+            self.allow_turn_start = asyncio.Event()
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method != "turn/start":
+                return await super().request(method, params)
+            self.requests.append((method, params))
+            self.turn_start_requested.set()
+            await self.allow_turn_start.wait()
+            return {"turn": {"id": "turn-1"}}
+
+    client: _TurnStartGateClient | None = None
+
+    def factory(command: tuple[str, ...]) -> _TurnStartGateClient:
+        nonlocal client
+        client = _TurnStartGateClient(command)
+        return client
+
+    async def collect_events() -> list[AgentEvent]:
+        backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
+        task = _task().model_copy(update={"requires_repository_write": False})
+        iterator = backend.stream(task, _workspace(tmp_path)).__aiter__()
+        events = [await anext(iterator), await anext(iterator)]
+        assert events[-1].event_type == "turn.starting"
+        assert client is not None
+
+        pending = asyncio.create_task(anext(iterator))
+        await client.turn_start_requested.wait()
+        assert not pending.done()
+
+        client.allow_turn_start.set()
+        events.append(await pending)
+        async for event in iterator:
+            events.append(event)
+        await backend.close()
+        return events
+
+    events = asyncio.run(collect_events())
+
+    assert [event.event_type for event in events[:3]] == [
+        "backend.selected",
+        "turn.starting",
+        "turn.started",
+    ]
+    assert events[2].turn_id == "turn-1"
+    assert events[-1].event_type == "turn.finalizing"
+    assert events[-1].status == "running"
+
+
+def test_codex_backend_resumes_persisted_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake: _FakeClient | None = None
 
     def factory(command: tuple[str, ...]) -> _FakeClient:
@@ -246,6 +312,10 @@ def test_codex_backend_resumes_persisted_thread(tmp_path: Path) -> None:
         fake = _FakeClient(command)
         return fake
 
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend._git_changed_files",
+        lambda *args, **kwargs: ["src/app.py"],
+    )
     backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory, resume_thread_id="thread-1")
     result = asyncio.run(backend.execute(_task(), _workspace(tmp_path)))
 
@@ -273,9 +343,147 @@ def test_codex_shim_failed_payload_retains_backend_error() -> None:
 
     assert payload["auto_execute_terminal_reason"] == "codex_failed"
     assert payload["answer"] == (
-        "Codex task did not complete. Reason: turn/start rejected the sandbox value"
+        "Codex coding turn failed: turn/start rejected the sandbox value"
     )
     assert "turn/start rejected the sandbox value" in payload["warnings"]
+    # Model draft must not be concatenated into the terminal answer.
+    assert "did not complete. Reason:" not in payload["answer"]
+
+
+def test_codex_shim_surfaces_mutation_required_terminal_reason() -> None:
+    result = CodingTaskResult(
+        task_id="empty-patch-task",
+        worker_id="codex-test",
+        backend="codex",
+        status="failed",
+        summary="Codex task did not complete.",
+        errors=["mutation_required_but_no_mutation_tool_attempted"],
+    )
+    payload = CodexCodingAgentShim._result_payload(
+        result,
+        events=[],
+        workspace_path="/tmp/worktree",
+    )
+    assert payload["auto_execute_terminal_reason"] == (
+        "mutation_required_but_no_mutation_tool_attempted"
+    )
+    assert payload["status"] == "failed"
+
+
+class _EmptyThenMutateBackend:
+    """First write-required turn produces empty patch; recovery mutates."""
+
+    def __init__(self) -> None:
+        self.tasks: list[CodingTask] = []
+        self.results: dict[str, Any] = {}
+        self.closed = False
+        self.calls = 0
+
+    async def stream(self, task: CodingTask, workspace: WorkspaceContext):
+        self.calls += 1
+        self.tasks.append(task)
+        yield adapt_codex_event(
+            task.task_id,
+            {"method": "turn/started", "params": {"threadId": f"thread-{self.calls}"}},
+        )
+        if self.calls == 1:
+            self.results[task.task_id] = parse_codex_result(
+                task=task,
+                workspace=workspace,
+                worker_id="codex-shim",
+                thread_id=f"thread-{self.calls}",
+                turn_id=f"turn-{self.calls}",
+                changed_files=[],
+                notifications=[
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "agentMessage",
+                                "text": "Analysis only, no patch.",
+                            }
+                        },
+                    },
+                    {
+                        "method": "turn/completed",
+                        "params": {"turn": {"status": "completed"}},
+                    },
+                ],
+            )
+        else:
+            self.results[task.task_id] = parse_codex_result(
+                task=task,
+                workspace=workspace,
+                worker_id="codex-shim",
+                thread_id=f"thread-{self.calls}",
+                turn_id=f"turn-{self.calls}",
+                changed_files=["astropy/modeling/separable.py"],
+                notifications=[
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "applyPatch",
+                                "status": "completed",
+                            }
+                        },
+                    },
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "agentMessage",
+                                "text": "Applied the nested CompoundModel fix.",
+                            }
+                        },
+                    },
+                    {
+                        "method": "turn/completed",
+                        "params": {"turn": {"status": "completed"}},
+                    },
+                ],
+            )
+
+    def result_for(self, task_id: str):
+        return self.results[task_id]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_coding_agent_shim_mutation_recovery_retries_empty_write_turn(tmp_path: Path) -> None:
+    _git_repo(tmp_path)
+    backend = _EmptyThenMutateBackend()
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        backend_factory=lambda: backend,
+    )
+
+    result = shim.generate_auto_execute("fix nested separability_matrix", auto_chat_mode="edit")
+
+    assert backend.calls == 2
+    assert "mutation_required recovery" in backend.tasks[1].goal
+    assert "Do not re-import or run the uninstalled package" in backend.tasks[1].goal
+    # Recovery must not reintroduce clarification-first requirements that block
+    # registered mutation tools on concrete write goals (lane_coordinator empty-patch mode).
+    recovery_reqs = " ".join(backend.tasks[1].requirements)
+    assert "Ask for required clarification" not in recovery_reqs
+    assert "registered for this turn" in recovery_reqs
+    assert "Do not finish with analysis" in recovery_reqs
+    # First write turn also prefers mutation over clarification-first language.
+    first_reqs = " ".join(backend.tasks[0].requirements)
+    assert "Ask for required clarification" not in first_reqs
+    assert "registered structured tool" in first_reqs
+    assert result["status"] == "completed"
+    assert result["changed_files"] == ["astropy/modeling/separable.py"]
+    assert result["mutation_recovery"] is True
+    assert result["prior_terminal_reason"] == (
+        "mutation_required_but_no_mutation_tool_attempted"
+    )
+    assert any(
+        str(w).startswith("mutation_recovery_after:") for w in (result.get("warnings") or [])
+    )
 
 
 class _ShimBackend:
@@ -603,7 +811,9 @@ def test_failed_test_command_is_not_reported_as_passing(tmp_path: Path) -> None:
         worker_id="worker-1",
         thread_id="thread-1",
         turn_id="turn-1",
-        changed_files=[],
+        # Write-required turn still needs a diff for overall success; supply one
+        # so this test isolates the tests_passed warning path.
+        changed_files=["src/app.py"],
         notifications=[
             {
                 "method": "item/completed",
@@ -622,6 +832,157 @@ def test_failed_test_command_is_not_reported_as_passing(tmp_path: Path) -> None:
     assert result.status == "completed"
     assert result.tests_passed is False
     assert result.warnings == ["Test command failed: pytest -q"]
+
+
+def test_write_required_turn_without_changed_files_fails(tmp_path: Path) -> None:
+    """Regression for SWE-bench empty_patch: completed + zero diff is not success."""
+    result = parse_codex_result(
+        task=_task(),
+        workspace=_workspace(tmp_path),
+        worker_id="worker-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        changed_files=[],
+        notifications=[
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "text": '<invoke name="exec_command"><cmd>ls</cmd></invoke>',
+                    }
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    assert result.errors == ["mutation_required_but_no_mutation_tool_attempted"]
+    assert result.tests_passed is False
+    # Failed write turns do not keep agentMessage drafts as the result summary.
+    assert "exec_command" not in (result.summary or "")
+    assert (result.summary or "") == ""
+    # Terminal user answer is evidence-based, not the free-form draft.
+    from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+
+    payload = CodexCodingAgentShim._result_payload(
+        result,
+        events=[],
+        workspace_path="",
+        requires_repository_write=True,
+    )
+    assert "exec_command" not in payload["answer"]
+    assert "No mutation tool was executed" in payload["answer"]
+    assert any(
+        str(w).startswith("assistant_freeform_tool_text_redacted")
+        for w in (result.warnings or [])
+    )
+
+
+def test_ultracall_tool_invocation_leak_redacted_from_codex_summary(tmp_path: Path) -> None:
+    """Broken tool-call XML must never become the coding answer text."""
+    leak = (
+        "There is a/_version.py file.\n"
+        "Let me inspect it.\n"
+        "<danke:ultracall_calls{... = ...;\n"
+        '<parameter name="cmd">cat src/mana_agent/_version.py</parameter>\n'
+        "Wait, my Tools invocation syntax above failed somehow - "
+        "looks like garbage output was produced.\n"
+        '{"padding": {"max_output_tokens": 2000}}'
+    )
+    result = parse_codex_result(
+        task=_task(),
+        workspace=_workspace(tmp_path),
+        worker_id="worker-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        changed_files=[],
+        notifications=[
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "text": leak,
+                    }
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    # Correctness is protocol/evidence based: failed write keeps no draft summary.
+    assert (result.summary or "") == ""
+    from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+
+    payload = CodexCodingAgentShim._result_payload(
+        result,
+        events=[],
+        workspace_path="",
+        requires_repository_write=True,
+    )
+    answer = payload["answer"]
+    assert "ultracall" not in answer.lower()
+    assert "parameter" not in answer.lower()
+    assert "max_output_tokens" not in answer.lower()
+    assert "Tools invocation" not in answer
+    assert "No mutation tool was executed" in answer
+    assert any(
+        str(w).startswith("assistant_freeform_tool_text_redacted")
+        for w in (result.warnings or [])
+    )
+
+
+def test_agent_message_event_strips_leaked_tool_markup() -> None:
+    """Assistant generation is internal — not published as tool progress."""
+    leak = (
+        '<danke:ultracall_calls><parameter name="cmd">ls</parameter>'
+        "</danke:ultracall_calls> Tools invocation syntax failed"
+    )
+    event = adapt_codex_event(
+        "task-1",
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "agentMessage",
+                    "text": leak,
+                }
+            },
+        },
+    )
+    assert event.event_type in {
+        "assistant.completed",
+        "assistant.message",
+        "assistant.started",
+    }
+    assert event.visibility == "internal"
+    assert event.semantic_kind == "assistant_generation"
+
+
+def test_write_required_turn_with_mutation_item_but_no_diff_fails(tmp_path: Path) -> None:
+    result = parse_codex_result(
+        task=_task(),
+        workspace=_workspace(tmp_path),
+        worker_id="worker-1",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        changed_files=[],
+        notifications=[
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "applyPatch",
+                        "status": "completed",
+                    }
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    assert result.errors == ["mutation_required_but_no_changed_files"]
 
 
 def test_interrupted_turn_is_cancelled(tmp_path: Path) -> None:

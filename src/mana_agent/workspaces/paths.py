@@ -8,7 +8,14 @@ from pathlib import Path
 
 def mana_home() -> Path:
     configured = str(os.getenv("MANA_HOME") or "").strip()
-    return Path(configured).expanduser().resolve() if configured else (Path.home() / ".mana").resolve()
+    candidate = Path(configured).expanduser() if configured else (Path.home() / ".mana")
+    # Windows ntpath.realpath always calls os.getcwd(); survive a deleted CWD.
+    try:
+        return candidate.resolve(strict=False)
+    except (FileNotFoundError, OSError, RuntimeError):
+        if candidate.is_absolute():
+            return Path(os.path.normpath(candidate))
+        return candidate
 
 
 def repository_id_for_path(path: str | Path) -> str:

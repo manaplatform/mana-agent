@@ -39,6 +39,7 @@ def model_cache_file() -> Path:
 SECRET_KEYS = {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "NVIDIA_API_KEY",
     "MANA_GITHUB_TOKEN",
     "MANA_WEB_SEARCH_API_KEY",
     "MANA_API_TOKEN",
@@ -63,6 +64,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENROUTER_HTTP_REFERER": "https://github.com/mana-agent/mana-agent",
     "OPENROUTER_TITLE": "Mana-Agent",
     "OPENROUTER_PROVIDER_PREFERENCES": {},
+    "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
     "OPENAI_TOOL_WORKER_MODEL": "",
     "OPENAI_CODING_PLANNER_MODEL": "",
@@ -263,6 +265,12 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
         "artifact_retention_days": 30,
     },
     "MANA_COMPUTER_CONTROL_ENABLED": False,
+    # When true, multi-agent coding/tool routes allocate an isolated Git worktree
+    # under ~/.mana/repositories/<id>/worktrees/ instead of editing the primary
+    # checkout. SWE-bench isolation forces this false so patches land in the
+    # evaluated worktree.
+    "MANA_MANAGED_WORKTREES_ENABLED": True,
+    "MANA_TRANSACTIONAL_ALWAYS_APPROVE": False,
     "computer_control": {
         "enabled": False,
         "provider": "auto",
@@ -341,6 +349,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CODEX_ALLOW_NETWORK": False,
     "MANA_CODEX_MODEL": "",
     "MANA_CODEX_BIN": "codex",
+    "MANA_AUTO_CHAT_TOOL_SURFACE": "full",
     "MANA_LANE_CONTRACTS": {},
     "MANA_LANE_GLOBAL_WORKER_LIMIT": 8,
     "MANA_LANE_PROVIDER_LIMITS": {},
@@ -401,6 +410,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "OPENROUTER_HTTP_REFERER": "openrouter_http_referer",
     "OPENROUTER_TITLE": "openrouter_title",
     "OPENROUTER_PROVIDER_PREFERENCES": "openrouter_provider_preferences",
+    "NVIDIA_API_KEY": "nvidia_api_key",
+    "NVIDIA_BASE_URL": "nvidia_base_url",
     "OPENAI_CHAT_MODEL": "openai_chat_model",
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
     "OPENAI_CODING_PLANNER_MODEL": "openai_coding_planner_model",
@@ -534,6 +545,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_BROWSER_ARTIFACT_DIR": "mana_browser_artifact_dir",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS": "mana_browser_profile_max_age_days",
     "MANA_COMPUTER_CONTROL_ENABLED": "mana_computer_control_enabled",
+    "MANA_MANAGED_WORKTREES_ENABLED": "mana_managed_worktrees_enabled",
+    "MANA_TRANSACTIONAL_ALWAYS_APPROVE": "mana_transactional_always_approve",
     "MANA_CODING_BACKEND": "mana_coding_backend",
     "MANA_CODEX_ENABLED": "mana_codex_enabled",
     "MANA_CODEX_MAX_WORKERS": "mana_codex_max_workers",
@@ -543,6 +556,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_CODEX_ALLOW_NETWORK": "mana_codex_allow_network",
     "MANA_CODEX_MODEL": "mana_codex_model",
     "MANA_CODEX_BIN": "mana_codex_bin",
+    "MANA_AUTO_CHAT_TOOL_SURFACE": "mana_auto_chat_tool_surface",
     "MANA_LANE_CONTRACTS": "mana_lane_contracts",
     "MANA_LANE_GLOBAL_WORKER_LIMIT": "mana_lane_global_worker_limit",
     "MANA_LANE_PROVIDER_LIMITS": "mana_lane_provider_limits",
@@ -703,6 +717,8 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
     "media",
     "MANA_COMPUTER_CONTROL_ENABLED",
+    "MANA_MANAGED_WORKTREES_ENABLED",
+    "MANA_TRANSACTIONAL_ALWAYS_APPROVE",
     "computer_control",
     "MANA_CODING_BACKEND",
     "MANA_CODEX_ENABLED",
@@ -713,6 +729,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_CODEX_ALLOW_NETWORK",
     "MANA_CODEX_MODEL",
     "MANA_CODEX_BIN",
+    "MANA_AUTO_CHAT_TOOL_SURFACE",
     "MANA_LANE_CONTRACTS",
     "MANA_LANE_GLOBAL_WORKER_LIMIT",
     "MANA_LANE_PROVIDER_LIMITS",
@@ -883,8 +900,15 @@ def has_user_config() -> bool:
 
 def is_user_config_valid() -> bool:
     effective = load_effective_settings(include_env=True)
+    provider = str(effective.get("MANA_AI_PROVIDER") or "openai").strip().lower()
+    if provider == "openrouter":
+        api_key = effective.get("OPENROUTER_API_KEY", "")
+    elif provider == "nvidia":
+        api_key = effective.get("NVIDIA_API_KEY", "")
+    else:
+        api_key = effective.get("OPENAI_API_KEY", "")
     return bool(
-        str(effective.get("OPENAI_API_KEY", "") or "").strip()
+        str(api_key or "").strip()
         and str(effective.get("OPENAI_CHAT_MODEL", "") or "").strip()
     )
 
@@ -1022,6 +1046,12 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         )
     if cleaned.get("OPENAI_BASE_URL"):
         cleaned["OPENAI_BASE_URL"] = validate_base_url(str(cleaned["OPENAI_BASE_URL"]))
+    if cleaned.get("OPENROUTER_BASE_URL"):
+        cleaned["OPENROUTER_BASE_URL"] = validate_base_url(
+            str(cleaned["OPENROUTER_BASE_URL"])
+        )
+    if cleaned.get("NVIDIA_BASE_URL"):
+        cleaned["NVIDIA_BASE_URL"] = validate_base_url(str(cleaned["NVIDIA_BASE_URL"]))
     if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
         cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"] = validate_base_url(
             str(cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"])
@@ -1225,6 +1255,25 @@ def migrate_legacy_config() -> list[str]:
         base_url = str(config.get("OPENAI_BASE_URL") or "").lower()
         provider = "nvidia" if "nvidia" in base_url else "openai"
         config["MANA_AI_PROVIDER"] = provider
+    # Legacy installs often pointed OPENAI_BASE_URL at NVIDIA while still
+    # storing the key as OPENAI_API_KEY. Promote isolated NVIDIA settings when
+    # the provider is NVIDIA and dedicated keys are still empty.
+    if provider == "nvidia":
+        if not str(config.get("NVIDIA_BASE_URL") or "").strip():
+            openai_base = str(config.get("OPENAI_BASE_URL") or "").strip()
+            if openai_base and "nvidia" in openai_base.lower():
+                config["NVIDIA_BASE_URL"] = openai_base
+            else:
+                config.setdefault(
+                    "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
+                )
+        nvidia_key = str(secrets.get("NVIDIA_API_KEY") or "").strip()
+        openai_key = str(secrets.get("OPENAI_API_KEY") or config.get("OPENAI_API_KEY") or "").strip()
+        if not nvidia_key and openai_key:
+            secrets["NVIDIA_API_KEY"] = openai_key
+            messages.append(
+                "Copied legacy OPENAI_API_KEY into NVIDIA_API_KEY for the NVIDIA provider."
+            )
     from mana_agent.config.provider_registry import qualify_model_id
 
     chat_model = str(

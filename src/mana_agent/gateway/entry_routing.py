@@ -268,7 +268,12 @@ Route semantics:
   Remote-worker lifecycle requests must select the `remote-worker` command with exactly
   `["register"|"start"|"stop", worker_id]`. This is a model decision, never keyword routing.
 - conversation: ordinary discussion that needs no tool, connector, repository, or coding action.
-- coding: repository code/file changes handled by the Codex coding workflow.
+  Do not select conversation for repository planning, plan continuation, verification, or review
+  of repository work—even when the user says not to edit yet.
+- coding: repository engineering workflows handled by the Codex coding path, including edits,
+  implementation, plan-only design for repository changes, continuing an active plan without
+  applying it, and verification/testing of the repository. Planning a CLI flag or similar
+  repository change is coding, not conversation.
 - mcp: execute a request through one configured Model Context Protocol provider. Return a complete
   mcp_request with one exact provider_id from the route availability details. MCP provider state and
   tool results are live external state, so requires_live_data must be true. The provider selection is
@@ -323,13 +328,17 @@ Route semantics:
   media, notes, clipboard, screenshots, filesystem, notifications, browser application, or system.
   Bounded screen-recording requests select computer even when material recording parameters need a
   typed clarification; do not select unsupported merely because duration, display, or destination is absent.
+  Do not select computer for reading or reviewing files that belong to the active code repository;
+  those use repository (read-only) or coding (edit/plan/verify workflows).
 - browser: direct public-page inspection using browser tools. A supplied public HTTP(S) URL is a
   strong signal for this route; page content, HTML, metadata, links, robots, and sitemap content
   require browser rather than search snippets.
 - search: current public-web discovery, mentions, competitors, indexing, or other search-visible
   information. Search snippets never substitute for browser page inspection.
 - github: connected/public GitHub information.
-- repository: read-only local repository questions or inspection.
+- repository: read-only local repository questions or inspection (find definitions, review architecture,
+  read project files such as pyproject.toml, inspect source without editing). Prefer repository over
+  computer when the target is the managed workspace/repository rather than an arbitrary desktop path.
 - memory: explicitly requested persisted memory retrieval. When
   memory_capsules_enabled is true, select exactly one task ID from
   memory_task_candidates and return it as memory_task_id; private capsule reads
@@ -375,8 +384,11 @@ required_source_rules. Route registry `tools` are executor tool names, not sourc
 never copy a tool name or route name into required_sources unless it is explicitly present in the
 source vocabulary. In particular, command is tool-free and requires exactly ["none"].
 When no supported available capability can satisfy a required source, return route capability_error
-with that source and an exact error_code. unsupported is a distinct model decision, never a
-fallback. Direct URL signals are supplied separately; do not treat them as repository evidence.
+with that source and an exact error_code. Only use capability_error when the live route registry
+marks that route or source unavailable (available=false); if the registry reports the browser (or
+other source) as available, select that route instead of inventing CONNECTOR_ERROR_* codes.
+unsupported is a distinct model decision, never a fallback. Direct URL signals are supplied
+separately; do not treat them as repository evidence.
 Open-ended discovery requests (for example, finding remote jobs, companies, products, or current
 opportunities) must select search with required_sources=["search"]. Browser is only for inspecting
 one or more explicit direct URLs supplied by the user or selected in target_urls; never select a
@@ -416,6 +428,10 @@ Examples:
 - “ping” -> conversation, ["none"].
 - “What can you do?” -> conversation, ["none"].
 - “Change this function and run its tests” -> coding, ["repository"] (one atomic workflow).
+- “Plan how to add a harmless CLI flag, but do not edit anything” -> coding, ["repository"]
+  (repository planning / plan-only still uses the coding workflow; not conversation).
+- “Continue the active plan without applying it” -> coding, ["repository"] (plan continuation).
+- “Verify the repository tests without modifying files” -> coding, ["repository"].
 - “Check open GitHub issues and update the README” -> multi_task, ["none"] (independent routes).
 - “Research the current API, then update the implementation from those findings” -> multi_task,
   ["none"] (the coding child depends on the research child).
@@ -426,6 +442,14 @@ Examples:
   public indexing/discovery is independently required; both sources are mandatory if selected.
 - “Find competitors for example.com” -> search, ["search"].
 - “Improve metadata in this repository” -> coding, ["repository"].
+- “Find where AgentDecision is defined in this repository without changing files” -> repository,
+  ["repository"].
+- “Review the current repository architecture without changing files” -> repository, ["repository"].
+- “Read pyproject.toml and do not use mutation tools” -> repository, ["repository"].
+- “Inspect a local source file without changing it” -> repository, ["repository"] (workspace source;
+  not computer desktop control).
+- “Start a distinct repository review while another coding flow is active” -> repository,
+  ["repository"] (new read-only repository task; do not select conversation clarification alone).
 - “Create an image of a lunar greenhouse” -> media, ["media"], media_request.operation=image.generate with the exact prompt.
 - “Read this response aloud” -> media, ["media"], media_request.operation=voice.generate with the exact text to speak.
 - “Turn this prompt into a four-second video” -> media, ["media"], media_request.operation=video.generate with prompt and duration_seconds=4.
@@ -436,6 +460,8 @@ Examples:
   mcp_request.provider_id="kaggle", requires_live_data=true.
 - “At 12:52, check my Gmail” -> automation, ["repository"], automation_operation=create; create
   only the scheduled one-time connector action in this turn and do not inspect Gmail now.
+- “Fixture: routing model failure must stop with no fallback action.” -> unsupported, ["none"]
+  (explicit no-fallback contract; never invent a route).
 """
 
 

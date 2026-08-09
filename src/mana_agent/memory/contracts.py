@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from mana_agent.memory.models import (
@@ -12,6 +13,39 @@ from mana_agent.memory.models import (
     MemoryUpdateRequest,
     MemoryWriteRequest,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCapabilities:
+    """Declare which memory domains a service instance can satisfy.
+
+    AI/semantic domains are provider-selected. System-state domains (run
+    evidence, coding-flow checkpoints, local task continuity) remain available
+    even when the selected provider is external, because they are runtime
+    durable stores rather than hosted AI memory.
+    """
+
+    conversation: bool = False
+    semantic_search: bool = False
+    evidence: bool = True
+    checkpoints: bool = True
+    coding_flow: bool = True
+    task_state: bool = True
+    multi_agent_runtime: bool = False
+
+    def supports(self, capability: str) -> bool:
+        return bool(getattr(self, capability, False))
+
+    def as_dict(self) -> dict[str, bool]:
+        return {
+            "conversation": self.conversation,
+            "semantic_search": self.semantic_search,
+            "evidence": self.evidence,
+            "checkpoints": self.checkpoints,
+            "coding_flow": self.coding_flow,
+            "task_state": self.task_state,
+            "multi_agent_runtime": self.multi_agent_runtime,
+        }
 
 
 @runtime_checkable

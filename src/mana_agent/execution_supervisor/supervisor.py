@@ -935,6 +935,124 @@ class ExecutionSupervisor:
             request_type=request_type,
         )
 
+    def suspend_for_connector(
+        self,
+        task_id: str,
+        *,
+        connector_id: str,
+        checkpoint_id: str = "",
+        reason: str = "connector_unavailable",
+    ) -> TaskRecord:
+        """Durably pause a branch that depends on an unavailable connector.
+
+        Does not retry into a known outage. Resume only via
+        :meth:`resume_from_connector` when the connector is healthy again.
+        """
+        if not connector_id.strip():
+            raise ValueError("connector_id is required")
+        active_checkpoint = checkpoint_id
+        if not active_checkpoint:
+            task = self.store.get_task(task_id)
+            active_checkpoint = task.checkpoint_id
+        if active_checkpoint:
+            checkpoint = self.store.get_checkpoint(active_checkpoint)
+            if checkpoint is None or checkpoint.task_id != task_id:
+                raise RetrySafetyError("connector suspension requires this branch's durable checkpoint")
+
+        def suspend(task: TaskRecord) -> None:
+            if (
+                task.waiting_connector_id == connector_id
+                and task.state is ExecutionState.WAITING
+                and task.waiting_reason == "waiting_for_connector"
+            ):
+                return
+            if task.state not in {
+                ExecutionState.QUEUED,
+                ExecutionState.LEASED,
+                ExecutionState.RUNNING,
+                ExecutionState.CHECKPOINTING,
+                ExecutionState.WAITING,
+                ExecutionState.RETRY_SCHEDULED,
+            }:
+                raise LeaseConflictError(
+                    f"task cannot wait for connector from state {task.state.value}"
+                )
+            if active_checkpoint and task.checkpoint_id and task.checkpoint_id != active_checkpoint:
+                raise RetrySafetyError("connector checkpoint is no longer the active branch checkpoint")
+            if task.state is not ExecutionState.WAITING:
+                validate_transition(task.state, ExecutionState.WAITING)
+            task.state = ExecutionState.WAITING
+            task.waiting_reason = "waiting_for_connector"
+            task.waiting_connector_id = connector_id
+            task.human_wait_started_at = task.human_wait_started_at or self.clock()
+            task.lease_owner = ""
+            task.lease_token = ""
+            task.lease_expires_at = None
+            task.assigned_worker = ""
+            task.recovery_reason = reason
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, suspend)
+        if task.attempt_id:
+            attempt = self.store.get_attempt(task.attempt_id)
+            if attempt is not None:
+                attempt.state = "waiting_for_connector"
+                attempt.lease_owner = ""
+                attempt.lease_token = ""
+                attempt.lease_expires_at = None
+                self.store.save_attempt(attempt)
+        self._emit(
+            "connector_branch_suspended",
+            task,
+            connector_id=connector_id,
+            waiting_reason=task.waiting_reason,
+            checkpoint_id=active_checkpoint,
+            reason=reason,
+        )
+        return task
+
+    def resume_from_connector(
+        self,
+        task_id: str,
+        *,
+        connector_id: str,
+        resume_claim_id: str,
+    ) -> TaskRecord:
+        """Resume a connector-paused branch exactly once after health recovery."""
+        if not resume_claim_id.strip():
+            raise ValueError("resume_claim_id is required")
+
+        def resume(task: TaskRecord) -> None:
+            if resume_claim_id in task.human_resume_claim_ids:
+                return
+            if (
+                task.state is not ExecutionState.WAITING
+                or task.waiting_reason != "waiting_for_connector"
+                or task.waiting_connector_id != connector_id
+            ):
+                raise LeaseConflictError("only the branch waiting for this connector may resume")
+            validate_transition(task.state, ExecutionState.QUEUED)
+            task.human_resume_claim_ids.append(resume_claim_id)
+            task.state = ExecutionState.QUEUED
+            task.waiting_reason = ""
+            task.waiting_connector_id = ""
+            task.human_wait_started_at = None
+            task.recovery_reason = "connector_healthy"
+            task.lease_owner = ""
+            task.lease_token = ""
+            task.lease_expires_at = None
+            task.retry_not_before = None
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, resume)
+        self._emit(
+            "connector_branch_resumed",
+            task,
+            connector_id=connector_id,
+            resume_claim_id=resume_claim_id,
+        )
+        return task
+
     def submit_result(
         self,
         task_id: str,

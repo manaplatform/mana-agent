@@ -22,6 +22,7 @@ DANGEROUS_SHELL_PATTERNS = [
 ]
 ALLOWED_SHELL_PREFIXES = (
     "python -m compileall",
+    "python3 -m compileall",
     "pytest",
     "ruff check",
     "mypy",

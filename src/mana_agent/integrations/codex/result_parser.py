@@ -1,10 +1,35 @@
-"""Normalize a completed Codex turn into a coding task result."""
+"""Normalize a completed Codex turn into a coding task result.
+
+Success and failure are determined from structured notifications and repository
+evidence (changed files, mutation item types, command exit codes). Agent message
+text is never the correctness signal and is not used as the user-facing answer
+for failed write turns.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from mana_agent.coding.models import CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.integrations.codex.text_cleanup import (
+    looks_like_freeform_tool_garbage,
+    sanitize_assistant_visible_text,
+)
+
+
+# Codex item types that indicate a repository mutation was attempted.
+_MUTATION_ITEM_TYPES = frozenset(
+    {
+        "fileChange",
+        "file_change",
+        "applyPatch",
+        "apply_patch",
+        "patchApplication",
+        "patch_application",
+    }
+)
+
+_ASSISTANT_ITEM_TYPES = frozenset({"agentMessage", "agent_message"})
 
 
 def parse_codex_result(
@@ -21,10 +46,13 @@ def parse_codex_result(
     tests: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
-    summary = ""
+    # Internal last agent message (may be sanitized). Not used as the coding
+    # answer for failed write turns — see terminal_summary.
+    agent_message_text = ""
     usage: dict[str, int] | None = None
     status = "completed"
     test_failures: list[str] = []
+    mutation_attempted = False
 
     for notification in notifications:
         method = str(notification.get("method") or "")
@@ -33,6 +61,8 @@ def parse_codex_result(
         item = payload.get("item")
         if isinstance(item, dict):
             item_type = str(item.get("type") or "")
+            if item_type in _MUTATION_ITEM_TYPES:
+                mutation_attempted = True
             command = str(item.get("command") or "").strip()
             if command and command not in commands:
                 commands.append(command)
@@ -40,19 +70,33 @@ def parse_codex_result(
                     tests.append(command)
                     exit_code = item.get("exitCode")
                     command_status = str(item.get("status") or "").lower()
-                    if (isinstance(exit_code, int) and exit_code != 0) or command_status in {"failed", "error"}:
+                    if (isinstance(exit_code, int) and exit_code != 0) or command_status in {
+                        "failed",
+                        "error",
+                    }:
                         test_failures.append(command)
-            if item_type in {"agentMessage", "agent_message"}:
+            if item_type in _ASSISTANT_ITEM_TYPES:
                 text = str(item.get("text") or item.get("message") or "").strip()
                 if text:
-                    summary = text
+                    # Keep for plan-mode terminal notes / internal warnings only.
+                    if looks_like_freeform_tool_garbage(text):
+                        warnings.append(
+                            "assistant_freeform_tool_text_redacted: model emitted "
+                            "protocol soup instead of structured tools"
+                        )
+                        agent_message_text = sanitize_assistant_visible_text(text)
+                    else:
+                        agent_message_text = sanitize_assistant_visible_text(text)
         if method == "warning":
             message = str(payload.get("message") or "").strip()
             if message:
                 warnings.append(message)
+                # Explicit capability degradation when Codex lacks model metadata.
+                if "fallback metadata" in message.lower() or "model metadata" in message.lower():
+                    warnings.append("codex_model_metadata_fallback")
         if method in {"turn/failed", "error"}:
             status = "failed"
-            errors.append(str(payload.get("message") or payload.get("error") or "Codex turn failed"))
+            errors.append(_format_turn_failure(payload))
         if method == "turn/cancelled":
             status = "cancelled"
         if method == "turn/completed":
@@ -75,13 +119,38 @@ def parse_codex_result(
 
     if test_failures:
         warnings.append("Test command failed: " + ", ".join(test_failures))
+
+    # Write-required turns that finish "successfully" with no repository diff are
+    # not complete. Mutation success is repository state, not agentMessage prose.
+    if (
+        status == "completed"
+        and task.requires_repository_write
+        and not [path for path in changed_files if str(path).strip()]
+    ):
+        status = "failed"
+        if mutation_attempted:
+            errors.append("mutation_required_but_no_changed_files")
+        else:
+            errors.append("mutation_required_but_no_mutation_tool_attempted")
+
+    # Summary stored on the result is evidence-oriented. Terminal user answers are
+    # built separately by terminal_summary (failed write → no draft).
+    if status == "failed" and task.requires_repository_write:
+        summary = ""
+    elif status == "completed":
+        summary = agent_message_text or "Codex task completed."
+    elif status == "cancelled":
+        summary = "Codex task cancelled."
+    else:
+        summary = ""
+
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
     return CodingTaskResult(
         task_id=task.task_id,
         worker_id=worker_id,
         backend="codex",
         status=status,  # type: ignore[arg-type]
-        summary=summary or ("Codex task completed." if status == "completed" else "Codex task did not complete."),
+        summary=summary,
         changed_files=changed_files,
         commands_run=commands,
         tests_run=tests,
@@ -97,7 +166,96 @@ def parse_codex_result(
 
 def _is_test_command(command: str) -> bool:
     executable = command.strip().split(maxsplit=1)[0] if command.strip() else ""
-    return executable in {"pytest", "tox", "nox", "npm", "pnpm", "yarn", "cargo", "go", "mvn", "gradle"}
+    return executable in {
+        "pytest",
+        "tox",
+        "nox",
+        "npm",
+        "pnpm",
+        "yarn",
+        "cargo",
+        "go",
+        "mvn",
+        "gradle",
+    }
+
+
+def _format_turn_failure(payload: dict[str, Any]) -> str:
+    """Prefer structured provider diagnostics over vague reconnect messages."""
+    message = payload.get("message") or payload.get("error") or "Codex turn failed"
+    if isinstance(message, dict):
+        additional = message.get("additionalDetails") or message.get("details")
+        info = message.get("codexErrorInfo") or message.get("error")
+        banner = str(message.get("message") or message.get("error") or "").strip()
+        # Prefer the upstream diagnostic when Codex only reported a reconnect banner.
+        if additional and (
+            "reconnecting" in banner.lower()
+            or (isinstance(info, dict) and "responseStreamDisconnected" in info)
+        ):
+            text = str(additional).strip()
+        elif additional:
+            text = f"{banner} | {additional}".strip(" |") if banner else str(additional)
+        else:
+            text = banner or "Codex turn failed"
+        if isinstance(info, dict):
+            kind = info.get("failure_kind") or info.get("type")
+            if kind and f"failure_kind={kind}" not in text:
+                text = f"{text} | failure_kind={kind}"
+            if info.get("retryable") is False and "retryable=false" not in text:
+                text = f"{text} | retryable=false"
+        if (
+            isinstance(info, dict)
+            and "responseStreamDisconnected" in info
+            and any(
+                marker in text.lower()
+                for marker in (
+                    "http 400",
+                    "http 401",
+                    "http 403",
+                    "http 404",
+                    "http 410",
+                    "http 422",
+                    "rejected the request",
+                )
+            )
+            and "retryable=false" not in text
+        ):
+            text = f"{text} | retryable=false | attempts=1"
+        return _rewrite_reconnect_banner(text)
+    text = str(message).strip() or "Codex turn failed"
+    additional = payload.get("additionalDetails") or payload.get("details")
+    if additional and str(additional) not in text:
+        text = f"{text} | {additional}"
+    return _rewrite_reconnect_banner(text)
+
+
+def _rewrite_reconnect_banner(text: str) -> str:
+    """Rewrite Codex reconnect banners when a non-retryable provider diagnostic is present."""
+    lowered = text.lower()
+    if "reconnecting" not in lowered:
+        return text
+    non_retryable_markers = (
+        "http 400",
+        "http 401",
+        "http 403",
+        "http 404",
+        "http 410",
+        "http 422",
+        "invalid_request",
+        "rejected the request",
+        "model has been retired",
+        "authentication failed",
+        "retryable=false",
+    )
+    if any(marker in lowered for marker in non_retryable_markers):
+        cleaned = text
+        for token in ("Reconnecting... 1/5", "Reconnecting... ", "Reconnecting"):
+            cleaned = cleaned.replace(token, "")
+        cleaned = " ".join(cleaned.split()).strip(" |")
+        if "not retrying" not in cleaned.lower() and "retryable=false" not in cleaned.lower():
+            cleaned = f"{cleaned} | retryable=false | attempts=1"
+        return cleaned
+    return text
 
 
 __all__ = ["parse_codex_result"]

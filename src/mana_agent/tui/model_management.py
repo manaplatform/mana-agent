@@ -7,9 +7,10 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from mana_agent.config.catalog_service import ModelCatalogService
+from mana_agent.config.inference_provider import credentials_from_mapping
 from mana_agent.config.model_catalog import ModelDescriptor, ModelPurpose, filter_models
 from mana_agent.config.provider_registry import split_qualified_model_id
-from mana_agent.config.provider_registry import PROVIDERS
+from mana_agent.config.provider_registry import PROVIDERS, qualify_model_id
 from mana_agent.config.user_config import load_effective_settings, save_user_config
 
 
@@ -21,7 +22,7 @@ class ModelSelection:
 
     @property
     def qualified_id(self) -> str:
-        return f"{self.provider}/{self.model_id}"
+        return qualify_model_id(self.provider, self.model_id)
 
 
 def configured_agent_models(*, service: ModelCatalogService | None = None) -> list[ModelDescriptor]:
@@ -30,9 +31,10 @@ def configured_agent_models(*, service: ModelCatalogService | None = None) -> li
     configured = set(values.get("MANA_CONFIGURED_PROVIDERS") or [provider])
     if provider not in configured:
         return []
+    _api_key, base_url = credentials_from_mapping(values, provider=provider)
     catalog = (service or ModelCatalogService()).cached(
         provider=provider,
-        base_url=str(values.get("OPENROUTER_BASE_URL") if provider == "openrouter" else values.get("OPENAI_BASE_URL") or PROVIDERS.get(provider).default_base_url),
+        base_url=base_url or PROVIDERS.get(provider).default_base_url,
     )
     models = filter_models(catalog, ModelPurpose.AGENT)
     current = str(values.get("OPENAI_CHAT_MODEL") or "").strip()
@@ -142,8 +144,8 @@ class ModelManagementScreen(ModalScreen[ModelSelection | None]):
             return
         if event.button.id == "refresh-models":
             values = load_effective_settings(include_env=False)
-            api_key = str(values.get("OPENROUTER_API_KEY") if provider == "openrouter" else values.get("OPENAI_API_KEY") or "")
-            base_url = str(values.get("OPENROUTER_BASE_URL") if provider == "openrouter" else values.get("OPENAI_BASE_URL") or PROVIDERS.get(provider).default_base_url)
+            provider = str(values.get("MANA_AI_PROVIDER") or "openai")
+            api_key, base_url = credentials_from_mapping(values, provider=provider)
             if not api_key:
                 self.query_one("#model-details", Static).update(
                     "Provider authentication is not configured.\nExit chat and run: mana-agent --configure"
@@ -152,8 +154,8 @@ class ModelManagementScreen(ModalScreen[ModelSelection | None]):
             try:
                 await self.run_worker(
                     lambda: self.catalog_service.refresh(
-                        provider=str(values.get("MANA_AI_PROVIDER") or "openai"),
-                        base_url=base_url,
+                        provider=provider,
+                        base_url=base_url or PROVIDERS.get(provider).default_base_url,
                         api_key=api_key,
                         timeout_seconds=int(values.get("MANA_SEARCH_TIMEOUT_SECONDS") or 15),
                     ),
@@ -186,13 +188,12 @@ def plain_models_command(command: str, *, current_model: str, catalog_service: M
     if action == "current":
         return f"Active model: {provider}/{current_model}", None
     if action == "refresh":
-        api_key = str(values.get("OPENROUTER_API_KEY") if provider == "openrouter" else values.get("OPENAI_API_KEY") or "")
-        base_url = str(values.get("OPENROUTER_BASE_URL") if provider == "openrouter" else values.get("OPENAI_BASE_URL") or PROVIDERS.get(provider).default_base_url)
+        api_key, base_url = credentials_from_mapping(values, provider=provider)
         if not api_key:
             return "Provider authentication is not configured. Exit chat and run: mana-agent --configure", None
         models = (catalog_service or ModelCatalogService()).refresh(
             provider=provider,
-            base_url=base_url,
+            base_url=base_url or PROVIDERS.get(provider).default_base_url,
             api_key=api_key,
             timeout_seconds=int(values.get("MANA_SEARCH_TIMEOUT_SECONDS") or 15),
         )

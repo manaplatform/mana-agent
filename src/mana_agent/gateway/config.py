@@ -17,6 +17,14 @@ class ChatGatewayConfig:
 
     # Model / index
     model: str | None = None
+    # When True, use the explicit model fields below instead of resolving through
+    # user MODEL_LEVEL_* / MANA_MODEL_* settings. Required for eval isolation so
+    # suite variant models are not rewritten by operator preferences.
+    pin_models: bool = False
+    router_model: str | None = None
+    coding_model: str | None = None
+    reviewer_model: str | None = None
+    verifier_model: str | None = None
     index_dir: str | Path | None = None
     dir_mode: bool = False
     max_indexes: int = 0
@@ -94,6 +102,11 @@ class ChatGatewayConfig:
 
         return ChatGatewayConfig(
             model=self.model,
+            pin_models=bool(self.pin_models),
+            router_model=self.router_model,
+            coding_model=self.coding_model,
+            reviewer_model=self.reviewer_model,
+            verifier_model=self.verifier_model,
             index_dir=self.index_dir,
             dir_mode=bool(self.dir_mode),
             max_indexes=int(self.max_indexes),

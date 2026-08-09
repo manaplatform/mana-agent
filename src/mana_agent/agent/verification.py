@@ -15,7 +15,7 @@ def default_verification_plan(*, mode: str, request: str) -> VerificationPlan:
     if mode == "verify":
         return VerificationPlan(notes=("Run the requested checks and summarize exact results.",))
     if any(token in text for token in ("pytest", "python", ".py", "django", "fastapi")):
-        return VerificationPlan(commands=("pytest -q", "python -m compileall src"))
+        return VerificationPlan(commands=("pytest -q", "python3 -m compileall src"))
     if any(token in text for token in ("package.json", "npm", "node", "typescript", "react", "next")):
         return VerificationPlan(commands=("npm test",), notes=("Use lint/typecheck scripts when tests are absent.",))
     return VerificationPlan(notes=("Run the most relevant focused test, smoke check, or syntax check after edits.",))

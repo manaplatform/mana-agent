@@ -129,6 +129,25 @@ def routing_budgets_from_settings(settings) -> RoutingBudgets:
     )
 
 
+def pin_model_for_role(role: AgentRole, model: str) -> ResolvedModelAssignment:
+    """Return a role assignment that uses an explicit model without level routing.
+
+    Used by evals and other isolated runtimes so suite-selected models are not
+    rewritten by operator MODEL_LEVEL_* / MANA_MODEL_* preferences.
+    """
+    env_var, default_level = _DEFAULT_MODEL_LEVELS[role]
+    selected = str(model or "").strip()
+    if not selected:
+        raise ValueError(f"pinned model for role {role.value} must be non-empty")
+    return ResolvedModelAssignment(
+        role=role,
+        env_var=env_var,
+        model_level="pinned",
+        resolved_model=selected,
+        routing_decision=None,
+    )
+
+
 def resolve_model_for_role(
     role: AgentRole,
     *,

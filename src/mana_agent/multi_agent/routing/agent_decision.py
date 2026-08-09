@@ -26,6 +26,26 @@ AgentIntent = Literal[
     "high_risk_tool",
 ]
 FlowAction = Literal["none", "continue", "new"]
+RequestedEffect = Literal["none", "read", "write", "execute", "external_action"]
+TargetSurface = Literal[
+    "conversation",
+    "repository",
+    "web",
+    "browser",
+    "local_system",
+    "external_service",
+]
+
+_REQUESTED_EFFECTS = frozenset({"none", "read", "write", "execute", "external_action"})
+_TARGET_SURFACES = frozenset(
+    {"conversation", "repository", "web", "browser", "local_system", "external_service"}
+)
+_REPOSITORY_READ_TOOLS = frozenset(
+    {"repo_search", "repo_batch_search", "read_file", "repo_batch_read", "semantic_search", "list_files"}
+)
+_REPOSITORY_MUTATION_TOOLS = frozenset(
+    {"apply_patch", "apply_patch_batch", "edit_file", "multi_edit_file", "write_file", "create_file", "delete_file"}
+)
 
 KNOWN_AGENT_TOOLS = frozenset(
     {
@@ -83,6 +103,9 @@ class AgentDecision:
     web_search_needed: bool = False
     code_editing_needed: bool = False
     flow_action: FlowAction = "none"
+    requested_effect: RequestedEffect = "none"
+    target_surface: TargetSurface = "conversation"
+    required_subagents: list[str] = field(default_factory=list)
     reasoning_summary: str = ""
     source: str = "model"
     verifier_passed: bool = False
@@ -182,8 +205,20 @@ Return JSON only with this schema:
   "web_search_needed": false,
   "code_editing_needed": false,
   "flow_action": "none|continue|new",
+  "requested_effect": "none|read|write|execute|external_action",
+  "target_surface": "conversation|repository|web|browser|local_system|external_service",
+  "required_subagents": ["repo_inventory|docs"],
   "reasoning_summary": "short reason"
 }
+
+The transport fields, including command_hint, are metadata only. Never repeat
+or prepend them to user_request, task descriptions, goals, or summaries that
+claim to be user text. Always emit requested_effect and target_surface as a
+semantic contract: write+repository requires an edit route and a repository
+mutation capability; execute+repository/local_system requires a tool route;
+read+repository requires repository inspection; none+conversation is valid for
+plain conversation and standalone planning. Select required_subagents only when they are needed;
+do not infer them from keywords.
 
 Flow continuity rules:
 - Use "continue" when the request continues or refines the active coding flow.
@@ -214,6 +249,9 @@ Enforce these boundaries:
   an invalid one. Do not infer a static route from keywords alone.
 - When operation_constraint is supplied, enforce it exactly in the corrected
   decision, including its required tool inputs.
+- Preserve the proposal's requested_effect, target_surface, and
+  required_subagents only when they match the request and selected tools;
+  otherwise correct them. Transport metadata remains separate from user text.
 Return JSON only.
 """
 
@@ -249,6 +287,8 @@ class AgentDecisionEngine:
                 repo_context_needed=False,
                 web_search_needed=False,
                 code_editing_needed=False,
+                requested_effect="execute",
+                target_surface="local_system",
                 reasoning_summary="High-risk shell or git operation requires safety routing.",
                 source="safety",
             )
@@ -275,7 +315,7 @@ class AgentDecisionEngine:
             AgentDecision(
                 intent="answer",
                 confidence=0.0,
-                reasoning_summary="Model routing decision was unavailable. No alternate route was executed.",
+                reasoning_summary="Model routing decision was unavailable. No route was executed.",
                 source="model_unavailable",
             ),
             request,
@@ -321,6 +361,7 @@ class AgentDecisionEngine:
                         content=json.dumps(
                             {
                                 "user_request": request,
+                                "command_hint": command_hint,
                                 "proposed_decision": proposed.to_dict(),
                                 "memory_context": memory_context,
                                 "operation_constraint": operation_constraint,
@@ -357,7 +398,7 @@ class AgentDecisionEngine:
             return None
 
     def _decision_from_payload(self, data: dict[str, Any]) -> AgentDecision:
-        intent = str(data.get("intent") or "answer").strip().lower()
+        intent = str(data.get("intent") or "").strip().lower()
         if intent not in {
             "answer",
             "repo_search",
@@ -370,7 +411,13 @@ class AgentDecisionEngine:
             "tool",
             "high_risk_tool",
         }:
-            intent = "answer"
+            raise ValueError("routing decision intent is missing or invalid")
+        requested_effect = str(data.get("requested_effect") or "").strip().lower()
+        if requested_effect not in _REQUESTED_EFFECTS:
+            raise ValueError("routing decision requested_effect is missing or invalid")
+        target_surface = str(data.get("target_surface") or "").strip().lower()
+        if target_surface not in _TARGET_SURFACES:
+            raise ValueError("routing decision target_surface is missing or invalid")
         selected_tools = _clean_tool_list(data.get("selected_tools"))
         tool_inputs = _clean_tool_inputs(data.get("tool_inputs"), selected_tools)
         return AgentDecision(
@@ -382,6 +429,9 @@ class AgentDecisionEngine:
             web_search_needed=bool(data.get("web_search_needed", False)),
             code_editing_needed=bool(data.get("code_editing_needed", False)),
             flow_action=_clean_flow_action(data.get("flow_action")),
+            requested_effect=requested_effect,  # type: ignore[arg-type]
+            target_surface=target_surface,  # type: ignore[arg-type]
+            required_subagents=_clean_required_subagents(data.get("required_subagents")),
             reasoning_summary=str(data.get("reasoning_summary") or "Model-routed agent decision.")[:500],
             source="model",
         )
@@ -418,9 +468,9 @@ def verify_agent_decision(
         warnings.append(f"unknown tools selected: {', '.join(unknown)}")
     if decision.web_search_needed and not any(tool in decision.selected_tools for tool in ("web_search", "github_search")):
         warnings.append("web_search_needed=true but no external search tool was selected")
-    if decision.repo_context_needed and not any(tool in decision.selected_tools for tool in ("repo_search", "repo_batch_search", "read_file", "repo_batch_read", "semantic_search", "list_files")):
+    if decision.repo_context_needed and not any(tool in decision.selected_tools for tool in _REPOSITORY_READ_TOOLS):
         warnings.append("repo_context_needed=true but no repository read/search tool was selected")
-    if decision.code_editing_needed and not any(tool in decision.selected_tools for tool in ("apply_patch", "apply_patch_batch", "edit_file", "multi_edit_file", "write_file", "create_file", "delete_file")):
+    if decision.code_editing_needed and not any(tool in decision.selected_tools for tool in _REPOSITORY_MUTATION_TOOLS):
         warnings.append("code_editing_needed=true but no mutation tool was selected")
     browser_selected = any(tool.startswith("browser_") for tool in decision.selected_tools)
     if browser_selected and decision.intent != "tool":
@@ -431,6 +481,30 @@ def verify_agent_decision(
         warnings.append("web_research intent must set web_search_needed=true")
     if decision.intent in {"repo_search", "analyze", "edit", "review"} and not decision.repo_context_needed:
         warnings.append(f"{decision.intent} intent should request repository context")
+    if decision.requested_effect == "write" and decision.target_surface == "repository":
+        if decision.intent != "edit" or not decision.code_editing_needed:
+            warnings.append("write+repository requires intent=edit and code_editing_needed=true")
+        if not any(tool in decision.selected_tools for tool in _REPOSITORY_MUTATION_TOOLS):
+            warnings.append("write+repository requires a repository mutation tool")
+    if decision.requested_effect == "execute" and decision.target_surface in {"repository", "local_system"}:
+        if decision.intent not in {"tool", "verify", "high_risk_tool"}:
+            warnings.append("execute on repository/local_system requires a tool route")
+        if not decision.selected_tools:
+            warnings.append("execute on repository/local_system requires an execution capability")
+    if decision.requested_effect == "read" and decision.target_surface == "repository":
+        if decision.intent not in {"repo_search", "analyze", "review"}:
+            warnings.append("read+repository requires a repository inspection route")
+        if not any(tool in decision.selected_tools for tool in _REPOSITORY_READ_TOOLS):
+            warnings.append("read+repository requires a repository read/search tool")
+    if decision.requested_effect == "none" and decision.target_surface == "conversation":
+        if decision.intent not in {"answer", "plan"} or decision.selected_tools:
+            warnings.append("none+conversation requires an answer or plan intent with no tools")
+    if decision.intent == "answer" and not (
+        decision.requested_effect == "none" and decision.target_surface == "conversation"
+    ):
+        warnings.append("answer intent requires requested_effect=none and target_surface=conversation")
+    if decision.source == "model_unavailable":
+        warnings.append("routing model decision is unavailable")
     if (
         require_flow_action
         and (decision.intent == "edit" or decision.code_editing_needed)
@@ -463,6 +537,13 @@ def _clean_tool_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [tool for tool in (str(item).strip() for item in value) if tool]
+
+
+def _clean_required_subagents(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    allowed = {"repo_inventory", "docs"}
+    return [name for name in (str(item).strip() for item in value) if name in allowed]
 
 
 def _clean_tool_inputs(value: Any, selected_tools: list[str]) -> dict[str, dict[str, Any]]:

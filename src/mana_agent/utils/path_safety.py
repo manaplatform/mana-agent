@@ -51,29 +51,103 @@ def is_within_any_root(path: Path, roots: Sequence[Path]) -> bool:
 
 
 def reject_unsafe_path_text(raw: str) -> str:
-    """Reject empty, null-byte, or segment-traversal path text before resolve."""
+    """Reject empty, null-byte, or traversal-like path text before resolve."""
     text = str(raw or "").strip()
     if not text or _NULL_BYTE in text:
         raise ValueError("Invalid path.")
     # Normalize separators for segment inspection without resolving.
     normalized = text.replace("\\", "/")
+    if "//" in normalized:
+        raise ValueError("Invalid path.")
     for segment in normalized.split("/"):
-        if not segment or segment == ".":
+        if not segment:
             continue
-        if segment == ".." or _UNSAFE_SEGMENT.match(segment):
-            # Allow ".." only when absolute resolution will later confine the path.
-            # We still reject repeated traversal-only inputs that never name a file.
-            pass
+        if _UNSAFE_SEGMENT.match(segment):
+            raise ValueError("Invalid path.")
     return text
 
 
 def resolve_user_path(raw: str) -> Path:
-    """Expand and resolve a user path after rejecting null bytes."""
+    """Canonicalize an untrusted path; fail closed if resolution fails."""
     text = reject_unsafe_path_text(raw)
     try:
         return Path(text).expanduser().resolve(strict=False)
-    except OSError as exc:
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
         raise ValueError("Invalid path.") from exc
+
+def safe_resolve(path: str | Path, *, strict: bool = False) -> Path:
+    """Best-effort resolution for trusted/internal paths.
+
+    This helper is for runtime resilience when the process CWD is unusable.
+
+    SECURITY:
+    Do not use this function to validate user-controlled filesystem paths.
+    Untrusted paths must go through resolve_within_allowed_roots(), which
+    canonicalizes and checks confinement without the normpath fallback.
+    """
+    candidate = Path(path).expanduser()
+
+    try:
+        return candidate.resolve(strict=strict)
+    except (FileNotFoundError, OSError, RuntimeError):
+        if candidate.is_absolute():
+            return Path(os.path.normpath(candidate))
+
+        try:
+            cwd = os.getcwd()
+        except (FileNotFoundError, OSError):
+            return Path(os.path.normpath(candidate))
+
+        return Path(
+            os.path.normpath(
+                os.path.join(cwd, str(candidate))
+            )
+        )
+
+def safe_cwd(*, fallback: str | Path | None = None) -> Path:
+    """Return the process CWD, or a stable fallback when it was deleted.
+
+    Unix processes can keep running after their working directory is unlinked
+    (common when a SWE-bench worktree is recreated under a live agent). In that
+    state ``os.getcwd()`` / ``Path.cwd()`` raise ``FileNotFoundError``. Callers
+    that only need a stable path for log naming or child ``cwd`` must not crash.
+
+    On Windows the process normally locks its CWD, but ``Path.resolve`` still
+    calls ``os.getcwd`` via ``ntpath.realpath``; fallbacks must not re-raise.
+    """
+    try:
+        return safe_resolve(Path.cwd())
+    except (FileNotFoundError, OSError):
+        pass
+    if fallback is not None:
+        candidate = Path(fallback).expanduser()
+        try:
+            if candidate.is_dir():
+                return safe_resolve(candidate)
+        except OSError:
+            pass
+    # Prefer Mana-managed state, then the user's home, then a stable absolute root.
+    try:
+        from mana_agent.config.settings import mana_home
+
+        home = mana_home()
+        if home.is_dir():
+            return safe_resolve(home)
+    except Exception:
+        pass
+    try:
+        return safe_resolve(Path.home())
+    except Exception:
+        pass
+    try:
+        import tempfile
+
+        return safe_resolve(Path(tempfile.gettempdir()))
+    except Exception:
+        # Never raise: last-ditch absolute roots differ by platform.
+        if os.name == "nt":
+            return Path(os.path.normpath("C:\\"))
+        return Path("/")
 
 
 def resolve_within_allowed_roots(
@@ -82,21 +156,33 @@ def resolve_within_allowed_roots(
     *,
     require_allowlist: bool = True,
 ) -> Path:
-    """Resolve raw and require it to sit under one of the allowed roots.
-
-    When ``require_allowlist`` is True and allowed_roots is empty, raise.
-    When False and allowed_roots is empty, return the resolved path only after
-    basic validation (used for single-user local dashboard paths that are
-    further constrained by callers).
-    """
+    """Resolve an untrusted path and confine it to explicit allowed roots."""
     path = resolve_user_path(raw)
-    roots = [root.resolve(strict=False) for root in allowed_roots]
+
+    roots: list[Path] = []
+    try:
+        for root in allowed_roots:
+            roots.append(
+                Path(root).expanduser().resolve(strict=False)
+            )
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        raise ValueError("Invalid allowed root.") from exc
+
     if not roots:
         if require_allowlist:
-            raise PermissionError("Path API is disabled until an allowlist is configured.")
+            raise PermissionError(
+                "Path API is disabled until an allowlist is configured."
+            )
         return path
-    if not is_within_any_root(path, roots):
-        raise PermissionError("Path is outside the configured allowlist.")
+
+    if not any(
+        path == root or root in path.parents
+        for root in roots
+    ):
+        raise PermissionError(
+            "Path is outside the configured allowlist."
+        )
+
     return path
 
 
@@ -149,4 +235,6 @@ __all__ = [
     "resolve_under_base",
     "resolve_user_path",
     "resolve_within_allowed_roots",
+    "safe_cwd",
+    "safe_resolve",
 ]

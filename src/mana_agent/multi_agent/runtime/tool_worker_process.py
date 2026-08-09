@@ -970,9 +970,19 @@ class ToolWorkerClient:
         workspace_id: str | None = None,
         repository_id: str | None = None,
     ) -> None:
-        from mana_agent.config.user_config import get_setting
+        from mana_agent.config.user_config import get_setting, load_effective_settings
 
-        resolved_base_url = str(base_url or get_setting("OPENAI_BASE_URL", "") or "").strip() or None
+        resolved_base_url = str(base_url or "").strip() or None
+        if not resolved_base_url:
+            try:
+                from mana_agent.config.inference_provider import credentials_from_mapping
+
+                values = load_effective_settings(include_env=False)
+                provider = str(values.get("MANA_AI_PROVIDER") or "openai")
+                _key, mapped_base = credentials_from_mapping(values, provider=provider)
+                resolved_base_url = mapped_base or None
+            except Exception:
+                resolved_base_url = str(get_setting("OPENAI_BASE_URL", "") or "").strip() or None
         self._init_payload = WorkerInitPayload(
             api_key=api_key,
             model=model,

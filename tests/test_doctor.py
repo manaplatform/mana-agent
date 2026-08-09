@@ -52,6 +52,22 @@ def test_doctor_skip_is_forwarded(monkeypatch) -> None:
     assert captured[0]["skip"] == ["config/schema"]
 
 
+def test_doctor_only_accepts_comma_separated_ids(monkeypatch) -> None:
+    captured: list[dict] = []
+
+    def fake_run(**kwargs):
+        captured.append(kwargs)
+        return _healthy_report()
+
+    monkeypatch.setattr("mana_agent.commands.cli.run_doctor", fake_run)
+    result = CliRunner().invoke(
+        app,
+        ["doctor", "--only", "connectors/health,connectors/credentials"],
+    )
+    assert result.exit_code == 0
+    assert captured[0]["only"] == ["connectors/health", "connectors/credentials"]
+
+
 def test_deep_check_is_skipped_in_normal_mode() -> None:
     normal, unknown = select_checks([], [], deep=False)
     deep, _ = select_checks([], [], deep=True)

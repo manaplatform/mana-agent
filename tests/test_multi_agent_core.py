@@ -32,6 +32,7 @@ from mana_agent.multi_agent.core.types import (
     AgentState,
     AgentRole,
     ExecutionContext,
+    GitIntent,
     MessageType,
     QueueJobStatus,
     QueueJobType,
@@ -94,8 +95,22 @@ def _route_payload(
     repo_context_needed: bool = False,
     web_search_needed: bool = False,
     code_editing_needed: bool = False,
+    required_subagents: list[str] | None = None,
     reasoning_summary: str = "Model selected route.",
 ) -> dict:
+    semantic_contract = {
+        "answer": ("none", "conversation"),
+        "repo_search": ("read", "repository"),
+        "analyze": ("read", "repository"),
+        "review": ("read", "repository"),
+        "edit": ("write", "repository"),
+        "web_research": ("read", "web"),
+        "tool": ("execute", "local_system"),
+        "verify": ("execute", "local_system"),
+        "high_risk_tool": ("execute", "local_system"),
+        "plan": ("none", "conversation"),
+    }
+    requested_effect, target_surface = semantic_contract[intent]
     return {
         "intent": intent,
         "confidence": confidence,
@@ -104,6 +119,9 @@ def _route_payload(
         "repo_context_needed": repo_context_needed,
         "web_search_needed": web_search_needed,
         "code_editing_needed": code_editing_needed,
+        "requested_effect": requested_effect,
+        "target_surface": target_surface,
+        "required_subagents": required_subagents or [],
         "reasoning_summary": reasoning_summary,
     }
 
@@ -515,6 +533,7 @@ def test_router_selects_required_routes():
                         selected_tools=["repo_search", "read_file", "apply_patch"],
                         repo_context_needed=True,
                         code_editing_needed=True,
+                        required_subagents=["repo_inventory", "docs"],
                         reasoning_summary="Update README documentation.",
                     ),
                 }
@@ -774,6 +793,7 @@ def test_tools_manager_blocks_dangerous_shell_commands():
     with pytest.raises(ToolPermissionError):
         assert_shell_allowed("cat .env")
     assert_shell_allowed("python -m compileall src")
+    assert_shell_allowed("python3 -m compileall src")
     with pytest.raises(ToolPermissionError):
         assert_shell_allowed("ssh root@130.185.73.235 'tail -n 10 /var/log/nginx/access.log'")
 
@@ -837,10 +857,11 @@ def test_reviewer_rejects_planned_verification_without_queue_job(tmp_path):
 
 
 def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
-    assert MainAgent(tmp_path).run_user_request("hello", entrypoint="chat").route_name == "simple"
+    conversation_model = _RouteModel({"hello": _route_payload("answer")})
+    assert MainAgent(tmp_path, routing_llm=conversation_model).run_user_request("hello", entrypoint="chat").route_name == "simple"
     analyze_model = _RouteModel(
         {
-            "analyze scan repo": _route_payload(
+            "scan repo": _route_payload(
                 "analyze",
                 selected_tools=["repo_search", "read_file"],
                 repo_context_needed=True,
@@ -850,7 +871,7 @@ def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     )
     plan_model = _RouteModel(
         {
-            "plan update docs": _route_payload(
+            "update docs": _route_payload(
                 "plan",
                 reasoning_summary="Plan the requested docs update.",
             )
@@ -858,6 +879,30 @@ def test_main_agent_routes_chat_analyze_and_plan(tmp_path):
     )
     assert MainAgent(tmp_path, routing_llm=analyze_model).run_user_request("scan repo", entrypoint="analyze").route_name == "analyze"
     assert MainAgent(tmp_path, routing_llm=plan_model).run_user_request("update docs", entrypoint="plan").route_name == "planning"
+
+
+def test_main_agent_preserves_semantic_request_and_passes_entrypoint_as_metadata(tmp_path):
+    class CapturingModel:
+        def __init__(self) -> None:
+            self.routing_payload: dict | None = None
+
+        def invoke(self, messages):  # noqa: ANN001
+            payload = json.loads(messages[-1].content)
+            if "tools" in payload:
+                self.routing_payload = payload
+            return SimpleNamespace(content=json.dumps(_route_payload("answer")))
+
+    model = CapturingModel()
+    main = MainAgent(tmp_path, routing_llm=model)
+    result = main.run_user_request("chat command", entrypoint="chat")
+    task = main.taskboard.get_task(result.task_id)
+
+    assert result.route_name == "simple"
+    assert task.user_request == "chat command"
+    assert task.normalized_goal == "chat command"
+    assert model.routing_payload is not None
+    assert model.routing_payload["user_request"] == "chat command"
+    assert model.routing_payload["command_hint"] == "chat"
 
 
 def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
@@ -873,6 +918,9 @@ def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
                         "repo_context_needed": False,
                         "web_search_needed": True,
                         "code_editing_needed": False,
+                        "requested_effect": "read",
+                        "target_surface": "web",
+                        "required_subagents": [],
                         "reasoning_summary": "Model selected public web research.",
                     }
                 )
@@ -891,11 +939,12 @@ def test_main_agent_records_large_docs_subagents_and_deactivates_them(tmp_path):
         tmp_path,
         routing_llm=_RouteModel(
             {
-                "chat project architecture changed, update README.md, cannot use diff": _route_payload(
+                "project architecture changed, update README.md, cannot use diff": _route_payload(
                     "edit",
                     selected_tools=["repo_search", "read_file", "apply_patch"],
                     repo_context_needed=True,
                     code_editing_needed=True,
+                    required_subagents=["repo_inventory", "docs"],
                     reasoning_summary="Update README documentation.",
                 )
             }
@@ -918,7 +967,7 @@ def test_main_agent_coding_route_has_queue_worker_verifier_and_review_evidence(t
         tmp_path,
         routing_llm=_RouteModel(
             {
-                "chat fix README.md heading": _route_payload(
+                "fix README.md heading": _route_payload(
                     "edit",
                     selected_tools=["repo_search", "read_file", "apply_patch"],
                     repo_context_needed=True,
@@ -943,8 +992,21 @@ def test_git_commit_push_request_queues_git_inspection_and_does_not_repo_search(
     repo = _init_git_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\nchanged\n", encoding="utf-8")
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_commit=True,
+        wants_push=True,
+        target_branch="main",
+        requires_remote=True,
+        risk_level="high",
+    )
 
-    result = main.run_user_request("commit changes and push to main", entrypoint="chat")
+    result = main.run_user_request(
+        "commit changes and push to main",
+        entrypoint="chat",
+        git_intent=intent,
+    )
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -976,8 +1038,16 @@ def test_git_push_to_main_inspects_remote_and_blocks_when_behind(tmp_path):
     assert _git(other, "push", "origin", "main").returncode == 0
     assert _git(repo, "fetch", "origin").returncode == 0
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_push=True,
+        target_branch="main",
+        requires_remote=True,
+        risk_level="high",
+    )
 
-    result = main.run_user_request("push to main", entrypoint="chat")
+    result = main.run_user_request("push to main", entrypoint="chat", git_intent=intent)
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -993,8 +1063,14 @@ def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
     repo = _init_git_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\ncommit only\n", encoding="utf-8")
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_commit=True,
+        risk_level="high",
+    )
 
-    result = main.run_user_request("commit", entrypoint="chat")
+    result = main.run_user_request("commit", entrypoint="chat", git_intent=intent)
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -1011,8 +1087,19 @@ def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
 def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
     repo = _init_git_repo(tmp_path / "repo")
     main = MainAgent(repo)
+    intent = GitIntent(
+        wants_status=True,
+        wants_diff=True,
+        wants_branch=True,
+        target_branch="feature/git-workflow",
+        risk_level="high",
+    )
 
-    result = main.run_user_request("create new branch feature/git-workflow", entrypoint="chat")
+    result = main.run_user_request(
+        "create new branch feature/git-workflow",
+        entrypoint="chat",
+        git_intent=intent,
+    )
 
     task = main.taskboard.get_task(result.task_id)
     commands = _git_job_commands(main, result.task_id)
@@ -1020,6 +1107,45 @@ def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
     assert ["switch", "-c", "feature/git-workflow"] in commands
     assert _git(repo, "branch", "--show-current").stdout.strip() == "feature/git-workflow"
     assert task.status == TaskStatus.VERIFYING
+
+
+def test_swe_bench_style_prompt_does_not_infer_git_intent_from_negations(tmp_path):
+    """SWE-bench prompts mention commit/push only to forbid them.
+
+    Keyword GitIntent inference previously hijacked every bench instance into
+    `git switch -c and` + failed `origin/and` verification.
+    """
+    repo = _init_git_repo(tmp_path / "repo")
+    # Strip so the fixture key matches MainAgent.run_user_request's semantic
+    # request normalization without embedding entrypoint metadata.
+    prompt = (
+        "You are solving a single SWE-bench issue inside an isolated git checkout.\n"
+        "Do not commit, push, rebase, or rewrite git history.\n"
+        "Success means production-source edits left as uncommitted working-tree changes.\n"
+        "Fix the TimeSeries required-column exception message.\n"
+    ).strip()
+    main = MainAgent(
+        repo,
+        routing_llm=_RouteModel(
+            {
+                prompt: _route_payload(
+                    "edit",
+                    selected_tools=["repo_search", "read_file", "apply_patch"],
+                    repo_context_needed=True,
+                    code_editing_needed=True,
+                    reasoning_summary="Implement the SWE-bench fix without git history rewrites.",
+                )
+            }
+        ),
+    )
+    result = main.run_user_request(prompt, entrypoint="chat")
+    task = main.taskboard.get_task(result.task_id)
+    commands = _git_job_commands(main, result.task_id)
+    assert result.route_name == "coding"
+    assert not any(command[:2] == ["switch", "-c"] for command in commands)
+    assert not any("origin/and" in item for item in task.blockers)
+    assert "git_push" not in task.required_capabilities
+    assert "git_branch" not in task.required_capabilities
 
 
 @pytest.fixture
@@ -1086,6 +1212,20 @@ def test_missing_symbolic_model_level_falls_back_to_global(
 
     assert assignment.model_level == MODEL_LEVEL_2_CODING
     assert assignment.resolved_model == "global-model"
+
+
+def test_pin_model_for_role_bypasses_operator_model_levels(
+    isolated_model_config: Path,
+) -> None:
+    from mana_agent.multi_agent.runtime.model_levels import pin_model_for_role
+
+    user_config.save_effective_user_config(
+        {MODEL_LEVEL_3_HIGH_REASONING: "operator-high-model"},
+        merge=False,
+    )
+    assignment = pin_model_for_role(AgentRole.MAIN, "suite-gpt-4.1-mini")
+    assert assignment.model_level == "pinned"
+    assert assignment.resolved_model == "suite-gpt-4.1-mini"
 
 
 def test_execution_context_preserves_model_metadata():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import zipfile
@@ -306,6 +307,24 @@ def test_teach_storage_and_grants_work_without_posix_fchmod(monkeypatch: pytest.
     store = TeachGrantStore(tmp_path / "teach" / "grants.json")
     store.grant(list(DESKTOP_GRANTS))
     assert all(store.is_granted(scope) for scope in DESKTOP_GRANTS)
+
+
+def test_semantic_teach_start_does_not_import_optional_desktop_adapters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blocked = {"pynput", "uiautomation", "playwright", "pyatspi"}
+    original_import = builtins.__import__
+
+    def reject_optional_adapter_import(name, *args, **kwargs):  # noqa: ANN001
+        if name.split(".", 1)[0] in blocked:
+            raise AssertionError(
+                f"semantic recording must not import optional adapter {name}"
+            )
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_optional_adapter_import)
+    session = _service(tmp_path).start("Portable semantic session", desktop=False)
+    assert session.state is SessionState.RECORDING
 
 
 def test_desktop_grants_are_explicit_owner_only_and_reported(tmp_path: Path) -> None:

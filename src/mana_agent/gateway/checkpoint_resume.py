@@ -14,7 +14,12 @@ from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 
-CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS = 512
+# Compact structured JSON is small (reason ≤ 480 chars), but some providers
+# (notably NVIDIA DeepSeek V4 with default thinking/reasoning_effort=high)
+# count chain-of-thought tokens against max_tokens. A 512-token ceiling was
+# exhausted by thinking alone, producing LengthFinishReasonError before the
+# schema JSON completed. Keep explicit headroom for that class of models.
+CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS = 4_096
 
 
 class CheckpointResumeError(RuntimeError):
@@ -23,6 +28,23 @@ class CheckpointResumeError(RuntimeError):
     def __init__(self, message: str, *, code: str = "checkpoint_resume_invalid") -> None:
         super().__init__(message)
         self.code = code
+
+
+def _checkpoint_resume_failure_reason(exc: BaseException) -> str:
+    """Format a provider/model failure without inventing a recovery action."""
+    detail = str(exc).strip() or type(exc).__name__
+    lowered = detail.casefold()
+    if (
+        type(exc).__name__ == "LengthFinishReasonError"
+        or "length limit was reached" in lowered
+        or "lengthfinishreason" in lowered
+    ):
+        return (
+            f"{detail}. Structured checkpoint_resume output was truncated at "
+            f"max_tokens={CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS}; the model did "
+            "not return a complete decision schema."
+        )
+    return detail
 
 
 class CheckpointResumeOutput(BaseModel):
@@ -138,21 +160,16 @@ class CheckpointResumeDecider:
             SystemMessage(content=CHECKPOINT_RESUME_PROMPT),
             HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
         ]
+        invoke_kwargs = {"max_tokens": CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS}
         try:
             structured = getattr(self.llm, "with_structured_output", None)
             if callable(structured):
                 response = structured(
                     CheckpointResumeOutput, method="json_schema", strict=True
-                ).invoke(
-                    messages,
-                    max_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
-                )
+                ).invoke(messages, **invoke_kwargs)
                 output = CheckpointResumeOutput.model_validate(response)
             else:
-                response = self.llm.invoke(
-                    messages,
-                    max_tokens=CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS,
-                )
+                response = self.llm.invoke(messages, **invoke_kwargs)
                 content = getattr(response, "content", response)
                 output = CheckpointResumeOutput.model_validate_json(str(content))
         except ContextBudgetExceeded as exc:
@@ -164,7 +181,7 @@ class CheckpointResumeDecider:
         except Exception as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
-                f"Reason: {exc}"
+                f"Reason: {_checkpoint_resume_failure_reason(exc)}"
             ) from exc
         candidate_pairs = {
             (str(item["task_id"]), str(item["checkpoint_id"]))

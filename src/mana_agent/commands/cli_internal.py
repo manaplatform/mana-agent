@@ -94,6 +94,8 @@ app.add_typer(context_app, name="context")
 app.add_typer(acp_app, name="acp")
 app.add_typer(a2a_app, name="a2a")
 app.add_typer(connector_app, name="connector")
+from .connectors_cli import connectors_app  # noqa: E402  # registers health under connector_app
+app.add_typer(connectors_app, name="connectors")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(worktree_app, name="worktree")
 app.add_typer(codex_app, name="codex")
@@ -224,14 +226,17 @@ def _build_project_llm_analyzer():
     except Exception as exc:  # noqa: BLE001 - unavailable configuration should not break analyze
         logger.warning("Project analyze LLM disabled (user configuration unavailable): %s", exc)
         return None
-    api_key = str(config.get("OPENAI_API_KEY", "") or "").strip()
+    from mana_agent.config.inference_provider import credentials_from_mapping
+
+    provider = str(config.get("MANA_AI_PROVIDER") or "openai")
+    api_key, base_url = credentials_from_mapping(config, provider=provider)
     if not api_key:
         return None
     return build_llm_analyzer(
         ModelConfig(
             api_key=api_key,
             model=str(config.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini"),
-            base_url=str(config.get("OPENAI_BASE_URL", "") or "").strip() or None,
+            base_url=base_url or None,
         )
     )
 
@@ -1225,13 +1230,25 @@ class _ConfiguredSkillDraftGenerator:
     """Structured model generator used only by explicit manual workshop runs."""
 
     def __init__(self) -> None:
+        from mana_agent.config.inference_provider import (
+            ProviderConfigurationError,
+            resolve_inference_connection,
+        )
+
         settings = Settings()
-        if not str(settings.openai_api_key or "").strip():
-            raise RuntimeError("Model decision failed: skill proposal generation. No fallback action was executed. Reason: no configured model API key.")
+        try:
+            connection = resolve_inference_connection(settings)
+        except ProviderConfigurationError as exc:
+            raise RuntimeError(
+                "Model decision failed: skill proposal generation. "
+                f"No fallback action was executed. Reason: {exc}"
+            ) from exc
         self.model = create_chat_model(
-            api_key=settings.openai_api_key,
+            api_key=connection.api_key,
             model=settings.openai_chat_model,
-            base_url=settings.openai_base_url,
+            base_url=connection.base_url,
+            provider=connection.provider,
+            default_headers=connection.headers,
             temperature=0,
         ).with_structured_output(SkillDraft)
 
@@ -1336,11 +1353,14 @@ def continue_command(
     worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
     tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
     settings = settings_cls()
+    from mana_agent.config.inference_provider import resolve_inference_connection
+
+    connection = resolve_inference_connection(settings, require_api_key=False)
     index_dir = default_index_dir(root)
     worker = worker_client_cls(
-        api_key=settings.openai_api_key,
+        api_key=connection.api_key,
         model=settings.openai_chat_model,
-        base_url=settings.openai_base_url,
+        base_url=connection.base_url,
         project_root=root,
         repo_root=root,
     )
@@ -1354,9 +1374,9 @@ def continue_command(
         max_tasks=settings.coding_flow_max_tasks,
     )
     orchestrator = tools_manager_orchestrator_cls(
-        api_key=settings.openai_api_key,
+        api_key=connection.api_key,
         model=settings.openai_chat_model,
-        base_url=settings.openai_base_url,
+        base_url=connection.base_url,
         worker_client=worker,
         repo_root=root,
         executor=LocalToolsExecutor(worker_client=worker),
@@ -1705,10 +1725,14 @@ def _resolve_out_path(user_out: str | None, default: Path, suffix: str) -> Path:
 
 def build_store(settings: Settings) -> FaissStore:
     store_cls = _public_symbol("FaissStore", FaissStore)
+    from mana_agent.config.inference_provider import resolve_inference_connection
+
+    connection = resolve_inference_connection(settings, require_api_key=False)
     embeddings = build_embeddings(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
+        api_key=connection.api_key or None,
+        base_url=connection.base_url or None,
         model=settings.openai_embed_model,
+        provider=connection.provider,
     )
     return store_cls(embeddings=embeddings)
 
@@ -1769,6 +1793,8 @@ def build_ask_service(
         api_key=connection.api_key,
         model=model,
         base_url=connection.base_url,
+        provider=connection.provider,
+        default_headers=connection.headers,
     )
     ask_agent = ask_agent_cls(
         api_key=connection.api_key,
@@ -1777,14 +1803,12 @@ def build_ask_service(
         base_url=connection.base_url,
         project_root=root,
         context_cost_governor=context_cost_governor,
+        provider=connection.provider,
+        default_headers=connection.headers,
     )
     for model_client in (getattr(qna_chain, "llm", None), getattr(ask_agent, "llm", None)):
-        if model_client is not None and hasattr(model_client, "selected_provider"):
-            model_client.selected_provider = connection.provider
         if model_client is not None and hasattr(model_client, "context_cost_governor"):
             model_client.context_cost_governor = context_cost_governor
-    if hasattr(ask_agent, "provider"):
-        ask_agent.provider = connection.provider
     router_kwargs = {"api_key": connection.api_key, "model": router_model, "base_url": connection.base_url, "provider": connection.provider, "default_headers": connection.headers}
     router_llm = create_chat_model(**router_kwargs)
     router_llm.context_cost_governor = context_cost_governor

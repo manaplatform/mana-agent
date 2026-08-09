@@ -10,19 +10,37 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from mana_agent.coding.event_visibility import (
+    EventVisibility,
+    is_user_publishable,
+    progress_event_payload,
+)
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.coding.live_events import publish_coding_event
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
+from mana_agent.integrations.codex.exceptions import CodexCapabilityError
+from mana_agent.integrations.codex.terminal_summary import (
+    build_coding_terminal_answer,
+    terminal_reason_from_result,
+)
 from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
 from mana_agent.evals.recorder import record_current
-from mana_agent.model_routing.models import Complexity, LatencyClass, RiskLevel, RoutingRequest
+from mana_agent.model_routing.models import (
+    Complexity,
+    LatencyClass,
+    RiskLevel,
+    RoutingRequest,
+    provider_request_overrides_from_configuration,
+)
 from mana_agent.multi_agent.runtime.model_levels import routing_budgets_from_settings
 from mana_agent.workspaces.preparation import validate_prepared_repository
+from mana_agent.config.provider_registry import CodexTransport
 
 if TYPE_CHECKING:
     from mana_agent.gateway.routing import GatewayRoutingAuthority
@@ -30,6 +48,29 @@ if TYPE_CHECKING:
 
 BackendFactory = Callable[[], CodexCodingBackend]
 WorkspaceManagerFactory = Callable[[], WorkspaceManager]
+
+
+def _run_async(coro: Any) -> Any:
+    """Run a coroutine from sync code even when a parent event loop is active."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    result: list[Any] = []
+    failure: list[BaseException] = []
+
+    def _collect() -> None:
+        try:
+            result.append(asyncio.run(coro))
+        except BaseException as exc:  # re-raised on the caller thread
+            failure.append(exc)
+
+    thread = threading.Thread(target=_collect, daemon=True)
+    thread.start()
+    thread.join()
+    if failure:
+        raise failure[0]
+    return result[0]
 
 
 class CodexCodingAgentShim:
@@ -168,6 +209,14 @@ class CodexCodingAgentShim:
             "Codex owns coding planning and execution; the legacy tools orchestrator cannot be attached."
         )
 
+    _MUTATION_FAILURE_REASONS = frozenset(
+        {
+            "mutation_required_but_no_mutation_tool_attempted",
+            "mutation_required_but_no_changed_files",
+        }
+    )
+    _MAX_MUTATION_ATTEMPTS = 2  # initial + one recovery
+
     def _execute_turn(
         self,
         request: str,
@@ -175,11 +224,111 @@ class CodexCodingAgentShim:
         requires_repository_write: bool,
         flow_id: Any = None,
         gateway_task_id: Any = None,
+        _mutation_recovery: bool = False,
     ) -> dict[str, Any]:
+        """Run a coding turn with bounded mutation recovery (explicit attempt loop).
+
+        User-facing output is only the validated terminal summary. Raw assistant
+        generation is recorded internally and never published as chat answer.
+        """
         goal = str(request or "").strip()
         if not goal:
             raise ValueError("Codex coding request is required")
         validate_prepared_repository(self.repo_root, self.working_directory)
+
+        original_goal = goal
+        # When called as recovery from the attempt loop, goal already includes
+        # recovery instructions; track the user-facing original separately only
+        # on the public entry path (_mutation_recovery=False).
+        prior_terminal = ""
+        combined_warnings: list[str] = []
+        last_payload: dict[str, Any] | None = None
+
+        max_attempts = (
+            1
+            if _mutation_recovery or not requires_repository_write
+            else self._MAX_MUTATION_ATTEMPTS
+        )
+
+        for attempt_index in range(max_attempts):
+            is_recovery = attempt_index > 0 or _mutation_recovery
+            attempt_goal = goal
+            if attempt_index > 0:
+                attempt_goal = self._mutation_recovery_goal(
+                    original_goal if not _mutation_recovery else goal.split("\n\n[mutation_required recovery]")[0],
+                    prior_terminal,
+                )
+                record_current(
+                    "codex.mutation_recovery.started",
+                    {
+                        "attempt": attempt_index + 1,
+                        "prior_terminal_reason": prior_terminal,
+                    },
+                )
+
+            payload = self._run_single_attempt(
+                attempt_goal,
+                requires_repository_write=requires_repository_write,
+                flow_id=None if is_recovery else flow_id,
+                gateway_task_id=gateway_task_id,
+                is_recovery=is_recovery,
+            )
+            last_payload = payload
+            combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
+            terminal = str(payload.get("auto_execute_terminal_reason") or "").strip()
+            if not requires_repository_write:
+                break
+            if terminal not in self._MUTATION_FAILURE_REASONS:
+                break
+            if attempt_index + 1 >= max_attempts:
+                break
+            prior_terminal = terminal
+            if is_recovery or attempt_index > 0:
+                # Already consumed recovery budget.
+                break
+
+        assert last_payload is not None
+        if prior_terminal:
+            last_payload = dict(last_payload)
+            last_payload["mutation_recovery"] = True
+            last_payload["prior_terminal_reason"] = prior_terminal
+            last_payload["warnings"] = [
+                *combined_warnings,
+                f"mutation_recovery_after:{prior_terminal}",
+            ]
+        else:
+            last_payload = dict(last_payload)
+            if combined_warnings:
+                last_payload["warnings"] = list(dict.fromkeys(combined_warnings))
+        return last_payload
+
+    def _mutation_recovery_goal(self, goal: str, terminal: str) -> str:
+        return (
+            f"{goal}\n\n"
+            "[mutation_required recovery]\n"
+            f"Prior turn terminal reason: {terminal}.\n"
+            "You inspected or discussed the issue but left the worktree unchanged.\n"
+            "You MUST apply the production-source fix now with a repository mutation "
+            "tool registered for this turn. Do not finish with analysis, "
+            "questions, chat text, or free-form DSML/think markup only. Success "
+            "requires uncommitted edits under the repository root.\n"
+            "Do not re-import or run the uninstalled package to reproduce the bug; "
+            "source checkouts may be non-importable. Do not spend the recovery turn "
+            "re-searching tests or CHANGELOG unless required to locate the production "
+            "file. Read the relevant production file(s) if needed, then mutate them "
+            "immediately. Prefer the fewest structured tool calls that complete the "
+            "edit."
+        )
+
+    def _run_single_attempt(
+        self,
+        goal: str,
+        *,
+        requires_repository_write: bool,
+        flow_id: Any = None,
+        gateway_task_id: Any = None,
+        is_recovery: bool = False,
+    ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
         # connector must not manufacture a second task identity after routing:
         # context-cost admission, transactional ownership, live events, and
@@ -218,6 +367,13 @@ class CodexCodingAgentShim:
             self.routing_authority.settings,
             provider=routing_decision.provider,
         )
+        # model_configuration mixes routing metadata (source_levels, …) with
+        # optional request fields. Only provider-safe request fields may become
+        # bridge overrides — NVIDIA rejects unknown body parameters with HTTP 400.
+        request_overrides = provider_request_overrides_from_configuration(
+            getattr(routing_decision, "model_configuration", None),
+            for_http_body=True,
+        )
         self.codex_settings = self.codex_settings.model_copy(
             update={
                 "model": routing_decision.selected_model,
@@ -229,7 +385,15 @@ class CodexCodingAgentShim:
                 "env_http_headers": routed_settings.env_http_headers,
                 "query_params": routed_settings.query_params,
                 "supports_responses_api": routed_settings.supports_responses_api,
+                "codex_transport": routed_settings.codex_transport,
+                "model_request_overrides": request_overrides,
             }
+        )
+        self._validate_write_transport_capability(
+            requires_repository_write=requires_repository_write,
+            model=str(self.codex_settings.model or ""),
+            provider=str(self.codex_settings.provider or ""),
+            transport=self.codex_settings.codex_transport,
         )
         record_current(
             "codex.turn.started",
@@ -241,26 +405,50 @@ class CodexCodingAgentShim:
                 "repository_identity": str(self.repo_root),
                 "routing_decision_id": routing_decision.decision_id,
                 "routing_mode": routing_decision.routing_mode.value,
+                "is_recovery": is_recovery,
             },
         )
+        if requires_repository_write and is_recovery:
+            requirements = [
+                "Apply the required production-source mutation now with a tool "
+                "registered for this turn.",
+                "Do not finish with analysis, questions, or shell-only inspection.",
+                "Minimal reads are allowed only when a concrete production file path "
+                "is still unknown; then mutate immediately.",
+                "Never invent free-form tool markup, DSML, HTML, or fake patch text; "
+                "use only structured tools registered for this turn.",
+            ]
+        elif requires_repository_write:
+            requirements = [
+                "Own the complete coding decision: inspect, plan, implement, and verify.",
+                "When the requested change is concrete (named files, version, or "
+                "behavior), mutate it with a registered structured tool; do not stop "
+                "after inspection.",
+                "Ask for clarification only when repository evidence cannot identify "
+                "the target file or the requested change.",
+                "Never invent free-form tool markup, DSML, HTML, or fake patch text; "
+                "use only structured tools registered for this turn.",
+            ]
+        else:
+            requirements = [
+                "Inspect the repository and produce a decision-complete plan.",
+                "Do not modify repository files.",
+            ]
         task = CodingTask(
             task_id=task_id,
             goal=goal,
-            requirements=(
-                [
-                    "Own the complete coding decision: inspect, plan, implement, and verify.",
-                    "Do not invent repository changes when the requested outcome is underspecified.",
-                    "Ask for required clarification instead of applying an arbitrary edit.",
-                ]
-                if requires_repository_write
-                else [
-                    "Inspect the repository and produce a decision-complete plan.",
-                    "Do not modify repository files.",
-                ]
-            ),
+            requirements=requirements,
             acceptance_criteria=[
                 "The response directly satisfies the user's stated goal.",
                 "All claims and changes are grounded in current repository evidence.",
+                *(
+                    [
+                        "Write-required turns must leave uncommitted production-source "
+                        "edits under the repository/worktree root.",
+                    ]
+                    if requires_repository_write
+                    else []
+                ),
             ],
             relevant_context=(
                 "This is the authoritative Codex turn. There is no separate Mana coding planner "
@@ -323,13 +511,16 @@ class CodexCodingAgentShim:
             try:
                 async for event in backend.stream(task, workspace):
                     events.append(event)
-                    self._emit_event(event)
+                    self._emit_event(
+                        event,
+                        requires_repository_write=requires_repository_write,
+                    )
                 return backend.result_for(task_id)
             finally:
                 await backend.close()
 
         try:
-            result = asyncio.run(run())
+            result = _run_async(run())
         except Exception as exc:
             record_current("codex.turn.failed", {"task_id": task_id, "error_type": type(exc).__name__, "error": str(exc)})
             if manager is not None:
@@ -363,13 +554,68 @@ class CodexCodingAgentShim:
             result,
             events=events,
             workspace_path=(str(workspace.worktree_path) if requires_repository_write else ""),
+            requires_repository_write=requires_repository_write,
         )
         selected_flow_id = str(result.thread_id or flow_id or task_id).strip()
         payload["flow_id"] = selected_flow_id
         self._active_flow_id = selected_flow_id
         self._flow_results[selected_flow_id] = dict(payload)
-        record_current("codex.turn.finished", {"task_id": task_id, "result": result.model_dump(mode="json"), "workspace_path": str(workspace.worktree_path)})
+        record_current(
+            "codex.turn.finished",
+            {
+                "task_id": task_id,
+                "result": result.model_dump(mode="json"),
+                "workspace_path": str(workspace.worktree_path),
+                "user_answer": payload.get("answer"),
+            },
+        )
+        # Emit a single terminal user-facing event (never mid-turn drafts).
+        self._emit_terminal_result(payload, task_id=task_id, model=str(self.codex_settings.model or ""))
         return payload
+
+    def _validate_write_transport_capability(
+        self,
+        *,
+        requires_repository_write: bool,
+        model: str,
+        provider: str,
+        transport: CodexTransport | Any,
+    ) -> None:
+        """Fail write jobs when the selected stack cannot represent tool/mutation work."""
+        if not requires_repository_write:
+            return
+        transport_value = getattr(transport, "value", str(transport or ""))
+        if transport is CodexTransport.UNSUPPORTED or transport_value in {"", "unsupported"}:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: selected provider has no supported "
+                f"Codex transport (provider={provider!r}, model={model!r}). "
+                "No fallback coding backend was executed."
+            )
+        # Catalog capability after routing. When Mana knows the model and it
+        # lacks tool_calling, refuse the write. Unknown models fail closed for
+        # write turns (no silent degraded path). Bridge conversion still
+        # fail-fasts if Codex tools cannot be represented mid-request.
+        try:
+            from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
+
+            caps = normalize_capabilities(provider, model)
+        except Exception as exc:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model capability metadata is unavailable. "
+                f"provider={provider!r} model={model!r}. No fallback was executed."
+            ) from exc
+        if not caps:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model capabilities are unknown "
+                f"(provider={provider!r}, model={model!r}, transport={transport_value!r}). "
+                "Refusing to claim write/tool support without explicit capability metadata."
+            )
+        if ModelCapability.TOOL_CALLING not in caps:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model does not declare tool_calling "
+                f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
+                "No silent degraded write path was started."
+            )
 
     def _repository_has_head(self) -> bool:
         completed = subprocess.run(
@@ -381,8 +627,106 @@ class CodexCodingAgentShim:
         )
         return completed.returncode == 0
 
-    def _emit_event(self, event: AgentEvent) -> None:
-        record_current(event.event_type, event.model_dump(mode="json"))
+    def _emit_event(
+        self,
+        event: AgentEvent,
+        *,
+        requires_repository_write: bool = True,
+    ) -> None:
+        """Record every event internally; publish only safe progress to user surfaces.
+
+        There is no path from assistant.delta / model drafts to chat. Visibility
+        is determined by event_type / semantic_kind, not text content.
+        """
+        _ = requires_repository_write  # reserved for phase-aware policies
+        full = event.model_dump(mode="json")
+        # Internal observability always keeps full fidelity (including drafts).
+        record_current(event.event_type, full)
+
+        visibility = str(event.visibility or EventVisibility.INTERNAL.value)
+        if not is_user_publishable(visibility):
+            # Do not publish assistant generation / reasoning / raw dumps to chat UI.
+            return
+
+        safe = progress_event_payload(event)
+        # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
+        progress = AgentEvent(
+            event_id=str(safe.get("event_id") or event.event_id),
+            event_type=str(safe.get("event_type") or event.event_type),
+            task_id=event.task_id,
+            backend=event.backend,
+            sequence=event.sequence,
+            status=event.status,
+            title=str(safe.get("title") or ""),
+            summary=str(safe.get("summary") or ""),
+            thread_id=event.thread_id,
+            turn_id=event.turn_id,
+            tool_name=str(safe.get("tool_name") or ""),
+            command=str(safe.get("command") or ""),
+            path=str(safe.get("path") or ""),
+            duration_ms=event.duration_ms,
+            token_usage=event.token_usage,
+            model=event.model,
+            error=str(safe.get("error") or ""),
+            output_preview="",
+            visibility="progress",
+            semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
+            payload={},
+        )
+        publish_coding_event(progress)
+        if self.session_id and self.repository_id:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            get_execution_event_hub().publish(
+                {
+                    **progress.model_dump(mode="json"),
+                    "type": progress.event_type,
+                    "event_id": progress.event_id,
+                    "metadata": {
+                        "visibility": progress.visibility,
+                        "semantic_kind": progress.semantic_kind,
+                    },
+                },
+                conversation_id=self.session_id,
+                execution_id=event.task_id,
+                repository_id=self.repository_id,
+            )
+        if self.event_sink is None:
+            return
+        payload = progress.model_dump(mode="json")
+        try:
+            self.event_sink(progress.event_type, payload)
+        except TypeError:
+            self.event_sink(payload)
+
+    def _emit_terminal_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        task_id: str,
+        model: str,
+    ) -> None:
+        """Publish one validated terminal coding result to user-facing surfaces."""
+        answer = str(payload.get("answer") or "").strip()
+        status = str(payload.get("status") or "failed")
+        event = AgentEvent(
+            event_type="coding.terminal",
+            task_id=task_id,
+            backend="codex",
+            sequence=10_000,
+            status="success" if status == "completed" else "failed" if status == "failed" else "cancelled",
+            title="Coding result",
+            summary=answer[:1000],
+            model=model,
+            visibility="terminal",
+            semantic_kind="lifecycle",
+            payload={
+                "auto_execute_terminal_reason": payload.get("auto_execute_terminal_reason"),
+                "changed_files": list(payload.get("changed_files") or []),
+                "status": status,
+            },
+        )
+        record_current("coding.terminal", event.model_dump(mode="json"))
         publish_coding_event(event)
         if self.session_id and self.repository_id:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
@@ -392,19 +736,21 @@ class CodexCodingAgentShim:
                     **event.model_dump(mode="json"),
                     "type": event.event_type,
                     "event_id": event.event_id,
-                    "metadata": event.payload,
+                    "metadata": {
+                        "visibility": event.visibility,
+                        "semantic_kind": event.semantic_kind,
+                    },
                 },
                 conversation_id=self.session_id,
-                execution_id=event.task_id,
+                execution_id=task_id,
                 repository_id=self.repository_id,
             )
-        if self.event_sink is None:
-            return
-        payload = event.model_dump(mode="json")
-        try:
-            self.event_sink(event.event_type, payload)
-        except TypeError:
-            self.event_sink(payload)
+        if self.event_sink is not None:
+            data = event.model_dump(mode="json")
+            try:
+                self.event_sink(event.event_type, data)
+            except TypeError:
+                self.event_sink(data)
 
     @staticmethod
     def _result_payload(
@@ -412,15 +758,14 @@ class CodexCodingAgentShim:
         *,
         events: list[AgentEvent],
         workspace_path: str,
+        requires_repository_write: bool = True,
     ) -> dict[str, Any]:
-        terminal_reason = {
-            "completed": "completed",
-            "failed": "codex_failed",
-            "cancelled": "codex_cancelled",
-        }[result.status]
-        answer = result.summary
-        if result.status == "failed" and result.errors:
-            answer = f"{result.summary} Reason: {result.errors[0]}".strip()
+        terminal_reason = terminal_reason_from_result(result)
+        answer = build_coding_terminal_answer(
+            result,
+            requires_repository_write=requires_repository_write,
+            terminal_reason=terminal_reason,
+        )
         return {
             "answer": answer,
             "backend": result.backend,
@@ -437,6 +782,7 @@ class CodexCodingAgentShim:
             "turn_id": result.turn_id,
             "branch_name": result.branch_name,
             "workspace_path": workspace_path,
+            # Full internal trace (includes assistant.delta for debugging).
             "trace": [event.model_dump(mode="json") for event in events],
             "actions_taken": [event.model_dump(mode="json") for event in events],
             "token_usage": result.token_usage,

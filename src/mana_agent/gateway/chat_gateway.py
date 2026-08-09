@@ -4849,6 +4849,15 @@ class AgentChatGateway:
         state: dict[str, Any],
         memory_warning: str = "",
     ) -> ChatTurnResult:
+        # Preserve a caller-set entry_route (from EntryRoutingDecision). process_chat_turn
+        # may overwrite payload["route"] with internal paths like "auto_chat"; eval scoring
+        # and lane bookkeeping must still see the validated entry route (repository, coding, …).
+        existing_entry_route = str((result.payload or {}).get("entry_route") or "").strip()
+        fallback_route = str(
+            (result.payload or {}).get("route")
+            or state.get("active_route")
+            or "unsupported"
+        )
         result.payload.update(
             {
                 "session_id": session_id,
@@ -4859,11 +4868,7 @@ class AgentChatGateway:
                     or result.payload.get("lane_task_id")
                     or ""
                 ),
-                "entry_route": str(
-                    (result.payload or {}).get("route")
-                    or state.get("active_route")
-                    or "unsupported"
-                ),
+                "entry_route": existing_entry_route or fallback_route,
             }
         )
         execution_id = str(result.payload.get("execution_id") or "")
@@ -6372,7 +6377,7 @@ class AgentChatGateway:
                 error="unsupported_route",
                 mode="route-unsupported",
                 decision=decision,
-                payload={"route": decision.route},
+                payload={"route": decision.route, "entry_route": decision.route},
             )
         if decision.route == "mcp":
             return self._execute_mcp_route(
@@ -6408,7 +6413,7 @@ class AgentChatGateway:
                 answer=str(answer or "").strip(),
                 mode="route-conversation",
                 decision=decision,
-                payload={"route": decision.route},
+                payload={"route": decision.route, "entry_route": decision.route},
             )
         if decision.route == "memory":
             return self._execute_memory_route(
@@ -6947,6 +6952,11 @@ class AgentChatGateway:
         if lane_task_id and decision.route != "artifact":
             for tool_name in mapped.selected_tools:
                 self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
+        from mana_agent.config.settings import default_index_dir
+
+        resolved_index = options.get("index_dir", self._index_dir) or default_index_dir(
+            self.root
+        )
         result = process_chat_turn(
             root=self.root,
             text=text,
@@ -6958,7 +6968,7 @@ class AgentChatGateway:
             coding_agent_is_custom=self._coding_agent_is_custom,
             resolved_k=self._resolved_k,
             coding_agent_max_steps=self._coding_agent_max_steps,
-            index_dir=options.get("index_dir", self._index_dir),
+            index_dir=resolved_index,
             index_dirs=options.get("index_dirs", self._index_dirs or None),
             event_sink=sink,
             callbacks=options.get("callbacks"),
@@ -6966,6 +6976,9 @@ class AgentChatGateway:
             coding_workspace_preparer=self._prepare_coding_workspace,
             gateway_task_id=lane_task_id,
         )
+        # Keep the entry-routing decision distinct from the internal execution path
+        # (process_chat_turn sets payload.route to "auto_chat" / coding modes).
+        result.payload["entry_route"] = decision.route
         result.payload.setdefault("route", decision.route)
         return result
 
@@ -7493,6 +7506,7 @@ class AgentChatGateway:
                     trace=trace,
                     payload={
                         "route": decision.route,
+                        "entry_route": decision.route,
                         "required_sources": list(decision.required_sources),
                         "route_status": "failed",
                         "executions": executions,
@@ -7505,6 +7519,7 @@ class AgentChatGateway:
             trace=trace,
             payload={
                 "route": decision.route,
+                "entry_route": decision.route,
                 "required_sources": list(decision.required_sources),
                 "target_urls": list(decision.target_urls),
                 "route_status": "success",
@@ -7523,12 +7538,13 @@ class AgentChatGateway:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
             raise RuntimeError("browser execution agent is unavailable")
+        from mana_agent.config.settings import default_index_dir
         from mana_agent.connectors.browser.contracts import browser_tool_contracts
         from mana_agent.multi_agent.runtime.prompts import BROWSER_AGENT_SYSTEM_PROMPT
 
         response = ask_agent.run(
             question=f"{text}\n\nDirect URLs selected by the routing model: {', '.join(target_urls)}",
-            index_dir=self._index_dir,
+            index_dir=self._index_dir or default_index_dir(self.root),
             k=self._resolved_k,
             max_steps=max(12, int(self.config.agent_max_steps or 6)),
             callbacks=callbacks,
@@ -7552,9 +7568,11 @@ class AgentChatGateway:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
             raise RuntimeError("repository execution agent is unavailable")
+        from mana_agent.config.settings import default_index_dir
+
         response = ask_agent.run(
             question=text,
-            index_dir=self._index_dir,
+            index_dir=self._index_dir or default_index_dir(self.root),
             k=self._resolved_k,
             max_steps=max(6, int(self.config.agent_max_steps or 6)),
             callbacks=callbacks,

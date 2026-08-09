@@ -37,6 +37,9 @@ class _BrowserDecisionModel:
                         "repo_context_needed": False,
                         "web_search_needed": False,
                         "code_editing_needed": False,
+                        "requested_effect": "external_action",
+                        "target_surface": "browser",
+                        "required_subagents": [],
                         "reasoning_summary": "The task requires an interactive website session.",
                     }
                 )
@@ -55,7 +58,8 @@ class _CorrectingBrowserDecisionModel:
                 "intent": "web_research", "confidence": 0.8,
                 "selected_tools": ["web_search"], "tool_inputs": {"web_search": {"query": "site"}},
                 "repo_context_needed": False, "web_search_needed": True,
-                "code_editing_needed": False, "reasoning_summary": "initial proposal",
+                "code_editing_needed": False, "requested_effect": "read",
+                "target_surface": "web", "required_subagents": [], "reasoning_summary": "initial proposal",
             }
             if self.calls == 1
             else {
@@ -63,7 +67,8 @@ class _CorrectingBrowserDecisionModel:
                 "selected_tools": ["browser_open", "browser_inspect"],
                 "tool_inputs": {"browser_open": {"url": "https://example.test"}},
                 "repo_context_needed": False, "web_search_needed": False,
-                "code_editing_needed": False, "reasoning_summary": "review corrected rendered-page inspection",
+                "code_editing_needed": False, "requested_effect": "external_action",
+                "target_surface": "browser", "required_subagents": [], "reasoning_summary": "review corrected rendered-page inspection",
             }
         )
         return type("Message", (), {"content": json.dumps(decision)})()

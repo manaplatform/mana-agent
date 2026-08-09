@@ -27,8 +27,14 @@ accept_with_overrun only when the supplied result evidence says completion
 verification passed. Choose require_review when evidence is incomplete, uncertain,
 or needs an operator. Choose retry_or_replan only with a complete nested recovery
 decision and only when the supplied recovery allocation is explicitly available.
-Every identifier and evidence hash must be copied exactly from the input. Mark the
-decision safe_to_continue only when the selected action is safe under these rules.
+Every identifier and evidence hash must be copied exactly from the input.
+
+safe_to_continue must be true for every valid decision object. It means this
+finalization decision itself is authorized to apply — not that the original task
+should keep spending budget automatically. require_review is a valid finalization
+(hand off to human review) and still requires safe_to_continue=true.
+accept_with_overrun also requires safe_to_continue=true. retry_or_replan requires
+safe_to_continue=true on both the outer decision and the nested recovery decision.
 """
 
 

@@ -64,6 +64,61 @@ class ModelDescriptor:
         return ModelCapability.TEXT_GENERATION in self.capabilities
 
 
+# Known provider context windows used when catalog endpoints omit token limits.
+# Values are capability facts for accounting; they do not select models.
+# (context_window, max_output_tokens)
+_MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
+    "gpt-4.1": (1_047_576, 32_768),
+    "gpt-4.1-mini": (1_047_576, 32_768),
+    "gpt-4.1-nano": (1_047_576, 32_768),
+    "gpt-4o": (128_000, 16_384),
+    "gpt-4o-mini": (128_000, 16_384),
+    "gpt-5": (400_000, 128_000),
+    "gpt-5-mini": (400_000, 128_000),
+    "gpt-5-nano": (400_000, 128_000),
+    "gpt-5.1": (400_000, 128_000),
+    "gpt-5.2": (400_000, 128_000),
+    "gpt-5.4": (400_000, 128_000),
+    "gpt-5.5": (400_000, 128_000),
+    "gpt-5.6-luna": (400_000, 128_000),
+    "gpt-5.6-sol": (400_000, 128_000),
+    "gpt-5.6-terra": (400_000, 128_000),
+    "o3": (200_000, 100_000),
+    "o3-mini": (200_000, 100_000),
+    "o4-mini": (200_000, 100_000),
+    # NVIDIA NIM / integrate.api DeepSeek V4 (1M context; max_tokens soft cap 65_536).
+    "deepseek-ai/deepseek-v4-flash": (1_000_000, 65_536),
+    "deepseek-ai/deepseek-v4-pro": (1_000_000, 65_536),
+}
+
+
+def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | None:
+    """Return maintained (context_window, max_output_tokens) when known."""
+    model = str(model_id or "").strip()
+    if not model:
+        return None
+    direct = _MAINTAINED_TOKEN_LIMITS.get(model)
+    if direct is not None:
+        return direct
+    # Family prefixes (e.g. gpt-5.4-mini-2026-03-17) inherit parent limits.
+    lowered = model.casefold()
+    for key, limits in _MAINTAINED_TOKEN_LIMITS.items():
+        if lowered.startswith(key.casefold()):
+            return limits
+    provider_id = str(provider or "").strip().casefold()
+    if provider_id == "openai" and lowered.startswith("gpt-5"):
+        return (400_000, 128_000)
+    if provider_id == "openai" and lowered.startswith("gpt-4.1"):
+        return (1_047_576, 32_768)
+    if provider_id == "openai" and lowered.startswith("gpt-4o"):
+        return (128_000, 16_384)
+    if "deepseek-v4-flash" in lowered or "deepseek-v4-pro" in lowered:
+        return (1_000_000, 65_536)
+    if provider_id == "nvidia" and "deepseek" in lowered:
+        return (1_000_000, 65_536)
+    return None
+
+
 # Maintained metadata takes precedence over the isolated provider-name
 # normalizer below. Entries are intentionally capability-focused, not a claim
 # that every model is available to every account.
@@ -75,6 +130,33 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "text-embedding-3-small": frozenset({ModelCapability.EMBEDDING}),
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),
+    "nvidia/llama-3.2-nv-embedqa-1b-v2": frozenset({ModelCapability.EMBEDDING}),
+    # Known NVIDIA Build / NIM text models used as agent baselines. Tool
+    # calling is OpenAI-compatible on these hosted models; unknown catalog
+    # entries remain unclassified until Advanced/manual selection.
+    "deepseek-ai/deepseek-v4-flash": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "deepseek-ai/deepseek-v4-pro": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "nvidia/nemotron-3-nano-30b-a3b": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
     "gpt-image-1": frozenset({ModelCapability.IMAGE_GENERATION}),
     "gpt-image-1-mini": frozenset({ModelCapability.IMAGE_GENERATION}),
     "dall-e-2": frozenset({ModelCapability.IMAGE_GENERATION}),
@@ -121,18 +203,59 @@ def normalize_capabilities(
     model = str(model_id or "").strip()
     if model in _MAINTAINED:
         return _MAINTAINED[model]
+    # Dated / build-suffixed ids (e.g. deepseek-ai/deepseek-v4-flash-0731)
+    # inherit the maintained family entry when they share the same prefix.
     lowered = model.lower()
+    for key, caps in _MAINTAINED.items():
+        key_l = key.lower()
+        if lowered.startswith(key_l) and (
+            len(lowered) == len(key_l) or lowered[len(key_l)] in "-._/"
+        ):
+            return caps
     for capability, markers in _NON_TEXT_MARKERS:
         if any(marker in lowered for marker in markers):
             return frozenset({capability})
     provider_id = str(provider or "").strip().lower()
+    # Conservative name-based text detection only. Do not invent tool-calling
+    # or reasoning capability solely because a model is an LLM; unknown models
+    # remain unclassified and stay usable via Advanced/manual entry.
     text_family = (
         provider_id == "openai" and lowered.startswith(("gpt-", "o1", "o3", "o4"))
     ) or (
-        provider_id == "nvidia" and any(marker in lowered for marker in ("llama", "nemotron", "mistral", "qwen", "deepseek"))
+        provider_id == "nvidia"
+        and any(
+            marker in lowered
+            for marker in (
+                "llama",
+                "nemotron",
+                "mistral",
+                "mixtral",
+                "qwen",
+                "deepseek",
+                "kimi",
+                "moonshot",
+                "gemma",
+                "phi-",
+                "codellama",
+                "yi-",
+            )
+        )
     )
     if text_family:
-        return frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+        if provider_id == "openai":
+            return frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+        # NVIDIA DeepSeek V4 family is agent-capable with tools on NIM even when
+        # the exact build suffix is not listed in _MAINTAINED.
+        if provider_id == "nvidia" and "deepseek" in lowered:
+            return frozenset(
+                {
+                    ModelCapability.TEXT_GENERATION,
+                    ModelCapability.REASONING,
+                    ModelCapability.CODE,
+                    ModelCapability.TOOL_CALLING,
+                }
+            )
+        return frozenset({ModelCapability.TEXT_GENERATION})
     return frozenset()
 
 
@@ -158,6 +281,11 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
             max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else None
         except (TypeError, ValueError):
             max_output_tokens = None
+        if context_window is None or max_output_tokens is None:
+            maintained = maintained_token_limits(provider, model_id)
+            if maintained is not None:
+                context_window = context_window or maintained[0]
+                max_output_tokens = max_output_tokens or maintained[1]
         result.append(ModelDescriptor(
             provider=provider,
             id=model_id,

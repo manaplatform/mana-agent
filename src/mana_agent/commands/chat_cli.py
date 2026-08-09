@@ -47,6 +47,14 @@ from mana_agent.skills.chat import ChatSkillCoordinator
 from mana_agent.connectors.browser.session import BrowserSessionManager
 from mana_agent.gateway import AgentChatGateway, ChatGatewayConfig
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
+
+
+def _normalize_chat_timeout(agent_timeout_seconds: int) -> int:
+    """Honor large/explicit agent timeouts; never hard-cap at 600s."""
+    return normalize_agent_timeout_seconds(
+        agent_timeout_seconds, floor=60, default=600
+    )
 
 
 _NEW_TOPIC_COMMANDS = {"/new", "/new-topic", "new topic", "new topic chat"}
@@ -904,7 +912,11 @@ def chat(
     if stack.tools_execution_config is not None:
         tools_execution_config = stack.tools_execution_config
     tools_execution_boot_warnings = list(stack.tools_execution_boot_warnings or [])
-    effective_base_url = settings.openai_base_url
+    from mana_agent.config.inference_provider import resolve_inference_connection
+
+    inference_connection = resolve_inference_connection(settings, require_api_key=False)
+    effective_base_url = inference_connection.base_url
+    effective_api_key = inference_connection.api_key
     tool_worker_model_assignment = resolve_model_for_role(
         AgentRole.TOOL_WORKER,
         global_model=settings.openai_tool_worker_model or effective_model,
@@ -919,7 +931,7 @@ def chat(
     )
     chat_ui_state = ChatUIState(
         repo_root=root,
-        provider="openai-compatible",
+        provider=inference_connection.provider or "openai-compatible",
         model=effective_model,
         mode="chat",
         tools_enabled=bool(agent_tools),
@@ -1368,7 +1380,7 @@ def chat(
             if tool_worker_client is None:
                 tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
                 tool_worker_client = tool_worker_client_cls(
-                    api_key=settings.openai_api_key,
+                    api_key=effective_api_key,
                     model=effective_tool_worker_model,
                     base_url=effective_base_url,
                     repo_root=root,
@@ -1393,7 +1405,7 @@ def chat(
                 tools_executor_instance = _build_tools_executor(tool_worker_client)
             tools_manager_orchestrator_cls = _public_symbol("QueueManager", QueueManager)
             tools_manager_orchestrator = tools_manager_orchestrator_cls(
-                api_key=settings.openai_api_key,
+                api_key=effective_api_key,
                 model=effective_model,
                 base_url=effective_base_url,
                 worker_client=tool_worker_client,
@@ -1984,6 +1996,14 @@ def chat(
                 logger.debug("Failed to save auto-chat state: %s", exc)
 
         queued_questions = [prompt] if prompt else []
+        # Non-TTY single-shot: when chat is launched with an initial prompt and
+        # no interactive terminal (CI, pipes, SWE-bench runner), process that
+        # turn (and any model-queued follow-ups) then exit. Do not block forever
+        # waiting for further stdin once the queue is empty.
+        single_shot_noninteractive = bool(prompt) and not _is_interactive_terminal()
+        # Write-required coding failures must not exit 0 for harnesses that treat
+        # returncode as success (SWE-bench empty_patch previously looked like ok).
+        single_shot_exit_code = 0
 
         # TUI for interactive terminals (the enhanced experience).
         # For non-TTY (tests/CliRunner, pipes, CI, or explicit --no-tui) fall back
@@ -1996,8 +2016,8 @@ def chat(
             reset_global_history()
 
             effective_model_for_tui = model or getattr(settings, "openai_chat_model", None)
-            api_key = getattr(settings, "openai_api_key", None)
-            base_url = getattr(settings, "openai_base_url", None)
+            api_key = effective_api_key or None
+            base_url = effective_base_url or None
 
             # Gateway already owns the stack (built at chat start). TUI connects
             # through the gateway and also receives rich objects for tool-card UI.
@@ -2030,6 +2050,12 @@ def chat(
                 if queued_questions:
                     question = queued_questions.pop(0)
                     console.print(f"[bold cyan]mana ❯[/bold cyan] {question}")
+                elif single_shot_noninteractive:
+                    logger.info(
+                        "Single-shot non-interactive chat complete; exiting without further input"
+                    )
+                    console.print("\nExiting chat (single-shot).")
+                    break
                 else:
                     question = _read_chat_input(
                         console,
@@ -2412,6 +2438,14 @@ def chat(
                 ),
                 event_type="RoutingStarted",
             )
+            if not agent_decision.verifier_passed:
+                console.print(
+                    "[red]Model decision failed: routing verification.[/red] "
+                    "No route or tool action was executed. Reason: "
+                    + agent_decision.verifier_summary
+                )
+                _finish_ui_turn(current_turn_id)
+                continue
             if (
                 active_flow_id
                 and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)
@@ -2615,7 +2649,7 @@ def chat(
                                 index_dir=selected_index,
                                 k=resolved_k,
                                 max_steps=max(12, len(available_browser_tools) + 4),
-                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                 tool_policy={
                                     "allowed_tools": available_browser_tools,
                                     "disable_external_search": True,
@@ -3291,7 +3325,7 @@ def chat(
                                     index_dirs=index_dirs,
                                     k=resolved_k,
                                     max_steps=coding_agent_max_steps,
-                                    timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                    timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                     pass_cap=auto_execute_max_passes,
                                     callbacks=callbacks,
                                     flow_id=active_flow_id,
@@ -3313,7 +3347,7 @@ def chat(
                                 index_dirs=index_dirs,
                                 k=resolved_k,
                                 max_steps=coding_agent_max_steps,
-                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                 callbacks=callbacks,
                                 flow_id=active_flow_id,
                                 auto_chat_mode=auto_chat_mode.value,
@@ -3328,7 +3362,7 @@ def chat(
                                     index_dir=resolved_index_dir,
                                     k=resolved_k,
                                     max_steps=coding_agent_max_steps,
-                                    timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                    timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                     pass_cap=auto_execute_max_passes,
                                     callbacks=callbacks,
                                     flow_id=active_flow_id,
@@ -3350,7 +3384,7 @@ def chat(
                                 index_dir=resolved_index_dir,
                                 k=resolved_k,
                                 max_steps=coding_agent_max_steps,
-                                timeout_seconds=min(max(agent_timeout_seconds, 60), 600),
+                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
                                 callbacks=callbacks,
                                 flow_id=active_flow_id,
                                 auto_chat_mode=auto_chat_mode.value,
@@ -3746,6 +3780,28 @@ def chat(
                 # Optional: if you want quick diff visibility without full diff spam:
                 # console.print("\n[dim]Tip: run with your own :diff command if you add history later.[/dim]")
 
+                terminal_for_exit = (
+                    str((result or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
+                    if isinstance(result, dict)
+                    else ""
+                )
+                run_status_for_exit = (
+                    str(
+                        (result or {}).get("run_status")
+                        or (result or {}).get("status")
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                    if isinstance(result, dict)
+                    else ""
+                )
+                if single_shot_noninteractive and (
+                    terminal_for_exit.startswith("mutation_required_but_")
+                    or run_status_for_exit in {"failed", "blocked", "error"}
+                    or terminal_for_exit in {"codex_failed", "codex_cancelled"}
+                ):
+                    single_shot_exit_code = 1
                 chat_ui_state.record_event(
                     make_event(
                         "agent.decision",
@@ -3774,3 +3830,5 @@ def chat(
             tmp_root.cleanup()
         if tmp_base is not None:
             tmp_base.cleanup()
+    if single_shot_noninteractive and single_shot_exit_code:
+        raise typer.Exit(code=int(single_shot_exit_code))
