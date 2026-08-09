@@ -68,42 +68,41 @@ def reject_unsafe_path_text(raw: str) -> str:
 
 
 def resolve_user_path(raw: str) -> Path:
-    """Expand and resolve a user path after rejecting null bytes."""
+    """Canonicalize an untrusted path; fail closed if resolution fails."""
     text = reject_unsafe_path_text(raw)
     try:
-        return safe_resolve(text)
-    except OSError as exc:
+        return Path(text).expanduser().resolve(strict=False)
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
         raise ValueError("Invalid path.") from exc
 
-
 def safe_resolve(path: str | Path, *, strict: bool = False) -> Path:
-    """Resolve *path* without crashing when the process CWD is unusable.
+    """Best-effort resolution for trusted/internal paths.
 
-    On Windows, ``ntpath.realpath`` (used by ``Path.resolve``) always calls
-    ``os.getcwd()`` even for absolute paths. When the CWD was deleted—or tests
-    simulate that by making ``getcwd`` raise—every ``resolve()`` fails.
+    This helper is for runtime resilience when the process CWD is unusable.
 
-    Prefer a real resolve when possible. If it fails and the path is already
-    absolute, return a normalized absolute path. Relative paths that cannot be
-    made absolute without a working CWD are returned normalized as-is.
+    SECURITY:
+    Do not use this function to validate user-controlled filesystem paths.
+    Untrusted paths must go through resolve_within_allowed_roots(), which
+    canonicalizes and checks confinement without the normpath fallback.
     """
-    # We use a suppression comment here because safe_resolve is a general-purpose
-    # utility that resolves paths before they are validated by callers (e.g. via
-    # resolve_within_allowed_roots). CodeQL flags this as an uncontrolled path
-    # injection, but the confinement is intentionally enforced later in the flow.
-    # codeql[py/path-injection]
     candidate = Path(path).expanduser()
+
     try:
         return candidate.resolve(strict=strict)
     except (FileNotFoundError, OSError, RuntimeError):
         if candidate.is_absolute():
             return Path(os.path.normpath(candidate))
+
         try:
             cwd = os.getcwd()
         except (FileNotFoundError, OSError):
             return Path(os.path.normpath(candidate))
-        return Path(os.path.normpath(os.path.join(cwd, str(candidate))))
 
+        return Path(
+            os.path.normpath(
+                os.path.join(cwd, str(candidate))
+            )
+        )
 
 def safe_cwd(*, fallback: str | Path | None = None) -> Path:
     """Return the process CWD, or a stable fallback when it was deleted.
@@ -157,21 +156,33 @@ def resolve_within_allowed_roots(
     *,
     require_allowlist: bool = True,
 ) -> Path:
-    """Resolve raw and require it to sit under one of the allowed roots.
-
-    When ``require_allowlist`` is True and allowed_roots is empty, raise.
-    When False and allowed_roots is empty, return the resolved path only after
-    basic validation (used for single-user local dashboard paths that are
-    further constrained by callers).
-    """
+    """Resolve an untrusted path and confine it to explicit allowed roots."""
     path = resolve_user_path(raw)
-    roots = [root.resolve(strict=False) for root in allowed_roots]
+
+    roots: list[Path] = []
+    try:
+        for root in allowed_roots:
+            roots.append(
+                Path(root).expanduser().resolve(strict=False)
+            )
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        raise ValueError("Invalid allowed root.") from exc
+
     if not roots:
         if require_allowlist:
-            raise PermissionError("Path API is disabled until an allowlist is configured.")
+            raise PermissionError(
+                "Path API is disabled until an allowlist is configured."
+            )
         return path
-    if not is_within_any_root(path, roots):
-        raise PermissionError("Path is outside the configured allowlist.")
+
+    if not any(
+        path == root or root in path.parents
+        for root in roots
+    ):
+        raise PermissionError(
+            "Path is outside the configured allowlist."
+        )
+
     return path
 
 

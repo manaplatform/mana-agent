@@ -7,8 +7,9 @@ import os
 import shutil
 import sys
 from pathlib import Path
+import pytest
 
-from mana_agent.utils.path_safety import safe_cwd, safe_resolve
+from mana_agent.utils.path_safety import safe_cwd, safe_resolve,resolve_within_allowed_roots
 
 
 def _make_cwd_unusable(work: Path, monkeypatch) -> None:
@@ -60,3 +61,47 @@ def test_safe_cwd_prefers_mana_home_when_no_fallback(
     monkeypatch.setenv("MANA_HOME", str(mana))
     resolved = safe_cwd()
     assert resolved == safe_resolve(mana)
+
+def test_resolve_within_allowed_roots_accepts_member(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    target = allowed / "file.txt"
+
+    assert resolve_within_allowed_roots(
+        str(target),
+        [allowed],
+    ) == target.resolve()
+
+
+def test_resolve_within_allowed_roots_rejects_outside(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+
+    with pytest.raises(
+        PermissionError,
+        match="outside the configured allowlist",
+    ):
+        resolve_within_allowed_roots(
+            str(outside / "secret.txt"),
+            [allowed],
+        )
+
+
+def test_resolve_within_allowed_roots_rejects_traversal(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    with pytest.raises(ValueError, match="Invalid path"):
+        resolve_within_allowed_roots(
+            str(allowed / ".." / "outside.txt"),
+            [allowed],
+        )
