@@ -48,6 +48,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from mana_agent.compat import process_exists
+
 
 LOG = logging.getLogger("mana_agent.swe_bench")
 
@@ -551,33 +553,25 @@ def worktree_is_dirty(path: Path) -> bool:
 def _worktree_lock_path(worktrees_dir: Path, instance_id: str) -> Path:
     return worktrees_dir / f".{_sanitize_id(instance_id)}.lock"
 
-
+# Simple wrapper for process_exists used strictly for testing. The main runner already calls process_exists directly.
 def _pid_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but is not owned by us — treat as live.
-        return True
-    except OSError:
-        return False
-    return True
+    return process_exists(pid)
 
-
-def worktree_lock_holder(worktrees_dir: Path, instance_id: str) -> int | None:
-    """Return the live PID holding the instance worktree lock, if any."""
+def worktree_lock_holder(
+    worktrees_dir: Path,
+    instance_id: str,
+) -> int | None:
     lock_path = _worktree_lock_path(worktrees_dir, instance_id)
     if not lock_path.is_file():
         return None
+
     try:
         raw = lock_path.read_text(encoding="utf-8").strip()
         pid = int(raw.splitlines()[0].strip())
     except (OSError, ValueError, IndexError):
         return None
-    return pid if _pid_is_alive(pid) else None
+
+    return pid if process_exists(pid) else None
 
 
 def acquire_worktree_lock(worktrees_dir: Path, instance_id: str) -> Path:
@@ -606,7 +600,7 @@ def release_worktree_lock(lock_path: Path | None) -> None:
             return
         raw = lock_path.read_text(encoding="utf-8").strip()
         pid = int(raw.splitlines()[0].strip())
-        if pid not in {0, os.getpid()} and _pid_is_alive(pid):
+        if pid not in {0, os.getpid()} and process_exists(pid):
             return
         lock_path.unlink(missing_ok=True)
     except (OSError, ValueError, IndexError):
@@ -688,7 +682,11 @@ def remove_worktree(repo_path: Path, worktree: Path, *, force: bool = True) -> N
             holder = int(lock_path.read_text(encoding="utf-8").strip().splitlines()[0])
         except (OSError, ValueError, IndexError):
             holder = None
-    if holder is not None and holder != os.getpid() and _pid_is_alive(holder):
+    if (
+        holder is not None
+        and holder != os.getpid()
+        and process_exists(holder)
+    ):
         raise SweBenchRunnerError(
             f"Refusing to remove worktree {worktree}: locked by live pid={holder}"
         )

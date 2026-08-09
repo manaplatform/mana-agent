@@ -17,6 +17,7 @@ from scripts.swe_bench.runner import (
     _disable_non_coding_integrations,
     _set_toml_table_key,
     _upsert_toml_keys,
+    _pid_is_alive,
     acquire_worktree_lock,
     build_prompt,
     capture_model_patch,
@@ -303,6 +304,7 @@ def test_prepare_agent_python_path_shims_python_to_python3(tmp_path: Path) -> No
         capture_output=True,
         text=True,
         check=False,
+        timeout=15,
     )
     assert probe.returncode == 0, (probe.stdout, probe.stderr)
     assert probe.stdout.strip() == "3"
@@ -351,27 +353,78 @@ def test_mass_delete_only_summary_and_capture_rejection(tmp_path: Path) -> None:
     assert "mass-delete" in reason
 
 
-def test_worktree_lock_blocks_second_holder(tmp_path: Path, monkeypatch) -> None:
+def test_worktree_lock_blocks_second_holder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     worktrees = tmp_path / "worktrees"
-    lock = acquire_worktree_lock(worktrees, "astropy__astropy-13033")
-    assert lock.is_file()
-    assert worktree_lock_holder(worktrees, "astropy__astropy-13033") == os.getpid()
 
-    # Simulate another process by claiming a foreign live pid.
+    lock = acquire_worktree_lock(
+        worktrees,
+        "astropy__astropy-13033",
+    )
+    assert lock.is_file()
+    assert (
+        worktree_lock_holder(
+            worktrees,
+            "astropy__astropy-13033",
+        )
+        == os.getpid()
+    )
+
+    # Simulate another live process.
     lock.write_text("1\n", encoding="utf-8")
+
     monkeypatch.setattr(
-        "scripts.swe_bench.runner._pid_is_alive",
+        "scripts.swe_bench.runner.process_exists",
         lambda pid: pid == 1,
     )
-    with pytest.raises(SweBenchRunnerError, match="locked by live process"):
-        acquire_worktree_lock(worktrees, "astropy__astropy-13033")
 
-    # Stale lock from a dead pid is reclaimable.
+    with pytest.raises(
+        SweBenchRunnerError,
+        match="locked by live process",
+    ):
+        acquire_worktree_lock(
+            worktrees,
+            "astropy__astropy-13033",
+        )
+
+    # Simulate the previous owner becoming stale/dead.
     monkeypatch.setattr(
-        "scripts.swe_bench.runner._pid_is_alive",
+        "scripts.swe_bench.runner.process_exists",
         lambda pid: False,
     )
-    reclaimed = acquire_worktree_lock(worktrees, "astropy__astropy-13033")
+
+    reclaimed = acquire_worktree_lock(
+        worktrees,
+        "astropy__astropy-13033",
+    )
+
     assert reclaimed.is_file()
+    assert (
+        reclaimed.read_text(encoding="utf-8").strip()
+        == str(os.getpid())
+    )
+
     release_worktree_lock(reclaimed)
-    assert worktree_lock_holder(worktrees, "astropy__astropy-13033") is None
+
+    assert (
+        worktree_lock_holder(
+            worktrees,
+            "astropy__astropy-13033",
+        )
+        is None
+    )
+
+def test_worktree_pid_probe_uses_cross_platform_process_check(
+    monkeypatch,
+) -> None:
+    seen: list[int] = []
+
+    monkeypatch.setattr(
+        "scripts.swe_bench.runner.process_exists",
+        lambda pid: seen.append(pid) or True,
+    )
+
+    assert _pid_is_alive(12345) is True
+    assert seen == [12345]
