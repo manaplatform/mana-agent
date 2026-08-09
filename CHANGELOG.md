@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Set the CI test-matrix job timeout to 45 minutes to allow the Windows suite
+  sufficient time to complete.
+  - User verification required: `python -m pytest -q`.
+
+## 2026-08-09
+
 - Updated chat CLI and planning-flow tests to supply an explicit validated
   routing decision, preserving fail-closed production routing without relying
   on an absent fake-service model.
