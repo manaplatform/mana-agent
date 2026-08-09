@@ -8,6 +8,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
+from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
@@ -40,11 +42,16 @@ class ChatToResponsesStreamAdapter:
     sequence: int = 0
     created_at: int = field(default_factory=lambda: int(time.time()))
     message_item_id: str = field(default_factory=lambda: _new_id("msg"))
+    reasoning_item_id: str = field(default_factory=lambda: _new_id("rs"))
     content_index: int = 0
     message_output_index: int = 0
+    reasoning_output_index: int = 0
     message_started: bool = False
     content_started: bool = False
+    reasoning_started: bool = False
     text_parts: list[str] = field(default_factory=list)
+    # DeepSeek / NVIDIA thinking tokens — never mix into assistant content.
+    reasoning_parts: list[str] = field(default_factory=list)
     tool_calls: dict[int, _ToolCallState] = field(default_factory=dict)
     next_output_index: int = 1
     usage: dict[str, Any] | None = None
@@ -69,10 +76,41 @@ class ChatToResponsesStreamAdapter:
             "received_stream_data": self.received_stream_data,
             "tool_side_effects": self.tool_side_effects,
             "text_chars": sum(len(part) for part in self.text_parts),
+            "reasoning_chars": sum(len(part) for part in self.reasoning_parts),
             "tool_call_count": len(self.tool_calls),
             "open_emitted": self.open_emitted,
             "completed": self.completed,
         }
+
+    def _ensure_reasoning_item(self) -> list[str]:
+        """Open a Responses reasoning item for provider chain-of-thought."""
+        if self.reasoning_started:
+            return []
+        self.reasoning_started = True
+        # Prefer index 0 when nothing else has started so multi-turn round-trip
+        # can reattach reasoning to the following assistant tool/message turn.
+        if not self.message_started and not self.tool_calls_started:
+            self.reasoning_output_index = 0
+            self.message_output_index = 1
+            self.next_output_index = max(self.next_output_index, 2)
+        else:
+            self.reasoning_output_index = self.next_output_index
+            self.next_output_index += 1
+        return [
+            _sse(
+                "response.output_item.added",
+                {
+                    "output_index": self.reasoning_output_index,
+                    "item": {
+                        "type": "reasoning",
+                        "id": self.reasoning_item_id,
+                        "status": "in_progress",
+                        "summary": [],
+                    },
+                },
+                sequence=self._next_sequence(),
+            )
+        ]
 
     def open_events(self) -> list[str]:
         self.open_emitted = True
@@ -162,6 +200,26 @@ class ChatToResponsesStreamAdapter:
             self.finish_reason = str(choice.get("finish_reason"))
             self.received_stream_data = True
         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        # DeepSeek thinking mode streams CoT on reasoning_content (same level as
+        # content). Never fold it into assistant text — multi-turn tool loops
+        # require it as a separate field on the next request.
+        reasoning_delta = delta.get("reasoning_content")
+        if reasoning_delta not in (None, ""):
+            self.received_stream_data = True
+            events.extend(self._ensure_reasoning_item())
+            text = str(reasoning_delta)
+            self.reasoning_parts.append(text)
+            events.append(
+                _sse(
+                    "response.reasoning_summary_text.delta",
+                    {
+                        "item_id": self.reasoning_item_id,
+                        "output_index": self.reasoning_output_index,
+                        "delta": text,
+                    },
+                    sequence=self._next_sequence(),
+                )
+            )
         content = delta.get("content")
         if content:
             self.received_stream_data = True
@@ -253,8 +311,45 @@ class ChatToResponsesStreamAdapter:
             )
             return events
 
+        full_reasoning = "".join(self.reasoning_parts)
+        if self.reasoning_started or full_reasoning:
+            if not self.reasoning_started:
+                events.extend(self._ensure_reasoning_item())
+            events.append(
+                _sse(
+                    "response.reasoning_summary_text.done",
+                    {
+                        "item_id": self.reasoning_item_id,
+                        "output_index": self.reasoning_output_index,
+                        "text": full_reasoning,
+                    },
+                    sequence=self._next_sequence(),
+                )
+            )
+            events.append(
+                _sse(
+                    "response.output_item.done",
+                    {
+                        "output_index": self.reasoning_output_index,
+                        "item": {
+                            "type": "reasoning",
+                            "id": self.reasoning_item_id,
+                            "status": "completed",
+                            "summary": (
+                                [{"type": "summary_text", "text": full_reasoning}]
+                                if full_reasoning
+                                else []
+                            ),
+                        },
+                    },
+                    sequence=self._next_sequence(),
+                )
+            )
+
         if self.message_started:
-            full_text = "".join(self.text_parts)
+            # Sanitize completed message text. Live deltas may still carry partial
+            # markers; final item text must not poison Codex multi-turn history.
+            full_text = sanitize_assistant_visible_text("".join(self.text_parts))
             events.append(
                 _sse(
                     "response.output_text.done",
@@ -329,8 +424,24 @@ class ChatToResponsesStreamAdapter:
                 )
             )
 
+        # Stable order for clients that only read response.completed.output:
+        # reasoning → message → function_calls (DeepSeek multi-turn contract).
         output: list[dict[str, Any]] = []
+        if self.reasoning_started or full_reasoning:
+            output.append(
+                {
+                    "type": "reasoning",
+                    "id": self.reasoning_item_id,
+                    "status": "completed",
+                    "summary": (
+                        [{"type": "summary_text", "text": full_reasoning}]
+                        if full_reasoning
+                        else []
+                    ),
+                }
+            )
         if self.message_started:
+            completed_text = sanitize_assistant_visible_text("".join(self.text_parts))
             output.append(
                 {
                     "type": "message",
@@ -340,7 +451,7 @@ class ChatToResponsesStreamAdapter:
                     "content": [
                         {
                             "type": "output_text",
-                            "text": "".join(self.text_parts),
+                            "text": completed_text,
                             "annotations": [],
                         }
                     ],

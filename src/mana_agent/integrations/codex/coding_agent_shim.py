@@ -290,24 +290,50 @@ class CodexCodingAgentShim:
                 "routing_mode": routing_decision.routing_mode.value,
             },
         )
+        # Write turns must prefer structured mutation over endless inspection.
+        # Conflicting "ask for clarification" language caused DeepSeek+Codex
+        # empty-patch failures (shell-only exploration, then free-form DSML soup
+        # instead of apply_patch) on concrete goals such as version bumps.
+        if requires_repository_write and _mutation_recovery:
+            requirements = [
+                "Apply the required production-source mutation now with apply_patch "
+                "(or an equivalent repository file mutation tool).",
+                "Do not finish with analysis, questions, or shell-only inspection.",
+                "Minimal reads are allowed only when a concrete production file path "
+                "is still unknown; then mutate immediately.",
+                "Never invent free-form tool markup, DSML, HTML, or fake patch text; "
+                "use structured tools only.",
+            ]
+        elif requires_repository_write:
+            requirements = [
+                "Own the complete coding decision: inspect, plan, implement, and verify.",
+                "When the requested change is concrete (named files, version, or "
+                "behavior), implement it with apply_patch; do not stop after inspection.",
+                "Ask for clarification only when repository evidence cannot identify "
+                "the target file or the requested change.",
+                "Never invent free-form tool markup, DSML, HTML, or fake patch text; "
+                "use structured tools only.",
+            ]
+        else:
+            requirements = [
+                "Inspect the repository and produce a decision-complete plan.",
+                "Do not modify repository files.",
+            ]
         task = CodingTask(
             task_id=task_id,
             goal=goal,
-            requirements=(
-                [
-                    "Own the complete coding decision: inspect, plan, implement, and verify.",
-                    "Do not invent repository changes when the requested outcome is underspecified.",
-                    "Ask for required clarification instead of applying an arbitrary edit.",
-                ]
-                if requires_repository_write
-                else [
-                    "Inspect the repository and produce a decision-complete plan.",
-                    "Do not modify repository files.",
-                ]
-            ),
+            requirements=requirements,
             acceptance_criteria=[
                 "The response directly satisfies the user's stated goal.",
                 "All claims and changes are grounded in current repository evidence.",
+                *(
+                    [
+                        "Write-required turns must leave uncommitted production-source "
+                        "edits under the repository/worktree root.",
+                    ]
+                    if requires_repository_write
+                    else []
+                ),
             ],
             relevant_context=(
                 "This is the authoritative Codex turn. There is no separate Mana coding planner "
@@ -434,12 +460,14 @@ class CodexCodingAgentShim:
                 "You inspected or discussed the issue but left the worktree unchanged.\n"
                 "You MUST apply the production-source fix now with apply_patch (or an "
                 "equivalent repository file mutation tool). Do not finish with analysis, "
-                "questions, or chat text only. Success requires uncommitted edits under "
-                "the repository root.\n"
+                "questions, chat text, or free-form DSML/think markup only. Success "
+                "requires uncommitted edits under the repository root.\n"
                 "Do not re-import or run the uninstalled package to reproduce the bug; "
-                "source checkouts may be non-importable. Read the relevant production "
-                "file(s) if needed, then mutate them immediately. Do not write long "
-                "analysis-only messages."
+                "source checkouts may be non-importable. Do not spend the recovery turn "
+                "re-searching tests or CHANGELOG unless required to locate the production "
+                "file. Read the relevant production file(s) if needed, then mutate them "
+                "immediately. Prefer the fewest structured tool calls that complete the "
+                "edit."
             )
             record_current(
                 "codex.mutation_recovery.started",
@@ -449,10 +477,12 @@ class CodexCodingAgentShim:
                     "prior_thread_id": result.thread_id,
                 },
             )
+            # Fresh turn identity: do not resume the prior flow/thread. Prior
+            # free-form DSML agentMessages poison multi-turn tool history.
             recovery_payload = self._execute_turn(
                 recovery_goal,
                 requires_repository_write=True,
-                flow_id=selected_flow_id,
+                flow_id=None,
                 gateway_task_id=gateway_task_id,
                 _mutation_recovery=True,
             )

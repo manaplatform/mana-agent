@@ -7,6 +7,8 @@ import time
 import uuid
 from typing import Any
 
+from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
@@ -49,25 +51,43 @@ def convert_chat_completion_to_response(
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
     output: list[dict[str, Any]] = []
 
-    # Never surface private reasoning as ordinary assistant text.
-    text = message.get("content")
-    if text not in (None, ""):
-        message_id = _new_id("msg")
+    # DeepSeek thinking mode returns chain-of-thought on reasoning_content.
+    # Keep it as a Responses reasoning item (never merge into assistant text)
+    # so multi-turn tool loops can round-trip it as reasoning_content.
+    reasoning_text = message.get("reasoning_content")
+    if reasoning_text not in (None, ""):
         output.append(
             {
-                "type": "message",
-                "id": message_id,
+                "type": "reasoning",
+                "id": _new_id("rs"),
                 "status": "completed",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": str(text),
-                        "annotations": [],
-                    }
-                ],
+                "summary": [{"type": "summary_text", "text": str(reasoning_text)}],
             }
         )
+
+    # Ordinary assistant text only — never fold reasoning_content into content.
+    # Strip leaked think/DSML free-form tool noise so Codex does not treat
+    # protocol soup as a successful agentMessage (empty-patch failure mode).
+    text = message.get("content")
+    if text not in (None, ""):
+        cleaned = sanitize_assistant_visible_text(str(text))
+        if cleaned:
+            message_id = _new_id("msg")
+            output.append(
+                {
+                    "type": "message",
+                    "id": message_id,
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": cleaned,
+                            "annotations": [],
+                        }
+                    ],
+                }
+            )
 
     tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
     for tool_call in tool_calls:

@@ -407,6 +407,16 @@ def test_coding_agent_shim_mutation_recovery_retries_empty_write_turn(tmp_path: 
     assert backend.calls == 2
     assert "mutation_required recovery" in backend.tasks[1].goal
     assert "Do not re-import or run the uninstalled package" in backend.tasks[1].goal
+    # Recovery must not reintroduce clarification-first requirements that block
+    # apply_patch on concrete write goals (lane_coordinator empty-patch mode).
+    recovery_reqs = " ".join(backend.tasks[1].requirements)
+    assert "Ask for required clarification" not in recovery_reqs
+    assert "apply_patch" in recovery_reqs
+    assert "Do not finish with analysis" in recovery_reqs
+    # First write turn also prefers mutation over clarification-first language.
+    first_reqs = " ".join(backend.tasks[0].requirements)
+    assert "Ask for required clarification" not in first_reqs
+    assert "apply_patch" in first_reqs
     assert result["status"] == "completed"
     assert result["changed_files"] == ["astropy/modeling/separable.py"]
     assert result["mutation_recovery"] is True
@@ -791,6 +801,12 @@ def test_write_required_turn_without_changed_files_fails(tmp_path: Path) -> None
     assert result.status == "failed"
     assert result.errors == ["mutation_required_but_no_mutation_tool_attempted"]
     assert result.tests_passed is False
+    # Free-form invoke/DSML soup must not become the user-facing summary.
+    assert "exec_command" not in (result.summary or "")
+    assert any(
+        str(w).startswith("assistant_freeform_tool_text_redacted")
+        for w in (result.warnings or [])
+    )
 
 
 def test_write_required_turn_with_mutation_item_but_no_diff_fails(tmp_path: Path) -> None:

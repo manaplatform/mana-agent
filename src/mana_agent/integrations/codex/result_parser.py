@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from mana_agent.coding.models import CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.integrations.codex.text_cleanup import (
+    looks_like_freeform_tool_garbage,
+    sanitize_assistant_visible_text,
+)
 
 
 # Codex item types that indicate a repository mutation was attempted.
@@ -61,7 +65,13 @@ def parse_codex_result(
             if item_type in {"agentMessage", "agent_message"}:
                 text = str(item.get("text") or item.get("message") or "").strip()
                 if text:
-                    summary = text
+                    # Never surface multi-KB think/DSML soup as the turn summary.
+                    summary = sanitize_assistant_visible_text(text)
+                    if looks_like_freeform_tool_garbage(text):
+                        warnings.append(
+                            "assistant_freeform_tool_text_redacted: model emitted "
+                            "think/DSML protocol soup instead of structured tools"
+                        )
         if method == "warning":
             message = str(payload.get("message") or "").strip()
             if message:

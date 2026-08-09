@@ -229,6 +229,278 @@ def test_stream_adapter_text_deltas() -> None:
     assert "hello" in joined
 
 
+def test_stream_adapter_reasoning_content_not_mixed_into_text() -> None:
+    """DeepSeek CoT must round-trip as reasoning items, never as assistant text."""
+    adapter = ChatToResponsesStreamAdapter(model="deepseek-ai/deepseek-v4-flash-0731")
+    events = list(adapter.open_events())
+    events.extend(
+        adapter.ingest_chat_chunk(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "I should call shell next.",
+                        }
+                    }
+                ]
+            }
+        )
+    )
+    events.extend(
+        adapter.ingest_chat_chunk(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": '{"command":"ls"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+        )
+    )
+    events.extend(adapter.close_events())
+    joined = "".join(events)
+    assert "response.reasoning_summary_text.delta" in joined
+    assert "I should call shell next." in joined
+    assert adapter.reasoning_parts == ["I should call shell next."]
+    assert adapter.text_parts == []
+    assert "response.function_call_arguments.done" in joined
+    # Final output order: reasoning then function_call (no text message).
+    completed = None
+    for block in joined.split("\n\n"):
+        if "response.completed" in block and "data:" in block:
+            payload = block.split("data:", 1)[1].strip()
+            completed = json.loads(payload)
+            break
+    assert completed is not None
+    types = [item["type"] for item in completed["response"]["output"]]
+    assert types[0] == "reasoning"
+    assert "function_call" in types
+    assert "message" not in types
+
+
+def test_responses_round_trip_preserves_reasoning_content_for_tool_loop() -> None:
+    """Multi-turn DeepSeek tool loops require reasoning_content on assistant."""
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    # Upstream chat message with CoT + tool_calls → Responses output.
+    chat = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Need to inspect separable.py before editing.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "shell",
+                                "arguments": '{"command":"sed -n 240,250p astropy/modeling/separable.py"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    response = convert_chat_completion_to_response(
+        chat, model="deepseek-ai/deepseek-v4-flash-0731"
+    )
+    types = [item["type"] for item in response["output"]]
+    assert types[0] == "reasoning"
+    assert "function_call" in types
+    reasoning = next(item for item in response["output"] if item["type"] == "reasoning")
+    assert "separable.py" in reasoning["summary"][0]["text"]
+
+    # Codex feeds the reasoning item + function_call + tool result back.
+    body = {
+        "model": "deepseek-ai/deepseek-v4-flash-0731",
+        "input": [
+            {"type": "message", "role": "user", "content": "fix nested CompoundModel separability"},
+            reasoning,
+            next(item for item in response["output"] if item["type"] == "function_call"),
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "cright[-right.shape[0]:, -right.shape[1]:] = 1",
+            },
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": "shell",
+                "description": "Run a shell command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                },
+            }
+        ],
+    }
+    next_chat = convert_responses_request_to_chat(body, upstream=upstream)
+    assistant = next(
+        message
+        for message in next_chat["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant["reasoning_content"] == "Need to inspect separable.py before editing."
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    roles = [message["role"] for message in next_chat["messages"]]
+    # Strict order: system? user → assistant(tool_calls) → tool (no orphan tool).
+    assert "tool" in roles
+    assistant_idx = roles.index("assistant")
+    tool_idx = roles.index("tool")
+    assert assistant_idx < tool_idx
+    assert next_chat["messages"][tool_idx]["tool_call_id"] == "call_1"
+
+
+def test_orphan_tool_result_gets_synthetic_assistant_pair() -> None:
+    """Orphan tool results must not precede a missing assistant tool_calls message."""
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
+            "input": [
+                {"type": "message", "role": "user", "content": "continue"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_orphan",
+                    "output": "tool-out",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        upstream=upstream,
+    )
+    roles = [message["role"] for message in chat["messages"]]
+    assert roles.count("assistant") >= 1
+    assert roles.index("assistant") < roles.index("tool")
+    assistant = next(
+        message
+        for message in chat["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant["tool_calls"][0]["id"] == "call_orphan"
+
+
+def test_leaked_think_markers_stripped_from_assistant_history() -> None:
+    """Confused multi-turn loops inject </think>/DSML into content; strip them."""
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
+            "input": [
+                {"type": "message", "role": "user", "content": "bump version"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": (
+                        "The version originates solely from pyproject.toml."
+                        "</think>"
+                        "<|DSML|junk>More text."
+                    ),
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        upstream=upstream,
+    )
+    assistant = next(
+        message for message in chat["messages"] if message.get("role") == "assistant"
+    )
+    content = str(assistant.get("content") or "")
+    assert "pyproject.toml" in content
+    assert "</think>" not in content
+    assert "DSML" not in content
+
+
+def test_freeform_tool_garbage_redacted_from_assistant_history() -> None:
+    """Protocol soup must not re-enter DeepSeek history as ordinary content."""
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+    )
+    garbage = (
+        "Probably there was some\"\"\" tat only appeared once above; "
+        "update pyccheroomportugal.py</nowarn></think>"
+        "Transfer Protocol Templates:\n"
+        "python-patch-before: apply_patch suppressums=false\n"
+        "<|DSML|junk>actionstarted.00:00</MESSAGE_END>. "
+        "Reason: mutation_required_but_no_mutation_tool_attempted"
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
+            "input": [
+                {"type": "message", "role": "user", "content": "bump version to v0.1.6"},
+                {"type": "message", "role": "assistant", "content": garbage},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        upstream=upstream,
+    )
+    assistant = next(
+        message for message in chat["messages"] if message.get("role") == "assistant"
+    )
+    content = str(assistant.get("content") or "")
+    assert "pyccheroomportugal" not in content
+    assert "DSML" not in content
+    assert "</think>" not in content
+    assert "structured tools" in content.lower() or "redacted" in content.lower()
+
+
 def test_nvidia_runtime_uses_bridge_and_never_exposes_upstream_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

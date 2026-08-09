@@ -12,6 +12,7 @@ from mana_agent.config.nvidia_model_requests import (
     normalize_nvidia_deepseek_effort,
 )
 from mana_agent.integrations.codex.responses_bridge.models import BridgeUpstreamConfig
+from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
 from mana_agent.model_routing.models import provider_request_overrides_from_configuration
 
 
@@ -56,6 +57,29 @@ def _content_to_text(content: Any) -> str:
     if isinstance(content, dict):
         return str(content.get("text") or content.get("content") or json.dumps(content))
     return str(content)
+
+
+def _reasoning_item_to_text(item: dict[str, Any]) -> str:
+    """Extract chain-of-thought text from a Responses reasoning item."""
+    summary = item.get("summary")
+    if isinstance(summary, list):
+        parts: list[str] = []
+        for entry in summary:
+            if isinstance(entry, dict):
+                text = entry.get("text") or entry.get("content")
+                if text not in (None, ""):
+                    parts.append(str(text))
+            elif isinstance(entry, str) and entry:
+                parts.append(entry)
+        if parts:
+            return "".join(parts)
+    content = item.get("content")
+    if content not in (None, ""):
+        return _content_to_text(content)
+    text = item.get("text")
+    if text not in (None, ""):
+        return str(text)
+    return ""
 
 
 def _convert_tools(tools: Any) -> list[dict[str, Any]]:
@@ -125,6 +149,17 @@ def convert_responses_request_to_chat(
         _append_message(messages, "user", raw_input)
     elif isinstance(raw_input, list):
         pending_tool_calls: list[dict[str, Any]] = []
+        # DeepSeek requires reasoning_content on the assistant message that
+        # performed tool calls (and on later turns of the same tool loop).
+        pending_reasoning: str | None = None
+
+        def take_reasoning_kwargs() -> dict[str, Any]:
+            nonlocal pending_reasoning
+            if pending_reasoning in (None, ""):
+                return {}
+            value = pending_reasoning
+            pending_reasoning = None
+            return {"reasoning_content": value}
 
         def flush_tool_calls() -> None:
             nonlocal pending_tool_calls
@@ -135,6 +170,7 @@ def convert_responses_request_to_chat(
                 "assistant",
                 "",
                 tool_calls=pending_tool_calls,
+                **take_reasoning_kwargs(),
             )
             pending_tool_calls = []
 
@@ -142,18 +178,33 @@ def convert_responses_request_to_chat(
             if not isinstance(item, dict):
                 continue
             item_type = str(item.get("type") or "")
+            if item_type == "reasoning":
+                # Attach CoT to the next assistant message; never as user text.
+                text = _reasoning_item_to_text(item)
+                if text:
+                    pending_reasoning = (
+                        f"{pending_reasoning}\n{text}" if pending_reasoning else text
+                    )
+                continue
             if item_type in {"", "message"} or item.get("role") in {"user", "assistant", "system", "developer"}:
                 flush_tool_calls()
                 role = str(item.get("role") or "user")
                 if role == "developer":
                     role = "system"
                 content = _content_to_text(item.get("content"))
+                if role == "assistant":
+                    # History rebuild: never re-feed think/DSML soup to DeepSeek.
+                    content = sanitize_assistant_visible_text(content)
                 # Assistant messages may already carry completed tool_calls.
                 tool_calls = item.get("tool_calls")
+                extra = take_reasoning_kwargs() if role == "assistant" else {}
+                # Prefer explicit reasoning_content on the item when present.
+                if role == "assistant" and item.get("reasoning_content") not in (None, ""):
+                    extra["reasoning_content"] = str(item.get("reasoning_content"))
                 if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
-                    _append_message(messages, "assistant", content, tool_calls=tool_calls)
+                    _append_message(messages, "assistant", content, tool_calls=tool_calls, **extra)
                 else:
-                    _append_message(messages, role, content)
+                    _append_message(messages, role, content, **extra)
                 continue
             if item_type in {"function_call", "custom_tool_call"}:
                 call_id = str(item.get("call_id") or item.get("id") or "")
@@ -177,15 +228,15 @@ def convert_responses_request_to_chat(
                     output = json.dumps(output, ensure_ascii=False) if output is not None else ""
                 _append_message(messages, "tool", output, tool_call_id=call_id)
                 continue
-            if item_type == "reasoning":
-                # Do not expose private chain-of-thought as ordinary content.
-                continue
             flush_tool_calls()
             # Unknown item: keep textual content when present.
             text = _content_to_text(item.get("content") or item.get("text") or "")
             if text:
                 _append_message(messages, "user", text)
         flush_tool_calls()
+        # Leftover reasoning without a following assistant turn is dropped —
+        # it must not become a user message (that confuses tool loops).
+        pending_reasoning = None
     elif raw_input is None and body.get("messages"):
         # Some clients already send chat-shaped messages under alternate keys.
         for message in body.get("messages") or []:

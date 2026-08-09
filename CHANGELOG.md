@@ -4,6 +4,48 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex coding empty-patch failures observed in lane_coordinator for
+  `bump version to v0.1.6` (DeepSeek V4 / NVIDIA Responses bridge).
+  - Evidence (`workspace_cefe56a22992f27e13d8`, tasks `000008`/`000010`):
+    bridge ran with tools + `thinking=False`; shell tools succeeded; turn ended
+    with free-form `</think>` / DSML / fake patch narration and
+    `mutation_required_but_no_mutation_tool_attempted` (no `apply_patch`).
+  - Causes: (1) write-turn requirements told Codex to “ask for clarification
+    instead of applying an arbitrary edit”, which blocked concrete mutations and
+    encouraged inspection-only loops; (2) leaked think/DSML agent text re-entered
+    multi-turn history and user summaries; (3) CoT/orphan tool order (below).
+  - Fix:
+    1. Write + mutation-recovery requirements prefer structured `apply_patch`
+       and forbid free-form tool markup; clarification only when targets are
+       truly ambiguous. Recovery starts a fresh flow (no poisoned thread resume).
+    2. Shared `text_cleanup` strips/redacts think/DSML free-form tool soup in
+       Responses↔Chat adapters and Codex result summaries.
+    3. Keep DeepSeek reasoning_content round-trip + orphan tool pairing (below).
+  - User verification required:
+    `python -m pytest tests/test_codex_integration.py::test_coding_agent_shim_mutation_recovery_retries_empty_write_turn tests/test_codex_integration.py::test_write_required_turn_without_changed_files_fails tests/test_codex_responses_bridge.py -k "reasoning or orphan or leaked or freeform or tools_force" -q`
+
+- Fixed Codex Responses→Chat adapter multi-turn DeepSeek tool loops that produced
+  analysis-only / DSML garbage (`mutation_required_but_no_mutation_tool_attempted`)
+  on version bumps and SWE-bench coding turns.
+  - Symptom: bridge had tools + `thinking=False`, shell sometimes ran, but later
+    turns ended in confused `</think>` / `<|DSML|>` soup with no `apply_patch`
+    (e.g. `bump version to v0.1.6`, `astropy__astropy-12907` empty_patch).
+  - Cause: (1) DeepSeek `reasoning_content` was never captured from chat streams
+    or non-stream messages and never reattached on the next request—CoT was
+    either dropped or leaked into ordinary `content`, poisoning tool history;
+    (2) orphan `function_call_output` items could land without a preceding
+    assistant `tool_calls` message, violating DeepSeek message order.
+  - Fix:
+    1. Stream + non-stream chat→Responses adapters emit CoT as `reasoning`
+       items (never as assistant text).
+    2. Responses→Chat reattaches reasoning items as `reasoning_content` on the
+       following assistant tool/message turn (DeepSeek tool multi-turn contract).
+    3. Strip leaked think/DSML markers from assistant history content.
+    4. `normalize_nvidia_chat_messages` enforces assistant→tool pairing and
+       synthesizes a minimal assistant `tool_calls` pair for orphan tool results.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py -k "reasoning or orphan or leaked or tools_force or fragmented or sequence" -q`
+
 - Fixed Codex Responses bridge NVIDIA HTTP 400 for catalog model-object fields
   (`created`, `id`, `object`, `owned_by`) on DeepSeek V4 coding turns.
   - Symptom: `change version to v0.1.6` (and peers) failed with

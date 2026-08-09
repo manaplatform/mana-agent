@@ -177,6 +177,10 @@ def normalize_nvidia_chat_messages(messages: list[Any]) -> list[dict[str, Any]]:
     * system messages are moved to the front (merged when multiple)
     * tool messages retain tool_call_id
     * empty orphan tool messages without tool_call_id are dropped
+    * tool results only follow an assistant that declared matching tool_call ids
+      (orphan tool results get a minimal synthetic assistant tool_calls pair so
+      DeepSeek does not enter a confused analysis loop on bad order)
+    * assistant ``reasoning_content`` is preserved for tool multi-turn loops
     * last conversational input remains a user/tool message when possible
     """
     system_parts: list[str] = []
@@ -228,6 +232,9 @@ def normalize_nvidia_chat_messages(messages: list[Any]) -> list[dict[str, Any]]:
                         call_copy["id"] = f"call_{len(cleaned_calls)+1}"
                     cleaned_calls.append(call_copy)
                 message["tool_calls"] = cleaned_calls
+            # Preserve DeepSeek reasoning_content for tool multi-turn contracts.
+            if role == "assistant" and message.get("reasoning_content") in (None, ""):
+                message.pop("reasoning_content", None)
             ordered.append(message)
             continue
         # Unknown role: keep as user text when content exists.
@@ -235,10 +242,52 @@ def normalize_nvidia_chat_messages(messages: list[Any]) -> list[dict[str, Any]]:
         if content not in (None, ""):
             ordered.append({"role": "user", "content": str(content)})
 
+    # Second pass: enforce assistant(tool_calls) → tool(tool_call_id) order.
+    paired: list[dict[str, Any]] = []
+    open_tool_ids: set[str] = set()
+    for message in ordered:
+        role = str(message.get("role") or "").strip().lower()
+        if role == "assistant":
+            open_tool_ids = set()
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if isinstance(call, dict):
+                        call_id = str(call.get("id") or "").strip()
+                        if call_id:
+                            open_tool_ids.add(call_id)
+            paired.append(message)
+            continue
+        if role == "tool":
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            if tool_call_id and tool_call_id not in open_tool_ids:
+                # Orphan tool result: synthesize the missing assistant tool_calls
+                # declaration so providers see a valid sequence.
+                paired.append(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {"name": "tool", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                )
+                open_tool_ids = {tool_call_id}
+            paired.append(message)
+            if tool_call_id:
+                open_tool_ids.discard(tool_call_id)
+            continue
+        open_tool_ids = set()
+        paired.append(message)
+
     result: list[dict[str, Any]] = []
     if system_parts:
         result.append({"role": "system", "content": "\n\n".join(system_parts)})
-    result.extend(ordered)
+    result.extend(paired)
     return result
 
 
