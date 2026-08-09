@@ -4,6 +4,23 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed the Windows CI suite stalling in the tool-worker import isolation test.
+  - The test no longer captures subprocess pipes that optional dependency
+    descendants can inherit on Windows; it exchanges its tiny assertion payload
+    through a temporary file and limits the child interpreter to 30 seconds.
+  - User verification required: `python -m pytest tests/test_tool_worker_process.py -q`
+
+- Fixed NVIDIA DeepSeek coding turns that inspected files but then completed
+  without a structured mutation.
+  - The Responses bridge now sends `tool_choice="auto"` whenever Codex
+    supplies tools but omits a choice. NVIDIA requires the pair to enable its
+    tool-call parser; without it, the provider can return XML/DSML-like tool
+    text in ordinary assistant content instead of a callable tool event.
+  - Coding prompts now require a structured mutation tool registered for the
+    current turn rather than naming `apply_patch` when that tool is not exposed
+    by the active Codex tool set.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge.py tests/test_codex_integration.py -q`
+
 - Fixed Codex/NVIDIA coding turns appearing to hang at `Turn Started` when the
   upstream streaming request never returned response headers.
   - The Responses bridge now limits only the initial stream-open wait to 45

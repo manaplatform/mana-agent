@@ -466,15 +466,15 @@ def test_coding_agent_shim_mutation_recovery_retries_empty_write_turn(tmp_path: 
     assert "mutation_required recovery" in backend.tasks[1].goal
     assert "Do not re-import or run the uninstalled package" in backend.tasks[1].goal
     # Recovery must not reintroduce clarification-first requirements that block
-    # apply_patch on concrete write goals (lane_coordinator empty-patch mode).
+    # registered mutation tools on concrete write goals (lane_coordinator empty-patch mode).
     recovery_reqs = " ".join(backend.tasks[1].requirements)
     assert "Ask for required clarification" not in recovery_reqs
-    assert "apply_patch" in recovery_reqs
+    assert "registered for this turn" in recovery_reqs
     assert "Do not finish with analysis" in recovery_reqs
     # First write turn also prefers mutation over clarification-first language.
     first_reqs = " ".join(backend.tasks[0].requirements)
     assert "Ask for required clarification" not in first_reqs
-    assert "apply_patch" in first_reqs
+    assert "registered structured tool" in first_reqs
     assert result["status"] == "completed"
     assert result["changed_files"] == ["astropy/modeling/separable.py"]
     assert result["mutation_recovery"] is True

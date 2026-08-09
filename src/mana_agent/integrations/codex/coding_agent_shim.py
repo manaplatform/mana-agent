@@ -308,8 +308,8 @@ class CodexCodingAgentShim:
             "[mutation_required recovery]\n"
             f"Prior turn terminal reason: {terminal}.\n"
             "You inspected or discussed the issue but left the worktree unchanged.\n"
-            "You MUST apply the production-source fix now with apply_patch (or an "
-            "equivalent repository file mutation tool). Do not finish with analysis, "
+            "You MUST apply the production-source fix now with a repository mutation "
+            "tool registered for this turn. Do not finish with analysis, "
             "questions, chat text, or free-form DSML/think markup only. Success "
             "requires uncommitted edits under the repository root.\n"
             "Do not re-import or run the uninstalled package to reproduce the bug; "
@@ -410,23 +410,24 @@ class CodexCodingAgentShim:
         )
         if requires_repository_write and is_recovery:
             requirements = [
-                "Apply the required production-source mutation now with apply_patch "
-                "(or an equivalent repository file mutation tool).",
+                "Apply the required production-source mutation now with a tool "
+                "registered for this turn.",
                 "Do not finish with analysis, questions, or shell-only inspection.",
                 "Minimal reads are allowed only when a concrete production file path "
                 "is still unknown; then mutate immediately.",
                 "Never invent free-form tool markup, DSML, HTML, or fake patch text; "
-                "use structured tools only.",
+                "use only structured tools registered for this turn.",
             ]
         elif requires_repository_write:
             requirements = [
                 "Own the complete coding decision: inspect, plan, implement, and verify.",
                 "When the requested change is concrete (named files, version, or "
-                "behavior), implement it with apply_patch; do not stop after inspection.",
+                "behavior), mutate it with a registered structured tool; do not stop "
+                "after inspection.",
                 "Ask for clarification only when repository evidence cannot identify "
                 "the target file or the requested change.",
                 "Never invent free-form tool markup, DSML, HTML, or fake patch text; "
-                "use structured tools only.",
+                "use only structured tools registered for this turn.",
             ]
         else:
             requirements = [

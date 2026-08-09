@@ -281,6 +281,14 @@ def convert_responses_request_to_chat(
     tool_choice = _convert_tool_choice(body.get("tool_choice"))
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
+    elif tools:
+        # NVIDIA's Chat Completions function-calling contract requires both
+        # ``tools`` and ``tool_choice``. Codex omits the latter for automatic
+        # tool selection, which can leave DeepSeek/NIM deployments to emit raw
+        # XML/DSML call text in ``content`` instead of ``tool_calls``.
+        # ``auto`` preserves the model's tool choice; it only enables the
+        # provider's structured tool-call parser.
+        payload["tool_choice"] = "auto"
     for source_key, target_key in (
         ("temperature", "temperature"),
         ("top_p", "top_p"),

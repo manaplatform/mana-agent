@@ -14,24 +14,30 @@ import pytest
 from mana_agent.multi_agent.runtime import tool_worker_process as twp
 
 
-def test_tool_worker_import_does_not_configure_root_logging() -> None:
+def test_tool_worker_import_does_not_configure_root_logging(tmp_path: Path) -> None:
     src_root = Path(__file__).resolve().parents[1] / "src"
+    result_path = tmp_path / "worker-import-logging.json"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(src_root)
     code = (
-        "import json, logging; "
+        "import json, logging, pathlib, sys; "
         "import mana_agent.multi_agent.runtime.tool_worker_process; "
         "root = logging.getLogger(); "
-        "print(json.dumps({'level': root.level, 'handlers': len(root.handlers)}))"
+        "pathlib.Path(sys.argv[1]).write_text("
+        "json.dumps({'level': root.level, 'handlers': len(root.handlers)}), "
+        "encoding='utf-8')"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
+    # Do not capture child stdout/stderr here. On Windows, descendants of an
+    # imported optional dependency can inherit those pipe handles and keep
+    # ``communicate()`` waiting after the child interpreter has exited.
+    subprocess.run(
+        [sys.executable, "-c", code, str(result_path)],
         check=True,
-        capture_output=True,
         text=True,
         env=env,
+        timeout=30,
     )
-    payload = json.loads(result.stdout)
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
     assert payload == {"level": logging.WARNING, "handlers": 0}
 
 

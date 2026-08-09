@@ -868,6 +868,7 @@ def test_deepseek_tools_force_thinking_off() -> None:
         upstream=upstream,
     )
     assert chat["tools"][0]["function"]["name"] == "shell"
+    assert chat["tool_choice"] == "auto"
     assert "reasoning_effort" not in chat
     assert chat["chat_template_kwargs"] == {
         "thinking": False,

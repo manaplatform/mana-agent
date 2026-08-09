@@ -78,7 +78,7 @@ _FREEFORM_TOOL_NOISE_RE = re.compile(
 
 _REDACTED_TOOL_GARBAGE = (
     "Prior model output was invalid free-form tool/thinking text and was redacted. "
-    "Continue with structured tools only (apply_patch for edits)."
+    "Continue with a structured tool registered for this turn."
 )
 
 
