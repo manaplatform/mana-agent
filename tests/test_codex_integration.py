@@ -298,6 +298,8 @@ def test_codex_backend_reports_turn_started_only_after_turn_start_accepts(
         "turn.started",
     ]
     assert events[2].turn_id == "turn-1"
+    assert events[-1].event_type == "turn.finalizing"
+    assert events[-1].status == "running"
 
 
 def test_codex_backend_resumes_persisted_thread(

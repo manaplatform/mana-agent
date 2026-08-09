@@ -12,7 +12,10 @@ All notable repository changes should be recorded here.
   - Codex lifecycle events now report `Starting Codex turn` before the
     `turn/start` response, and report `Codex turn started` only after the
     server returns a turn ID.
-  - User verification required: `python -m pytest tests/test_codex_responses_bridge_recovery.py tests/test_codex_integration.py -q`
+  - Provider-level `turn/completed` now remains `turn.finalizing` until Mana
+    has parsed the trace and published the validated `coding.terminal` summary
+    to the live event stream, event sink, and execution event hub.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge_recovery.py tests/test_codex_integration.py tests/test_codex_coding_visibility.py -q`
 
 - Fixed Windows CI hanging while running Teach Mode tests.
   - Teach availability checks now probe optional desktop, browser, and input

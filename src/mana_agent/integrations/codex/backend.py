@@ -283,6 +283,19 @@ class CodexCodingBackend:
                     seen_event_ids.add(event.event_id)
                     sequence += 1
                     notifications.append(notification)
+                    # A provider-level turn/completed notification only means
+                    # Codex has stopped streaming. Mana still has to parse the
+                    # trace, verify the repository outcome, and publish the
+                    # validated terminal answer. Keep the UI in an explicit
+                    # finalizing state until that work is done.
+                    if event.event_type == "turn.completed":
+                        event = event.model_copy(
+                            update={
+                                "event_type": "turn.finalizing",
+                                "status": "running",
+                                "title": "Codex response received — preparing result",
+                            }
+                        )
                     if event.token_usage:
                         last_usage = dict(event.token_usage)
                         hard_reason = self.context_cost_governor.active_hard_limit_reason(

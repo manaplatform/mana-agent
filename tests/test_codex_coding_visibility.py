@@ -20,6 +20,7 @@ from mana_agent.coding.event_visibility import (
     classify_coding_event,
     is_user_publishable,
 )
+from mana_agent.coding.live_events import subscribe_coding_events
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
@@ -348,6 +349,35 @@ def test_successful_write_one_terminal_summary(tmp_path: Path) -> None:
     assert payload["auto_execute_terminal_reason"] == "completed"
     # Not a multi-draft stream
     assert answer.count("I'll inspect") == 0
+
+
+def test_terminal_summary_is_published_after_provider_finalization(tmp_path: Path) -> None:
+    sink = _RecordingSink()
+    published: list[AgentEvent] = []
+    unsubscribe = subscribe_coding_events(published.append)
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        event_sink=sink,
+    )
+    try:
+        shim._emit_terminal_result(
+            {
+                "answer": "Codex completed the repository mutation.\nChanged files:\n- src/app.py",
+                "status": "completed",
+                "auto_execute_terminal_reason": "completed",
+                "changed_files": ["src/app.py"],
+            },
+            task_id="task-terminal",
+            model="deepseek-ai/deepseek-v4-flash-0731",
+        )
+    finally:
+        unsubscribe()
+
+    assert sink.events[-1][0] == "coding.terminal"
+    assert "src/app.py" in sink.events[-1][1]["summary"]
+    assert published[-1].event_type == "coding.terminal"
+    assert "src/app.py" in published[-1].summary
 
 
 # ---------------------------------------------------------------------------

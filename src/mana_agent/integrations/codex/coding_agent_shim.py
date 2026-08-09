@@ -727,6 +727,23 @@ class CodexCodingAgentShim:
         )
         record_current("coding.terminal", event.model_dump(mode="json"))
         publish_coding_event(event)
+        if self.session_id and self.repository_id:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            get_execution_event_hub().publish(
+                {
+                    **event.model_dump(mode="json"),
+                    "type": event.event_type,
+                    "event_id": event.event_id,
+                    "metadata": {
+                        "visibility": event.visibility,
+                        "semantic_kind": event.semantic_kind,
+                    },
+                },
+                conversation_id=self.session_id,
+                execution_id=task_id,
+                repository_id=self.repository_id,
+            )
         if self.event_sink is not None:
             data = event.model_dump(mode="json")
             try:
