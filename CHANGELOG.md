@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Windows CI hanging while running Teach Mode tests.
+  - Teach availability checks now probe optional desktop, browser, and input
+    integrations without importing their platform adapters during normal
+    semantic recording and doctor checks. Native desktop capture still performs
+    its real dependency and OS-permission validation when explicitly requested.
+  - User verification required: `python -m pytest tests/test_teach_mode.py -q`
+
 - Fixed Codex Responses bridge rejecting coding turns with
   `original=10 converted=8 unsupported=2` or
   `original=10 converted=9 unsupported=1` on NVIDIA DeepSeek

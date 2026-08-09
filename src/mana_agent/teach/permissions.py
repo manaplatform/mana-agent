@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -34,6 +35,14 @@ def _restrict_descriptor_to_owner(fd: int) -> None:
     fchmod = getattr(os, "fchmod", None)
     if fchmod is not None:
         fchmod(fd, 0o600)
+
+
+def _optional_module_available(name: str) -> bool:
+    """Check optional desktop dependencies without initializing their adapters."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 
 class GrantStatus(BaseModel):
@@ -139,41 +148,39 @@ def open_permission_settings(scopes: list[TeachGrantScope]) -> list[str]:
 
 
 def _native_availability() -> dict[TeachGrantScope, dict[str, object]]:
-    try:
-        import pynput  # type: ignore[import-not-found]  # noqa: F401
-        input_available = True
-        input_reason = ""
-    except Exception:
-        input_available = False
-        input_reason = "Install the Teach Mode desktop extra: pip install 'mana-agent[teach-desktop]'."
+    input_available = _optional_module_available("pynput")
+    input_reason = (
+        ""
+        if input_available
+        else "Install the Teach Mode desktop extra: pip install 'mana-agent[teach-desktop]'."
+    )
     accessibility_available = False
     accessibility_os: bool | None = None
     accessibility_reason = ""
     if sys.platform == "darwin":
-        try:
-            import ApplicationServices  # type: ignore[import-not-found]
-
-            accessibility_os = bool(ApplicationServices.AXIsProcessTrusted())
-            accessibility_available = accessibility_os
-            if not accessibility_os:
-                accessibility_reason = "macOS Accessibility permission is not granted."
-        except (ImportError, AttributeError):
+        if not _optional_module_available("ApplicationServices"):
             accessibility_reason = "Install the macOS Teach dependency (PyObjC Quartz)."
-    elif sys.platform == "win32":
-        try:
-            import uiautomation  # type: ignore[import-not-found]  # noqa: F401
+        else:
+            try:
+                import ApplicationServices  # type: ignore[import-not-found]
 
+                accessibility_os = bool(ApplicationServices.AXIsProcessTrusted())
+                accessibility_available = accessibility_os
+                if not accessibility_os:
+                    accessibility_reason = "macOS Accessibility permission is not granted."
+            except (ImportError, AttributeError):
+                accessibility_reason = "Install the macOS Teach dependency (PyObjC Quartz)."
+    elif sys.platform == "win32":
+        if _optional_module_available("uiautomation"):
             accessibility_available = True
             accessibility_os = True
-        except ImportError:
+        else:
             accessibility_reason = "Install the Windows UI Automation adapter."
     elif sys.platform.startswith("linux"):
-        try:
-            import pyatspi  # type: ignore[import-not-found]  # noqa: F401
-
+        if _optional_module_available("pyatspi"):
             accessibility_available = True
             accessibility_os = True
-        except ImportError:
+        else:
             accessibility_reason = "Install AT-SPI Python bindings and enable accessibility."
     return {
         "teach.record.accessibility": {
