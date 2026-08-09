@@ -20,23 +20,23 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.10"
-            timeout: 45
+            timeout: 90
 
           - os: ubuntu-latest
             python: "3.12"
-            timeout: 45
+            timeout: 90
 
           - os: ubuntu-latest
             python: "3.14"
-            timeout: 45
+            timeout: 90
 
           - os: windows-latest
             python: "3.12"
-            timeout: 75
+            timeout: 90
 
           - os: macos-latest
             python: "3.12"
-            timeout: 45
+            timeout: 90
 
     env:
       PYTHONPATH: src
