@@ -4,6 +4,35 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-09
 
+- Fixed Codex Responses bridge NVIDIA HTTP 400 for catalog model-object fields
+  (`created`, `id`, `object`, `owned_by`) on DeepSeek V4 coding turns.
+  - Symptom: `change version to v0.1.6` (and peers) failed with
+    `upstream_invalid_request` /
+    `Unsupported parameter(s): created, id, object, owned_by` for
+    `deepseek-ai/deepseek-v4-flash-0731`.
+  - Cause: gateway routing merged the full `/v1/models` catalog record into
+    `ModelProfile.configuration`; the Codex shim copied that into bridge
+    `request_overrides`, and the adapter forwarded those keys as Chat
+    Completions body fields. NVIDIA rejects catalog identity parameters.
+  - Fix:
+    1. Stop merging raw catalog metadata into profile configuration; keep
+       limits/pricing on profile fields and set `capability_source` only.
+    2. Strip OpenAI model-object / catalog-only keys in
+       `provider_request_overrides_from_configuration` (bridge + shim).
+    3. Re-filter flattened `extra_body` in the Responses→Chat adapter so
+       nested catalog junk cannot reappear as top-level body keys.
+  - User verification required:
+    `python -m pytest tests/test_codex_responses_bridge.py::test_bridge_strips_catalog_model_object_fields_from_request_overrides tests/test_codex_responses_bridge.py::test_bridge_strips_routing_metadata_from_request_overrides tests/test_model_routing.py::test_provider_request_overrides_drop_catalog_model_object_fields tests/test_model_routing.py::test_provider_request_overrides_drop_routing_metadata -q`
+
+- Fixed gateway Codex stack test expecting stale `MANA_CODEX_MODEL` in runtime logs.
+  - Symptom: `test_gateway_uses_codex_shim_without_legacy_coding_workers` failed
+    because it asserted `coding=codex-test-model` while stack logging reports the
+    resolved/routed coding model (e.g. `coding=gpt-4.1-mini`).
+  - Fix: update the test to assert the Codex shim path, disabled legacy workers,
+    and that a leftover `MANA_CODEX_MODEL` pin is not reported as `coding=`.
+  - User verification required:
+    `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_uses_codex_shim_without_legacy_coding_workers -q`
+
 - Fixed SWE-bench verification shell using login shells that drop the Python 3 PATH shim (`astropy__astropy-12907`).
   - Symptom: after Codex read `separable.py` and mutation recovery, the multi-agent verifier ran
     `["/bin/sh", "-lc", "python -m compileall ."]` with exit 1 and ~133KB of SyntaxError

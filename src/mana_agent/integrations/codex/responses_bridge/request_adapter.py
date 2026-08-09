@@ -237,9 +237,10 @@ def convert_responses_request_to_chat(
         # Stash for NVIDIA DeepSeek shaping below.
         payload["reasoning_effort"] = mapped
 
-    # Optional provider/model overrides (never secrets / never routing metadata).
-    # Defense in depth: even if a caller stashes profile bookkeeping on
-    # request_overrides, strip keys providers reject (e.g. source_levels).
+    # Optional provider/model overrides (never secrets / never routing or
+    # catalog metadata). Defense in depth: profile.configuration may still
+    # contain /v1/models identity fields (id, object, created, owned_by) or
+    # routing bookkeeping (source_levels); strip before the HTTP body.
     safe_overrides = provider_request_overrides_from_configuration(
         dict(upstream.request_overrides or {}),
         for_http_body=True,
@@ -262,9 +263,15 @@ def convert_responses_request_to_chat(
         payload[key] = value
 
     # Flatten extra_body into the top-level request for raw HTTP chat/completions.
+    # Re-filter after flatten so nested catalog/routing junk never lands as body
+    # keys either (NVIDIA: Unsupported parameter(s): created, id, object, owned_by).
     extra_body = payload.pop("extra_body", None)
     if isinstance(extra_body, dict):
-        for key, value in extra_body.items():
+        filtered_extra = provider_request_overrides_from_configuration(
+            extra_body,
+            for_http_body=True,
+        )
+        for key, value in filtered_extra.items():
             if key == "chat_template_kwargs" and isinstance(value, dict):
                 nested = dict(payload.get("chat_template_kwargs") or {})
                 nested.update(value)

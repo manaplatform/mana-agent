@@ -265,6 +265,10 @@ class GatewayRoutingAuthority:
                 descriptor.context_window is not None
                 and descriptor.max_output_tokens is not None
             )
+            # Apply catalog limits/pricing onto profile fields only. Never merge
+            # the raw /v1/models object (id, object, created, owned_by, …) into
+            # configuration — that dict becomes Codex bridge request_overrides
+            # and NVIDIA rejects those keys as unsupported chat/completions params.
             resolved.append(replace(
                 profile,
                 context_window=context_window,
@@ -276,8 +280,12 @@ class GatewayRoutingAuthority:
                 source_level=("provider-catalog" if complete_capabilities else "provider-catalog-with-configured-unknown-limit"),
                 configuration={
                     **profile.configuration,
-                    **metadata,
                     "token_profile_confidence": "high" if complete_capabilities else "low",
+                    "capability_source": (
+                        "provider-catalog"
+                        if complete_capabilities
+                        else "provider-catalog-with-configured-unknown-limit"
+                    ),
                 },
             ))
         return tuple(resolved)

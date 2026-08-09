@@ -483,3 +483,58 @@ def test_bridge_strips_routing_metadata_from_request_overrides() -> None:
     # DeepSeek still shaped correctly; bare reasoning_effort is not forwarded.
     assert chat["chat_template_kwargs"]["thinking"] is True
     assert chat["chat_template_kwargs"]["reasoning_effort"] == "high"
+
+
+def test_bridge_strips_catalog_model_object_fields_from_request_overrides() -> None:
+    """Catalog model identity fields must not reach NVIDIA chat/completions.
+
+    Regression: profile.configuration received the full /v1/models record
+    (id/object/created/owned_by). Bridge request_overrides forwarded them and
+    NVIDIA returned HTTP 400 Unsupported parameter(s): created, id, object,
+    owned_by (deepseek-ai/deepseek-v4-flash-0731 coding turns).
+    """
+    upstream = BridgeUpstreamConfig(
+        provider="nvidia",
+        display_name="NVIDIA",
+        api_key="nvapi",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+        request_overrides={
+            "id": "deepseek-ai/deepseek-v4-flash-0731",
+            "object": "model",
+            "created": 735790403,
+            "owned_by": "deepseek-ai",
+            "capabilities": ["text_generation", "tool_calling"],
+            "extra_body": {
+                "id": "must-not-flatten",
+                "owned_by": "must-not-flatten",
+                "chat_template_kwargs": {"thinking": False, "reasoning_effort": "none"},
+            },
+            "temperature": 0.0,
+        },
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek-ai/deepseek-v4-flash-0731",
+            "input": "change version to v0.1.6",
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "run a shell command",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        upstream=upstream,
+    )
+    for key in ("id", "object", "created", "owned_by", "capabilities"):
+        assert key not in chat
+    assert chat["model"] == "deepseek-ai/deepseek-v4-flash-0731"
+    assert chat["temperature"] == 0.0
+    assert chat["stream"] is True
+    assert chat["tools"]
+    # Nested catalog junk was stripped from extra_body; template kwargs kept.
+    assert chat["chat_template_kwargs"]["thinking"] is False
+    assert chat["chat_template_kwargs"]["reasoning_effort"] == "none"

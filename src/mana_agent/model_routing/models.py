@@ -57,6 +57,39 @@ INTERNAL_MODEL_CONFIGURATION_KEYS = frozenset(
     }
 )
 
+# OpenAI-compatible /v1/models object identity + common catalog-only fields.
+# Provider catalogs (NVIDIA NIM, OpenRouter, …) return full model records that
+# may be stashed on profile.configuration for accounting. Spreading those into
+# chat/completions JSON yields HTTP 400 Unsupported parameter(s): created, id,
+# object, owned_by (and peers).
+CATALOG_MODEL_OBJECT_KEYS = frozenset(
+    {
+        "id",
+        "object",
+        "created",
+        "owned_by",
+        "root",
+        "parent",
+        "permission",
+        "permissions",
+        "capabilities",
+        "supported_parameters",
+        "architecture",
+        "pricing",
+        "top_provider",
+        "context_length",
+        "context_window",
+        "max_output_tokens",
+        "tokenizer",
+        "input_price_per_million",
+        "output_price_per_million",
+        "cached_input_price_per_million",
+        "input_modalities",
+        "name",
+        "description",
+    }
+)
+
 # Client/SDK-only keys that are not OpenAI-compatible HTTP body parameters.
 NON_HTTP_MODEL_CONFIGURATION_KEYS = frozenset(
     {
@@ -87,15 +120,18 @@ def provider_request_overrides_from_configuration(
     """Extract provider request fields from model configuration.
 
     Routing stores internal metadata (source_levels, capability_source, …)
+    and sometimes catalog model-object fields (id, object, created, owned_by)
     alongside optional request fields (temperature, extra_body, …). Only the
     latter may be sent upstream. Secrets are stripped.
 
     When ``for_http_body`` is True (Codex Responses bridge / raw HTTP), also
-    drop SDK-only keys such as ``model_kwargs``.
+    drop SDK-only keys such as ``model_kwargs`` and catalog identity fields
+    that NVIDIA and other strict hosts reject as unsupported parameters.
     """
     if not isinstance(configuration, dict) or not configuration:
         return {}
     blocked = set(INTERNAL_MODEL_CONFIGURATION_KEYS)
+    blocked |= CATALOG_MODEL_OBJECT_KEYS
     if for_http_body:
         blocked |= NON_HTTP_MODEL_CONFIGURATION_KEYS
     result: dict[str, Any] = {}
@@ -104,6 +140,16 @@ def provider_request_overrides_from_configuration(
         if name in blocked:
             continue
         if any(marker in name.lower() for marker in _SECRET_KEY_MARKERS):
+            continue
+        # Nested extra_body must not reintroduce catalog/routing keys when
+        # later flattened into a raw HTTP chat/completions body.
+        if name == "extra_body" and isinstance(value, dict):
+            nested = provider_request_overrides_from_configuration(
+                value,
+                for_http_body=for_http_body,
+            )
+            if nested:
+                result[name] = nested
             continue
         result[name] = value
     return result

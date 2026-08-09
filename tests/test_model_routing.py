@@ -264,6 +264,40 @@ def test_provider_request_overrides_drop_routing_metadata() -> None:
     assert client_side == {"model_kwargs": {"bar": 2}}
 
 
+def test_provider_request_overrides_drop_catalog_model_object_fields() -> None:
+    """Catalog /v1/models records must not become chat/completions body params.
+
+    Regression: gateway routing merged full NVIDIA model objects into
+    profile.configuration; the Codex bridge then forwarded id/object/created/
+    owned_by and NVIDIA returned HTTP 400 Unsupported parameter(s).
+    """
+    overrides = provider_request_overrides_from_configuration(
+        {
+            "id": "deepseek-ai/deepseek-v4-flash-0731",
+            "object": "model",
+            "created": 735790403,
+            "owned_by": "deepseek-ai",
+            "capabilities": ["text_generation"],
+            "pricing": {"prompt": "0.1"},
+            "temperature": 0.2,
+            "extra_body": {
+                "id": "nested-must-drop",
+                "owned_by": "nested-must-drop",
+                "chat_template_kwargs": {"thinking": False},
+            },
+        },
+        for_http_body=True,
+    )
+    assert overrides == {
+        "temperature": 0.2,
+        "extra_body": {"chat_template_kwargs": {"thinking": False}},
+    }
+    for key in ("id", "object", "created", "owned_by", "capabilities", "pricing"):
+        assert key not in overrides
+    assert "id" not in overrides["extra_body"]
+    assert "owned_by" not in overrides["extra_body"]
+
+
 def test_history_persistence_redacts_secrets(tmp_path: Path) -> None:
     path = tmp_path / "routing.jsonl"
     store = JsonlRoutingHistory(path)
