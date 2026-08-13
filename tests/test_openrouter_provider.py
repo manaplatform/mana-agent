@@ -40,14 +40,32 @@ def test_openrouter_catalog_preserves_ids_and_capabilities() -> None:
         "context_length": 200000,
         "supported_parameters": ["tools", "response_format", "reasoning"],
         "architecture": {"input_modalities": ["text", "image"]},
+    }, {
+        "id": "openai/dall-e-3",
+    }, {
+        "id": "openai/text-embedding-3-small",
+    }, {
+        "id": "haiper/haiper-video-2",
     }]})
     models = ModelCatalogService(fetcher=lambda **_kwargs: records).refresh(
         provider="openrouter", base_url="https://openrouter.ai/api/v1", api_key="secret"
     )
     assert models[0].id == "anthropic/claude-3.7-sonnet:free"
     assert models[0].context_window == 200000
-    assert {ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.IMAGE_INPUT, ModelCapability.REASONING} <= models[0].capabilities
-    assert filter_models(models, ModelPurpose.AGENT) == models
+    assert {ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.IMAGE_INPUT, ModelCapability.REASONING, ModelCapability.TEXT_GENERATION} <= models[0].capabilities
+    assert filter_models(models, ModelPurpose.AGENT) == [models[0]]
+    
+    assert models[1].id == "haiper/haiper-video-2"
+    assert ModelCapability.VIDEO_GENERATION in models[1].capabilities
+    assert ModelCapability.TEXT_GENERATION not in models[1].capabilities
+
+    assert models[2].id == "openai/dall-e-3"
+    assert ModelCapability.IMAGE_GENERATION in models[2].capabilities
+    assert ModelCapability.TEXT_GENERATION not in models[2].capabilities
+
+    assert models[3].id == "openai/text-embedding-3-small"
+    assert ModelCapability.EMBEDDING in models[3].capabilities
+    assert ModelCapability.TEXT_GENERATION not in models[3].capabilities
 
 
 def test_openrouter_configuration_persists_provider_model_pair(isolated_openrouter_config: Path) -> None:

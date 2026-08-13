@@ -194,7 +194,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     reuse_active_route: bool = False
     command_name: str = ""
     command_arguments: list[str] = Field(default_factory=list)
-    remote_request: EntryRoutingRemoteRequest = Field(default_factory=EntryRoutingRemoteRequest)
+    remote_request: EntryRoutingRemoteRequest | None = None
     server_request: EntryRoutingServerRequest | None = None
     mcp_request: EntryRoutingMcpRequest | None = None
     memory_task_id: str = ""

@@ -93,12 +93,30 @@ def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
         architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
         supported = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
         modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else []
-        capabilities: set[str] = {ModelCapability.TEXT_GENERATION.value}
+        capabilities: set[str] = set()
+        lowered_id = model_id.lower()
+        endpoint = item.get("_mana_endpoint", "")
+        out_mods = architecture.get("output_modalities") if isinstance(architecture, dict) else []
+        if not isinstance(out_mods, list):
+            out_mods = []
+        out_mods_lower = [str(m).lower() for m in out_mods]
+
+        if endpoint == "/embeddings/models" or "embeddings" in out_mods_lower or any(marker in lowered_id for marker in ("embed", "embedding", "embedder")):
+            capabilities.add(ModelCapability.EMBEDDING.value)
+        elif endpoint == "/images/models" or "image" in out_mods_lower or any(marker in lowered_id for marker in ("dall-e", "image-gen", "image_generation", "flux", "stable-diffusion", "midjourney")):
+            capabilities.add(ModelCapability.IMAGE_GENERATION.value)
+        elif endpoint == "/videos/models" or "video" in out_mods_lower or isinstance(item.get("supported_durations"), list) or any(marker in lowered_id for marker in ("sora", "video-gen", "video_generation", "runway", "luma", "haiper", "minimax/video", "kling")):
+            capabilities.add(ModelCapability.VIDEO_GENERATION.value)
+        elif "audio" in out_mods_lower or "voice" in out_mods_lower or any(marker in lowered_id for marker in ("tts", "voice", "audio", "speech", "elevenlabs")):
+            capabilities.add(ModelCapability.TEXT_TO_SPEECH.value)
+        else:
+            capabilities.add(ModelCapability.TEXT_GENERATION.value)
+
         if any(str(value).lower() in {"tools", "tool_choice", "parallel_tool_calls"} for value in supported):
             capabilities.add(ModelCapability.TOOL_CALLING.value)
         if any("structured" in str(value).lower() or "response_format" in str(value).lower() for value in supported):
             capabilities.add(ModelCapability.STRUCTURED_OUTPUT.value)
-        if any(str(value).lower() in {"image", "image_url"} for value in modalities):
+        if any(str(value).lower() in {"image", "image_url"} for value in modalities or []):
             capabilities.add(ModelCapability.IMAGE_INPUT.value)
         if any("reasoning" in str(value).lower() for value in supported):
             capabilities.add(ModelCapability.REASONING.value)
@@ -177,29 +195,52 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
         definition = PROVIDERS.get(provider)
     except KeyError as exc:
         raise ModelFetchError(str(exc)) from exc
-    url = (base_url or definition.default_base_url).rstrip("/") + "/models"
+
     headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise ModelFetchError(_http_error_message(definition.display_name, exc)) from exc
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
-            raise ModelFetchError(
-                f"{definition.display_name} model fetch timed out: {reason}."
-            ) from exc
-        raise ModelFetchError(f"{definition.display_name} model fetch failed: {reason}.") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ModelFetchError(f"{definition.display_name} model fetch failed: {exc}.") from exc
+    base = (base_url or definition.default_base_url).rstrip("/")
+
+    def _fetch(endpoint: str) -> dict[str, Any]:
+        request = urllib.request.Request(base + endpoint, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise ModelFetchError(_http_error_message(definition.display_name, exc)) from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
+                raise ModelFetchError(
+                    f"{definition.display_name} model fetch timed out: {reason}."
+                ) from exc
+            raise ModelFetchError(f"{definition.display_name} model fetch failed: {reason}.") from exc
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ModelFetchError(f"{definition.display_name} model fetch failed: {exc}.") from exc
+
     if provider == "openrouter":
-        models: list[str | dict[str, Any]] = parse_openrouter_models(payload)
-    elif provider == "nvidia":
-        models = parse_openai_compatible_model_records(payload)
+        all_data: list[Any] = []
+        seen: set[str] = set()
+        for endpoint in ("/models", "/embeddings/models", "/images/models", "/videos/models"):
+            try:
+                payload = _fetch(endpoint)
+                if isinstance(payload.get("data"), list):
+                    for item in payload["data"]:
+                        if isinstance(item, dict):
+                            item_id = str(item.get("id", ""))
+                            if item_id and item_id not in seen:
+                                seen.add(item_id)
+                                item["_mana_endpoint"] = endpoint
+                                all_data.append(item)
+            except ModelFetchError:
+                if endpoint == "/models":
+                    raise
+        models: list[str | dict[str, Any]] = parse_openrouter_models({"data": all_data})
     else:
-        models = parse_model_ids(payload)
+        payload = _fetch("/models")
+        if provider == "nvidia":
+            models = parse_openai_compatible_model_records(payload)
+        else:
+            models = parse_model_ids(payload)
+
     if not models:
         raise ModelFetchError(
             f"{definition.display_name} model fetch succeeded, but no model IDs were returned."

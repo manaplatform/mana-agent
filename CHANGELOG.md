@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-13
 
+- Added support for OpenRouter in image generation, video generation, and embeddings logic.
+  - User verification required: `python -m pytest tests/test_media_generation.py tests/test_openrouter_provider.py -q`
+
+- Fixed OpenRouter models not showing up in the configuration UI for embeddings, image, and video generation by correctly parsing capabilities from model IDs and handling `null` modalities safely.
+- Enhanced OpenRouter model fetching to query multiple endpoints (`/models`, `/embeddings/models`, `/images/models`, `/videos/models`) to ensure all media models are properly discovered and deduplicated.
+- Added dynamic capability classification for OpenRouter models using `architecture.output_modalities` and endpoint origins, correctly tagging models (e.g. `minimax/hailuo-3` and `bytedance/seedance-2.5`) as video generation without relying on hardcoded ID strings.
+- Added voice and audio capability parsing for OpenRouter models.
+- Added OpenRouter to the list of available media providers in the TUI configuration for image, voice, and video generation.
+- Fixed a validation error in `EntryRoutingOutput` where models explicitly generating `null` for `remote_request` would crash routing.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`
+
 - Fixed conversation-route invocation so older `ask_conversation(question)` signatures still record provider failures instead of raising out of the turn.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_failed_turn_keeps_session_and_records_failure -q`.
 
