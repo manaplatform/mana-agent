@@ -1624,10 +1624,16 @@ class ManaChatApp(App):
                 default_headers=connection.headers,
             )
 
-            system = (
+            from mana_agent.spirit.adapter import apply_spirit_instruction
+
+            system = apply_spirit_instruction(
                 "You are a helpful repository-aware coding assistant called mana-agent. "
                 "Answer concisely and usefully. Use any provided repo context. "
-                "If edits or tools would help, describe what you would do."
+                "If edits or tools would help, describe what you would do.",
+                agent_name="tui-agent",
+                agent_role="main",
+                provider=connection.provider,
+                model=model_name,
             )
             user_content = f"Repo context: {extra_context}\n\nUser question: {question}"
 

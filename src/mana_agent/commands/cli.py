@@ -22,6 +22,7 @@ from mana_agent.teach.cli import teach_app
 from mana_agent.execution_supervisor.cli import tasks_app
 from mana_agent.memory.cli import memory_app
 from mana_agent.human_inbox.cli import inbox_app
+from mana_agent.commands.config_cli import app as config_app
 
 # Use exactly one canonical Typer app.
 # Do not create a second typer.Typer() here.
@@ -42,6 +43,8 @@ if not any(group.name == "memory" for group in app.registered_groups):
     app.add_typer(memory_app, name="memory")
 if not any(group.name == "inbox" for group in app.registered_groups):
     app.add_typer(inbox_app, name="inbox")
+if not any(group.name == "config" for group in app.registered_groups):
+    app.add_typer(config_app, name="config")
 
 
 def _replace_command(name: str, callback, **kwargs) -> None:
@@ -95,12 +98,46 @@ def doctor_command(
         "--skip",
         help="Skip this stable check ID (repeatable or comma-separated).",
     ),
+    check_providers: bool = typer.Option(False, "--providers", help="Run provider checks."),
+    check_connectors: bool = typer.Option(False, "--connectors", help="Run connector checks."),
+    check_mcp: bool = typer.Option(False, "--mcp", help="Run MCP checks."),
+    check_network: bool = typer.Option(False, "--network", help="Run network checks."),
+    check_config: bool = typer.Option(False, "--config", help="Run configuration checks."),
+    check_all: bool = typer.Option(False, "--all", help="Run all checks (overrides group filters)."),
+    bundle: bool = typer.Option(False, "--bundle", help="Export a sanitized diagnostic bundle."),
 ) -> None:
     """Diagnose installation and configuration without requiring an LLM."""
     if json_output and fix and not yes:
         raise typer.BadParameter("--json --fix requires --yes because JSON output cannot prompt.")
+    
     only = _split_check_ids(only)
     skip = _split_check_ids(skip)
+    
+    if not check_all:
+        group_prefixes = []
+        if check_providers:
+            group_prefixes.append("providers/")
+        if check_connectors:
+            group_prefixes.append("connectors/")
+        if check_mcp:
+            group_prefixes.append("mcp/")
+        if check_network:
+            group_prefixes.append("environment/network")
+        if check_config:
+            group_prefixes.append("config/")
+            
+        if group_prefixes:
+            # We resolve the actual check IDs that match these prefixes
+            from mana_agent.doctor.registry import CHECKS
+            for check in CHECKS:
+                if any(check.check_id.startswith(p) for p in group_prefixes):
+                    if check.check_id not in only:
+                        only.append(check.check_id)
+            # If a group flag was passed, but it matched nothing, it will just use 'only'
+            # If they passed --providers but we didn't add anything to `only`, then we should
+            # probably just let it pass [] which means run all. However, we populated `only`.
+            # If `only` is empty after this but group flags were passed, we shouldn't run all.
+            # But CHECKS will match something.
     try:
         preview = run_doctor(deep=deep, only=only, skip=skip)
         should_fix = fix
@@ -119,6 +156,14 @@ def doctor_command(
         else:
             typer.echo(f"Doctor failed before producing a valid report: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    
+    if bundle:
+        import json
+        bundle_path = Path.cwd() / "mana-agent-diagnostic-bundle.json"
+        bundle_path.write_text(json.dumps(report.as_dict(), indent=2) + "\n")
+        typer.echo(f"Diagnostic bundle exported to {bundle_path}")
+        raise typer.Exit(code=0 if report.ok else 1)
+
     typer.echo(render_doctor_report(report, json_mode=json_output))
     raise typer.Exit(code=0 if report.ok else 1)
 # Typer sub-app registrations live on the canonical app and are preserved.

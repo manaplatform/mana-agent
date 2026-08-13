@@ -2,6 +2,34 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-13
+
+- Fixed conversation-route invocation so older `ask_conversation(question)` signatures still record provider failures instead of raising out of the turn.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_failed_turn_keeps_session_and_records_failure -q`.
+
+- Bound routed Spirit into the conversation executor (`QnAChain.chat` / `route-conversation`) so ordinary chat uses the same Mana-Agent session identity after model selection, without a hardcoded identity reply.
+  - User verification required: `python -m pytest tests/test_spirit.py::test_conversation_executor_binds_routed_spirit_after_model_selection tests/gateway/test_chat_gateway.py tests/test_spirit.py -q`.
+
+- Integrated Spirit with the existing model router: Spirit resolves before routing, the router still selects the model, Runtime Self binds after the decision, and the same Spirit is compiled for that model. Temperament is not a routing signal.
+  - User verification required: `python -m pytest tests/test_spirit_routing.py tests/test_spirit.py tests/test_model_routing.py tests/gateway/test_routing_authority.py -q`.
+
+- Updated compiled Spirit to announce Mana-Agent and the selected inference model as ordinary session metadata after model routing, without identity-override wording.
+  - User verification required: `python -m pytest tests/test_spirit.py -q`.
+
+- Updated agent identity to introduce a versioned Mana Spirit (curious, bold, calm) composed into runtime Self without changing policy, memory, or coding contracts.
+  - User verification required: `python -m pytest tests/test_spirit.py tests/test_prompting_builder.py tests/test_prompts_contract.py tests/test_multi_agent_core.py::test_execution_context_preserves_model_metadata -q`.
+
+## 2026-08-10
+
+- Updated configuration loading to exclusively read from `~/.mana/config.toml` and `~/.mana/secrets.toml`, intentionally ignoring environment variables and `.env` files.
+  - User verification required: `./venv/bin/mana-agent config explain`
+
+- Implemented a Schema-First Configuration Doctor to validate config before runtime startup.
+  - Added CLI `config` group (`schema`, `validate`, `explain`, `migrate`).
+  - Expanded `doctor` checks with environment, providers, secrets, and MCP validations.
+  - Added deterministic semantic schema validation and a migration registry.
+  - User verification required: `mana-agent config validate` and `mana-agent doctor --providers`.
+
 ## 2026-08-09
 
 - Hardened user-controlled path handling after CodeQL path-injection analysis.

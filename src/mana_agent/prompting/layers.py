@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-PROMPT_TEMPLATE_VERSION = "stable-ephemeral-v1"
+PROMPT_TEMPLATE_VERSION = "stable-ephemeral-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +14,7 @@ class PromptLayer:
 
 @dataclass(frozen=True, slots=True)
 class StablePromptState:
+    spirit: str
     identity: str
     tool_rules: str
     behavior_rules: str
@@ -35,6 +36,7 @@ class EphemeralPromptContext:
 
 
 STABLE_PROMPT_LAYER_ORDER: tuple[str, ...] = (
+    "spirit",
     "core_identity",
     "tool_rules",
     "agent_behavior_rules",

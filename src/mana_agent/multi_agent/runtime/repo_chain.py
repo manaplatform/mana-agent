@@ -21,6 +21,8 @@ from mana_agent.multi_agent.runtime.prompts import (
     DEEP_FLOW_SYSTEM_PROMPT,
     DEEP_FLOW_HUMAN_TEMPLATE,
 )
+from mana_agent.spirit.adapter import apply_spirit_instruction
+from mana_agent.spirit.self_model import compose_runtime_self
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +211,17 @@ class RepositoryMultiChain:
         security_lens: str = "defensive-red-team",
     ) -> str:
         prompt = ChatPromptTemplate.from_messages([
-            ("system", DEEP_FLOW_SYSTEM_PROMPT),
+            (
+                "system",
+                apply_spirit_instruction(
+                    DEEP_FLOW_SYSTEM_PROMPT,
+                    compose_runtime_self(
+                        agent_name="repo-analysis-agent",
+                        agent_role="research",
+                        model=self.model,
+                    ),
+                ),
+            ),
             ("human", DEEP_FLOW_HUMAN_TEMPLATE),
         ])
 

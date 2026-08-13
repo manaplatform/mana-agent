@@ -21,6 +21,7 @@ class DoctorFinding:
     message: str
     fix_hint: str | None = None
     path: str | None = None
+    code: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     repairable: bool = False
 

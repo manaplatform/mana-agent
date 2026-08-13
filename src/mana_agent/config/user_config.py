@@ -400,6 +400,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
 
 FIELD_NAME_BY_ENV: dict[str, str] = {
     "media": "media",
+    "spirit": "spirit",
     "MANA_AI_PROVIDER": "mana_ai_provider",
     "MANA_PRIMARY_MODEL": "mana_primary_model",
     "MANA_EMBEDDING_MODEL": "mana_embedding_model",
@@ -589,6 +590,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_CONFIG_SCHEMA_VERSION",
     "MANA_AI_PROVIDER",
     "MANA_PRIMARY_MODEL",
+    "spirit",
     "MANA_EMBEDDING_MODEL",
     "MANA_CONFIGURED_PROVIDERS",
     "OPENAI_BASE_URL",
@@ -899,7 +901,7 @@ def has_user_config() -> bool:
 
 
 def is_user_config_valid() -> bool:
-    effective = load_effective_settings(include_env=True)
+    effective = load_effective_settings(include_env=False)
     provider = str(effective.get("MANA_AI_PROVIDER") or "openai").strip().lower()
     if provider == "openrouter":
         api_key = effective.get("OPENROUTER_API_KEY", "")
@@ -913,12 +915,13 @@ def is_user_config_valid() -> bool:
     )
 
 
-def load_effective_settings(*, include_env: bool = True) -> dict[str, Any]:
+def load_effective_settings(*, include_env: bool = False) -> dict[str, Any]:
     """Load Mana-managed settings exclusively from the user configuration.
 
-    Explicit Mana configuration wins over environment variables. Environment
-    variables may fill missing values for CI and automation, but repository
-    ``.env`` files are deliberately never loaded here.
+    All settings are loaded from ~/.mana/config.toml and ~/.mana/secrets.toml.
+    Environment variables and .env files are deliberately not loaded by default,
+    but may be explicitly requested by internal components (like the API or
+    worker gateway) using include_env=True.
     """
     values = dict(DEFAULT_USER_CONFIG)
     user_values = load_user_config()
@@ -1017,6 +1020,16 @@ def validate_model_level(value: str) -> str:
 
 def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(values)
+    if "spirit" in cleaned:
+        from mana_agent.spirit.registry import resolve_spirit
+        from mana_agent.spirit.schema import SpiritSettings
+
+        raw_spirit = cleaned["spirit"]
+        if not isinstance(raw_spirit, dict):
+            raise UserConfigError("spirit must be a TOML table.")
+        spirit_settings = SpiritSettings.model_validate(raw_spirit)
+        resolve_spirit(spirit_id=spirit_settings.id, spirit_version=spirit_settings.version)
+        cleaned["spirit"] = spirit_settings.model_dump(mode="json")
     if "media" in cleaned:
         from mana_agent.media.config import MediaConfig
 

@@ -2,6 +2,12 @@
 
 Mana-Agent selects inference models through the existing `mana_agent.model_routing.ModelRouter`. `GatewayRoutingAuthority` owns that router for CLI, TUI, API, dashboard, protocol, automation, and Codex execution. It adds task/session/workspace identity, persists every request/decision pair to `~/.mana/routing/decisions.jsonl`, and emits routing lifecycle events. Logical model levels and explicitly configured role models remain profile hints only. A missing, invalid, or unpersistable decision stops execution; there is no default-model bypass.
 
+Spirit is resolved before this router runs and is bound to the selected
+provider/model afterward. Curious, bold, and calm are identity, not routing
+signals: they are not added to scoring, cost, risk, latency, or capability
+evaluation. Model changes therefore do not change Mana identity. Durable
+routing records store `spirit_id` and `spirit_version` only.
+
 ## Request and profiles
 
 A `RoutingRequest` carries task/parent/session/workspace/repository IDs, lane/role, task description and category, estimated complexity and risk, cached `RepositoryMetadata`, required tools/capabilities/context/output, latency, task-tree depth, health/evidence signals, budgets, and the coordinating model's explicit decomposition or competition request. Repository inspection uses a Git-index/config fingerprint and reuses its bounded inventory until relevant metadata changes. Languages, frameworks, build systems, repository/test size, changed-file scope, and sensitive changed areas contribute to routing demand.

@@ -24,7 +24,7 @@ class DoctorReport:
 
     def as_dict(self) -> dict:
         def finding(item: DoctorFinding) -> dict:
-            return {"checkId": item.check_id, "severity": item.severity.value, "title": item.title, "message": item.message, "fixHint": item.fix_hint, "path": item.path, "repairable": item.repairable, "details": redact(item.details)}
+            return {"checkId": item.check_id, "code": item.code, "severity": item.severity.value, "title": item.title, "message": item.message, "fixHint": item.fix_hint, "path": item.path, "repairable": item.repairable, "details": redact(item.details)}
         return redact({"ok": self.ok, "version": "1", "manaAgentVersion": get_version(), "mode": "deep" if self.deep else "normal", "checksRun": self.checks_run, "checksSkipped": self.checks_skipped, "summary": {"passed": sum(item.severity is Severity.INFO for item in self.findings), "warnings": sum(item.severity is Severity.WARNING for item in self.findings), "errors": sum(item.severity is Severity.ERROR for item in self.findings), "repairsApplied": sum(item.success and item.changed for item in self.repairs), "repairsFailed": sum(not item.success for item in self.repairs)}, "findings": [finding(item) for item in self.findings], "repairs": [{"checkId": item.check_id, "changed": item.changed, "success": item.success, "message": item.message, "backupPath": item.backup_path, "details": redact(item.details)} for item in self.repairs]})
 
 

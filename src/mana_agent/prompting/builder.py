@@ -27,6 +27,8 @@ from mana_agent.prompting.output_contract import render_output_contract
 from mana_agent.prompting.repo_rules import render_repo_rules
 from mana_agent.prompting.skills_index import render_matched_skill_context, render_stable_skills_index
 from mana_agent.context_cost.estimator import estimate_value_tokens
+from mana_agent.spirit.compiler import compile_spirit_instruction, strip_spirit_instruction
+from mana_agent.spirit.self_model import RuntimeSelf, compose_runtime_self
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,7 @@ def _verification_rules() -> str:
 
 def _stable_layers(state: StablePromptState) -> list[PromptLayer]:
     return [
+        PromptLayer("spirit", state.spirit),
         PromptLayer("core_identity", state.identity),
         PromptLayer("tool_rules", state.tool_rules),
         PromptLayer("agent_behavior_rules", state.behavior_rules),
@@ -132,6 +135,8 @@ class PromptCache:
         behavior_rules: str,
         repo_rules: str,
         verification_rules: str,
+        spirit: str,
+        spirit_ref: str,
     ) -> StablePromptState:
         _ = repo
         normalized_tools = _normalize_tools(tools)
@@ -142,7 +147,10 @@ class PromptCache:
             "enabled_tools": normalized_tools,
             "skill_index_hash": _hash_text(skill_index),
             "repository_rules_hash": _hash_text(repo_rules),
-            "identity_rules_hash": _hash_text(_join_sections(identity, tool_rules, behavior_rules, verification_rules)),
+            "identity_rules_hash": _hash_text(
+                _join_sections(spirit, identity, tool_rules, behavior_rules, verification_rules)
+            ),
+            "spirit_ref": spirit_ref,
             "model_provider_profile": _hash_text(_profile_text(config)),
         }
         cache_key = _hash_text(repr(sorted(key_parts.items())))
@@ -154,6 +162,7 @@ class PromptCache:
 
         reason = self._reason_for_miss(cache_key, key_parts)
         state = StablePromptState(
+            spirit=spirit,
             identity=identity,
             tool_rules=tool_rules,
             behavior_rules=behavior_rules,
@@ -254,6 +263,24 @@ def compose(
     return messages
 
 
+def _runtime_self_for_prompt(
+    *,
+    runtime_self: RuntimeSelf | None,
+    execution_context: Any | None,
+    agent_name: str | None,
+    agent_role: str | None,
+    model_profile: Mapping[str, Any] | None,
+) -> RuntimeSelf:
+    if runtime_self is not None:
+        return runtime_self
+    return compose_runtime_self(
+        execution_context=execution_context,
+        agent_name=agent_name,
+        agent_role=agent_role,
+        model_profile=model_profile,
+    )
+
+
 def get_or_build_stable_prompt(
     *,
     base_prompt: str,
@@ -262,10 +289,22 @@ def get_or_build_stable_prompt(
     enabled_tools: Sequence[str] | None = None,
     model_profile: Mapping[str, Any] | None = None,
     cache: PromptCache | None = None,
+    runtime_self: RuntimeSelf | None = None,
+    execution_context: Any | None = None,
+    agent_name: str | None = None,
+    agent_role: str | None = None,
 ) -> StablePromptState:
     repo_rules = render_repo_rules(repo_root=repo_root)
     skills = render_stable_skills_index(repo_root=repo_root)
     active_cache = cache or prompt_cache
+    current_self = _runtime_self_for_prompt(
+        runtime_self=runtime_self,
+        execution_context=execution_context,
+        agent_name=agent_name,
+        agent_role=agent_role,
+        model_profile=model_profile,
+    )
+    spirit_text = compile_spirit_instruction(current_self)
     return active_cache.get_or_build(
         repo_root,
         {
@@ -274,11 +313,13 @@ def get_or_build_stable_prompt(
         },
         skills,
         enabled_tools,
-        identity=base_prompt,
+        identity=strip_spirit_instruction(base_prompt),
         tool_rules=CODING_AGENT_LANGUAGE_TOOLING_PROMPT,
         behavior_rules=_behavior_rules(full_auto_mode=full_auto_mode),
         repo_rules=repo_rules,
         verification_rules=_verification_rules(),
+        spirit=spirit_text,
+        spirit_ref=current_self.spirit.key(),
     )
 
 
@@ -294,6 +335,10 @@ def build_coding_system_prompt(
     prompt_cache: PromptCache | None = None,
     enabled_tools: Sequence[str] | None = None,
     model_profile: Mapping[str, Any] | None = None,
+    runtime_self: RuntimeSelf | None = None,
+    execution_context: Any | None = None,
+    agent_name: str | None = None,
+    agent_role: str | None = None,
 ) -> str:
     flow = build_agent_flow(
         request,
@@ -308,6 +353,10 @@ def build_coding_system_prompt(
         enabled_tools=enabled_tools,
         model_profile=model_profile,
         cache=prompt_cache,
+        runtime_self=runtime_self,
+        execution_context=execution_context,
+        agent_name=agent_name,
+        agent_role=agent_role,
     )
     temporary_constraints = [
         render_mode_rules(flow.context.mode),

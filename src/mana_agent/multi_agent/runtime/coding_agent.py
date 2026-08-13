@@ -1260,6 +1260,8 @@ class CodingAgent:
             prompt_cache=self._prompt_cache,
             enabled_tools=self._enabled_tool_names(),
             model_profile=self._prompt_model_profile(),
+            agent_name="coding-agent",
+            agent_role="coding",
         )
 
     @staticmethod
