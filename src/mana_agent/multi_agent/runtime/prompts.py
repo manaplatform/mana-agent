@@ -173,6 +173,11 @@ Presentation:
 """.strip()
 
 
+CONVERSATION_SYSTEM_PROMPT = """
+Answer the user's current conversational request using the active session history included in the message. Treat that transcript as available context, preserve stated values exactly, and never claim that session history is unavailable when it is present. Do not turn session facts into long-term repository memory.
+""".strip()
+
+
 BROWSER_AGENT_SYSTEM_PROMPT = """
 You are Mana-Agent's model-controlled browser operator. Complete the user's
 website task by calling the provided browser_* tools. Do not use repository,
@@ -843,6 +848,7 @@ __all__ = [
     "PROJECT_ANALYZE_SYSTEM_PROMPT",
     "PROJECT_ANALYZE_HUMAN_TEMPLATE",
     "ASK_AGENT_SYSTEM_PROMPT",
+    "CONVERSATION_SYSTEM_PROMPT",
     "BROWSER_AGENT_SYSTEM_PROMPT",
     "TOOL_FIRST",
     "DEEP_FLOW_SYSTEM_PROMPT",

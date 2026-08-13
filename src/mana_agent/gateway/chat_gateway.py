@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import inspect
 import json
 import logging
 import re
@@ -3992,6 +3993,11 @@ class AgentChatGateway:
                         entry_route=entry_decision.route,
                         model_lane=options.get("lane_id"),
                     )
+                    state["latest_routing_decision"] = entry_model_decision.concise()
+                    conversation_options = dict(options)
+                    conversation_options["_selected_model"] = entry_model_decision.selected_model
+                    conversation_options["_selected_provider"] = entry_model_decision.provider
+                    conversation_options["_routing_decision_id"] = entry_model_decision.decision_id
                     result = self._execute_entry_route(
                         decision=entry_decision,
                         context=route_context,
@@ -3999,7 +4005,7 @@ class AgentChatGateway:
                         state=state,
                         ask_service=ask_service,
                         sink=sink,
-                        options=dict(options),
+                        options=conversation_options,
                     )
                     result.payload["lane_id"] = conversation_lane.value
                     return self._finalize_turn_result(
@@ -4151,6 +4157,11 @@ class AgentChatGateway:
                 state["latest_routing_decision"] = execution_decision.concise()
                 self._apply_selected_model(
                     getattr(ask_service, "ask_agent", None),
+                    execution_decision.selected_model,
+                    execution_decision.provider,
+                )
+                self._apply_selected_model(
+                    getattr(ask_service, "qna_chain", None),
                     execution_decision.selected_model,
                     execution_decision.provider,
                 )
@@ -6042,6 +6053,76 @@ class AgentChatGateway:
         visit(payload)
         return found
 
+    def _invoke_conversation(
+        self,
+        execution_text: str,
+        *,
+        ask_service: Any,
+        text: str,
+        state: dict[str, Any],
+        options: dict[str, Any],
+    ) -> Any:
+        runtime_self = self._conversation_runtime_self(
+            ask_service=ask_service,
+            text=text,
+            state=state,
+            options=options,
+        )
+        ask_conversation = self._chat_service.ask_conversation
+        try:
+            parameters = inspect.signature(ask_conversation).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "runtime_self" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            return ask_conversation(execution_text, runtime_self=runtime_self)
+        return ask_conversation(execution_text)
+
+    def _conversation_runtime_self(
+        self,
+        *,
+        ask_service: Any,
+        text: str,
+        state: dict[str, Any],
+        options: dict[str, Any],
+    ) -> Any:
+        """Bind the already-routed Spirit and model for a conversation turn."""
+        from mana_agent.spirit.self_model import compose_runtime_self
+
+        qna_chain = getattr(ask_service, "qna_chain", None)
+        latest = dict(state.get("latest_routing_decision") or {})
+        provider = str(
+            options.get("_selected_provider")
+            or latest.get("provider")
+            or getattr(qna_chain, "provider", "")
+            or ""
+        )
+        model = str(
+            options.get("_selected_model")
+            or latest.get("model")
+            or getattr(qna_chain, "model", "")
+            or ""
+        )
+        if provider and model:
+            self._apply_selected_model(qna_chain, model, provider)
+        decision_id = str(options.get("_routing_decision_id") or latest.get("decision_id") or "")
+        authority = getattr(self, "routing_authority", None)
+        binding = (
+            authority.binding_for(decision_id)
+            if authority is not None and decision_id
+            else None
+        )
+        spirit = binding.base_self.spirit if binding is not None else None
+        return compose_runtime_self(
+            spirit=spirit,
+            agent_name="conversation-agent",
+            agent_role="conversation",
+            provider=provider,
+            model=model,
+            purpose=text,
+        )
+
     def _apply_selected_model(self, target: Any, model: str, provider: str) -> None:
         if target is None:
             return
@@ -6402,7 +6483,13 @@ class AgentChatGateway:
             )
         if decision.route == "conversation":
             try:
-                answer = self._chat_service.ask_conversation(execution_text)
+                answer = self._invoke_conversation(
+                    execution_text,
+                    ask_service=ask_service,
+                    text=text,
+                    state=state,
+                    options=options,
+                )
             except Exception as exc:
                 return ChatTurnResult(
                     answer="",

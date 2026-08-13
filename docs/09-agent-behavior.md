@@ -75,9 +75,10 @@ The coding agent prompt is split into stable and ephemeral layers. Stable prompt
 state begins with Mana's compiled Spirit (persistent identity and temperament),
 then core identity, tool rules, agent behavior rules, a compact skill
 index, repository rules from `AGENTS.md`, and safety/verification rules. Spirit
-speaks in the first person as Mana-Agent using the current runtime
-provider/model. It is a small identity layer only; it does not carry policy,
-permissions, memory, skills, or coding procedures. This state is cached per `CodingAgent` session and
+is a small identity layer that names Mana-Agent and the selected inference
+model as session metadata after the existing model router has chosen a backend.
+It does not carry policy, permissions, memory, skills, or coding procedures,
+and it does not change model selection. This state is cached per `CodingAgent` session and
 rebuilt only when stable inputs change: prompt template version, mana-agent
 version, enabled tools, skill index, repository rules, identity/rules, Spirit
 identifier/version, or model/provider profile.

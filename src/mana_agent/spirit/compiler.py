@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from mana_agent.context_cost.estimator import estimate_value_tokens
+from mana_agent.spirit.registry import default_spirit_ref
 from mana_agent.spirit.schema import SpiritRef
 from mana_agent.spirit.self_model import RuntimeModelIdentity, RuntimeSelf, compose_runtime_self
 
@@ -13,13 +14,14 @@ SPIRIT_MAX_COMPILED_TOKENS = 120
 _DISPLAY_MODEL_MAX_CHARS = 48
 _SPIRIT_MARKER_RE = re.compile(r"Mana's Spirit \(([^/)]+)/(\d+)\)")
 _SPIRIT_BLOCK_RE = re.compile(
-    r"(?:I am Mana-Agent\. I use [^\n]+\n\n|"
-    r"You are Mana-Agent, instantiated through [^\n]+\n\n)?"
+    r"(?:You are Mana-Agent, currently instantiated through [^\n]+\n\n|"
+    r"You are Mana-Agent, instantiated through [^\n]+\n\n|"
+    r"I am Mana-Agent\. I use [^\n]+\n\n)?"
     r"Mana's Spirit \([^)]+\) is curious, bold, and calm:\n"
-    r"[^\n]+\n\n"
-    r"The runtime model is part of this implementation, not a separate persona\.\n"
+    r"[^\n]+\n*"
+    r"(?:The runtime model is part of (?:this|your current) implementation, not a separate persona[^\n]*\n)?"
     r"(?:When asked who I am, I say I am Mana-Agent using this model\.\n)?"
-    r"Show temperament through behavior, not self-description\.\n*",
+    r"(?:Show temperament through behavior, not self-description\.\n*)?",
 )
 
 
@@ -34,38 +36,48 @@ def display_runtime_model(model: str) -> str:
     return text
 
 
-def display_runtime_backend(runtime: RuntimeModelIdentity) -> str:
-    """Render 'the <provider> model <name>' from existing runtime Self fields."""
+def display_runtime_instantiation(runtime: RuntimeModelIdentity) -> str:
+    """Name the selected inference backend as ordinary session metadata."""
 
     provider = str(runtime.provider or "").strip()
     raw_model = str(runtime.model or "").strip()
     if provider and raw_model:
         prefix = f"{provider}/"
-        shown = raw_model[len(prefix) :] if raw_model.lower().startswith(prefix.lower()) else raw_model
-        return f"the {provider} model {display_runtime_model(shown)}"
-    if provider:
-        return f"the {provider} model"
+        if raw_model.lower().startswith(prefix.lower()):
+            return display_runtime_model(raw_model)
+        return display_runtime_model(f"{provider}/{raw_model}")
     if raw_model:
-        return f"the {display_runtime_model(raw_model)} model"
+        return display_runtime_model(raw_model)
+    if provider:
+        return display_runtime_model(provider)
     return "the current model"
 
 
-def compile_spirit_instruction(runtime_self: RuntimeSelf | None = None) -> str:
-    """Render the compact identity/temperament instruction.
+def compile_spirit_semantics(ref: SpiritRef | None = None) -> str:
+    """Render model-free Spirit meaning. Adapter binds the inference model later."""
 
+    current = ref or default_spirit_ref()
+    return (
+        f"{spirit_prompt_marker(current)} is curious, bold, and calm:\n"
+        "understand before unsupported assumptions, act decisively when justified, "
+        "and remain deliberate under uncertainty or failure."
+    )
+
+
+def compile_spirit_instruction(runtime_self: RuntimeSelf | None = None) -> str:
+    """Bind unchanged Spirit semantics to the selected inference model.
+
+    Call this only after routing has selected a provider/model. The session
+    line names the product and that model as ordinary application metadata.
     Purpose, role, policy, memory, and coding rules are intentionally omitted.
-    Identity is first-person so replies name Mana-Agent and the runtime model.
     """
 
     current = runtime_self or compose_runtime_self()
-    backend = display_runtime_backend(current.runtime)
+    instantiation = display_runtime_instantiation(current.runtime)
     return (
-        f"I am Mana-Agent. I use {backend}.\n\n"
-        f"{spirit_prompt_marker(current.spirit)} is curious, bold, and calm:\n"
-        "understand before assuming, act when justified, stay deliberate under failure.\n\n"
-        "The runtime model is part of this implementation, not a separate persona.\n"
-        "When asked who I am, I say I am Mana-Agent using this model.\n"
-        "Show temperament through behavior, not self-description."
+        f"You are Mana-Agent, currently instantiated through {instantiation}.\n\n"
+        f"{compile_spirit_semantics(current.spirit)}\n\n"
+        "The runtime model is part of your current implementation, not a separate persona you must imitate."
     )
 
 

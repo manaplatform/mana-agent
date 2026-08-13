@@ -52,6 +52,22 @@ class RuntimePurpose(BaseModel):
         return str(value or "").strip()
 
 
+class BaseSelf(BaseModel):
+    """Pre-routing identity. Spirit is resolved; no model is bound yet."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    spirit: Spirit
+    agent: RuntimeAgentIdentity
+    purpose: RuntimePurpose = Field(default_factory=RuntimePurpose)
+
+    def ref(self) -> SpiritRef:
+        return self.spirit.ref()
+
+    def durable_ref(self) -> dict[str, int | str]:
+        return {"id": self.spirit.id, "version": self.spirit.version}
+
+
 class RuntimeSelf(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -74,9 +90,60 @@ def _optional_text(*values: Any) -> str:
     return ""
 
 
+def _resolve_spirit_object(
+    *,
+    spirit: Spirit | SpiritRef | None,
+    execution_context: Any | None,
+    settings: Any | None,
+) -> Spirit:
+    if isinstance(spirit, Spirit):
+        return spirit
+    if isinstance(spirit, SpiritRef):
+        return resolve_spirit(spirit_id=spirit.id, spirit_version=spirit.version, settings=settings)
+    context_id = getattr(execution_context, "spirit_id", None) if execution_context is not None else None
+    context_version = getattr(execution_context, "spirit_version", None) if execution_context is not None else None
+    if context_id or settings is not None:
+        return resolve_spirit(
+            spirit_id=str(context_id or "") or None,
+            spirit_version=int(context_version) if context_version else None,
+            settings=settings,
+        )
+    return resolve_configured_spirit()
+
+
+def compose_base_self(
+    *,
+    spirit: Spirit | SpiritRef | None = None,
+    execution_context: Any | None = None,
+    agent_name: str | None = None,
+    agent_role: str | None = None,
+    purpose: str | None = None,
+    settings: Any | None = None,
+) -> BaseSelf:
+    """Resolve stable identity only. Do not compile a model-specific prompt."""
+
+    resolved = _resolve_spirit_object(
+        spirit=spirit,
+        execution_context=execution_context,
+        settings=settings,
+    )
+    role = _optional_text(agent_role, getattr(execution_context, "agent_role", None), "main")
+    name = _optional_text(
+        agent_name,
+        getattr(execution_context, "agent_id", None),
+        f"{role}-agent",
+    )
+    return BaseSelf(
+        spirit=resolved,
+        agent=RuntimeAgentIdentity(name=name, role=role),
+        purpose=RuntimePurpose(task=_optional_text(purpose)),
+    )
+
+
 def compose_runtime_self(
     *,
     spirit: Spirit | SpiritRef | None = None,
+    base_self: BaseSelf | None = None,
     execution_context: Any | None = None,
     agent_name: str | None = None,
     agent_role: str | None = None,
@@ -88,24 +155,16 @@ def compose_runtime_self(
 ) -> RuntimeSelf:
     """Compose Self from a Spirit ref and existing runtime/role state."""
 
+    if base_self is not None:
+        spirit = spirit or base_self.spirit
+        agent_name = agent_name or base_self.agent.name
+        agent_role = agent_role or base_self.agent.role
+        purpose = purpose or base_self.purpose.task
+
     ctx = execution_context
     profile = dict(model_profile or {})
-    if isinstance(spirit, Spirit):
-        ref = spirit.ref()
-    elif isinstance(spirit, SpiritRef):
-        ref = spirit
-    else:
-        context_id = getattr(ctx, "spirit_id", None) if ctx is not None else None
-        context_version = getattr(ctx, "spirit_version", None) if ctx is not None else None
-        if context_id or settings is not None:
-            resolved = resolve_spirit(
-                spirit_id=str(context_id or "") or None,
-                spirit_version=int(context_version) if context_version else None,
-                settings=settings,
-            )
-        else:
-            resolved = resolve_configured_spirit()
-        ref = resolved.ref()
+    resolved = _resolve_spirit_object(spirit=spirit, execution_context=ctx, settings=settings)
+    ref = resolved.ref()
 
     role = _optional_text(agent_role, getattr(ctx, "agent_role", None), "main")
     name = _optional_text(

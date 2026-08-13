@@ -157,12 +157,13 @@ without treating a lane cap as model capacity. See
   See: `src/mana_agent/agent/flow.py:1-109`.
 
 - **`src/mana_agent/spirit/`** is the versioned Mana Spirit: persistent identity
-  and temperament (`curious`, `bold`, `calm`). A compiler turns Spirit plus the
-  current runtime Self (agent role + provider/model from existing runtime
-  context) into a small first-person instruction: the agent says it is
-  Mana-Agent using the current provider/model, not a vendor chatbot persona.
-  Durable records store `spirit_id` and `spirit_version` only. Spirit is not a
-  policy, memory, security, or coding layer.
+  and temperament (`curious`, `bold`, `calm`). `spirit/routing.py` coordinates
+  the existing model router without replacing it: resolve Spirit → Base Self →
+  task intake → `ModelRouter` → Runtime Self → compile the same Spirit for the
+  selected model. Routing chooses how Mana thinks; it does not choose who Mana
+  is. Spirit semantics do not change per model, retry, or candidate. Durable
+  records store `spirit_id` and `spirit_version` only. Spirit is not a policy,
+  memory, security, or coding layer.
 - **`src/mana_agent/prompting/builder.py`** assembles the stable prompt (Spirit,
   rules, tool policy, skill index hints, verification rules) and the ephemeral
   prompt (per-call task context, retrieved snippets, recent summaries).

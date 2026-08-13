@@ -9,6 +9,8 @@ from mana_agent.model_routing.models import Complexity, LatencyClass, Repository
 from mana_agent.model_routing.profiles import configured_profiles, profiles_from_legacy_configuration
 from mana_agent.model_routing.router import ModelRouter
 from mana_agent.multi_agent.core.types import AgentRole
+from mana_agent.spirit.routing import bind_after_route, resolve_base_self, route_with_spirit
+from mana_agent.spirit.self_model import RuntimeSelf
 
 MODEL_LEVEL_3_HIGH_REASONING = "MODEL_LEVEL_3_HIGH_REASONING"
 MODEL_LEVEL_2_CODING = "MODEL_LEVEL_2_CODING"
@@ -47,6 +49,9 @@ class ResolvedModelAssignment:
     model_level: str
     resolved_model: str
     routing_decision: RoutingDecision | None = None
+    spirit_id: str = ""
+    spirit_version: int = 0
+    runtime_self: RuntimeSelf | None = None
 
 
 def _is_symbolic_model_level(value: str) -> bool:
@@ -114,7 +119,8 @@ def route_model(request: RoutingRequest, *, global_model: str, profiles=None) ->
             weights=weights or RoutingPolicy().weights,
         )
         history = JsonlRoutingHistory(mana_home() / "routing" / "outcomes.jsonl", retention_days=policy.evidence_retention_days)
-    return ModelRouter(candidates, policy=policy, history=history if profiles is None else None).route(request)
+    router = ModelRouter(candidates, policy=policy, history=history if profiles is None else None)
+    return route_with_spirit(router, request).decision
 
 
 def routing_budgets_from_settings(settings) -> RoutingBudgets:
@@ -139,12 +145,15 @@ def pin_model_for_role(role: AgentRole, model: str) -> ResolvedModelAssignment:
     selected = str(model or "").strip()
     if not selected:
         raise ValueError(f"pinned model for role {role.value} must be non-empty")
+    base_self = resolve_base_self(role=role.value)
     return ResolvedModelAssignment(
         role=role,
         env_var=env_var,
         model_level="pinned",
         resolved_model=selected,
         routing_decision=None,
+        spirit_id=base_self.spirit.id,
+        spirit_version=base_self.spirit.version,
     )
 
 
@@ -199,15 +208,20 @@ def resolve_model_for_role(
             repository_id=repository_id,
             execution_lane=execution_lane or role.value,
         )
-    decision = (
-        routing_authority.route(request)
-        if routing_authority is not None
-        else route_model(request, global_model=migration_target)
-    )
+    base_self = resolve_base_self(role=role.value, purpose=request.task_description)
+    if routing_authority is not None:
+        decision = routing_authority.route(request)
+        binding = routing_authority.binding_for(decision.decision_id) or bind_after_route(base_self, decision)
+    else:
+        decision = route_model(request, global_model=migration_target)
+        binding = bind_after_route(base_self, decision)
     return ResolvedModelAssignment(
         role=role,
         env_var=env_var,
         model_level=configured if _is_symbolic_model_level(configured) else default_level,
         resolved_model=decision.selected_model,
         routing_decision=decision,
+        spirit_id=binding.runtime_self.spirit.id,
+        spirit_version=binding.runtime_self.spirit.version,
+        runtime_self=binding.runtime_self,
     )

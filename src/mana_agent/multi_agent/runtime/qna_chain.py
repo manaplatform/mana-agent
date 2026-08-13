@@ -8,7 +8,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
 from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 
-from mana_agent.multi_agent.runtime.prompts import HUMAN_TEMPLATE, SYSTEM_PROMPT
+from mana_agent.multi_agent.runtime.prompts import (
+    CONVERSATION_SYSTEM_PROMPT,
+    HUMAN_TEMPLATE,
+    SYSTEM_PROMPT,
+)
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 from mana_agent.spirit.adapter import apply_spirit_instruction
 from mana_agent.spirit.self_model import compose_runtime_self
@@ -100,18 +104,18 @@ class QnAChain:
         logger.info("QnA chain completed in %.2fms", elapsed_ms)
         return str(response.content)
 
-    def chat(self, question: str) -> str:
-        """Answer directly from the exact active-session transcript in ``question``."""
+    def chat(self, question: str, *, runtime_self: Any | None = None) -> str:
+        """Answer from the session transcript after the routed Self is bound."""
+        current = runtime_self or compose_runtime_self(
+            agent_name="conversation-agent",
+            agent_role="conversation",
+            provider=self.provider,
+            model=self.model,
+        )
         response = self.llm.invoke(
             [
                 SystemMessage(
-                    content=(
-                        "Answer the user's current conversational request using the active "
-                        "session history included in the message. Treat that transcript as "
-                        "available context, preserve stated values exactly, and never claim "
-                        "that session history is unavailable when it is present. Do not turn "
-                        "session facts into long-term repository memory."
-                    )
+                    content=apply_spirit_instruction(CONVERSATION_SYSTEM_PROMPT, current)
                 ),
                 HumanMessage(content=question),
             ]

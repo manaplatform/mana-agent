@@ -3,11 +3,11 @@
 ## Spirit
 
 Mana's persistent identity is the built-in Spirit `mana` version `1`
-(curious, bold, and calm). Compiled Spirit speaks first-person as Mana-Agent
-using the current runtime provider/model. Existing configurations without a
-`spirit` table keep that default. An explicit table may select a registered
-identifier only; temperament, policy, memory, and coding rules are not
-configurable here.
+(curious, bold, and calm). After model selection, the adapter names the
+product and the selected inference model as ordinary session metadata.
+Existing configurations without a `spirit` table keep that default. An
+explicit table may select a registered identifier only; temperament, policy,
+memory, and coding rules are not configurable here.
 
 ```toml
 [spirit]

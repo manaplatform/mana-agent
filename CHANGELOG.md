@@ -4,7 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-13
 
-- Updated compiled Spirit to speak first-person as Mana-Agent using the current runtime provider/model (for example, the openai model), instead of a vendor chatbot persona.
+- Fixed conversation-route invocation so older `ask_conversation(question)` signatures still record provider failures instead of raising out of the turn.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_failed_turn_keeps_session_and_records_failure -q`.
+
+- Bound routed Spirit into the conversation executor (`QnAChain.chat` / `route-conversation`) so ordinary chat uses the same Mana-Agent session identity after model selection, without a hardcoded identity reply.
+  - User verification required: `python -m pytest tests/test_spirit.py::test_conversation_executor_binds_routed_spirit_after_model_selection tests/gateway/test_chat_gateway.py tests/test_spirit.py -q`.
+
+- Integrated Spirit with the existing model router: Spirit resolves before routing, the router still selects the model, Runtime Self binds after the decision, and the same Spirit is compiled for that model. Temperament is not a routing signal.
+  - User verification required: `python -m pytest tests/test_spirit_routing.py tests/test_spirit.py tests/test_model_routing.py tests/gateway/test_routing_authority.py -q`.
+
+- Updated compiled Spirit to announce Mana-Agent and the selected inference model as ordinary session metadata after model routing, without identity-override wording.
   - User verification required: `python -m pytest tests/test_spirit.py -q`.
 
 - Updated agent identity to introduce a versioned Mana Spirit (curious, bold, calm) composed into runtime Self without changing policy, memory, or coding contracts.

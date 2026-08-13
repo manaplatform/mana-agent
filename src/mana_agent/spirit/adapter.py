@@ -1,7 +1,8 @@
-"""Prompt adapter that injects compiled Spirit exactly once.
+"""Bind resolved Spirit to the selected model as ordinary session metadata.
 
-Provider adapters may change placement or formatting, but must call this
-compiler so Spirit meaning stays stable across models.
+Spirit semantics stay the same across models. This adapter only names the
+product and the already-selected inference model, then injects that block
+exactly once. It does not add identity-override instructions.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ def apply_spirit_instruction(
     model_profile: Mapping[str, Any] | None = None,
     settings: Any | None = None,
 ) -> str:
-    """Prepend the compiled Spirit instruction when it is not already present."""
+    """Prepend the model-bound Spirit session block when it is not already present."""
 
     current = runtime_self or compose_runtime_self(
         execution_context=execution_context,

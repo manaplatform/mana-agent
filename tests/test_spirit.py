@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -11,7 +12,12 @@ from mana_agent.integrations.codex.prompt_builder import build_codex_prompt
 from mana_agent.multi_agent.core.types import AgentRole, ExecutionContext
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
 from mana_agent.multi_agent.runtime.coding_agent_prompt import CODING_SYSTEM_PROMPT
-from mana_agent.multi_agent.runtime.prompts import ASK_AGENT_SYSTEM_PROMPT, SYSTEM_PROMPT
+from mana_agent.multi_agent.runtime.prompts import (
+    ASK_AGENT_SYSTEM_PROMPT,
+    CONVERSATION_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+)
+from mana_agent.multi_agent.runtime.qna_chain import QnAChain
 from mana_agent.prompting.builder import (
     PromptCache,
     build_coding_system_prompt,
@@ -24,6 +30,7 @@ from mana_agent.spirit.adapter import apply_spirit_instruction
 from mana_agent.spirit.compiler import (
     SPIRIT_MAX_COMPILED_TOKENS,
     compile_spirit_instruction,
+    compile_spirit_semantics,
     estimate_spirit_tokens,
     spirit_prompt_marker,
     strip_spirit_instruction,
@@ -164,6 +171,14 @@ def test_coding_and_repository_instructions_are_not_moved_into_spirit() -> None:
         "memory capsule",
         "policy",
         "tool_choice",
+        "when asked who",
+        "i say i am",
+        "you are not",
+        "ignore previous",
+        "developer mode",
+        "chatgpt",
+        "pretend",
+        "vendor chatbot",
     )
     for token in forbidden:
         assert token not in dumped.lower()
@@ -198,9 +213,53 @@ def test_prompt_constants_do_not_embed_spirit() -> None:
     assert marker not in SYSTEM_PROMPT
     assert marker not in ASK_AGENT_SYSTEM_PROMPT
     assert marker not in CODING_SYSTEM_PROMPT
+    assert marker not in CONVERSATION_SYSTEM_PROMPT
+    assert "when asked who" not in CONVERSATION_SYSTEM_PROMPT.lower()
+    assert "chatgpt" not in CONVERSATION_SYSTEM_PROMPT.lower()
 
 
-def test_spirit_says_mana_agent_uses_runtime_model() -> None:
+def test_conversation_executor_binds_routed_spirit_after_model_selection() -> None:
+    captured: list[object] = []
+
+    class _LLM:
+        def invoke(self, messages):
+            captured.extend(messages)
+            return SimpleNamespace(content="ok")
+
+    chain = QnAChain.__new__(QnAChain)
+    chain.llm = _LLM()
+    chain.model = "gpt-5.6-luna"
+    chain.provider = "openai"
+    current = compose_runtime_self(
+        agent_name="conversation-agent",
+        agent_role="conversation",
+        provider="openai",
+        model="gpt-5.6-luna",
+        purpose="who are you?",
+    )
+    answer = chain.chat("who are you?", runtime_self=current)
+    system = str(getattr(captured[0], "content", ""))
+    assert answer == "ok"
+    assert system.startswith(
+        "You are Mana-Agent, currently instantiated through openai/gpt-5.6-luna."
+    )
+    assert "active session history" in system
+    assert system.count("Mana's Spirit (mana/1)") == 1
+    assert "when asked who" not in system.lower()
+    assert "chatgpt" not in system.lower()
+    assert "you are not" not in system.lower()
+
+
+def test_spirit_semantics_are_model_free() -> None:
+    text = compile_spirit_semantics()
+    assert text.startswith("Mana's Spirit (mana/1) is curious, bold, and calm:")
+    assert "instantiated" not in text.lower()
+    assert "openai" not in text.lower()
+    assert "gpt" not in text.lower()
+    assert "model" not in text.lower()
+
+
+def test_spirit_announces_product_and_inference_model() -> None:
     openai_self = compose_runtime_self(
         agent_name="main-agent",
         agent_role="main",
@@ -208,15 +267,24 @@ def test_spirit_says_mana_agent_uses_runtime_model() -> None:
         model="gpt-4.1-mini",
     )
     compiled = compile_spirit_instruction(openai_self)
-    assert compiled.startswith("I am Mana-Agent. I use the openai model gpt-4.1-mini.")
-    assert "When asked who I am, I say I am Mana-Agent using this model." in compiled
-    assert "ChatGPT" not in compiled
-    assert "You are Mana-Agent, instantiated through" not in compiled
+    assert compiled.startswith(
+        "You are Mana-Agent, currently instantiated through openai/gpt-4.1-mini."
+    )
+    assert compile_spirit_semantics(openai_self.spirit) in compiled
+    assert "not a separate persona you must imitate" in compiled
+    lowered = compiled.lower()
+    assert "when asked who" not in lowered
+    assert "i say i am" not in lowered
+    assert "chatgpt" not in lowered
+    assert "you are not" not in lowered
 
     other = compile_spirit_instruction(
         compose_runtime_self(provider="anthropic", model="claude-sonnet-4", agent_role="main")
     )
-    assert other.startswith("I am Mana-Agent. I use the anthropic model claude-sonnet-4.")
+    assert other.startswith(
+        "You are Mana-Agent, currently instantiated through anthropic/claude-sonnet-4."
+    )
+    assert compile_spirit_semantics(openai_self.spirit) in other
     assert openai_self.spirit == compose_runtime_self(
         provider="anthropic", model="claude-sonnet-4", agent_role="main"
     ).spirit
@@ -232,13 +300,14 @@ def test_spirit_compiled_footprint_stays_small() -> None:
     compiled = compile_spirit_instruction(current)
     tokens = estimate_spirit_tokens(compiled)
     assert 40 <= tokens <= SPIRIT_MAX_COMPILED_TOKENS
-    assert compiled.startswith("I am Mana-Agent. I use the openai model gpt-4.1-mini.")
+    assert compiled.startswith(
+        "You are Mana-Agent, currently instantiated through openai/gpt-4.1-mini."
+    )
     assert "curious" in compiled and "bold" in compiled and "calm" in compiled
-    assert "separate persona" in compiled
     assert "As a curious, bold, and calm" not in compiled
     remainder = strip_spirit_instruction(f"{compiled}\n\nCore Identity")
     assert remainder == "Core Identity"
-    assert "I am Mana-Agent" not in remainder
+    assert "Mana-Agent" not in remainder
 
 
 def test_subagents_inherit_mana_spirit() -> None:

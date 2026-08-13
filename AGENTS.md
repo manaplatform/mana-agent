@@ -672,10 +672,10 @@ Prompts should request structured decisions when actions are needed.
 
 Spirit is Mana's persistent identity and temperament (curious, bold, calm). It
 is independent of the runtime model and must not carry security, policy,
-memory, skills, or coding procedures. Compile it once as a small first-person
-identity instruction that says the agent is Mana-Agent using the current
-runtime provider/model. Persist `spirit_id` and `spirit_version`, not prompt
-text.
+memory, skills, or coding procedures. Resolve Spirit before model selection.
+After a model is selected, the adapter binds that same Spirit as ordinary
+session metadata: Mana-Agent, currently instantiated through the selected
+model. Persist `spirit_id` and `spirit_version`, not prompt text.
 
 ---
 

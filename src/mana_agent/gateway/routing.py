@@ -33,6 +33,14 @@ from mana_agent.model_routing.models import (
 from mana_agent.model_routing.profiles import configured_profiles, profiles_from_legacy_configuration
 from mana_agent.model_routing.repository import RepositoryMetadataInspector
 from mana_agent.model_routing.router import ModelRouter
+from mana_agent.spirit.routing import (
+    RoutedSpiritBinding,
+    attach_spirit_accounting,
+    bind_after_route,
+    resolve_base_self,
+)
+from mana_agent.spirit.registry import default_spirit_ref
+from mana_agent.spirit.schema import SpiritRef
 
 
 class GatewayRoutingError(RoutingFailure):
@@ -73,6 +81,23 @@ class GatewayRoutingAuthority:
         self.decision_path = decision_path or (mana_home() / "routing" / "decisions.jsonl")
         self._write_lock = threading.Lock()
         self.context_cost_governor: Any | None = None
+        self._spirit_by_task: dict[str, SpiritRef] = {}
+        self._bindings: dict[str, RoutedSpiritBinding] = {}
+
+    def binding_for(self, decision_id: str) -> RoutedSpiritBinding | None:
+        return self._bindings.get(str(decision_id or ""))
+
+    def _base_self_for(self, request: RoutingRequest):
+        pinned = self._spirit_by_task.get(request.task_id) if request.task_id else None
+        base_self = resolve_base_self(
+            role=request.role,
+            purpose=request.task_description,
+            spirit=pinned,
+            settings=self.settings,
+        )
+        if request.task_id:
+            self._spirit_by_task[request.task_id] = base_self.ref()
+        return base_self
 
     def route(self, request: RoutingRequest) -> RoutingDecision:
         """Route and persist one model-backed invocation without fallback."""
@@ -83,13 +108,28 @@ class GatewayRoutingAuthority:
             if self.context_cost_governor is not None
             else request.budgets
         )
-        enriched = replace(
-            request,
-            request_id=invocation_id,
-            repository=request.repository if request.repository.fingerprint else self.repository,
-            budgets=budgets,
+        base_self = self._base_self_for(request)
+        spirit_diag = {
+            "spirit_id": base_self.spirit.id,
+            "spirit_version": base_self.spirit.version,
+            "agent_role": request.role,
+        }
+        enriched = attach_spirit_accounting(
+            replace(
+                request,
+                request_id=invocation_id,
+                repository=request.repository if request.repository.fingerprint else self.repository,
+                budgets=budgets,
+            ),
+            base_self,
         )
-        self._emit("routing.requested", request_id=invocation_id, task_id=enriched.task_id, role=enriched.role)
+        self._emit(
+            "routing.requested",
+            request_id=invocation_id,
+            task_id=enriched.task_id,
+            role=enriched.role,
+            **spirit_diag,
+        )
         try:
             decision = self.router.route(enriched)
             if not decision.decision_id or decision.request_id != invocation_id:
@@ -101,9 +141,17 @@ class GatewayRoutingAuthority:
                     raise GatewayRoutingError(
                         f"Routing child budget allocation failed: {exc}. No candidate or subagent was started."
                     ) from exc
-            self._persist(enriched, decision)
+            binding = bind_after_route(base_self, decision)
+            self._bindings[decision.decision_id] = binding
+            self._persist(enriched, decision, spirit=base_self.ref())
         except RoutingFailure as exc:
-            self._emit("routing.failed", request_id=invocation_id, task_id=enriched.task_id, error=str(exc))
+            self._emit(
+                "routing.failed",
+                request_id=invocation_id,
+                task_id=enriched.task_id,
+                error=str(exc),
+                **spirit_diag,
+            )
             raise
         self._emit(
             "routing.completed",
@@ -112,8 +160,11 @@ class GatewayRoutingAuthority:
             task_id=enriched.task_id,
             provider=decision.provider,
             model=decision.selected_model,
+            selected_provider=decision.provider,
+            selected_model=decision.selected_model,
             routing_mode=decision.routing_mode.value,
             confidence=decision.confidence,
+            **spirit_diag,
         )
         return decision
 
@@ -209,7 +260,13 @@ class GatewayRoutingAuthority:
             "parallel_execution_enabled": self.policy.parallel_execution_enabled,
         }
 
-    def _persist(self, request: RoutingRequest, decision: RoutingDecision) -> None:
+    def _persist(
+        self,
+        request: RoutingRequest,
+        decision: RoutingDecision,
+        *,
+        spirit: SpiritRef | None = None,
+    ) -> None:
         request_payload = asdict(request)
         request_payload["estimation_components"] = {
             str(key): "[accounted-without-content]"
@@ -220,6 +277,11 @@ class GatewayRoutingAuthority:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "request": sanitize_configuration(request_payload),
             "decision": sanitize_configuration(asdict(decision)),
+            "spirit": (
+                {"id": spirit.id, "version": spirit.version}
+                if spirit is not None
+                else default_spirit_ref().model_dump()
+            ),
         }
         self.decision_path.parent.mkdir(parents=True, exist_ok=True)
         try:
