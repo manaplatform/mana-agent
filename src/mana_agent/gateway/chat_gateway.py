@@ -4575,6 +4575,11 @@ class AgentChatGateway:
                         # Follow-up, expand, retry, resume, and second+ messages
                         # recalculate the live reservation from this turn's
                         # forecast so exhausted prior usage cannot block work.
+                        budgets = self._routing_budgets_for_lane(lane_id)
+                        self._lane_coordinator.reset_turn_accounting(
+                            reservation.execution.task_id,
+                            allocated_tokens=budgets.task_token_limit or 0,
+                        )
                         self._recalculate_reservation_for_message(
                             reservation.execution.task_id,
                             execution_estimate=execution_estimate,
@@ -4739,9 +4744,24 @@ class AgentChatGateway:
                                             "budget-overrun recovery is scheduled"
                                         )
                                         result.payload["budget_overrun_status"] = "recovery_scheduled"
-                                if (
-                                    not result.error
-                                    and finished.state is LaneTaskState.BUDGET_EXHAUSTED
+                                status = result.payload.get("status")
+                                if status == "completed":
+                                    pending_required_work_exists = False
+                                elif status in ("pass_budget_exhausted", "blocked"):
+                                    pending_required_work_exists = True
+                                else:
+                                    pending_required_work_exists = (
+                                        finished.state is not LaneTaskState.COMPLETED
+                                    )
+
+                                budget_exhausted = reservation.execution.budget.turn_remaining_tokens <= 0
+
+                                if status == "completed":
+                                    pass  # Keep result as is, do not override with budget_exhausted
+                                elif (
+                                    status != "completed"
+                                    and pending_required_work_exists
+                                    and budget_exhausted
                                 ):
                                     result.error = "lane_budget_exhausted"
                                     result.mode = "lane-budget-exhausted"
@@ -4749,6 +4769,13 @@ class AgentChatGateway:
                                         "The selected workflow exceeded its reserved execution "
                                         "budget before its result could be accepted. "
                                         f"{finished.error or 'No result was accepted.'}"
+                                    )
+                                elif status == "blocked" and not result.error:
+                                    result.error = "lane_blocked"
+                                    result.mode = "lane-blocked"
+                                    result.answer = (
+                                        "The task is blocked and requires operator intervention. "
+                                        f"{finished.error or ''}"
                                     )
                                 elif (
                                     not result.error

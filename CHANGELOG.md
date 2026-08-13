@@ -2,6 +2,12 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-14
+
+- Decoupled budget exhaustion from semantic task completion by introducing per-turn token envelopes (`turn_budget_tokens`, `turn_consumed_tokens`, `turn_reserved_tokens`) while preserving cumulative historical accounting (`consumed_tokens`). This prevents tasks that have genuinely completed from being incorrectly marked as `BUDGET_EXHAUSTED` when their final operation consumes the last of the available token limit.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py -q`
+
+
 ## 2026-08-13
 
 - Added support for OpenRouter in image generation, video generation, and embeddings logic.

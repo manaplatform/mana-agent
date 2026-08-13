@@ -1403,3 +1403,54 @@ def test_state_persistence_retries_transient_windows_replace_denial(
     assert not list(coordinator.state_path.parent.glob(f".{coordinator.state_path.name}.*.tmp"))
     coordinator.start(reservation)
     coordinator.finish(reservation.execution.task_id)
+
+def test_lane_budget_turn_accounting() -> None:
+    budget = LaneBudget(
+        reserved_input_tokens=100,
+        reserved_output_tokens=100,
+        consumed_input_tokens=50,
+        consumed_output_tokens=50,
+    )
+    budget.start_new_turn(allocated_tokens=1000)
+    assert budget.turn_budget_tokens == 1000
+    assert budget.turn_consumed_tokens == 0
+    assert budget.turn_reserved_tokens == 0
+    
+    budget.turn_consumed_tokens += 200
+    assert budget.turn_remaining_tokens == 800
+
+    budget.start_new_turn(allocated_tokens=500)
+    assert budget.turn_remaining_tokens == 500
+    assert budget.turn_consumed_tokens == 0
+
+def test_synchronize_usage_tracks_turn_tokens(coordinator: LaneCoordinator) -> None:
+    reservation = _reserve(coordinator, LaneId.RESEARCH, intent="turn budget")
+    coordinator.start(reservation)
+    
+    coordinator.reset_turn_accounting(reservation.execution.task_id, allocated_tokens=2000)
+    
+    coordinator.synchronize_usage(
+        reservation.execution.task_id,
+        consumed_input_tokens=100,
+        consumed_output_tokens=50
+    )
+    
+    execution = coordinator.inspect_task(reservation.execution.task_id)
+    assert execution.budget.consumed_input_tokens == 100
+    assert execution.budget.consumed_output_tokens == 50
+    assert execution.budget.turn_consumed_tokens == 150
+    assert execution.budget.turn_remaining_tokens == 1850
+
+    coordinator.reset_turn_accounting(reservation.execution.task_id, allocated_tokens=500)
+    
+    coordinator.synchronize_usage(
+        reservation.execution.task_id,
+        consumed_input_tokens=150,
+        consumed_output_tokens=75
+    )
+    
+    execution = coordinator.inspect_task(reservation.execution.task_id)
+    assert execution.budget.consumed_input_tokens == 150
+    assert execution.budget.consumed_output_tokens == 75
+    assert execution.budget.turn_consumed_tokens == 75
+    assert execution.budget.turn_remaining_tokens == 425
