@@ -92,13 +92,15 @@ def _stable_hash(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _completion_verification_failure(manifest: Mapping[str, Any]) -> str:
+def _completion_verification_failure(manifest: Mapping[str, Any], execution: Any = None, supervised: Any = None) -> str:
     verification = manifest.get("verification")
     if not isinstance(verification, Mapping):
         return "Durable completion verification failed without a persisted verification report."
     checks = verification.get("checks")
     checks = checks if isinstance(checks, list) else []
     failures: list[str] = []
+    
+
     for raw in checks:
         if not isinstance(raw, Mapping) or raw.get("passed") is True:
             continue
@@ -1233,6 +1235,16 @@ class LaneCoordinator:
                         reason=f"lane completion supervision failed: {exc}",
                     )
             else:
+                if supervised.state == SupervisorState.COMPLETED_PENDING_VERIFICATION:
+                    try:
+                        self.execution_supervisor.verify_completion(task_id)
+                        supervised = self.execution_supervisor.store.get_task(task_id)
+                    except Exception as exc:
+                        self.execution_supervisor.transition(
+                            task_id, SupervisorState.FAILED, reason=f"Verification failed: {exc}"
+                        )
+                        supervised = self.execution_supervisor.store.get_task(task_id)
+
                 verified = supervised.state == SupervisorState.COMPLETED
                 state = (
                     LaneTaskState.COMPLETED if verified
@@ -1245,7 +1257,7 @@ class LaneCoordinator:
                         execution.error = "A validated model budget-overrun decision is required before finalization."
                     else:
                         manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
-                        execution.error = _completion_verification_failure(manifest)
+                        execution.error = _completion_verification_failure(manifest, execution, supervised)
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
         elif state == LaneTaskState.BUDGET_EXHAUSTED:

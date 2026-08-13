@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed chat turn finalization lifecycle and lineage linkage for routed executions (e.g. Gmail, external tools) so that routed executions properly link to the originating chat turn / parent task, and completed lane states correctly finalize the chat turn and synthesize assistant responses.
+  - Added tool validation ensuring that routes requiring external tools verify that valid tool executions were recorded in the trace before claiming successful completion.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py -q`
+
 - Decoupled budget exhaustion from semantic task completion by introducing per-turn token envelopes (`turn_budget_tokens`, `turn_consumed_tokens`, `turn_reserved_tokens`) while preserving cumulative historical accounting (`consumed_tokens`). This prevents tasks that have genuinely completed from being incorrectly marked as `BUDGET_EXHAUSTED` when their final operation consumes the last of the available token limit.
   - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py -q`
 

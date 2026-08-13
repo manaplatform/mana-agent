@@ -4105,6 +4105,8 @@ class AgentChatGateway:
                         expected_tool_calls=(
                             max(0, int(self.config.agent_max_steps) - 1)
                             if entry_decision.route == "canvas"
+                            else max(1, len(route_tools))
+                            if route_tools
                             else 0
                         ),
                         expected_model_calls=(
@@ -4661,6 +4663,12 @@ class AgentChatGateway:
                                 reason="waiting for interactive approval",
                             )
                         else:
+                            if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
+                                actual_tools = [
+                                    t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
+                                ]
+                                if not actual_tools:
+                                    result.error = "completion_verification_failed"
                             self._lane_coordinator.checkpoint(
                                 reservation.execution.task_id,
                                 boundary="before_verification",
@@ -6014,16 +6022,30 @@ class AgentChatGateway:
                 error=str(result.error),
             )
         else:
-            finished = self._finish_lane(
-                reservation.execution.task_id,
-                changed_files=result.changed_files,
-                verification_state={"mode": result.mode, "status": "completed"},
-            )
-            status = (
-                "completed"
-                if finished.state == LaneTaskState.COMPLETED
-                else "failed"
-            )
+            if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"}:
+                actual_tools = [
+                    t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
+                ]
+                if not actual_tools:
+                    result.error = "completion_verification_failed"
+                    self._finish_lane(
+                        reservation.execution.task_id,
+                        state=LaneTaskState.FAILED,
+                        changed_files=result.changed_files,
+                        error="required_tool_missing: Execution required external tool work but no valid tool result was recorded",
+                    )
+                    status = "failed"
+            if not result.error:
+                finished = self._finish_lane(
+                    reservation.execution.task_id,
+                    changed_files=result.changed_files,
+                    verification_state={"mode": result.mode, "status": "completed"},
+                )
+                status = (
+                    "completed"
+                    if finished.state == LaneTaskState.COMPLETED
+                    else "failed"
+                )
         artifacts = [
             str(item.get("path"))
             for item in result.sources
@@ -6550,6 +6572,7 @@ class AgentChatGateway:
                 text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
+                lane_task_id=lane_task_id,
             )
 
         if decision.route == "automation":
@@ -8462,6 +8485,7 @@ class AgentChatGateway:
         text: str,
         ask_service: Any,
         callbacks: Any,
+        lane_task_id: str = "",
     ) -> ChatTurnResult:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
@@ -8505,6 +8529,7 @@ class AgentChatGateway:
                 },
                 flow_id=context.session_id,
                 run_id=context.turn_id,
+                transactional_parent_task_id=lane_task_id,
             )
         except Exception as exc:
             return ChatTurnResult(
