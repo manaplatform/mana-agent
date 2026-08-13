@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-13
+
+- Updated agent identity to introduce a versioned Mana Spirit (curious, bold, calm) composed into runtime Self without changing policy, memory, or coding contracts.
+  - User verification required: `python -m pytest tests/test_spirit.py tests/test_prompting_builder.py tests/test_prompts_contract.py tests/test_multi_agent_core.py::test_execution_context_preserves_model_metadata -q`.
+
 ## 2026-08-10
 
 - Updated configuration loading to exclusively read from `~/.mana/config.toml` and `~/.mana/secrets.toml`, intentionally ignoring environment variables and `.env` files.

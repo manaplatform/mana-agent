@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from mana_agent.coding.models import CodingTask, WorkspaceContext
+from mana_agent.spirit.adapter import apply_spirit_instruction
+from mana_agent.spirit.self_model import compose_runtime_self
 
 
 def build_codex_prompt(task: CodingTask, workspace: WorkspaceContext) -> str:
     def lines(values: list[str]) -> str:
         return "\n".join(f"- {value}" for value in values) or "- None specified"
 
-    return f"""You are a coding worker operating under Mana-Agent.
+    return apply_spirit_instruction(
+        f"""You are a coding worker operating under Mana-Agent.
 
 Task ID:
 {task.task_id}
@@ -61,7 +64,15 @@ Constraints:
 - Own the full coding workflow for this task: evidence gathering, decisions,
   planning, implementation, review, and verification.
 - Return a concise summary, changed files, tests, warnings, and unresolved issues.
-""".strip()
+""".strip(),
+        compose_runtime_self(
+            agent_name="codex-worker",
+            agent_role="coding",
+            provider="codex",
+            model="codex",
+            purpose=task.goal,
+        ),
+    )
 
 
 __all__ = ["build_codex_prompt"]

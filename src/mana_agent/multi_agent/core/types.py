@@ -184,6 +184,8 @@ class AgentNode:
     allowed_tools: list[str] = field(default_factory=list)
     model_level: str = ""
     state: AgentState = AgentState.IDLE
+    spirit_id: str = ""
+    spirit_version: int = 0
 
 
 @dataclass
@@ -443,6 +445,8 @@ class ExecutionContext:
     execution_repo_root: str | None = None
     managed_branch: str | None = None
     base_revision: str | None = None
+    spirit_id: str | None = None
+    spirit_version: int | None = None
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "ExecutionContext":
@@ -466,6 +470,8 @@ class ExecutionContext:
             execution_repo_root=_clean_optional(data.get("execution_repo_root")),
             managed_branch=_clean_optional(data.get("managed_branch")),
             base_revision=_clean_optional(data.get("base_revision")),
+            spirit_id=_clean_optional(data.get("spirit_id")),
+            spirit_version=_optional_int(data.get("spirit_version")),
         ).normalized()
 
     def normalized(self) -> "ExecutionContext":
@@ -493,6 +499,8 @@ class ExecutionContext:
             execution_repo_root=self.execution_repo_root,
             managed_branch=self.managed_branch,
             base_revision=self.base_revision,
+            spirit_id=self.spirit_id,
+            spirit_version=self.spirit_version,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -516,12 +524,24 @@ class ExecutionContext:
             "execution_repo_root": ctx.execution_repo_root,
             "managed_branch": ctx.managed_branch,
             "base_revision": ctx.base_revision,
+            "spirit_id": ctx.spirit_id,
+            "spirit_version": ctx.spirit_version,
         }
 
 
 def _clean_optional(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def enrich_event_identity(row: dict[str, Any], context: ExecutionContext | dict[str, Any] | None) -> dict[str, Any]:

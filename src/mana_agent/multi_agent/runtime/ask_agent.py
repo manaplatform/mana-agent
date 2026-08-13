@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from langchain_core.callbacks.base import BaseCallbackHandler
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.multi_agent.runtime.prompts import ASK_AGENT_SYSTEM_PROMPT
+from mana_agent.spirit.adapter import apply_spirit_instruction
 from mana_agent.analysis.chunker import CodeChunker
 from mana_agent.services.structure_service import StructureService
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
@@ -2166,7 +2167,15 @@ class AskAgent:
         forced_write_done = False
 
         messages = [
-            SystemMessage(content=system_prompt or ASK_AGENT_SYSTEM_PROMPT),
+            SystemMessage(
+                content=apply_spirit_instruction(
+                    system_prompt or ASK_AGENT_SYSTEM_PROMPT,
+                    agent_name="ask-agent",
+                    agent_role="tool",
+                    provider=self.provider,
+                    model=self.model,
+                )
+            ),
             HumanMessage(content=question),
         ]
 

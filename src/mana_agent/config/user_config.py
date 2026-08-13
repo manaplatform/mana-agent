@@ -400,6 +400,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
 
 FIELD_NAME_BY_ENV: dict[str, str] = {
     "media": "media",
+    "spirit": "spirit",
     "MANA_AI_PROVIDER": "mana_ai_provider",
     "MANA_PRIMARY_MODEL": "mana_primary_model",
     "MANA_EMBEDDING_MODEL": "mana_embedding_model",
@@ -589,6 +590,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_CONFIG_SCHEMA_VERSION",
     "MANA_AI_PROVIDER",
     "MANA_PRIMARY_MODEL",
+    "spirit",
     "MANA_EMBEDDING_MODEL",
     "MANA_CONFIGURED_PROVIDERS",
     "OPENAI_BASE_URL",
@@ -1018,6 +1020,16 @@ def validate_model_level(value: str) -> str:
 
 def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(values)
+    if "spirit" in cleaned:
+        from mana_agent.spirit.registry import resolve_spirit
+        from mana_agent.spirit.schema import SpiritSettings
+
+        raw_spirit = cleaned["spirit"]
+        if not isinstance(raw_spirit, dict):
+            raise UserConfigError("spirit must be a TOML table.")
+        spirit_settings = SpiritSettings.model_validate(raw_spirit)
+        resolve_spirit(spirit_id=spirit_settings.id, spirit_version=spirit_settings.version)
+        cleaned["spirit"] = spirit_settings.model_dump(mode="json")
     if "media" in cleaned:
         from mana_agent.media.config import MediaConfig
 

@@ -72,11 +72,14 @@ bare worker calls.
 ## Prompt Cache Boundary
 
 The coding agent prompt is split into stable and ephemeral layers. Stable prompt
-state contains core identity, tool rules, agent behavior rules, a compact skill
-index, repository rules from `AGENTS.md`, and safety/verification rules. This
-state is cached per `CodingAgent` session and rebuilt only when stable inputs
-change: prompt template version, mana-agent version, enabled tools, skill index,
-repository rules, identity/rules, or model/provider profile.
+state begins with Mana's compiled Spirit (persistent identity and temperament),
+then core identity, tool rules, agent behavior rules, a compact skill
+index, repository rules from `AGENTS.md`, and safety/verification rules. Spirit
+is a small identity layer only; it does not carry policy, permissions, memory,
+skills, or coding procedures. This state is cached per `CodingAgent` session and
+rebuilt only when stable inputs change: prompt template version, mana-agent
+version, enabled tools, skill index, repository rules, identity/rules, Spirit
+identifier/version, or model/provider profile.
 
 The compact skill index contains only `name`, `description`, and `trigger` for
 each discovered skill. Full `SKILL.md` bodies are not stable prompt content.

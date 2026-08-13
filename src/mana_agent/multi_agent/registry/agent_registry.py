@@ -5,6 +5,7 @@ from mana_agent.multi_agent.core.ids import new_agent_id, new_subagent_id
 from mana_agent.multi_agent.core.types import AgentNode, AgentRole, AgentState
 from mana_agent.multi_agent.registry.capability_registry import DEFAULT_CAPABILITIES
 from mana_agent.multi_agent.runtime.model_levels import model_level_for_role
+from mana_agent.spirit.registry import default_spirit_ref
 
 
 class AgentRegistry:
@@ -45,12 +46,15 @@ class AgentRegistry:
             raise AgentRegistryError("maximum active agents reached")
         if parent_agent_id and parent_agent_id not in self.agents:
             raise AgentRegistryError(f"unknown parent agent: {parent_agent_id}")
+        spirit_id, spirit_version = self._spirit_fields(parent_agent_id)
         node = AgentNode(
             agent_id=agent_id or new_agent_id(role.value),
             role=role,
             parent_agent_id=parent_agent_id,
             capabilities=capabilities or list(DEFAULT_CAPABILITIES.get(role, [])),
             model_level=model_level_for_role(role).model_level,
+            spirit_id=spirit_id,
+            spirit_version=spirit_version,
         )
         self._validate_depth(node.parent_agent_id)
         self.agents[node.agent_id] = node
@@ -62,12 +66,15 @@ class AgentRegistry:
             raise AgentRegistryError("maximum active agents reached")
         if parent_agent_id not in self.agents:
             raise AgentRegistryError(f"unknown parent agent: {parent_agent_id}")
+        spirit_id, spirit_version = self._spirit_fields(parent_agent_id)
         node = AgentNode(
             agent_id=new_subagent_id(role.value),
             role=role,
             parent_agent_id=parent_agent_id,
             capabilities=capabilities,
             model_level=model_level_for_role(role).model_level,
+            spirit_id=spirit_id,
+            spirit_version=spirit_version,
         )
         self._validate_depth(node.parent_agent_id)
         self.agents[node.agent_id] = node
@@ -114,6 +121,14 @@ class AgentRegistry:
                 raise AgentRegistryError("circular hierarchy is not allowed")
             seen.add(cursor)
             cursor = self.agents[cursor].parent_agent_id if cursor in self.agents else None
+
+    def _spirit_fields(self, parent_agent_id: str | None) -> tuple[str, int]:
+        if parent_agent_id and parent_agent_id in self.agents:
+            parent = self.agents[parent_agent_id]
+            if parent.spirit_id:
+                return parent.spirit_id, int(parent.spirit_version or 0) or default_spirit_ref().version
+        ref = default_spirit_ref()
+        return ref.id, ref.version
 
     def _validate_depth(self, parent_agent_id: str | None) -> None:
         depth = 1

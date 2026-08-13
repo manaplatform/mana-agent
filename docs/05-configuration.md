@@ -1,5 +1,20 @@
 # Configuration
 
+## Spirit
+
+Mana's persistent identity is the built-in Spirit `mana` version `1`
+(curious, bold, and calm). Existing configurations without a `spirit` table
+keep that default. An explicit table may select a registered identifier only;
+temperament, policy, memory, and coding rules are not configurable here.
+
+```toml
+[spirit]
+id = "mana"
+version = 1
+```
+
+Unknown Spirit identifiers fail closed. No substitute Spirit is selected.
+
 ## Durable human inbox
 
 Inbox state lives under `~/.mana/inbox` (or the existing test/managed

@@ -63,6 +63,8 @@ def test_coding_prompt_builder_composes_stable_layers(tmp_path: Path, monkeypatc
         flow_context="Flow ID: abc123",
     )
 
+    assert prompt.index("Mana's Spirit (mana/1)") < prompt.index("Core Identity")
+    assert prompt.count("Mana's Spirit (mana/1)") == 1
     assert prompt.index("Core Identity") < prompt.index("Language-aware tooling")
     assert prompt.index("Language-aware tooling") < prompt.index("Agent Behavior Rules")
     assert prompt.index("Agent Behavior Rules") < prompt.index("Available skills:")

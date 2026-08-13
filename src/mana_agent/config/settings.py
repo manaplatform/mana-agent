@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     mana_embedding_model: str = Field(
         default="openai/text-embedding-3-small", alias="MANA_EMBEDDING_MODEL"
     )
+    spirit: dict[str, Any] | str = Field(default_factory=dict, alias="spirit")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")

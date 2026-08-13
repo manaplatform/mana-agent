@@ -10,6 +10,8 @@ from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 
 from mana_agent.multi_agent.runtime.prompts import HUMAN_TEMPLATE, SYSTEM_PROMPT
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
+from mana_agent.spirit.adapter import apply_spirit_instruction
+from mana_agent.spirit.self_model import compose_runtime_self
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +27,6 @@ class QnAChain:
         default_headers: dict[str, str] | None = None,
     ) -> None:
         logger.debug("Initializing QnA chain with model=%s", model)
-        self.prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", SYSTEM_PROMPT),
-                ("human", HUMAN_TEMPLATE),
-            ]
-        )
         self.llm = create_chat_model(
             api_key=api_key,
             model=model,
@@ -40,7 +36,27 @@ class QnAChain:
         )
         self.model = model
         self.provider = str(provider or getattr(self.llm, "selected_provider", "") or "unknown")
+        self.prompt = self._build_prompt()
         self.run_logger = LlmRunLogger()
+
+    def _build_prompt(self) -> ChatPromptTemplate:
+        return ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    apply_spirit_instruction(
+                        SYSTEM_PROMPT,
+                        compose_runtime_self(
+                            agent_name="qna-agent",
+                            agent_role="research",
+                            provider=self.provider,
+                            model=self.model,
+                        ),
+                    ),
+                ),
+                ("human", HUMAN_TEMPLATE),
+            ]
+        )
 
     def update_model_assignment(self, provider: str, model: str, *, settings: Any | None = None) -> None:
         from mana_agent.config.inference_provider import resolve_inference_connection
@@ -57,6 +73,8 @@ class QnAChain:
         )
         self.llm.context_cost_governor = governor
         self.model = model
+        self.provider = connection.provider
+        self.prompt = self._build_prompt()
 
     def run(self, question: str, context: str) -> str:
         logger.info("Invoking QnA chain")
