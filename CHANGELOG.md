@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Implemented P1 Verified Execution Result Escrow and Durable Turn Recovery to fix `Verified execution result escrow is unavailable; no stored status was returned.`
+  - Defined versioned `EscrowResult` v2 schema with `execution_id`, `root_task_id`, `trigger_turn_id`, `session_id`, `lane_id`, `supervisor_state`, `verification_status`, and `mode="before"` migration for legacy v1 records.
+  - Made `ExecutionSupervisor` the single authoritative owner of result escrow persistence, guaranteeing that verified completion outcomes, terminal failures (`FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`), and resumable waits (`approval_required`, `auth_required`, `blocked`) are persisted to escrow with authoritative execution identity.
+  - Separated immutable `EscrowResult` from caller delivery tracking via standalone `ResultAcknowledgement` records.
+  - Added authoritative `get_verified_execution_result(execution_id)` with status differentiation (`FOUND`, `NOT_FOUND`, `EXECUTION_STILL_RUNNING`, `UNVERIFIED`, `CORRUPT`, `INCOMPATIBLE_VERSION`) and structured diagnostic error codes.
+  - Updated `ChatGateway` and `LaneCoordinator` to recover verified results from escrow across restarts, crashed gateways, and asynchronous lane execution, preserving exactly-once user response semantics.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_result_escrow_recovery.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_turn_store.py tests/gateway/test_chat_gateway.py -q`
+
 - Fixed chat turn finalization lifecycle and lineage linkage for routed executions (e.g. Gmail, external tools) so that routed executions properly link to the originating chat turn / parent task, and completed lane states correctly finalize the chat turn and synthesize assistant responses.
   - Added tool validation ensuring that routes requiring external tools verify that valid tool executions were recorded in the trace before claiming successful completion.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py -q`

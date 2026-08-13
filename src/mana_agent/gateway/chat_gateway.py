@@ -105,6 +105,8 @@ from mana_agent.model_routing.models import (
 from mana_agent.execution_supervisor.models import (
     ActionRequestState,
     BudgetForecast,
+    EscrowLookupStatus,
+    EscrowStatus,
     ExecutionState,
     RecoveryAction,
     RecoveryDecision,
@@ -4294,19 +4296,92 @@ class AgentChatGateway:
                                 },
                             )
                         if followup.category in {"status_request", "duplicate_message"}:
-                            supervised = self._lane_coordinator.execution_supervisor
-                            verified_task = supervised.store.get_task(followup.related_task_id)
-                            escrow = supervised.store.get_result(verified_task.result_id)
-                            if escrow is None:
-                                raise CheckpointResumeError("Verified execution result escrow is unavailable; no stored status was returned.")
-                            durable_result = dict(escrow.payload.get("chat_result") or {})
-                            result = ChatTurnResult(
-                                answer=str(durable_result.get("answer") or "Verified result is available for the selected task."),
-                                mode="verified-task-status",
-                                changed_files=list(durable_result.get("changed_files") or []),
-                                payload={**dict(durable_result.get("payload") or {}), "lane_task_id": verified_task.task_id, "execution_id": verified_task.task_id, "verified_result_reused": True},
+                            lookup = self._lane_coordinator.get_verified_execution_result(
+                                followup.related_task_id
                             )
-                            return self._finalize_turn_result(result=result, session_id=session_id, conversation_id=conversation_id, turn_id=turn_id, text=text, state=state, memory_warning=memory_warning)
+                            if lookup.status == EscrowLookupStatus.FOUND and lookup.result is not None:
+                                durable_result = dict(lookup.result.payload.get("chat_result") or {})
+                                ans = (
+                                    durable_result.get("answer")
+                                    or lookup.result.error_metadata.get("reason")
+                                    or (lookup.task.failure_reason if lookup.task else "")
+                                    or f"Status: {lookup.result.supervisor_state}"
+                                )
+                                result = ChatTurnResult(
+                                    answer=str(ans),
+                                    mode=durable_result.get("mode") or "verified-task-status",
+                                    changed_files=list(durable_result.get("changed_files") or []),
+                                    payload={
+                                        **dict(durable_result.get("payload") or {}),
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "verified_result_reused": True,
+                                        "status": lookup.result.supervisor_state,
+                                        "is_terminal": lookup.is_terminal,
+                                        "is_resumable": lookup.is_resumable,
+                                    },
+                                )
+                                if lookup.acknowledgement is None:
+                                    self._lane_coordinator.execution_supervisor.acknowledge_result(
+                                        lookup.result.result_id,
+                                        consumer_turn_id=turn_id,
+                                        consumer_execution_id=lookup.execution_id,
+                                    )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif lookup.status == EscrowLookupStatus.EXECUTION_STILL_RUNNING:
+                                result = ChatTurnResult(
+                                    answer=f"Task {followup.related_task_id} is currently running.",
+                                    mode="task-status",
+                                    payload={
+                                        "lane_task_id": followup.related_task_id,
+                                        "execution_id": followup.related_task_id,
+                                        "status": "running",
+                                        "is_terminal": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif lookup.status == EscrowLookupStatus.UNVERIFIED:
+                                result = ChatTurnResult(
+                                    answer=f"Task {followup.related_task_id} execution has completed and is pending verification.",
+                                    mode="task-status",
+                                    payload={
+                                        "lane_task_id": followup.related_task_id,
+                                        "execution_id": followup.related_task_id,
+                                        "status": "verifying",
+                                        "is_terminal": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            else:
+                                err_msg = (
+                                    f"Verified execution result escrow is unavailable: "
+                                    f"[{lookup.error_code}] {lookup.error_message}"
+                                )
+                                raise CheckpointResumeError(err_msg)
                         if followup.category in {"conversation_only", "clarification_answer"}:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
@@ -4922,6 +4997,15 @@ class AgentChatGateway:
             supervisor = self._lane_coordinator.execution_supervisor
             supervised = supervisor.store.get_task_or_none(execution_id)
             if supervised is not None:
+                if supervised.result_id:
+                    try:
+                        supervisor.acknowledge_result(
+                            supervised.result_id,
+                            consumer_turn_id=turn_id,
+                            consumer_execution_id=execution_id,
+                        )
+                    except Exception:
+                        pass
                 manifest = supervisor.store.artifact_manifest(execution_id) or {}
                 attempt = (
                     supervisor.store.get_attempt(supervised.attempt_id)

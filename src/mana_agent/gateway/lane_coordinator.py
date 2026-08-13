@@ -49,8 +49,10 @@ from mana_agent.execution_supervisor.errors import (
 )
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
+    EscrowLookupStatus,
     ExecutionState,
     RecoveryAction,
+    VerifiedExecutionResultLookup,
 )
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
@@ -1328,6 +1330,12 @@ class LaneCoordinator:
         with self._condition:
             self._condition.notify_all()
         return execution
+
+    def get_verified_execution_result(
+        self, execution_id: str
+    ) -> VerifiedExecutionResultLookup:
+        """Authoritative retrieval of verified results or terminal outcomes from escrow."""
+        return self.execution_supervisor.get_verified_execution_result(execution_id)
 
     def synchronize_usage(
         self,

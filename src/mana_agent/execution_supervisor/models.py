@@ -228,23 +228,113 @@ class CheckpointRecord(StrictModel):
     resume_cursor: str = ""
 
 
+class ResultAcknowledgement(StrictModel):
+    acknowledgement_id: str = Field(default_factory=lambda: stable_id("ack"))
+    result_id: str
+    execution_id: str = ""
+    consumer_execution_id: str = ""
+    consumer_turn_id: str = ""
+    acknowledged_at: datetime = Field(default_factory=utc_now)
+    acknowledged_by: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EscrowLookupStatus(str, Enum):
+    FOUND = "FOUND"
+    NOT_FOUND = "NOT_FOUND"
+    NOT_YET_TERMINAL = "NOT_YET_TERMINAL"
+    EXECUTION_STILL_RUNNING = "EXECUTION_STILL_RUNNING"
+    UNVERIFIED = "UNVERIFIED"
+    CORRUPT = "CORRUPT"
+    INCOMPATIBLE_VERSION = "INCOMPATIBLE_VERSION"
+    ESCROW_NOT_CONFIGURED = "ESCROW_NOT_CONFIGURED"
+
+
 class EscrowResult(StrictModel):
+    schema_version: int = Field(default=2, ge=1)
     result_id: str = Field(default_factory=lambda: stable_id("result"))
+    execution_id: str = ""
     task_id: str
+    root_task_id: str = ""
     parent_task_id: str | None = None
-    attempt_id: str
-    attempt_generation: int = Field(default=1, ge=1)
-    lease_token_hash: str
-    created_at: datetime = Field(default_factory=utc_now)
-    payload: dict[str, Any] = Field(default_factory=dict)
-    capsule_revisions: dict[str, int] = Field(default_factory=dict)
-    artifacts: list[CompletionArtifact] = Field(default_factory=list)
+    trigger_turn_id: str = ""
+    session_id: str = ""
+    lane_id: str = ""
+    owning_lane: str = ""
+    attempt_id: str = ""
+    attempt_generation: int = Field(default=1, ge=0)
+    lease_token_hash: str = ""
     status: EscrowStatus = EscrowStatus.PRODUCED
+    supervisor_state: str = ""
+    verification_status: VerificationStatus = VerificationStatus.PENDING
+    result_kind: str = "chat_result"
+    payload: dict[str, Any] = Field(default_factory=dict)
+    result_reference: str = ""
+    verification_evidence: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[CompletionArtifact] = Field(default_factory=list)
+    artifact_references: list[str] = Field(default_factory=list)
+    capsule_revisions: dict[str, int] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    verified_at: datetime | None = None
+    resume_checkpoint: str = ""
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
     delivery_count: int = Field(default=0, ge=0)
     delivered_at: datetime | None = None
     rejected_reason: str = ""
     acknowledged_at: datetime | None = None
     acknowledged_by: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_and_validate_schema(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        version = data.get("schema_version", 1)
+        if isinstance(version, int) and version > 2:
+            raise ValueError(f"unsupported escrow schema_version {version}; max supported is 2")
+        if not data.get("schema_version") or version < 2:
+            data = dict(data)
+            data["schema_version"] = 2
+            task_id = str(data.get("task_id") or "")
+            if not data.get("execution_id"):
+                data["execution_id"] = task_id
+            if not data.get("root_task_id"):
+                data["root_task_id"] = task_id
+            if not data.get("lane_id") and data.get("owning_lane"):
+                data["lane_id"] = str(data.get("owning_lane"))
+            if not data.get("owning_lane") and data.get("lane_id"):
+                data["owning_lane"] = str(data.get("lane_id"))
+            if not data.get("supervisor_state"):
+                st = data.get("status")
+                if st in {"available", "delivered", "acknowledged"}:
+                    data["supervisor_state"] = ExecutionState.COMPLETED.value
+                else:
+                    data["supervisor_state"] = ExecutionState.RUNNING.value
+            if not data.get("verification_status"):
+                if data.get("artifacts") or data.get("status") in {"available", "delivered", "acknowledged"}:
+                    data["verification_status"] = VerificationStatus.PASSED.value
+                else:
+                    data["verification_status"] = VerificationStatus.PENDING.value
+            if not data.get("result_kind"):
+                data["result_kind"] = "chat_result"
+        return data
+
+
+class VerifiedExecutionResultLookup(StrictModel):
+    status: EscrowLookupStatus
+    execution_id: str
+    result: EscrowResult | None = None
+    task: TaskRecord | None = None
+    acknowledgement: ResultAcknowledgement | None = None
+    error_code: str = ""
+    error_message: str = ""
+    is_terminal: bool = False
+    is_resumable: bool = False
+    is_verified: bool = False
+    requires_action: bool = False
+
 
 
 class ExecutionEvent(StrictModel):

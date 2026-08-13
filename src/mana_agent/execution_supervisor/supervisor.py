@@ -14,6 +14,10 @@ from mana_agent.execution_supervisor.errors import (
     BudgetExceededError,
     CompletionVerificationError,
     ConcurrentUpdateError,
+    EscrowConflictError,
+    EscrowCorruptError,
+    EscrowIncompatibleVersionError,
+    EscrowNotFoundError,
     ExecutionSupervisorError,
     InvalidTransitionError,
     LeaseConflictError,
@@ -31,6 +35,7 @@ from mana_agent.execution_supervisor.models import (
     CheckpointRecord,
     CompletionContract,
     CompletionContractType,
+    EscrowLookupStatus,
     EscrowResult,
     EscrowStatus,
     ExecutionEvent,
@@ -39,6 +44,7 @@ from mana_agent.execution_supervisor.models import (
     RecoveryAction,
     RecoveryDecision,
     RecoverySummary,
+    ResultAcknowledgement,
     RetryBudget,
     RetryCategory,
     SideEffectClassification,
@@ -46,6 +52,7 @@ from mana_agent.execution_supervisor.models import (
     TERMINAL_STATES,
     VerificationStatus,
     VerificationReport,
+    VerifiedExecutionResultLookup,
     WaitPolicy,
     utc_now,
 )
@@ -452,6 +459,73 @@ class ExecutionSupervisor:
                 task.waiting_inbox_item_id = ""
                 task.waiting_reason = ""
                 task.human_wait_started_at = None
+                if target != ExecutionState.COMPLETED and not task.result_id:
+                    result_kind = (
+                        "terminal_failure"
+                        if target in {ExecutionState.FAILED, ExecutionState.CANCELLED, ExecutionState.BUDGET_EXHAUSTED}
+                        else "chat_result"
+                    )
+                    status = EscrowStatus.AVAILABLE
+                    verification_status = (
+                        VerificationStatus.FAILED
+                        if target == ExecutionState.FAILED
+                        else VerificationStatus.NOT_SUPPORTED
+                    )
+                    result_payload = {
+                        "status": target.value,
+                        "reason": reason or task.failure_reason,
+                        "recovery_reason": task.recovery_reason,
+                        "is_resumable": False,
+                        "chat_result": {
+                            "answer": reason or f"Execution ended as {target.value}.",
+                            "error": reason or target.value,
+                            "mode": f"lane-{target.value.replace('_', '-')}",
+                            "payload": {
+                                "execution_id": task.task_id,
+                                "lane_task_id": task.task_id,
+                                "status": target.value,
+                                "terminal_failure": True,
+                                "is_resumable": False,
+                            },
+                        },
+                    }
+                    err_meta = {
+                        "state": target.value,
+                        "reason": reason or task.failure_reason,
+                        "recovery_reason": task.recovery_reason,
+                        "is_resumable": False,
+                    }
+                    term_result = EscrowResult(
+                        task_id=task.task_id,
+                        execution_id=task.task_id,
+                        root_task_id=task.root_task_id or task.task_id,
+                        parent_task_id=task.parent_task_id,
+                        trigger_turn_id=task.trigger_turn_id,
+                        session_id=task.session_id,
+                        lane_id=(
+                            task.assigned_agent.removeprefix("lane:")
+                            if task.assigned_agent.startswith("lane:")
+                            else task.assigned_agent
+                        ),
+                        owning_lane=(
+                            task.assigned_agent.removeprefix("lane:")
+                            if task.assigned_agent.startswith("lane:")
+                            else task.assigned_agent
+                        ),
+                        attempt_id=task.attempt_id,
+                        attempt_generation=task.attempt_generation,
+                        lease_token_hash=task.lease_token,
+                        status=status,
+                        supervisor_state=target.value,
+                        verification_status=verification_status,
+                        result_kind=result_kind,
+                        payload=result_payload,
+                        error_metadata=err_meta,
+                        created_at=self.clock(),
+                        completed_at=self.clock(),
+                    )
+                    task.result_id = term_result.result_id
+                    self.store.save_result(term_result)
             elif target == ExecutionState.QUEUED:
                 task.lease_owner = ""
                 task.lease_token = ""
@@ -499,6 +573,109 @@ class ExecutionSupervisor:
                 self.store.save_attempt(attempt)
         self._emit(event_name, task, previous_state=prior.value if prior else "", reason=reason or recovery_reason)
         return task
+
+    def record_terminal_result(
+        self,
+        task_id: str,
+        *,
+        state: ExecutionState,
+        reason: str = "",
+        payload: dict[str, Any] | None = None,
+        is_resumable: bool = False,
+        error_metadata: dict[str, Any] | None = None,
+    ) -> EscrowResult:
+        """Persist a terminal outcome or resumable wait in durable result escrow."""
+        task = self.store.get_task(task_id)
+        existing_result = (
+            self.store.get_result(task.result_id)
+            if task.result_id
+            else self.store.get_result_by_execution_id(task.task_id)
+        )
+        if existing_result is not None:
+            if (
+                existing_result.supervisor_state != state.value
+                and existing_result.status != EscrowStatus.ACKNOWLEDGED
+            ):
+                existing_result.supervisor_state = state.value
+                if state in TERMINAL_STATES:
+                    existing_result.completed_at = existing_result.completed_at or self.clock()
+                self.store.save_result(existing_result)
+            return existing_result
+
+        result_kind = (
+            "terminal_failure"
+            if state in {ExecutionState.FAILED, ExecutionState.CANCELLED, ExecutionState.BUDGET_EXHAUSTED}
+            else ("resumable_wait" if is_resumable else "chat_result")
+        )
+        status = EscrowStatus.AVAILABLE
+        verification_status = (
+            VerificationStatus.PASSED
+            if state == ExecutionState.COMPLETED
+            else (VerificationStatus.FAILED if state == ExecutionState.FAILED else VerificationStatus.NOT_SUPPORTED)
+        )
+        result_payload = payload or {
+            "status": state.value,
+            "reason": reason or task.failure_reason,
+            "recovery_reason": task.recovery_reason,
+            "is_resumable": is_resumable,
+            "chat_result": {
+                "answer": reason or f"Execution ended as {state.value}.",
+                "error": reason or state.value,
+                "mode": f"lane-{state.value.replace('_', '-')}",
+                "payload": {
+                    "execution_id": task.task_id,
+                    "lane_task_id": task.task_id,
+                    "status": state.value,
+                    "terminal_failure": not is_resumable,
+                    "is_resumable": is_resumable,
+                },
+            },
+        }
+        err_meta = error_metadata or {
+            "state": state.value,
+            "reason": reason or task.failure_reason,
+            "recovery_reason": task.recovery_reason,
+            "is_resumable": is_resumable,
+        }
+        result = EscrowResult(
+            task_id=task.task_id,
+            execution_id=task.task_id,
+            root_task_id=task.root_task_id or task.task_id,
+            parent_task_id=task.parent_task_id,
+            trigger_turn_id=task.trigger_turn_id,
+            session_id=task.session_id,
+            lane_id=(
+                task.assigned_agent.removeprefix("lane:")
+                if task.assigned_agent.startswith("lane:")
+                else task.assigned_agent
+            ),
+            owning_lane=(
+                task.assigned_agent.removeprefix("lane:")
+                if task.assigned_agent.startswith("lane:")
+                else task.assigned_agent
+            ),
+            attempt_id=task.attempt_id,
+            attempt_generation=task.attempt_generation,
+            lease_token_hash=task.lease_token,
+            status=status,
+            supervisor_state=state.value,
+            verification_status=verification_status,
+            result_kind=result_kind,
+            payload=result_payload,
+            error_metadata=err_meta,
+            created_at=self.clock(),
+            completed_at=self.clock() if state in TERMINAL_STATES else None,
+        )
+        if not task.result_id:
+            def link_res(curr: TaskRecord) -> None:
+                curr.result_id = result.result_id
+                curr.updated_at = self.clock()
+
+            self.store.update_task(task.task_id, link_res)
+        self.store.save_result(result)
+        self._emit("result_stored", task, result_id=result.result_id, status=status.value)
+        return result
+
 
     def queue(self, task_id: str) -> TaskRecord:
         task = self.store.get_task(task_id)
@@ -1106,13 +1283,31 @@ class ExecutionSupervisor:
             validate_transition(task.state, target_state)
             result = EscrowResult(
                 task_id=task.task_id,
+                execution_id=task.task_id,
+                root_task_id=task.root_task_id or task.task_id,
                 parent_task_id=task.parent_task_id,
+                trigger_turn_id=task.trigger_turn_id,
+                session_id=task.session_id,
+                lane_id=(
+                    task.assigned_agent.removeprefix("lane:")
+                    if task.assigned_agent.startswith("lane:")
+                    else task.assigned_agent
+                ),
+                owning_lane=(
+                    task.assigned_agent.removeprefix("lane:")
+                    if task.assigned_agent.startswith("lane:")
+                    else task.assigned_agent
+                ),
                 attempt_id=attempt_id,
                 attempt_generation=task.attempt_generation,
                 lease_token_hash=_token_hash(lease_token),
                 payload=payload,
                 capsule_revisions=dict(capsule_revisions or {}),
                 status=EscrowStatus.PRODUCED,
+                supervisor_state=target_state.value,
+                verification_status=VerificationStatus.PENDING,
+                result_kind="chat_result",
+                created_at=self.clock(),
             )
             task.result_id = result.result_id
             task_had_usage = task.token_usage > 0
@@ -1382,6 +1577,14 @@ class ExecutionSupervisor:
                 ) from exc
         result.artifacts = list(report.artifacts)
         result.status = EscrowStatus.AVAILABLE
+        result.verification_status = report.status
+        result.supervisor_state = (
+            ExecutionState.COMPLETED.value
+            if report.status == VerificationStatus.PASSED
+            else ExecutionState.FAILED.value
+        )
+        result.verified_at = self.clock()
+        result.completed_at = result.completed_at or self.clock()
         self.store.save_result(result)
         def apply_report(current: TaskRecord) -> None:
             if current.result_id != result.result_id:
@@ -1422,27 +1625,196 @@ class ExecutionSupervisor:
             self._emit("verification_failed", task, checks=report.checks)
         return task
 
-    def acknowledge_result(self, result_id: str, *, parent_task_id: str) -> EscrowResult:
+    def acknowledge_result(
+        self,
+        result_id: str,
+        *,
+        parent_task_id: str | None = None,
+        consumer_execution_id: str = "",
+        consumer_turn_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> ResultAcknowledgement:
         result = self.store.get_result(result_id)
         if result is None:
             raise CompletionVerificationError(f"unknown escrow result: {result_id}")
-        if result.parent_task_id != parent_task_id:
+        if parent_task_id and result.parent_task_id and result.parent_task_id != parent_task_id:
             raise CompletionVerificationError("result does not belong to the acknowledging parent")
-        if result.acknowledged_at is None:
-            result.status = EscrowStatus.DELIVERY_PENDING
-            self.store.save_result(result)
-            self._emit("result_delivery_pending", self.store.get_task(result.task_id), result_id=result_id)
-            result.status = EscrowStatus.DELIVERED
-            result.delivery_count += 1
-            result.delivered_at = self.clock()
-            self.store.save_result(result)
-            result.acknowledged_at = self.clock()
-            result.acknowledged_by = parent_task_id
-            result.status = EscrowStatus.ACKNOWLEDGED
-            self.store.save_result(result)
-        task = self.store.get_task(result.task_id)
-        self._emit("result_acknowledged", task, result_id=result_id, parent_task_id=parent_task_id)
-        return result
+        existing_ack = self.store.get_acknowledgement(result_id)
+        if existing_ack is not None:
+            return existing_ack
+        now = self.clock()
+        ack = ResultAcknowledgement(
+            result_id=result_id,
+            execution_id=result.execution_id or result.task_id,
+            consumer_execution_id=consumer_execution_id or parent_task_id or "",
+            consumer_turn_id=consumer_turn_id,
+            acknowledged_at=now,
+            acknowledged_by=parent_task_id or consumer_execution_id or consumer_turn_id or "caller",
+            metadata=dict(metadata or {}),
+        )
+        self.store.save_acknowledgement(ack)
+        task = self.store.get_task_or_none(result.task_id)
+        if task is not None:
+            self._emit(
+                "result_acknowledged",
+                task,
+                result_id=result_id,
+                parent_task_id=parent_task_id or "",
+                consumer_turn_id=consumer_turn_id,
+                consumer_execution_id=consumer_execution_id,
+            )
+        return ack
+
+    def get_verified_execution_result(
+        self, execution_id: str
+    ) -> VerifiedExecutionResultLookup:
+        if not str(execution_id).strip():
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.NOT_FOUND,
+                execution_id=str(execution_id),
+                error_code="RESULT_NOT_FOUND",
+                error_message="execution_id is empty or missing",
+            )
+        exec_id = str(execution_id).strip()
+        task = self.store.get_task_or_none(exec_id)
+
+        if task is not None and task.state in {
+            ExecutionState.QUEUED,
+            ExecutionState.LEASED,
+            ExecutionState.RUNNING,
+            ExecutionState.CHECKPOINTING,
+            ExecutionState.RETRY_SCHEDULED,
+            ExecutionState.REPLANNING,
+            ExecutionState.CANCELLING,
+        }:
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.EXECUTION_STILL_RUNNING,
+                execution_id=exec_id,
+                task=task,
+                error_code="EXECUTION_STILL_RUNNING",
+                error_message=f"Execution {exec_id} is active ({task.state.value})",
+            )
+
+        if task is not None and task.state is ExecutionState.WAITING:
+            try:
+                escrow_res = self.store.get_result_by_execution_id(exec_id)
+            except (EscrowCorruptError, EscrowIncompatibleVersionError) as exc:
+                return VerifiedExecutionResultLookup(
+                    status=(
+                        EscrowLookupStatus.CORRUPT
+                        if isinstance(exc, EscrowCorruptError)
+                        else EscrowLookupStatus.INCOMPATIBLE_VERSION
+                    ),
+                    execution_id=exec_id,
+                    task=task,
+                    error_code=getattr(exc, "code", "RESULT_CORRUPT"),
+                    error_message=str(exc),
+                )
+            ack = (
+                self.store.get_acknowledgement(escrow_res.result_id)
+                if escrow_res
+                else None
+            )
+            return VerifiedExecutionResultLookup(
+                status=(
+                    EscrowLookupStatus.FOUND
+                    if escrow_res
+                    else EscrowLookupStatus.EXECUTION_STILL_RUNNING
+                ),
+                execution_id=exec_id,
+                result=escrow_res,
+                task=task,
+                acknowledgement=ack,
+                is_resumable=True,
+                requires_action=True,
+                error_code="ACTION_REQUIRED" if not escrow_res else "",
+                error_message=task.waiting_reason
+                or "Execution is waiting for approval/input",
+            )
+
+        if (
+            task is not None
+            and task.state is ExecutionState.COMPLETED_PENDING_VERIFICATION
+        ):
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.UNVERIFIED,
+                execution_id=exec_id,
+                task=task,
+                error_code="RESULT_NOT_VERIFIED",
+                error_message=f"Execution {exec_id} is pending completion verification",
+            )
+
+        try:
+            result = self.store.get_result_by_execution_id(exec_id)
+            if result is None and task is not None and task.result_id:
+                result = self.store.get_result(task.result_id)
+        except EscrowCorruptError as exc:
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.CORRUPT,
+                execution_id=exec_id,
+                task=task,
+                error_code="RESULT_CORRUPT",
+                error_message=str(exc),
+            )
+        except EscrowIncompatibleVersionError as exc:
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.INCOMPATIBLE_VERSION,
+                execution_id=exec_id,
+                task=task,
+                error_code="RESULT_SCHEMA_INCOMPATIBLE",
+                error_message=str(exc),
+            )
+
+        if result is not None:
+            ack = self.store.get_acknowledgement(result.result_id)
+            is_term = (
+                result.supervisor_state
+                in {
+                    ExecutionState.COMPLETED.value,
+                    ExecutionState.FAILED.value,
+                    ExecutionState.CANCELLED.value,
+                    ExecutionState.BUDGET_EXHAUSTED.value,
+                }
+                or (task is not None and task.state in TERMINAL_STATES)
+            )
+            is_resumable = bool(
+                result.result_kind == "resumable_wait"
+                or result.error_metadata.get("is_resumable")
+                or (task is not None and task.state is ExecutionState.WAITING)
+            )
+            is_ver = (
+                result.verification_status == VerificationStatus.PASSED
+                or (task is not None and task.state == ExecutionState.COMPLETED)
+            )
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.FOUND,
+                execution_id=exec_id,
+                result=result,
+                task=task,
+                acknowledgement=ack,
+                is_terminal=is_term,
+                is_resumable=is_resumable,
+                is_verified=is_ver,
+                requires_action=is_resumable,
+            )
+
+        if task is not None and task.state in TERMINAL_STATES:
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.NOT_FOUND,
+                execution_id=exec_id,
+                task=task,
+                is_terminal=True,
+                error_code="RESULT_NOT_FOUND",
+                error_message=f"No escrow result found for terminal execution {exec_id}",
+            )
+
+        return VerifiedExecutionResultLookup(
+            status=EscrowLookupStatus.NOT_FOUND,
+            execution_id=exec_id,
+            error_code="RESULT_NOT_FOUND",
+            error_message=f"Unknown execution identity: {exec_id}",
+        )
+
 
     def reverify_completed(self, task_id: str) -> TaskRecord:
         """Invalidate the completion projection until durable evidence passes again."""
@@ -1596,7 +1968,8 @@ class ExecutionSupervisor:
                 self._emit("cancellation_blocked", task, reason=reason)
                 blocked.append(current.task_id)
                 continue
-            self.transition(current.task_id, ExecutionState.CANCELLING, reason=reason)
+            if current.state != ExecutionState.CANCELLING:
+                self.transition(current.task_id, ExecutionState.CANCELLING, reason=reason)
             def finish(task: TaskRecord) -> None:
                 validate_transition(task.state, ExecutionState.CANCELLED)
                 task.state = ExecutionState.CANCELLED
@@ -1610,6 +1983,60 @@ class ExecutionSupervisor:
                 task.waiting_inbox_item_id = ""
                 task.waiting_reason = ""
                 task.human_wait_started_at = None
+                if not task.result_id:
+                    term_result = EscrowResult(
+                        task_id=task.task_id,
+                        execution_id=task.task_id,
+                        root_task_id=task.root_task_id or task.task_id,
+                        parent_task_id=task.parent_task_id,
+                        trigger_turn_id=task.trigger_turn_id,
+                        session_id=task.session_id,
+                        lane_id=(
+                            task.assigned_agent.removeprefix("lane:")
+                            if task.assigned_agent.startswith("lane:")
+                            else task.assigned_agent
+                        ),
+                        owning_lane=(
+                            task.assigned_agent.removeprefix("lane:")
+                            if task.assigned_agent.startswith("lane:")
+                            else task.assigned_agent
+                        ),
+                        attempt_id=task.attempt_id,
+                        attempt_generation=task.attempt_generation,
+                        lease_token_hash=task.lease_token,
+                        status=EscrowStatus.AVAILABLE,
+                        supervisor_state=ExecutionState.CANCELLED.value,
+                        verification_status=VerificationStatus.NOT_SUPPORTED,
+                        result_kind="terminal_failure",
+                        payload={
+                            "status": "cancelled",
+                            "reason": reason or "cancelled",
+                            "recovery_reason": task.recovery_reason,
+                            "is_resumable": False,
+                            "chat_result": {
+                                "answer": reason or "Execution was cancelled.",
+                                "error": reason or "cancelled",
+                                "mode": "lane-cancelled",
+                                "payload": {
+                                    "execution_id": task.task_id,
+                                    "lane_task_id": task.task_id,
+                                    "status": "cancelled",
+                                    "terminal_failure": True,
+                                    "is_resumable": False,
+                                },
+                            },
+                        },
+                        error_metadata={
+                            "state": "cancelled",
+                            "reason": reason or "cancelled",
+                            "recovery_reason": task.recovery_reason,
+                            "is_resumable": False,
+                        },
+                        created_at=self.clock(),
+                        completed_at=self.clock(),
+                    )
+                    task.result_id = term_result.result_id
+                    self.store.save_result(term_result)
             task, _ = self.store.update_task(current.task_id, finish)
             if task.attempt_id:
                 attempt = self.store.get_attempt(task.attempt_id)
