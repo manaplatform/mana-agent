@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-13
 
+- Updated compiled Spirit to speak first-person as Mana-Agent using the current runtime provider/model (for example, the openai model), instead of a vendor chatbot persona.
+  - User verification required: `python -m pytest tests/test_spirit.py -q`.
+
 - Updated agent identity to introduce a versioned Mana Spirit (curious, bold, calm) composed into runtime Self without changing policy, memory, or coding contracts.
   - User verification required: `python -m pytest tests/test_spirit.py tests/test_prompting_builder.py tests/test_prompts_contract.py tests/test_multi_agent_core.py::test_execution_context_preserves_model_metadata -q`.
 

@@ -6,17 +6,19 @@ import re
 
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.spirit.schema import SpiritRef
-from mana_agent.spirit.self_model import RuntimeSelf, compose_runtime_self
+from mana_agent.spirit.self_model import RuntimeModelIdentity, RuntimeSelf, compose_runtime_self
 
 
 SPIRIT_MAX_COMPILED_TOKENS = 120
 _DISPLAY_MODEL_MAX_CHARS = 48
 _SPIRIT_MARKER_RE = re.compile(r"Mana's Spirit \(([^/)]+)/(\d+)\)")
 _SPIRIT_BLOCK_RE = re.compile(
-    r"You are Mana-Agent, instantiated through [^\n]+\n\n"
+    r"(?:I am Mana-Agent\. I use [^\n]+\n\n|"
+    r"You are Mana-Agent, instantiated through [^\n]+\n\n)?"
     r"Mana's Spirit \([^)]+\) is curious, bold, and calm:\n"
     r"[^\n]+\n\n"
     r"The runtime model is part of this implementation, not a separate persona\.\n"
+    r"(?:When asked who I am, I say I am Mana-Agent using this model\.\n)?"
     r"Show temperament through behavior, not self-description\.\n*",
 )
 
@@ -32,19 +34,37 @@ def display_runtime_model(model: str) -> str:
     return text
 
 
+def display_runtime_backend(runtime: RuntimeModelIdentity) -> str:
+    """Render 'the <provider> model <name>' from existing runtime Self fields."""
+
+    provider = str(runtime.provider or "").strip()
+    raw_model = str(runtime.model or "").strip()
+    if provider and raw_model:
+        prefix = f"{provider}/"
+        shown = raw_model[len(prefix) :] if raw_model.lower().startswith(prefix.lower()) else raw_model
+        return f"the {provider} model {display_runtime_model(shown)}"
+    if provider:
+        return f"the {provider} model"
+    if raw_model:
+        return f"the {display_runtime_model(raw_model)} model"
+    return "the current model"
+
+
 def compile_spirit_instruction(runtime_self: RuntimeSelf | None = None) -> str:
     """Render the compact identity/temperament instruction.
 
     Purpose, role, policy, memory, and coding rules are intentionally omitted.
+    Identity is first-person so replies name Mana-Agent and the runtime model.
     """
 
     current = runtime_self or compose_runtime_self()
-    model_name = display_runtime_model(current.runtime.model)
+    backend = display_runtime_backend(current.runtime)
     return (
-        f"You are Mana-Agent, instantiated through {model_name}.\n\n"
+        f"I am Mana-Agent. I use {backend}.\n\n"
         f"{spirit_prompt_marker(current.spirit)} is curious, bold, and calm:\n"
         "understand before assuming, act when justified, stay deliberate under failure.\n\n"
         "The runtime model is part of this implementation, not a separate persona.\n"
+        "When asked who I am, I say I am Mana-Agent using this model.\n"
         "Show temperament through behavior, not self-description."
     )
 

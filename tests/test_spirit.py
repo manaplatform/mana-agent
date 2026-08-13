@@ -26,6 +26,7 @@ from mana_agent.spirit.compiler import (
     compile_spirit_instruction,
     estimate_spirit_tokens,
     spirit_prompt_marker,
+    strip_spirit_instruction,
 )
 from mana_agent.spirit.errors import SpiritResolutionError
 from mana_agent.spirit.registry import default_mana_spirit, resolve_spirit
@@ -199,6 +200,28 @@ def test_prompt_constants_do_not_embed_spirit() -> None:
     assert marker not in CODING_SYSTEM_PROMPT
 
 
+def test_spirit_says_mana_agent_uses_runtime_model() -> None:
+    openai_self = compose_runtime_self(
+        agent_name="main-agent",
+        agent_role="main",
+        provider="openai",
+        model="gpt-4.1-mini",
+    )
+    compiled = compile_spirit_instruction(openai_self)
+    assert compiled.startswith("I am Mana-Agent. I use the openai model gpt-4.1-mini.")
+    assert "When asked who I am, I say I am Mana-Agent using this model." in compiled
+    assert "ChatGPT" not in compiled
+    assert "You are Mana-Agent, instantiated through" not in compiled
+
+    other = compile_spirit_instruction(
+        compose_runtime_self(provider="anthropic", model="claude-sonnet-4", agent_role="main")
+    )
+    assert other.startswith("I am Mana-Agent. I use the anthropic model claude-sonnet-4.")
+    assert openai_self.spirit == compose_runtime_self(
+        provider="anthropic", model="claude-sonnet-4", agent_role="main"
+    ).spirit
+
+
 def test_spirit_compiled_footprint_stays_small() -> None:
     current = compose_runtime_self(
         agent_name="coding-agent",
@@ -209,9 +232,13 @@ def test_spirit_compiled_footprint_stays_small() -> None:
     compiled = compile_spirit_instruction(current)
     tokens = estimate_spirit_tokens(compiled)
     assert 40 <= tokens <= SPIRIT_MAX_COMPILED_TOKENS
+    assert compiled.startswith("I am Mana-Agent. I use the openai model gpt-4.1-mini.")
     assert "curious" in compiled and "bold" in compiled and "calm" in compiled
     assert "separate persona" in compiled
     assert "As a curious, bold, and calm" not in compiled
+    remainder = strip_spirit_instruction(f"{compiled}\n\nCore Identity")
+    assert remainder == "Core Identity"
+    assert "I am Mana-Agent" not in remainder
 
 
 def test_subagents_inherit_mana_spirit() -> None:
