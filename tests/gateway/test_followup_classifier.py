@@ -102,7 +102,12 @@ def test_completed_task_cannot_be_classified_as_a_resume() -> None:
         )
 
 
-def test_unsafe_classification_reports_the_model_reason() -> None:
+def test_independent_category_overrides_unsafe_to_safe() -> None:
+    """new_task with no related task is unambiguous by construction.
+
+    Even if the model sets safe_to_continue=false, the structural invariant
+    in decide() overrides it to true because the classification is independent.
+    """
     classifier = FollowupClassifier(
         _StructuredModel(
             {
@@ -110,7 +115,54 @@ def test_unsafe_classification_reports_the_model_reason() -> None:
                 "category": "new_task",
                 "related_task_id": "",
                 "safe_to_continue": False,
-                "reason": "the request refers to two conflicting task identities",
+                "reason": "the request is a bare email address with no context",
+            }
+        )
+    )
+
+    decision = classifier.decide(
+        message="user@example.com",
+        recent_history=[],
+        candidates=[{"task_id": "task_1"}],
+    )
+    assert decision.category == "new_task"
+    assert decision.related_task_id == ""
+    assert decision.safe_to_continue is True
+
+
+def test_conversation_only_overrides_unsafe_to_safe() -> None:
+    """conversation_only with no related task is also structurally unambiguous."""
+    classifier = FollowupClassifier(
+        _StructuredModel(
+            {
+                "decision_id": "followup_conv",
+                "category": "conversation_only",
+                "related_task_id": "",
+                "safe_to_continue": False,
+                "reason": "terse input with empty history",
+            }
+        )
+    )
+
+    decision = classifier.decide(
+        message="hello",
+        recent_history=[],
+        candidates=[{"task_id": "task_1"}],
+    )
+    assert decision.category == "conversation_only"
+    assert decision.safe_to_continue is True
+
+
+def test_task_bound_category_with_unsafe_still_raises() -> None:
+    """Categories that require a related task should still respect safe_to_continue=false."""
+    classifier = FollowupClassifier(
+        _StructuredModel(
+            {
+                "decision_id": "followup_bound",
+                "category": "followup_task",
+                "related_task_id": "task_1",
+                "safe_to_continue": False,
+                "reason": "two conflicting task identities",
             }
         )
     )
@@ -124,3 +176,4 @@ def test_unsafe_classification_reports_the_model_reason() -> None:
             recent_history=[],
             candidates=[{"task_id": "task_1"}, {"task_id": "task_2"}],
         )
+

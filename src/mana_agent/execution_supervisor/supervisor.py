@@ -1653,6 +1653,9 @@ class ExecutionSupervisor:
             metadata=dict(metadata or {}),
         )
         self.store.save_acknowledgement(ack)
+        result.acknowledged_at = now
+        result.acknowledged_by = ack.acknowledged_by
+        self.store.save_result(result)
         task = self.store.get_task_or_none(result.task_id)
         if task is not None:
             self._emit(

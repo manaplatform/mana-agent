@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed `FollowupClassifier` false-negative that blocked independent inputs (bare email addresses, terse messages) when existing durable tasks were present. The LLM would classify the input as `new_task` but set `safe_to_continue=false`, causing a hard failure. Strengthened the classifier prompt and added a structural invariant guard: independent classifications (`new_task`, `conversation_only`, `clarification_answer`) with no related task now always proceed, since they are unambiguous by construction.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py::test_failed_followup_classification_stops_before_recovery_or_new_work -v`
+
+- Added missing `fleet.comparison.failed` event kind to `EVENT_TYPES` in `fleet/events.py`.
+  - `FleetService` emits this kind when verification does not fully pass; it was absent from the registry, causing a `ValidationError` in the integration test.
+  - User verification required: `python -m pytest tests/fleet/test_fleet_core.py`
+
+- Fixed `acknowledge_result` in `execution_supervisor/supervisor.py` to stamp `acknowledged_at` and `acknowledged_by` on the `EscrowResult` after saving the `ResultAcknowledgement`.
+  - `verify_completion` reads `child_result.acknowledged_at` directly from the `EscrowResult`; without the stamp, all child jobs appeared as blocking children and the parent fleet run could never reach `COMPLETED`, raising `FleetStateError`.
+  - User verification required: `python -m pytest tests/fleet/test_fleet_core.py`
+
+
+
 - Implemented P1 Verified Execution Result Escrow and Durable Turn Recovery to fix `Verified execution result escrow is unavailable; no stored status was returned.`
   - Defined versioned `EscrowResult` v2 schema with `execution_id`, `root_task_id`, `trigger_turn_id`, `session_id`, `lane_id`, `supervisor_state`, `verification_status`, and `mode="before"` migration for legacy v1 records.
   - Made `ExecutionSupervisor` the single authoritative owner of result escrow persistence, guaranteeing that verified completion outcomes, terminal failures (`FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`), and resumable waits (`approval_required`, `auth_required`, `blocked`) are persisted to escrow with authoritative execution identity.

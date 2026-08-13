@@ -16,7 +16,7 @@ EVENT_TYPES = frozenset({
     "fleet.workspace.ready", "fleet.repository.synced", "fleet.command.started",
     "fleet.command.output", "fleet.command.completed", "fleet.artifact.collected",
     "fleet.job.failed", "fleet.job.completed", "fleet.job.cancelled",
-    "fleet.worker.disconnected", "fleet.comparison.completed",
+    "fleet.worker.disconnected", "fleet.comparison.completed", "fleet.comparison.failed",
     "fleet.cleanup.completed", "fleet.cleanup.failed",
 })
 
