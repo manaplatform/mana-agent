@@ -358,6 +358,12 @@ class MediaService:
             usage_dict = dict(output.metadata.get("usage") or {})
             if "cost" in output.metadata and "cost" not in usage_dict:
                 usage_dict["cost"] = output.metadata["cost"]
+            if "actual_cost" in output.metadata and "actual_cost" not in usage_dict:
+                usage_dict["actual_cost"] = output.metadata["actual_cost"]
+            if "image_count" in output.metadata and "image_count" not in usage_dict:
+                usage_dict["image_count"] = output.metadata["image_count"]
+            if "provider_usage" in output.metadata and "provider_usage" not in usage_dict:
+                usage_dict["provider_usage"] = output.metadata["provider_usage"]
             result = result.model_copy(
                 update={
                     "status": output.status,

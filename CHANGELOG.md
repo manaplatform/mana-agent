@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed OpenRouter image-model discovery, capability validation, parameter derivation, and terminal failure handling.
+  - Implemented authoritative image model catalog discovery via `GET /api/v1/images/models` with bounded TTL cache and single-refresh retry on miss in `OpenRouterMediaProvider`.
+  - Added strict capability checking ensuring exact model ID existence in catalog and `"image"` in `architecture.output_modalities` without relying on substring heuristics or text model allowlists.
+  - Differentiated error codes into `media_image_model_not_found` (with safe metadata diagnostics and suggestions), `media_image_model_unsupported`, `media_image_provider_unavailable`, `media_image_provider_auth_required`, and `media_image_generation_failed`.
+  - Filtered generation request payloads dynamically from model `supported_parameters` and captured provider usage and cost accounting.
+  - Fixed `pending_required_work` semantics in `chat_gateway.py` so that non-resumable terminal failures strictly set `pending_required_work = False` and `goal_satisfied = False`.
+  - Added comprehensive regression tests covering all 11 OpenRouter image generation and terminal state scenarios in `tests/test_openrouter_image_generation.py`.
+  - User verification required: `python -m pytest tests/test_openrouter_image_generation.py tests/gateway/test_turn_budget_accounting.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
 - Fixed `UnboundLocalError` for `pending_required_work_exists` in `chat_gateway.py` and `TypeError` for `load_model_cache` in `configuration_app.py`.
   - Initialized `pending_required_work_exists` prior to approval and permission handling in `AgentChatGateway.process_turn`, ensuring all waiting, approval, and completion branches consistently propagate lane pending work status.
   - Corrected `validate_checkpoint_resume` invocation in single-turn resume in `AgentChatGateway.process_turn` to pass `allow_explicit_retry_seed=True` when validating explicit model `resume_checkpoint` decisions.

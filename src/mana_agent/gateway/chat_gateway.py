@@ -4809,10 +4809,13 @@ class AgentChatGateway:
                                 "budget_exhausted",
                             ):
                                 pending_required_work_exists = True
-                            elif status == "completed":
-                                pending_required_work_exists = False
                             else:
-                                pending_required_work_exists = bool(result.error)
+                                pending_required_work_exists = False
+
+                        if result.error or status != "completed":
+                            result.payload.setdefault("goal_satisfied", False)
+                        else:
+                            result.payload.setdefault("goal_satisfied", True)
 
                         if result.mode == "remote-awaiting-permission":
                             self._synchronize_lane_usage(
@@ -7415,7 +7418,17 @@ class AgentChatGateway:
                 error=exc.code,
                 mode="route-media-error",
                 decision=decision,
-                payload={"route": "media"},
+                payload={
+                    "route": "media",
+                    "status": "failed",
+                    "error_code": exc.code,
+                    "error_detail": exc.detail,
+                    "pending_required_work": False,
+                    "goal_satisfied": False,
+                    "is_resumable": False,
+                    "terminal_failure": True,
+                    **getattr(exc, "metadata", {}),
+                },
             )
         except ValueError:
             return ChatTurnResult(
@@ -7423,7 +7436,16 @@ class AgentChatGateway:
                 error="media_request_invalid",
                 mode="route-media-error",
                 decision=decision,
-                payload={"route": "media"},
+                payload={
+                    "route": "media",
+                    "status": "failed",
+                    "error_code": "media_request_invalid",
+                    "error_detail": "The model-selected media request contains invalid parameters.",
+                    "pending_required_work": False,
+                    "goal_satisfied": False,
+                    "is_resumable": False,
+                    "terminal_failure": True,
+                },
             )
 
         # Record media usage in context cost governor if available
@@ -7486,6 +7508,10 @@ class AgentChatGateway:
                 "image_model": result.model,
                 "output_artifacts": [art.local_path for art in result.artifacts],
                 "generation": result.model_dump(mode="json"),
+                "status": result.status.value,
+                "pending_required_work": False,
+                "goal_satisfied": result.status == GenerationStatus.COMPLETED,
+                "is_resumable": False,
                 "verification_status": "passed"
                 if result.status == GenerationStatus.COMPLETED
                 else result.status.value,

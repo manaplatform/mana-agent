@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import json
 import re
 import time
@@ -8,9 +9,13 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
+from mana_agent.config.model_catalog import ModelCapability
 from mana_agent.media.artifacts import _detected_mime
-from mana_agent.media.errors import MediaProviderError
+from mana_agent.media.errors import (
+    MediaCapabilityError,
+    MediaModelNotFoundError,
+    MediaProviderError,
+)
 from mana_agent.media.models import (
     GenerationStatus,
     ImageGenerationRequest,
@@ -31,6 +36,7 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
         timeout_seconds: int = 120,
         http_referer: str = "https://github.com/mana-agent/mana-agent",
         title: str = "Mana-Agent",
+        cache_ttl_seconds: float = 300.0,
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -39,173 +45,207 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
         )
         self.http_referer = http_referer
         self.title = title
-        self._image_model_cache: list[dict[str, Any]] | None = None
+        self._image_model_cache: dict[str, dict[str, Any]] | None = None
+        self._image_model_cache_fetched_at: float = 0.0
+        self._cache_ttl_seconds = float(cache_ttl_seconds)
 
-    def capabilities(self, model: str) -> frozenset[ModelCapability]:
-        lowered = str(model or "").lower()
-        # Non-text and dedicated image model family indicators
-        if any(
-            marker in lowered
-            for marker in (
-                "dall-e",
-                "image-gen",
-                "image_generation",
-                "flux",
-                "stable-diffusion",
-                "midjourney",
-                "recraft",
-                "imagen",
-                "seedance",
-                "ideogram",
-            )
+    def list_image_models(self, *, force_refresh: bool = False) -> list[dict[str, Any]]:
+        """Fetch the dedicated OpenRouter image model catalog (GET /api/v1/images/models)."""
+        if (
+            not force_refresh
+            and self._image_model_cache is not None
+            and (time.monotonic() - self._image_model_cache_fetched_at) < self._cache_ttl_seconds
         ):
-            return frozenset({ModelCapability.IMAGE_GENERATION})
+            return list(self._image_model_cache.values())
 
-        # Known text-only reasoning/chat families must not be inferred as image generation
-        if any(
-            marker in lowered
-            for marker in (
-                "grok",
-                "claude",
-                "deepseek",
-                "llama",
-                "mistral",
-                "qwen",
-                "gpt-4",
-                "gpt-3",
-                "o1",
-                "o3",
-                "o4",
-                "gemini",
-                "command-r",
-            )
-        ) and not any(marker in lowered for marker in ("image", "dall-e", "flux")):
-            return normalize_capabilities(self.provider_id, model)
+        try:
+            raw_bytes, _, _ = self._request_bytes("GET", "/images/models", None)
+        except MediaProviderError as exc:
+            if exc.code in {"media_provider_auth_required", "media_image_provider_auth_required"}:
+                raise MediaProviderError(
+                    "media_image_provider_auth_required",
+                    exc.detail,
+                    retryable=False,
+                ) from exc
+            raise MediaProviderError(
+                "media_image_provider_unavailable",
+                exc.detail,
+                retryable=True,
+            ) from exc
 
-        caps = normalize_capabilities(self.provider_id, model)
-        return caps
-
-    def list_image_models(self) -> list[dict[str, Any]]:
-        """Fetch the dedicated OpenRouter image model catalog."""
-        raw_bytes, _, _ = self._request_bytes("GET", "/images/models", None)
         try:
             payload = json.loads(raw_bytes.decode("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise MediaProviderError(
-                "media_catalog_invalid",
+                "media_image_provider_unavailable",
                 "Failed to parse OpenRouter image model catalog.",
             ) from exc
 
         data = payload.get("data")
         if not isinstance(data, list):
+            self._image_model_cache = {}
+            self._image_model_cache_fetched_at = time.monotonic()
             return []
 
-        models: list[dict[str, Any]] = []
+        models: dict[str, dict[str, Any]] = {}
         for raw in data:
-            if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+            if not isinstance(raw, dict):
                 continue
+            model_id = str(raw.get("id") or "").strip()
+            if not model_id:
+                continue
+
             arch = raw.get("architecture") if isinstance(raw.get("architecture"), dict) else {}
-            output_modalities = arch.get("output_modalities") if isinstance(arch, dict) else []
-            if not isinstance(output_modalities, list):
-                output_modalities = []
-            out_mods_lower = [str(m).lower() for m in output_modalities]
-
-            # Only retain models with image output
-            lowered_id = str(raw["id"]).lower()
-            if "image" not in out_mods_lower and not any(
-                marker in lowered_id
-                for marker in (
-                    "dall-e",
-                    "image-gen",
-                    "image_generation",
-                    "flux",
-                    "stable-diffusion",
-                    "midjourney",
-                    "recraft",
-                    "imagen",
-                    "ideogram",
-                )
-            ):
-                continue
-
-            models.append(
-                {
-                    "id": str(raw["id"]).strip(),
-                    "name": str(raw.get("name") or raw["id"]).strip(),
-                    "architecture": {
-                        "input_modalities": arch.get("input_modalities")
-                        if isinstance(arch.get("input_modalities"), list)
-                        else ["text"],
-                        "output_modalities": output_modalities
-                        if output_modalities
-                        else ["image"],
-                    },
-                    "supported_parameters": list(raw.get("supported_parameters") or []),
-                    "supports_streaming": bool(raw.get("supports_streaming", False)),
-                    "endpoints": list(raw.get("endpoints") or []),
-                }
+            input_modalities = (
+                list(arch.get("input_modalities") or [])
+                if isinstance(arch.get("input_modalities"), list)
+                else ["text"]
             )
-        self._image_model_cache = models
-        return models
+            output_modalities = (
+                list(arch.get("output_modalities") or [])
+                if isinstance(arch.get("output_modalities"), list)
+                else []
+            )
+            supported_parameters = (
+                list(raw.get("supported_parameters") or [])
+                if isinstance(raw.get("supported_parameters"), list)
+                else []
+            )
+            supports_streaming = bool(raw.get("supports_streaming", False))
+            endpoints = (
+                list(raw.get("endpoints") or [])
+                if isinstance(raw.get("endpoints"), list)
+                else []
+            )
 
-    @staticmethod
-    def _image_payload(request: ImageGenerationRequest) -> dict[str, Any]:
+            models[model_id] = {
+                "id": model_id,
+                "name": str(raw.get("name") or model_id).strip(),
+                "architecture": {
+                    "input_modalities": input_modalities,
+                    "output_modalities": output_modalities,
+                },
+                "supported_parameters": supported_parameters,
+                "supports_streaming": supports_streaming,
+                "endpoints": endpoints,
+            }
+
+        self._image_model_cache = models
+        self._image_model_cache_fetched_at = time.monotonic()
+        return list(models.values())
+
+    def get_image_model(self, model: str) -> dict[str, Any]:
+        """Fetch and validate model from OpenRouter image catalog with single retry on miss."""
+        target = str(model or "").strip()
+        if not target:
+            raise MediaCapabilityError(
+                "media_image_model_not_configured",
+                "No image generation model configured.",
+            )
+
+        if (
+            self._image_model_cache is None
+            or (time.monotonic() - self._image_model_cache_fetched_at) >= self._cache_ttl_seconds
+        ):
+            self.list_image_models(force_refresh=False)
+
+        entry = self._image_model_cache.get(target) if self._image_model_cache is not None else None
+
+        # On cache miss: refresh catalog once and retry exact lookup once
+        if entry is None:
+            self.list_image_models(force_refresh=True)
+            entry = (
+                self._image_model_cache.get(target)
+                if self._image_model_cache is not None
+                else None
+            )
+
+        if entry is None:
+            available_ids = list(self._image_model_cache.keys()) if self._image_model_cache else []
+            closest = difflib.get_close_matches(target, available_ids, n=3, cutoff=0.2)
+            suggested = closest[0] if closest else ""
+            detail = (
+                f"The requested image model {target!r} was not found in OpenRouter's image model catalog."
+            )
+            if suggested:
+                detail += f" Suggested model: {suggested!r}."
+            diag_meta = {
+                "requested_model": target,
+                "provider": self.provider_id,
+                "image_catalog_loaded": self._image_model_cache is not None,
+                "closest_model_ids": closest,
+                "suggested_model": suggested,
+            }
+            raise MediaModelNotFoundError(
+                "media_image_model_not_found",
+                detail,
+                metadata=diag_meta,
+            )
+
+        output_modalities = [
+            str(m).lower()
+            for m in entry.get("architecture", {}).get("output_modalities", [])
+        ]
+        if "image" not in output_modalities:
+            detail = (
+                f"The model {target!r} exists in OpenRouter's catalog but does not support image output modalities."
+            )
+            diag_meta = {
+                "requested_model": target,
+                "provider": self.provider_id,
+                "output_modalities": entry.get("architecture", {}).get("output_modalities", []),
+            }
+            raise MediaCapabilityError(
+                "media_image_model_unsupported",
+                detail,
+                metadata=diag_meta,
+            )
+
+        return entry
+
+    def capabilities(self, model: str) -> frozenset[ModelCapability]:
+        """Validate image model capability dynamically against OpenRouter's image catalog."""
+        self.get_image_model(model)
+        return frozenset({ModelCapability.IMAGE_GENERATION})
+
+    def _image_payload(
+        self,
+        request: ImageGenerationRequest,
+        model_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        info = model_info or self.get_image_model(request.model)
+        supported = set(info.get("supported_parameters") or [])
+
         payload: dict[str, Any] = {
             "model": request.model,
             "prompt": request.prompt,
-            "response_format": "b64_json",
         }
-        if request.count > 1:
-            payload["n"] = request.count
-        if request.size and request.size != "auto":
+
+        if not supported or "response_format" in supported:
+            payload["response_format"] = "b64_json"
+
+        if not supported or "n" in supported:
+            if request.count > 1 or "n" in supported:
+                payload["n"] = request.count
+
+        if (not supported or "size" in supported) and request.size and request.size != "auto":
             payload["size"] = request.size
-        if request.resolution:
+
+        if (not supported or "resolution" in supported) and request.resolution:
             payload["resolution"] = request.resolution
-        if request.aspect_ratio:
+
+        if (not supported or "aspect_ratio" in supported) and request.aspect_ratio:
             payload["aspect_ratio"] = request.aspect_ratio
-        if request.quality and request.quality != "auto":
+
+        if (not supported or "quality" in supported) and request.quality and request.quality != "auto":
             payload["quality"] = request.quality
-        if request.output_format and request.output_format != "png":
+
+        if (not supported or "output_format" in supported) and request.output_format and request.output_format != "png":
             payload["output_format"] = request.output_format
-        if request.background:
+
+        if (not supported or "background" in supported) and request.background:
             payload["background"] = request.background
 
-        model_name = request.model.split("/")[-1]
-        if model_name.startswith("dall-e"):
-            if request.output_format != "png" or request.background:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E models require PNG output and do not support background control.",
-                )
-            if model_name == "dall-e-3" and request.count != 1:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E 3 accepts one image per request.",
-                )
-            allowed_sizes = (
-                {"256x256", "512x512", "1024x1024"}
-                if model_name == "dall-e-2"
-                else {"1024x1024", "1024x1792", "1792x1024"}
-            )
-            if request.size != "auto" and request.size not in allowed_sizes:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "The selected DALL-E model does not support the requested size.",
-                )
-            if model_name == "dall-e-2" and request.quality != "auto":
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E 2 does not accept a quality setting.",
-                )
-            if model_name == "dall-e-3" and request.quality not in {
-                "auto",
-                "standard",
-                "hd",
-            }:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E 3 quality must be auto, standard, or hd.",
-                )
         return payload
 
     def generate_image(
@@ -219,28 +259,57 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
                 "OpenRouter image generation does not currently support reference-image editing.",
             )
 
-        payload = self._image_payload(request)
+        model_info = self.get_image_model(request.model)
+        payload = self._image_payload(request, model_info=model_info)
         body = json.dumps(payload).encode("utf-8")
 
-        response_bytes, request_id, _ = self._request_bytes(
-            "POST",
-            "/images",
-            body,
-            content_type="application/json",
-            idempotency_key=request.idempotency_key,
-        )
+        endpoint_path = "/images"
+        endpoints = model_info.get("endpoints")
+        if isinstance(endpoints, list) and endpoints:
+            first_ep = endpoints[0]
+            if isinstance(first_ep, dict) and first_ep.get("url"):
+                ep_url = str(first_ep["url"]).strip()
+                if ep_url.startswith("http://") or ep_url.startswith("https://"):
+                    endpoint_path = ep_url
+                elif ep_url.startswith("/"):
+                    endpoint_path = ep_url
+
+        absolute = endpoint_path.startswith("http://") or endpoint_path.startswith("https://")
+        try:
+            response_bytes, request_id, _ = self._request_bytes(
+                "POST",
+                endpoint_path,
+                body,
+                content_type="application/json",
+                idempotency_key=request.idempotency_key,
+                absolute=absolute,
+            )
+        except MediaProviderError as exc:
+            if exc.code in {"media_provider_auth_required", "media_image_provider_auth_required"}:
+                raise MediaProviderError(
+                    "media_image_provider_auth_required", exc.detail, retryable=False
+                ) from exc
+            if exc.code in {"media_provider_parameter_rejected", "media_rate_limited", "media_generation_timeout"}:
+                raise
+            if exc.code == "media_provider_unavailable":
+                raise MediaProviderError(
+                    "media_image_provider_unavailable", exc.detail, retryable=True
+                ) from exc
+            raise MediaProviderError(
+                "media_image_generation_failed", exc.detail, retryable=exc.retryable
+            ) from exc
 
         try:
             response = json.loads(response_bytes.decode("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise MediaProviderError(
-                "media_provider_invalid_output",
+                "media_image_generation_failed",
                 "The image provider returned invalid JSON output.",
             ) from exc
 
         if not isinstance(response, dict):
             raise MediaProviderError(
-                "media_provider_invalid_output",
+                "media_image_generation_failed",
                 "The image provider returned an unexpected response structure.",
             )
 
@@ -264,7 +333,7 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
                     decoded = base64.b64decode(encoded, validate=True)
                 except ValueError as exc:
                     raise MediaProviderError(
-                        "media_provider_invalid_output",
+                        "media_image_generation_failed",
                         "The image provider returned invalid base64-encoded output.",
                     ) from exc
                 if len(decoded) == 0:
@@ -296,6 +365,7 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
         metadata: dict[str, Any] = {
             "provider": self.provider_id,
             "model": request.model,
+            "image_count": len(content) or len(urls),
         }
         if len(dimensions) == 2 and all(v.isdigit() for v in dimensions):
             metadata["width"] = int(dimensions[0])
@@ -304,8 +374,10 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
         usage_dict = response.get("usage")
         if isinstance(usage_dict, dict):
             metadata["usage"] = usage_dict
+            metadata["provider_usage"] = usage_dict
             if "cost" in usage_dict:
                 metadata["cost"] = usage_dict["cost"]
+                metadata["actual_cost"] = usage_dict["cost"]
 
         return ProviderOutput(
             provider_request_id=request_id or str(response.get("id") or ""),
@@ -321,7 +393,6 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
             return ""
         if self._api_key and self._api_key in text:
             text = text.replace(self._api_key, "[REDACTED]")
-        # Redact generic bearer tokens or key patterns
         return re.sub(r"sk-[a-zA-Z0-9_-]{10,}", "[REDACTED]", text)
 
     def _request_bytes(
@@ -386,15 +457,19 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
                     error_detail = str(exc.reason)
 
                 code = (
-                    "media_provider_auth_required"
+                    "media_image_provider_auth_required"
                     if exc.code in {401, 403}
                     else "media_rate_limited"
                     if exc.code == 429
                     else "media_provider_parameter_rejected"
                     if exc.code == 400
-                    else "media_provider_rejected"
+                    else "media_image_generation_failed"
                 )
-                safe_detail = self._redact(error_detail) if error_detail else f"The media provider rejected the request (HTTP {exc.code})."
+                safe_detail = (
+                    self._redact(error_detail)
+                    if error_detail
+                    else f"The media provider rejected the request (HTTP {exc.code})."
+                )
                 raise MediaProviderError(
                     code,
                     safe_detail,
@@ -412,10 +487,10 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
                     continue
                 safe_reason = self._redact(str(getattr(exc, "reason", exc)))
                 raise MediaProviderError(
-                    "media_provider_unavailable",
+                    "media_image_provider_unavailable",
                     f"The media provider could not be reached: {safe_reason}",
                     retryable=True,
                 ) from exc
         raise MediaProviderError(
-            "media_provider_unavailable", "The media provider could not be reached."
+            "media_image_provider_unavailable", "The media provider could not be reached."
         )
