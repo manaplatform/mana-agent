@@ -108,7 +108,12 @@ from mana_agent.gateway.envelope import (
     RoutingExecutionEnvelope,
     build_routing_execution_envelope,
 )
-from mana_agent.tools.context_retrieval import build_context_retrieval_tools
+from mana_agent.tools.context_retrieval import (
+    MemoryTaskBinding,
+    TurnRetrievalLedger,
+    build_context_retrieval_tools,
+    execute_memory_read,
+)
 from mana_agent.tools.catalog import list_auto_chat_tools
 from mana_agent.model_routing.models import (
     Complexity,
@@ -378,111 +383,227 @@ _API_WORKFLOW_EVIDENCE = {
 def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     """Validate exact successful tool evidence against the model workflow decision."""
     traces = _serialize_tool_traces(response)
+
     if not traces or traces[0].get("tool_name") != "api_workflow_decide":
         return {
             "valid": False,
             "error_code": "api_workflow_decision_missing",
             "message": (
-                "Model decision failed: api_workflow. The first API-route tool call was not a "
-                "validated workflow decision. No completion was recorded."
+                "Model decision failed: api_workflow. The first API-route tool call "
+                "was not a validated workflow decision. No completion was recorded."
             ),
             "required_actions": [],
             "completed_actions": [],
             "missing_actions": [],
+            "unexpected_actions": [],
+            "execution_evidence": {},
         }
 
     def payload(trace: dict[str, Any]) -> dict[str, Any]:
-        value: Any = trace.get("output_preview") or trace.get("result_summary")
-        if not isinstance(value, str):
-            return value if isinstance(value, dict) else {}
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
+        """Return the authoritative structured tool payload when available.
+
+        Prefer the actual tool result over UI-oriented previews/summaries.
+        """
+        for key in (
+            "result",
+            "output_preview",
+            "result_summary",
+            "error",
+        ):
+            value: Any = trace.get(key)
+
+            if isinstance(value, dict):
+                return value
+
+            if isinstance(value, str) and value.strip():
+                try:
+                    decoded = json.loads(value)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+
+                if isinstance(decoded, dict):
+                    return decoded
+
+        return {}
+
+    def raw_payload(trace: dict[str, Any]) -> Any:
+        """Return the first available raw result representation."""
+        for key in (
+            "result",
+            "output_preview",
+            "result_summary",
+        ):
+            value = trace.get(key)
+            if value not in (None, ""):
+                return value
+        return None
 
     decision_index = -1
-    decision = None
+    decision: dict[str, Any] | None = None
+
     for idx, trace in enumerate(traces):
         tool_name = str(trace.get("tool_name") or "")
+
         if tool_name == "api_workflow_decide":
-            p = payload(trace)
-            if p.get("ok") is True and isinstance(p.get("result"), dict):
-                candidate = p["result"]
-                if candidate.get("safe_to_continue"):
+            result = payload(trace)
+
+            if result.get("ok") is True and isinstance(result.get("result"), dict):
+                candidate = result["result"]
+
+                if candidate.get("safe_to_continue") is True:
                     decision = candidate
                     decision_index = idx
                     break
+
         elif tool_name in _API_WORKFLOW_EVIDENCE:
-            # Operational tool invoked before a validated workflow decision
+            # An operational API tool ran before the validated workflow decision.
             break
 
-    if decision_index < 0 or not isinstance(decision, dict) or not decision.get("safe_to_continue"):
+    if (
+        decision_index < 0
+        or not isinstance(decision, dict)
+        or decision.get("safe_to_continue") is not True
+    ):
         return {
             "valid": False,
             "error_code": "api_workflow_decision_invalid",
             "message": (
-                "Model decision failed: api_workflow. The workflow decision was invalid or unsafe. "
-                "No completion was recorded."
+                "Model decision failed: api_workflow. The workflow decision was "
+                "invalid or unsafe. No completion was recorded."
             ),
             "required_actions": [],
             "completed_actions": [],
             "missing_actions": [],
+            "unexpected_actions": [],
+            "execution_evidence": {},
         }
-    required = [str(item) for item in decision.get("required_actions") or []]
+
+    required = [
+        str(item)
+        for item in decision.get("required_actions") or []
+        if str(item).strip()
+    ]
+
     completed: set[str] = set()
     execution_evidence: dict[str, Any] = {}
+
     for trace in traces[decision_index + 1:]:
-        action = _API_WORKFLOW_EVIDENCE.get(str(trace.get("tool_name") or ""))
+        tool_name = str(trace.get("tool_name") or "")
+        action = _API_WORKFLOW_EVIDENCE.get(tool_name)
+
+        if not action:
+            continue
+
         result = payload(trace)
         trace_succeeded = str(trace.get("status") or "").lower() == "ok"
         result_succeeded = result.get("ok") is True
-        raw_result = trace.get("output_preview") or trace.get("result_summary")
+
+        raw_result = raw_payload(trace)
+
         clipped_success_evidence = (
-            trace_succeeded
+            action != "request_execution"
+            and trace_succeeded
             and isinstance(raw_result, str)
             and len(raw_result) >= 4000
             and not result
         )
-        if action == "request_execution" and result.get("ok") is True:
+
+        # --------------------------------------------------------------
+        # Request execution requires authoritative structured evidence.
+        #
+        # Never infer execution success merely from:
+        # - tool status == ok
+        # - a clipped result
+        # - a textual model claim
+        # --------------------------------------------------------------
+        if action == "request_execution":
+            if result.get("ok") is not True:
+                continue
+
             executed = result.get("result")
+
+            if not isinstance(executed, dict):
+                continue
+
             if (
-                isinstance(executed, dict)
-                and executed.get("executed") is True
-                and executed.get("upstream_ok") is True
-                and isinstance(executed.get("status_code"), int)
+                executed.get("executed") is not True
+                or executed.get("upstream_ok") is not True
+                or not isinstance(executed.get("status_code"), int)
+            ):
+                continue
+
+            completed.add(action)
+
+            execution_evidence = {
+                key: executed.get(key)
+                for key in (
+                    "integration_id",
+                    "operation_id",
+                    "method",
+                    "redacted_url",
+                    "status_code",
+                    "content_type",
+                    "body_kind",
+                    "json_body",
+                    "text_body",
+                    "file_reference",
+                    "latency_ms",
+                    "upstream_ok",
+                    "executed",
+                )
+                if executed.get(key) not in (None, "")
+            }
+
+            continue
+
+        # --------------------------------------------------------------
+        # Preview may legitimately stop before execution because trusted
+        # local approval is required.
+        # --------------------------------------------------------------
+        if action == "request_preview":
+            if result_succeeded:
+                preview_result = result.get("result")
+
+                if isinstance(preview_result, dict):
+                    # Both ordinary preview and approval-required preview
+                    # are successful completion of the preview action.
+                    completed.add(action)
+                    continue
+
+            # Compatibility with older permission-required result shape.
+            if (
+                result.get("error_code") == "permission_required"
+                and isinstance(result.get("details"), dict)
+                and str(
+                    result["details"].get("permission_scope") or ""
+                ) == "api.request.execute"
+                and str(
+                    result["details"].get("permission_request_id") or ""
+                ).strip()
             ):
                 completed.add(action)
-                execution_evidence = {
-                    key: executed.get(key)
-                    for key in (
-                        "method",
-                        "redacted_url",
-                        "status_code",
-                        "content_type",
-                        "body_kind",
-                        "json_body",
-                        "text_body",
-                        "file_reference",
-                        "latency_ms",
-                    )
-                    if executed.get(key) not in (None, "")
-                }
-        elif (
-            action == "request_preview"
-            and result.get("error_code") == "permission_required"
-            and isinstance(result.get("details"), dict)
-            and str(result["details"].get("permission_scope") or "")
-            == "api.request.execute"
-            and str(result["details"].get("permission_request_id") or "")
-        ):
-            # The preview successfully built the exact request, then stopped it
-            # before execution to await the trusted-local approval it created.
+                continue
+
+        # --------------------------------------------------------------
+        # Non-execution lifecycle steps may use normal safe_result()
+        # evidence. A clipped successful trace is acceptable here because
+        # these actions do not prove an external side effect occurred.
+        # --------------------------------------------------------------
+        if result_succeeded or clipped_success_evidence:
             completed.add(action)
-        elif action and (result_succeeded or clipped_success_evidence):
-            completed.add(action)
-    missing = [action for action in required if action not in completed]
-    unexpected = sorted(action for action in completed if action not in required)
+
+    missing = [
+        action
+        for action in required
+        if action not in completed
+    ]
+
+    unexpected = sorted(
+        action
+        for action in completed
+        if action not in required
+    )
+
     if unexpected:
         error_code = "api_workflow_action_not_selected"
         message = (
@@ -490,6 +611,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             + ", ".join(unexpected)
             + "."
         )
+
     elif missing:
         error_code = "api_workflow_incomplete"
         message = (
@@ -497,9 +619,11 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             + ", ".join(missing)
             + "."
         )
+
     else:
         error_code = ""
         message = "API workflow completion evidence is valid."
+
     return {
         "valid": not missing and not unexpected,
         "error_code": error_code,
@@ -511,7 +635,6 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         "unexpected_actions": unexpected,
         "execution_evidence": execution_evidence,
     }
-
 
 class _RoutePreflightComplete(RuntimeError):
     """Internal control flow for a truthful pre-dispatch capability response."""
@@ -1850,6 +1973,7 @@ class AgentChatGateway:
                 raise LookupError("Durable server approval context is invalid.")
             self._pending_server_approvals[approval_request_id] = pending
         return item, pending
+    
 
     def api_approval_command(
         self,
@@ -1858,7 +1982,11 @@ class AgentChatGateway:
         session_id: str,
         client_type: str = "tui",
     ) -> dict[str, Any]:
-        """Approve and execute one exact session-bound API mutation."""
+        """Approve and execute one exact session-bound API request.
+
+        Gateway completion is reported only when the controlled runtime confirms
+        both execution and upstream success.
+        """
         from mana_agent.api_manager.events import api_event_scope
         from mana_agent.api_manager.runtime_tools import api_manager_service
 
@@ -1873,19 +2001,106 @@ class AgentChatGateway:
                 approve=True,
                 client_type=client_type,
             )
-        status_code = int(
-            ((result.get("result") or {}).get("status_code") or 0)
-            if isinstance(result, dict)
-            else 0
+
+        if not isinstance(result, dict):
+            return {
+                "status": "failed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "message": (
+                    "API approval returned an invalid execution result. "
+                    "Completion was not recorded."
+                ),
+            }
+
+        approved = result.get("approved") is True
+        executed = result.get("executed") is True
+
+        raw_execution = result.get("result")
+        execution = (
+            dict(raw_execution)
+            if isinstance(raw_execution, dict)
+            else {}
         )
-        execution = dict(result.get("result") or {}) if isinstance(result, dict) else {}
+
+        upstream_ok = execution.get("upstream_ok") is True
+
+        raw_status_code = execution.get("status_code")
+        try:
+            status_code = int(raw_status_code or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+
+        # Approval must never be reported as successful completion without
+        # authoritative evidence that the request actually executed.
+        if not approved:
+            return {
+                "status": "failed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "message": (
+                    "API approval was not granted. "
+                    "No successful external execution was recorded."
+                ),
+            }
+
+        if not executed:
+            return {
+                "status": "approved_not_executed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "message": (
+                    "The API request was approved, but execution was not confirmed. "
+                    "Completion was not recorded."
+                ),
+            }
+
+        # An executed HTTP request is not the same thing as a successful API
+        # operation. HTTP/upstream failure must remain a failed workflow result.
+        if not upstream_ok:
+            status_suffix = (
+                f" with HTTP status {status_code}"
+                if status_code
+                else ""
+            )
+
+            message = (
+                "The approved API request was executed"
+                f"{status_suffix}, but the upstream API did not report success. "
+                "The API workflow was not marked completed."
+            )
+
+            details = self._api_approval_completion_message(
+                execution,
+                status_code,
+            )
+
+            if details:
+                message = f"{message}\n\n{details}"
+
+            return {
+                "status": "failed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "execution_evidence": execution,
+                "message": message,
+            }
+
+        # Successful completion requires all three:
+        #
+        # approved == True
+        # executed == True
+        # upstream_ok == True
         return {
             "status": "completed",
             "approval_request_id": approval_request_id,
             "result": result,
-            "message": self._api_approval_completion_message(execution, status_code),
+            "execution_evidence": execution,
+            "message": self._api_approval_completion_message(
+                execution,
+                status_code,
+            ),
         }
-
     @staticmethod
     def _api_approval_completion_message(
         execution: dict[str, Any],
@@ -3814,6 +4029,17 @@ class AgentChatGateway:
             state["_user_message_id"] = user_message_id
             turn_retrieval_cache: dict[str, Any] = {}
             state["_turn_retrieval_cache"] = turn_retrieval_cache
+            retrieval_ledger = TurnRetrievalLedger(
+                retrieval_budget_tokens=int(
+                    getattr(
+                        self.settings,
+                        "mana_context_retrieval_max_tokens",
+                        12000,
+                    )
+                    or 12000
+                )
+            )
+            state["_retrieval_ledger"] = retrieval_ledger
             state["conversation_retrieval_tokens"] = 0
             state["memory_retrieval_tokens"] = 0
             state["history_injected"] = False
@@ -3987,6 +4213,8 @@ class AgentChatGateway:
                 authenticated_user_id=authenticated_user_id,
                 envelope=routing_envelope,
             )
+            memory_task_binding = MemoryTaskBinding(selected_memory_task_id="")
+            state["_memory_task_binding"] = memory_task_binding
             context_retrieval_tools = build_context_retrieval_tools(
                 session_id=session_id,
                 conversation_id=conversation_id,
@@ -3995,13 +4223,21 @@ class AgentChatGateway:
                 capsule_service=getattr(self._stack.memory_service, "capsules", None),
                 repository_id=str(self._stack.repository_id or ""),
                 current_turn_id=turn_id,
+                selected_memory_task_id=memory_task_binding,
                 memory_task_candidates=memory_task_candidates,
                 governor=self._stack.context_cost_governor,
                 turn_retrieval_cache=turn_retrieval_cache,
                 event_sink=sink,
+                retrieval_ledger=retrieval_ledger,
                 conversation_budget=conv_avail.retrieval_token_budget,
                 memory_budget=mem_avail.retrieval_token_budget,
             )
+            conversation_context_tool = next(
+                (t for t in context_retrieval_tools if t.name == "conversation_context_read"),
+                None,
+            )
+            state["_conversation_context_tool"] = conversation_context_tool
+            state["_context_retrieval_tools"] = context_retrieval_tools
             if ask_service is not None and getattr(ask_service, "ask_agent", None) is not None:
                 if hasattr(ask_service.ask_agent, "set_context_retrieval_tools"):
                     ask_service.ask_agent.set_context_retrieval_tools(context_retrieval_tools)
@@ -4053,6 +4289,14 @@ class AgentChatGateway:
                     {"decision": entry_decision.to_dict(), "turn_id": turn_id},
                 )
                 state["active_route"] = entry_decision.route
+                if entry_decision.memory_task_id:
+                    offered_task_ids = {
+                        str(item.get("task_id") or "").strip()
+                        for item in memory_task_candidates
+                        if str(item.get("task_id") or "").strip()
+                    }
+                    if entry_decision.memory_task_id in offered_task_ids:
+                        memory_task_binding.bind(entry_decision.memory_task_id)
                 if entry_decision.route == "command":
                     import shlex
 
@@ -4469,7 +4713,10 @@ class AgentChatGateway:
                             recent_history=[],
                             candidates=recoverable_task_candidates,
                             pointers=turn_pointers,
-                            retrieval_hints=["conversation_context_read" if conv_avail.has_history else ""],
+                            retrieval_hints=["conversation_context_read"] if conv_avail.has_history else [],
+                            conversation_tool=state.get("_conversation_context_tool"),
+                            turn_retrieval_cache=turn_retrieval_cache,
+                            retrieval_ledger=retrieval_ledger,
                         )
                         turn_record.normalized_intent = followup.category
                         turn_record.routing_decision_id = followup.decision_id
@@ -5055,6 +5302,8 @@ class AgentChatGateway:
                                 sink=sink,
                                 options=options,
                             )
+                            if result.payload is not None:
+                                result.payload.setdefault("lane_id", lane_id.value)
                             if recovered_task and result.error is None:
                                 result.error = ""
                         except BaseException as exc:
@@ -6770,16 +7019,25 @@ class AgentChatGateway:
             state=state,
             options=options,
         )
+        context_tools = state.get("_context_retrieval_tools")
+        if context_tools is None:
+            conv_tool = state.get("_conversation_context_tool")
+            context_tools = [conv_tool] if conv_tool is not None else []
         ask_conversation = self._chat_service.ask_conversation
         try:
             parameters = inspect.signature(ask_conversation).parameters
         except (TypeError, ValueError):
             parameters = {}
+        kwargs: dict[str, Any] = {}
         if "runtime_self" in parameters or any(
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
-            return ask_conversation(execution_text, runtime_self=runtime_self)
-        return ask_conversation(execution_text)
+            kwargs["runtime_self"] = runtime_self
+        if "context_tools" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            kwargs["context_tools"] = context_tools
+        return ask_conversation(execution_text, **kwargs)
 
     def _conversation_runtime_self(
         self,
@@ -8142,16 +8400,21 @@ class AgentChatGateway:
         context: EntryRouteContext,
         query: str,
     ) -> ChatTurnResult:
-        """Read only the exact memory scope authorized by entry routing."""
+        """Read only the exact memory scope authorized by entry routing using authoritative execute_memory_read."""
         memory_service = self._stack.memory_service
         capsules_enabled = bool(
             getattr(getattr(memory_service.config, "capsules", None), "enabled", False)
         )
         if capsules_enabled:
+            state = self._session(context.session_id)
+            turn_cache = state.get("_turn_retrieval_cache")
+            ledger = state.get("_retrieval_ledger")
+            sink = state.get("_turn_event_sink") or self._event_sink
             task_id = str(decision.memory_task_id or "").strip()
             offered_task_ids = {
                 str(item.get("task_id") or "").strip()
                 for item in context.memory_task_candidates
+                if str(item.get("task_id") or "").strip()
             }
             if not task_id or task_id not in offered_task_ids:
                 return ChatTurnResult(
@@ -8170,7 +8433,11 @@ class AgentChatGateway:
                         "verification_status": "failed",
                     },
                 )
-            user_id = str(context.authenticated_user_id or "").strip()
+            user_id = str(
+                context.authenticated_user_id
+                or getattr(memory_service, "user_id", "")
+                or ""
+            ).strip()
             if not user_id:
                 return ChatTurnResult(
                     answer=(
@@ -8189,42 +8456,32 @@ class AgentChatGateway:
                         "verification_status": "failed",
                     },
                 )
-            if hasattr(memory_service, "user_id") and not getattr(memory_service, "user_id", None):
-                memory_service.user_id = user_id
-            from mana_agent.memory import CapsuleReadRequest
-
-            principal = MemoryPrincipal(
-                user_id=user_id,
-                project_id=str(self._stack.repository_id or "") or None,
-                task_id=task_id,
-                agent_id="gateway:memory",
-                capabilities=frozenset({"memory.capsule.read.private"}),
-            )
-            task_context = CapsuleTaskContext(
-                user_id=user_id,
-                organisation_id=None,
-                project_id=str(self._stack.repository_id or "") or None,
-                team_ids=frozenset(),
-                task_id=task_id,
-                agent_id="gateway:memory",
+            raw_res = execute_memory_read(
+                capsule_service=getattr(memory_service, "capsules", None),
+                authenticated_user_id=user_id,
                 session_id=context.session_id,
+                repository_id=str(self._stack.repository_id or ""),
+                current_turn_id=context.turn_id,
+                selected_memory_task_id=task_id,
+                memory_task_candidates=context.memory_task_candidates,
+                query=query,
+                max_capsules=3,
+                max_tokens=int(getattr(self.settings, "mana_memory_capsules_default_max_tokens", 4000) or 4000),
+                governor=self._stack.context_cost_governor,
+                turn_retrieval_cache=turn_cache,
+                event_sink=sink,
+                retrieval_ledger=ledger,
             )
-            try:
-                projections = memory_service.capsules.query_capsules(
-                    CapsuleReadRequest(
-                        principal=principal,
-                        task_context=task_context,
-                        query=query,
-                        allowed_scopes=frozenset({CapsuleScope.PRIVATE}),
-                        max_capsules=3,
-                        max_tokens=self.settings.mana_memory_capsules_default_max_tokens,
-                    ),
-                    correlation_id=context.turn_id,
+            payload = json.loads(raw_res)
+            if payload.get("error"):
+                error_type = (
+                    "memory_principal_unavailable"
+                    if "authenticated user identity" in payload.get("error", "")
+                    else "memory_task_id_invalid"
                 )
-            except (MemoryError, PermissionError, ValueError) as exc:
                 return ChatTurnResult(
-                    answer=f"Private memory retrieval failed safely: {exc}",
-                    error="memory_retrieval_failed",
+                    answer=payload.get("error", "Memory retrieval failed safely"),
+                    error=error_type,
                     mode="route-memory-error",
                     decision=decision,
                     payload={
@@ -8236,16 +8493,17 @@ class AgentChatGateway:
                         "verification_status": "failed",
                     },
                 )
+            capsules = payload.get("capsules", [])
             evidence = [
                 redact_secrets(
                     {
-                        "capsule_id": item.capsule_id,
-                        "revision": item.revision,
-                        "summary": item.summary,
-                        "content": item.content,
+                        "capsule_id": item.get("capsule_id"),
+                        "revision": item.get("revision"),
+                        "summary": item.get("summary"),
+                        "content": item.get("content"),
                     }
                 )
-                for item in projections
+                for item in capsules
             ]
             answer = (
                 "No authorized private memory matched the selected task."
@@ -8256,7 +8514,7 @@ class AgentChatGateway:
                 )
             )
             count = len(evidence)
-            matched = count > 0
+            matched = payload.get("goal_satisfied", count > 0)
             return ChatTurnResult(
                 answer=answer,
                 mode="route-memory",
@@ -8265,7 +8523,7 @@ class AgentChatGateway:
                     "route": "memory",
                     "memory_task_id": task_id,
                     "memory_record_count": count,
-                    "memory_lookup_status": "matched" if matched else "no_match",
+                    "memory_lookup_status": payload.get("status", "matched" if matched else "no_match"),
                     "goal_satisfied": matched,
                     "verification_status": "passed" if matched else "failed",
                 },

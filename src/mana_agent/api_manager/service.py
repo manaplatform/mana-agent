@@ -309,9 +309,16 @@ class ApiManagerService:
         routing_decision: ApiRouteDecision | dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Execute one validated model-selected API operation.
+
+        Direct execution and trusted-local approval execution intentionally share
+        the same low-level execution/finalization path so upstream success,
+        ephemeral cleanup, and discovery accounting cannot diverge.
+        """
         route = ApiRouteDecision.model_validate(routing_decision)
         if route.workflow != "request_execution":
             raise ValueError("The model decision did not select request execution.")
+
         evidence = self._validate_route(route)
         if (
             evidence.integration_id != kwargs.get("integration_id")
@@ -320,6 +327,7 @@ class ApiManagerService:
             raise ValueError(
                 "Request identifiers do not match the validated model operation decision."
             )
+
         request, preview = self._prepare_request_and_preview(
             session_id=session_id,
             task_intent=route.task_intent,
@@ -335,36 +343,80 @@ class ApiManagerService:
                 "routing_evidence": evidence.model_dump(mode="json"),
             },
         )
+
+        result = self._execute_prepared_request(
+            request,
+            preview,
+            approval_reference=approval_reference,
+            task_intent=route.task_intent,
+        )
+
+        if not result.upstream_ok:
+            raise UpstreamApiError(
+                f"The upstream API returned HTTP {result.status_code}.",
+                details=self._execution_failure_details(result),
+            )
+
+        return result.model_dump(mode="json")
+
+    def _execute_prepared_request(
+        self,
+        request: Any,
+        preview: Any,
+        *,
+        approval_reference: str,
+        task_intent: str,
+    ) -> Any:
+        """Execute an already validated request through one canonical path.
+
+        Important:
+        - PermissionRequiredError and other pre-execution failures propagate.
+        - Ephemeral integrations are discarded only after an execution result
+          exists, preserving pending approval workflows.
+        - Discovery success is recorded only for authoritative upstream success.
+        """
+        is_ephemeral = bool(self.registry.get(request.integration_id).ephemeral)
+
         result = self.executor.execute(
             request,
             preview=preview,
             approval_reference=approval_reference,
         )
-        if not result.upstream_ok:
-            if self.registry.get(request.integration_id).ephemeral:
-                self.registry.discard_ephemeral(request.integration_id)
-            raise UpstreamApiError(
-                f"The upstream API returned HTTP {result.status_code}.",
-                details={
-                    "executed": True,
-                    "integration_id": result.integration_id,
-                    "operation_id": result.operation_id,
-                    "status_code": result.status_code,
-                    "content_type": result.content_type,
-                    "body_kind": result.body_kind,
-                    "json_body": result.json_body,
-                    "text_body": result.text_body[:4000],
-                    "latency_ms": result.latency_ms,
-                },
-            )
-        if self.registry.get(request.integration_id).ephemeral:
+
+        if is_ephemeral:
             self.registry.discard_ephemeral(request.integration_id)
-        self.discovery.record_success(
-            task_intent=route.task_intent,
-            integration_id=request.integration_id,
-            operation_id=request.operation_id,
-        )
-        return result.model_dump(mode="json")
+
+        if result.upstream_ok:
+            self.discovery.record_success(
+                task_intent=task_intent,
+                integration_id=result.integration_id,
+                operation_id=result.operation_id,
+            )
+
+        return result
+
+    @staticmethod
+    def _execution_failure_details(result: Any) -> dict[str, Any]:
+        """Return bounded structured evidence for an executed upstream failure."""
+        return {
+            key: value
+            for key, value in {
+                "executed": bool(getattr(result, "executed", False)),
+                "upstream_ok": bool(getattr(result, "upstream_ok", False)),
+                "integration_id": getattr(result, "integration_id", ""),
+                "operation_id": getattr(result, "operation_id", ""),
+                "method": getattr(result, "method", ""),
+                "redacted_url": getattr(result, "redacted_url", ""),
+                "status_code": getattr(result, "status_code", 0),
+                "content_type": getattr(result, "content_type", ""),
+                "body_kind": getattr(result, "body_kind", ""),
+                "json_body": getattr(result, "json_body", None),
+                "text_body": str(getattr(result, "text_body", ""))[:4000],
+                "file_reference": getattr(result, "file_reference", ""),
+                "latency_ms": getattr(result, "latency_ms", None),
+            }.items()
+            if value not in (None, "")
+        }
 
     def _prepare_request_and_preview(
         self,
@@ -494,32 +546,59 @@ class ApiManagerService:
         approve: bool,
         client_type: str,
     ) -> dict[str, Any]:
+        """Resolve one trusted-local approval and execute its exact bound request.
+
+        This remains compatible with the current gateway command path while
+        returning truthful execution state. An HTTP request that ran but whose
+        upstream response failed is never reported as completed.
+        """
         if not approve:
             self.approvals.deny(
                 request_id,
                 session_id=session_id,
                 client_type=client_type,
             )
-            return {"approved": False, "executed": False}
+            return {
+                "approved": False,
+                "executed": False,
+                "upstream_ok": False,
+                "status": "denied",
+                "result": {},
+            }
+
         request, preview = self.approvals.approve(
             request_id,
             session_id=session_id,
             client_type=client_type,
         )
-        result = self.executor.execute(
+
+        result = self._execute_prepared_request(
             request,
-            preview=preview,
+            preview,
             approval_reference=request_id,
+            task_intent=request.routing_task_intent,
         )
-        if self.registry.get(request.integration_id).ephemeral:
-            self.registry.discard_ephemeral(request.integration_id)
-        if result.upstream_ok:
-            self.discovery.record_success(
-                task_intent=request.routing_task_intent,
-                integration_id=request.integration_id,
-                operation_id=request.operation_id,
-            )
-        return {"approved": True, "executed": True, "result": result.model_dump(mode="json")}
+        payload = result.model_dump(mode="json")
+
+        if not result.upstream_ok:
+            return {
+                "approved": True,
+                "executed": bool(result.executed),
+                "upstream_ok": False,
+                "status": "failed",
+                "error_code": "upstream_api_error",
+                "message": f"The upstream API returned HTTP {result.status_code}.",
+                "error_details": self._execution_failure_details(result),
+                "result": payload,
+            }
+
+        return {
+            "approved": True,
+            "executed": bool(result.executed),
+            "upstream_ok": True,
+            "status": "completed",
+            "result": payload,
+        }
 
     def _validate_route(
         self,

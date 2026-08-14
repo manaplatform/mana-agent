@@ -1,8 +1,13 @@
+import json
 import pytest
 
 from mana_agent.gateway.followup_classifier import (
     FollowupClassificationError,
     FollowupClassifier,
+)
+from mana_agent.tools.context_retrieval import (
+    TurnRetrievalLedger,
+    execute_conversation_context_read,
 )
 
 
@@ -17,6 +22,21 @@ class _StructuredModel:
 
     def invoke(self, _messages):
         return self.payload
+
+
+class _MultiTurnStructuredModel:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = list(responses)
+        self.invocations: list[list[object]] = []
+
+    def with_structured_output(self, _schema, *, method: str, strict: bool):
+        return self
+
+    def invoke(self, messages):
+        self.invocations.append(messages)
+        if self.responses:
+            return self.responses.pop(0)
+        return {"category": "conversation_only", "safe_to_continue": True, "reason": "default"}
 
 
 def test_expansion_must_select_an_offered_task() -> None:
@@ -172,6 +192,67 @@ def test_task_bound_category_with_unsafe_still_raises() -> None:
         )
 
 
+def test_why_retrieves_previous_turn_before_followup_classification() -> None:
+    """Follow-up 'why?' performs retrieval before final classification."""
+    model = _MultiTurnStructuredModel(
+        [
+            {
+                "action": "retrieve_context",
+                "retrieval": {"query": "OAuth2 PKCE", "max_turns": 1},
+                "reason": "Need previous recommendation context to classify 'why?'",
+            },
+            {
+                "action": "classify",
+                "category": "task_expansion",
+                "related_task_id": "task_1",
+                "safe_to_continue": True,
+                "reason": "User asks for justification of the OAuth2 recommendation",
+            },
+        ]
+    )
+    tool_calls: list[dict[str, object]] = []
+
+    def mock_conv_tool(query: str = "", max_turns: int = 1) -> str:
+        tool_calls.append({"query": query, "max_turns": max_turns})
+        return json.dumps(
+            {
+                "source": "conversation_context",
+                "turns_returned": 1,
+                "turns": [
+                    {"turn_id": "turn_1", "role": "assistant", "content": "I recommend OAuth2 with PKCE."},
+                ],
+                "tokens": 25,
+                "empty": False,
+            }
+        )
+
+    classifier = FollowupClassifier(model)
+    decision = classifier.decide(
+        message="why?",
+        recent_history=[],
+        candidates=[{"task_id": "task_1", "normalized_intent": "auth architecture"}],
+        conversation_tool=mock_conv_tool,
+    )
+
+    assert decision.category == "task_expansion"
+    assert decision.related_task_id == "task_1"
+    assert decision.safe_to_continue is True
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["query"] == "OAuth2 PKCE"
+    assert len(model.invocations) == 2
+
+    # Verify initial prompt has recent_history: [] and no raw transcript
+    first_payload = json.loads(model.invocations[0][1].content)
+    assert first_payload["message"] == "why?"
+    assert first_payload["recent_history"] == []
+    assert "retrieved_context" not in first_payload
+
+    # Verify second prompt contains retrieved_context
+    second_payload = json.loads(model.invocations[1][1].content)
+    assert "retrieved_context" in second_payload
+    assert second_payload["retrieved_context"][0]["turns"][0]["content"] == "I recommend OAuth2 with PKCE."
+
+
 def test_context_budget_blocked_followup_classification() -> None:
     from mana_agent.context_cost.models import (
         BudgetSnapshot,
@@ -217,5 +298,3 @@ def test_context_budget_blocked_followup_classification() -> None:
         )
     assert exc_info.value.code == "context_budget_blocked"
     assert "Context budget blocked" in str(exc_info.value)
-
-

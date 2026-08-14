@@ -50,6 +50,8 @@ from .write_file import (  # noqa: F401
 from .context_retrieval import (  # noqa: F401
     ConversationContextReadInput,
     MemoryReadInput,
+    MemoryTaskBinding,
+    TurnRetrievalLedger,
     build_context_retrieval_tools,
     execute_conversation_context_read,
     execute_memory_read,
@@ -95,6 +97,8 @@ __all__ = [
     "safe_delete_file",
     "ConversationContextReadInput",
     "MemoryReadInput",
+    "MemoryTaskBinding",
+    "TurnRetrievalLedger",
     "build_context_retrieval_tools",
     "execute_conversation_context_read",
     "execute_memory_read",

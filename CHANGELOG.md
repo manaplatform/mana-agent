@@ -2,7 +2,34 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-15
+
+- Fixed entry router model invocation and test suite compatibility.
+  - Handled `with_structured_output` implementations/mocks lacking `include_raw` support in `src/mana_agent/gateway/entry_routing.py`.
+  - Added required `token_estimate` argument to `ContextSegment` instantiation in `test_scenario_8_retrieved_context_participates_in_provider_call_estimate` in `tests/gateway/test_context_retrieval_tools.py`.
+  - Removed extra `decision_id` field in `_RouteModel` mock response for `CHECKPOINT_RESUME_PROMPT` in `tests/gateway/test_entry_routing.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_context_retrieval_tools.py tests/gateway/test_followup_classifier.py tests/test_prompts_contract.py -v`.
+
 ## 2026-08-14
+
+- Fixed `route-conversation` printing raw tool call strings (e.g. `**[Tool Call: conversation_context_read]**`) instead of executing retrieval tools.
+  - Updated `QnAChain.chat` in `src/mana_agent/multi_agent/runtime/qna_chain.py` with a bounded retrieval loop supporting both structured `tool_calls` and text-based tool invocation fallback (`[Tool Call: ...]`) via `context_tools`.
+  - Updated `ChatService.ask_conversation` and `ChatGateway._invoke_conversation` to store and forward `context_retrieval_tools` (`conversation_context_read`, `memory_read`) to `QnAChain.chat`.
+  - Added unit tests in `tests/test_spirit.py` verifying structured and text-based context retrieval tool executions.
+  - User verification required: `python -m pytest tests/test_spirit.py tests/gateway/test_chat_gateway.py -v`.
+
+- Fixed Part 0/1 Final Integration Gate between Phase-0 accounting and Part-1 context retrieval.
+  - Made `FollowupClassifier` retrieval-aware with a bounded tool loop (maximum 1–2 contextual retrievals) via `conversation_context_read` for terse and ambiguous follow-ups while preserving `recent_history = []` as default architecture.
+  - Updated prompt contracts in `CONVERSATION_SYSTEM_PROMPT` and `ASK_AGENT_SYSTEM_PROMPT` to specify that only the current turn is provided automatically and that `conversation_context_read` and `memory_read` must be used for prior conversation and durable memory.
+  - Removed `task_id` from `MemoryReadInput` and bound memory authorization strictly to the router-validated `entry_decision.memory_task_id` via `MemoryTaskBinding`.
+  - Removed implicit turn/execution authorization from private memory, establishing strict separation between `current_turn_id` (observability/accounting identity) and `selected_memory_task_id` (capsule authorization identity).
+  - Unified memory retrieval between `route=memory` and `memory_read` tool through single authoritative `execute_memory_read` service.
+  - Standardized empty-memory semantics to return structured results with `status="matched"`/`status="no_match"` and `goal_satisfied=false` for 0 results.
+  - Added host-owned `TurnRetrievalLedger` enforcing cumulative token allowance (`conversation_retrieval_tokens + memory_retrieval_tokens <= retrieval_budget_tokens`) and deduplication without charging cached retrievals twice.
+  - Removed nonexistent `governor.record_usage` and silent exception swallowing; retrieval tokens consume turn retrieval allowance when returned and participate in Phase-0 provider call forecasting upon inclusion in LLM calls.
+  - Restored `MANA_ROUTING_TASK_TOKEN_BUDGET=1000000` in `docs/05-configuration.md`.
+  - Updated `_RouteModel` in test harness and test suites in `tests/gateway/test_context_retrieval_tools.py`, `tests/gateway/test_followup_classifier.py`, and `tests/gateway/test_entry_routing.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_context_retrieval_tools.py tests/gateway/test_followup_classifier.py -v`.
 
 - Fixed `EntryRoutingOutput`, `FollowupClassificationOutput`, and `CheckpointResumeOutput` failing with `json_invalid` when models return markdown-fenced JSON (```` ```json ... ``` ````).
   - Added `_coerce_routing_output` in `src/mana_agent/gateway/entry_routing.py` to extract JSON from strings, strip markdown code fences, and validate against `EntryRoutingOutput` regardless of whether `structured_output` returns an object, dict, or raw markdown string.

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
+import uuid
 from time import perf_counter
-from typing import Any
+from typing import Any, Sequence
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, SystemMessage
 from mana_agent.multi_agent.runtime.compatibility import create_chat_model
 
 from mana_agent.multi_agent.runtime.prompts import (
@@ -104,20 +107,100 @@ class QnAChain:
         logger.info("QnA chain completed in %.2fms", elapsed_ms)
         return str(response.content)
 
-    def chat(self, question: str, *, runtime_self: Any | None = None) -> str:
-        """Answer from the session transcript after the routed Self is bound."""
+    def chat(
+        self,
+        question: str,
+        *,
+        runtime_self: Any | None = None,
+        context_tools: Sequence[Any] | None = None,
+    ) -> str:
+        """Answer from the session transcript after the routed Self is bound, executing bounded retrieval if needed."""
         current = runtime_self or compose_runtime_self(
             agent_name="conversation-agent",
             agent_role="conversation",
             provider=self.provider,
             model=self.model,
         )
-        response = self.llm.invoke(
-            [
-                SystemMessage(
-                    content=apply_spirit_instruction(CONVERSATION_SYSTEM_PROMPT, current)
-                ),
-                HumanMessage(content=question),
-            ]
-        )
+        tools = list(context_tools or [])
+        tool_map: dict[str, Any] = {
+            t.name: t for t in tools if hasattr(t, "name") and isinstance(t.name, str)
+        }
+
+        active_llm = self.llm
+        if tool_map and hasattr(self.llm, "bind_tools") and callable(getattr(self.llm, "bind_tools", None)):
+            try:
+                active_llm = self.llm.bind_tools(list(tool_map.values()))
+            except Exception:
+                active_llm = self.llm
+
+        messages: list[Any] = [
+            SystemMessage(
+                content=apply_spirit_instruction(CONVERSATION_SYSTEM_PROMPT, current)
+            ),
+            HumanMessage(content=question),
+        ]
+
+        max_retrieval_rounds = 2
+        for _ in range(max_retrieval_rounds + 1):
+            response = active_llm.invoke(messages)
+
+            # Check for structured tool calls first
+            tool_calls = getattr(response, "tool_calls", None)
+            if isinstance(tool_calls, list) and tool_calls and tool_map:
+                messages.append(response)
+                for tc in tool_calls:
+                    fn_name = tc.get("name")
+                    args = tc.get("args") or {}
+                    call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                    if fn_name in tool_map:
+                        tool = tool_map[fn_name]
+                        try:
+                            if hasattr(tool, "invoke") and callable(tool.invoke):
+                                tool_res = tool.invoke(args)
+                            elif callable(tool):
+                                tool_res = tool(**args)
+                            else:
+                                tool_res = str(tool)
+                        except Exception as exc:
+                            tool_res = f'{{"error": "{exc}"}}'
+                        messages.append(ToolMessage(content=str(tool_res), tool_call_id=call_id))
+                continue
+
+            # Check for text-based tool call strings emitted directly by model
+            content = getattr(response, "content", response)
+            if isinstance(content, list):
+                content_text = " ".join(
+                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            else:
+                content_text = str(content or "")
+
+            match = re.search(r"\[Tool Call:\s*([a-zA-Z0-9_]+)\]", content_text, re.IGNORECASE)
+            if match and tool_map:
+                matched_tool_name = match.group(1)
+                if matched_tool_name in tool_map:
+                    tool = tool_map[matched_tool_name]
+                    try:
+                        if hasattr(tool, "invoke") and callable(tool.invoke):
+                            tool_res = tool.invoke({"query": question, "max_turns": 3})
+                        elif callable(tool):
+                            tool_res = tool(query=question, max_turns=3)
+                        else:
+                            tool_res = str(tool)
+                    except Exception as exc:
+                        tool_res = f'{{"error": "{exc}"}}'
+                    messages.append(AIMessage(content=content_text))
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                f"Retrieved context for `{matched_tool_name}`:\n{tool_res}\n\n"
+                                "Please answer the user's conversational request now using the context above."
+                            )
+                        )
+                    )
+                    continue
+
+            return content_text.strip()
+
         return str(getattr(response, "content", response) or "").strip()

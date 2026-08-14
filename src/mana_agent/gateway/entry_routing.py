@@ -574,14 +574,10 @@ class EntryRouter:
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             ]
             structured_output = getattr(self.llm, "with_structured_output", None)
-            if callable(structured_output):
-                response = structured_output(
-                    EntryRoutingOutput,
-                    method="json_schema",
-                    strict=True,
-                ).invoke(messages)
-            else:
-                response = self.llm.invoke(messages)
+            response, decision_payload = _invoke_routing_model(
+                self.llm,
+                messages,
+            )
             decision_payload = _coerce_routing_output(response)
             try:
                 decision = self._validate(decision_payload, context=context)
@@ -605,12 +601,10 @@ class EntryRouter:
                         )
                     ),
                 ]
-                if callable(structured_output):
-                    response = structured_output(
-                        EntryRoutingOutput, method="json_schema", strict=True
-                    ).invoke(repair_messages)
-                else:
-                    response = self.llm.invoke(repair_messages)
+                response, decision_payload = _invoke_routing_model(
+                    self.llm,
+                    repair_messages,
+                )
                 decision_payload = _coerce_routing_output(response)
                 decision = self._validate(decision_payload, context=context)
             record_current(
@@ -999,11 +993,90 @@ def _extract_json(text: str) -> dict[str, Any]:
     return payload
 
 
+def _invoke_routing_model(
+    llm: Any,
+    messages: list[Any],
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Invoke the entry-routing model exactly once.
+
+    Prefer strict structured output, but retain the raw AIMessage so a provider
+    that prepends/appends prose around an otherwise valid JSON object does not
+    destroy the entire turn.
+
+    Recovery does NOT bypass EntryRouter._validate().
+    """
+    structured_output = getattr(llm, "with_structured_output", None)
+
+    if not callable(structured_output):
+        response = llm.invoke(messages)
+        return response, _coerce_routing_output(response)
+
+    try:
+        runner = structured_output(
+            EntryRoutingOutput,
+            method="json_schema",
+            strict=True,
+            include_raw=True,
+        )
+    except TypeError:
+        try:
+            runner = structured_output(
+                EntryRoutingOutput,
+                method="json_schema",
+                strict=True,
+            )
+        except TypeError:
+            runner = structured_output(EntryRoutingOutput)
+
+    result = runner.invoke(messages)
+
+    # LangChain include_raw=True contract:
+    #
+    # {
+    #     "raw": AIMessage(...),
+    #     "parsed": EntryRoutingOutput(...) | None,
+    #     "parsing_error": Exception | None,
+    # }
+    if isinstance(result, dict) and (
+        "raw" in result
+        or "parsed" in result
+        or "parsing_error" in result
+    ):
+        raw = result.get("raw")
+        parsed = result.get("parsed")
+        parsing_error = result.get("parsing_error")
+
+        if parsed is not None:
+            return raw or parsed, _coerce_routing_output(parsed)
+
+        # Important recovery path:
+        # structured parsing failed, but the raw response may contain a
+        # perfectly usable JSON object surrounded by provider/model prose.
+        if raw is not None:
+            try:
+                return raw, _coerce_routing_output(raw)
+            except Exception as raw_error:
+                # Preserve the original structured-parser error when possible.
+                if parsing_error is not None:
+                    raise parsing_error from raw_error
+                raise
+
+        if parsing_error is not None:
+            raise parsing_error
+
+        raise ValueError(
+            "structured entry-router response contained neither parsed nor raw output"
+        )
+
+    # Defensive compatibility with implementations that ignore include_raw.
+    return result, _coerce_routing_output(result)
+
 def _coerce_routing_output(response: Any) -> dict[str, Any]:
     if isinstance(response, EntryRoutingOutput):
         return response.model_dump()
     if isinstance(response, dict):
-        return EntryRoutingOutput.model_validate(response).model_dump()
+        return response
     content = getattr(response, "content", response)
     if isinstance(content, list):
         content = " ".join(
@@ -1011,7 +1084,7 @@ def _coerce_routing_output(response: Any) -> dict[str, Any]:
             for part in content
         )
     extracted = _extract_json(str(content))
-    return EntryRoutingOutput.model_validate(extracted).model_dump()
+    return extracted
 
 
 

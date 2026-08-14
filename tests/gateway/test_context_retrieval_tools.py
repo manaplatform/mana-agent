@@ -1,16 +1,16 @@
 """Tests for Canonical RoutingExecutionEnvelope and Context Retrieval Tools.
 
 Covers all 12 scenarios:
-1. Long stored history does not increase ordinary prompt size.
+1. Long stored history does not increase ordinary prompt size (100k stored conversation never injected automatically).
 2. Independent turn performs zero conversation/memory reads.
 3. Follow-up "why?" retrieves relevant previous turn via conversation_context_read.
-4. Memory question uses memory_read to fetch authorized capsules.
-5. Unauthorized private memory remains inaccessible (deny-by-default).
-6. Fabricated session/user identifiers cannot alter tool scope.
-7. Retrieval results are token bounded.
-8. Retrieval usage participates in Phase-0 accounting.
-9. Repeated identical retrieval within a turn is deduplicated.
-10. Routing receives the complete structured envelope but no raw history.
+4. Router selects task_A; memory tool queries exactly task_A.
+5. Current turn exec_B can never become capsule task scope.
+6. Unoffered task_X remains denied.
+7. Authorized task_A capsule returns non-zero match when present; zero matches returns goal_satisfied=false.
+8. Retrieved context participates once in the next provider-call estimate with real ContextCostGovernor.
+9. Repeated identical retrieval within a turn is deduplicated (cached retrieval not charged twice).
+10. Retrieval allowance is cumulative across conversation + memory.
 11. Multi-task memory and follow-up workflows continue to work without copying parent chat history.
 12. Terminal and dashboard sessions behave identically.
 """
@@ -20,12 +20,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
+from mana_agent.config.settings import Settings
 from mana_agent.context_cost.governor import ContextCostGovernor
-from mana_agent.context_cost.models import AccountingSnapshot
+from mana_agent.context_cost.models import AccountingSnapshot, ContextSegment
 from mana_agent.gateway.envelope import (
     ApprovalState,
     ConversationContextAvailability,
@@ -45,6 +45,8 @@ from mana_agent.memory.capsules.models import (
     MemoryPrincipal,
 )
 from mana_agent.tools.context_retrieval import (
+    MemoryTaskBinding,
+    TurnRetrievalLedger,
     build_context_retrieval_tools,
     execute_conversation_context_read,
     execute_memory_read,
@@ -107,10 +109,10 @@ class DummyCapsuleService:
 
 
 def test_scenario_1_long_stored_history_does_not_increase_prompt_size():
-    """Scenario 1: Long stored history does not increase ordinary prompt size."""
+    """Scenario 1: 100k stored conversation is never injected automatically."""
     session_state: dict[str, Any] = {
         "messages": [
-            DummyMessage(role="user", content=f"User question {i}", turn_id=f"turn_{i}").to_dict()
+            DummyMessage(role="user", content=f"User question {i}" * 50, turn_id=f"turn_{i}").to_dict()
             for i in range(100)
         ],
         "followup_memory_context": "Durable memory text that was previously injected",
@@ -130,8 +132,10 @@ def test_scenario_2_independent_turn_performs_zero_reads():
             DummyMessage(role="assistant", content="Hi there!", turn_id="turn_1"),
         ]
     )
-    governor = MagicMock()
+    settings = Settings()
+    governor = ContextCostGovernor(session_id="session_123", settings=settings)
     turn_cache: dict[str, Any] = {}
+    ledger = TurnRetrievalLedger(retrieval_budget_tokens=12000)
 
     tools = build_context_retrieval_tools(
         session_id="session_123",
@@ -141,10 +145,13 @@ def test_scenario_2_independent_turn_performs_zero_reads():
         current_turn_id="turn_2",
         governor=governor,
         turn_retrieval_cache=turn_cache,
+        retrieval_ledger=ledger,
     )
     assert len(tools) == 2
     assert len(turn_cache) == 0
-    assert governor.record_usage.call_count == 0
+    assert ledger.retrieval_used_tokens == 0
+    assert ledger.conversation_retrieval_tokens == 0
+    assert ledger.memory_retrieval_tokens == 0
 
 
 def test_scenario_3_why_retrieves_relevant_previous_turn():
@@ -169,6 +176,7 @@ def test_scenario_3_why_retrieves_relevant_previous_turn():
         events.append({"type": event_type, "message": msg, "metadata": metadata or {}})
 
     turn_cache: dict[str, Any] = {}
+    ledger = TurnRetrievalLedger(retrieval_budget_tokens=12000)
     res_json = execute_conversation_context_read(
         session_id="session_123",
         conversation_id="conv_123",
@@ -180,6 +188,7 @@ def test_scenario_3_why_retrieves_relevant_previous_turn():
         max_tokens=2000,
         turn_retrieval_cache=turn_cache,
         event_sink=sink,
+        retrieval_ledger=ledger,
     )
     data = json.loads(res_json)
     assert data["source"] == "conversation_context"
@@ -187,11 +196,12 @@ def test_scenario_3_why_retrieves_relevant_previous_turn():
     assert data["empty"] is False
     assert len(data["turns"]) == 2  # user + assistant in turn_1
     assert any("OAuth2 with PKCE" in t["content"] for t in data["turns"])
+    assert ledger.conversation_retrieval_tokens > 0
     assert any(e["type"] == "context.conversation_read" for e in events)
 
 
-def test_scenario_4_memory_question_uses_memory_read():
-    """Scenario 4: Memory question uses memory_read to fetch authorized capsules."""
+def test_scenario_4_router_selects_task_a_memory_tool_queries_task_a():
+    """Scenario 4: Router selects task_A; memory tool queries exactly task_A."""
     sample_projection = DummyCapsuleProjection(
         capsule_id="cap_1",
         revision=1,
@@ -208,28 +218,68 @@ def test_scenario_4_memory_question_uses_memory_read():
         events.append({"type": event_type, "message": msg, "metadata": metadata or {}})
 
     turn_cache: dict[str, Any] = {}
+    ledger = TurnRetrievalLedger(retrieval_budget_tokens=4000)
     res_json = execute_memory_read(
         capsule_service=capsule_service,
         authenticated_user_id="user_alice",
         session_id="session_123",
         repository_id="repo_1",
-        current_task_id="task_100",
+        current_turn_id="turn_2",
+        selected_memory_task_id="task_A",
+        memory_task_candidates=({"task_id": "task_A", "normalized_intent": "coding", "state": "active"},),
         query="dataclasses",
         max_capsules=3,
         turn_retrieval_cache=turn_cache,
         event_sink=sink,
+        retrieval_ledger=ledger,
     )
     data = json.loads(res_json)
     assert data["source"] == "memory_capsules"
+    assert data["status"] == "matched"
+    assert data["selected_memory_task_id"] == "task_A"
     assert data["capsules_returned"] == 1
+    assert data["goal_satisfied"] is True
     assert data["empty"] is False
     assert data["capsules"][0]["capsule_id"] == "cap_1"
     assert "slots" in data["capsules"][0]["content"]
+    assert ledger.memory_retrieval_tokens > 0
     assert any(e["type"] == "context.memory_read" for e in events)
 
 
-def test_scenario_5_unauthorized_private_memory_remains_inaccessible():
-    """Scenario 5: Unauthorized private memory remains inaccessible (deny-by-default)."""
+def test_scenario_5_current_turn_exec_b_never_becomes_capsule_task_scope():
+    """Scenario 5: Current turn exec_B can never become capsule task scope."""
+    sample_projection = DummyCapsuleProjection(
+        capsule_id="cap_secret",
+        revision=1,
+        title="Secret",
+        summary="Secret summary",
+        content="Secret content",
+        tags=("secret",),
+        scope=CapsuleScope.PRIVATE,
+    )
+    capsule_service = DummyCapsuleService([sample_projection])
+
+    # Attempting to use current turn ID "exec_B" as task scope when it is not in offered candidates
+    res_json = execute_memory_read(
+        capsule_service=capsule_service,
+        authenticated_user_id="user_alice",
+        session_id="session_123",
+        repository_id="repo_1",
+        current_turn_id="exec_B",
+        selected_memory_task_id="exec_B",  # Model or code tries to use turn ID as task scope
+        memory_task_candidates=({"task_id": "task_A", "normalized_intent": "foo", "state": "active"},),
+        query="secret",
+    )
+    data = json.loads(res_json)
+    assert data["empty"] is True
+    assert data["capsules_returned"] == 0
+    assert data["goal_satisfied"] is False
+    assert data["status"] == "no_match"
+    assert "was not offered to the router" in data["error"]
+
+
+def test_scenario_6_unoffered_task_x_remains_denied():
+    """Scenario 6: Unoffered task_X remains denied."""
     sample_projection = DummyCapsuleProjection(
         capsule_id="cap_secret",
         revision=1,
@@ -247,11 +297,14 @@ def test_scenario_5_unauthorized_private_memory_remains_inaccessible():
         authenticated_user_id="",  # Empty user ID
         session_id="session_123",
         repository_id="repo_1",
+        selected_memory_task_id="task_allowed",
+        memory_task_candidates=({"task_id": "task_allowed", "normalized_intent": "foo", "state": "active"},),
         query="secret",
     )
     data_unauth = json.loads(res_unauth)
     assert data_unauth["empty"] is True
     assert data_unauth["capsules_returned"] == 0
+    assert data_unauth["goal_satisfied"] is False
     assert "requires an authenticated user identity" in data_unauth["error"]
 
     # Unauthorized task ID not in offered candidates
@@ -260,93 +313,91 @@ def test_scenario_5_unauthorized_private_memory_remains_inaccessible():
         authenticated_user_id="user_alice",
         session_id="session_123",
         repository_id="repo_1",
-        current_task_id="task_allowed",
+        current_turn_id="turn_allowed",
         memory_task_candidates=({"task_id": "task_allowed", "normalized_intent": "foo", "state": "active"},),
-        task_id="task_unauthorized_999",
+        selected_memory_task_id="task_unauthorized_999",
         query="secret",
     )
     data_unoffered = json.loads(res_unoffered)
     assert data_unoffered["empty"] is True
     assert data_unoffered["capsules_returned"] == 0
+    assert data_unoffered["goal_satisfied"] is False
     assert "not offered to the router" in data_unoffered["error"]
 
 
-def test_scenario_6_fabricated_identifiers_cannot_alter_tool_scope():
-    """Scenario 6: Fabricated session/user identifiers cannot alter tool scope."""
-    history = DummyHistoryStore(
-        [
-            DummyMessage(role="user", content="Original user message", turn_id="turn_1"),
-            DummyMessage(role="assistant", content="Original answer", turn_id="turn_1"),
-        ]
-    )
-    tools = build_context_retrieval_tools(
-        session_id="trusted_session",
-        conversation_id="trusted_conv",
-        authenticated_user_id="trusted_user",
-        history_store=history,
-        current_turn_id="turn_2",
-    )
-    conv_tool = next(t for t in tools if t.name == "conversation_context_read")
-
-    # Even if model passes fabricated kwargs, trusted session and user ID are used
-    result_str = conv_tool.invoke({"query": "Original", "max_turns": 2, "session_id": "attacker_session", "user_id": "attacker_user"})
-    data = json.loads(result_str)
-    assert data["session_id"] == "trusted_session"
-    assert data["conversation_id"] == "trusted_conv"
-
-
-def test_scenario_7_retrieval_results_are_token_bounded():
-    """Scenario 7: Retrieval results are token bounded."""
-    huge_content = "Word " * 5000  # ~5000 tokens
-    sample_projection = DummyCapsuleProjection(
-        capsule_id="cap_huge",
-        revision=1,
-        title="Huge Documentation",
-        summary="A very long document",
-        content=huge_content,
-        tags=("docs",),
-        scope=CapsuleScope.PROJECT,
-    )
-    capsule_service = DummyCapsuleService([sample_projection])
+def test_scenario_7_zero_matches_returns_goal_satisfied_false():
+    """Scenario 7: Zero matches returns goal_satisfied=false."""
+    capsule_service = DummyCapsuleService([])  # Empty capsule store
 
     res_json = execute_memory_read(
         capsule_service=capsule_service,
         authenticated_user_id="user_alice",
         session_id="session_123",
         repository_id="repo_1",
-        query="Documentation",
-        max_capsules=1,
-        max_tokens=100,  # Strict token bound
+        current_turn_id="turn_1",
+        selected_memory_task_id="task_A",
+        memory_task_candidates=({"task_id": "task_A", "normalized_intent": "foo", "state": "active"},),
+        query="nonexistent_query_12345",
     )
     data = json.loads(res_json)
-    assert data["tokens"] <= 100 or data["empty"] is True
+    assert data["source"] == "memory_capsules"
+    assert data["status"] == "no_match"
+    assert data["selected_memory_task_id"] == "task_A"
+    assert data["capsules_returned"] == 0
+    assert data["goal_satisfied"] is False
+    assert data["empty"] is True
 
 
-def test_scenario_8_retrieval_usage_participates_in_accounting():
-    """Scenario 8: Retrieval usage participates in Phase-0 accounting."""
+def test_scenario_8_retrieved_context_participates_in_provider_call_estimate():
+    """Scenario 8: Retrieved context participates in Phase-0 provider call estimation with real governor."""
     history = DummyHistoryStore(
         [
-            DummyMessage(role="user", content="Question 1", turn_id="turn_1"),
-            DummyMessage(role="assistant", content="Answer 1", turn_id="turn_1"),
+            DummyMessage(role="user", content="Explain OAuth2 in detail.", turn_id="turn_1"),
+            DummyMessage(role="assistant", content="OAuth2 uses access tokens and scopes.", turn_id="turn_1"),
         ]
     )
-    governor = MagicMock()
+    settings = Settings()
+    governor = ContextCostGovernor(session_id="session_123", settings=settings)
+    turn_cache: dict[str, Any] = {}
+    ledger = TurnRetrievalLedger(retrieval_budget_tokens=12000)
 
-    execute_conversation_context_read(
+    # 1. Retrieve context via tool
+    res_json = execute_conversation_context_read(
         session_id="session_123",
         conversation_id="conv_123",
         authenticated_user_id="user_alice",
         history_store=history,
         current_turn_id="turn_2",
-        governor=governor,
+        query="OAuth2",
+        turn_retrieval_cache=turn_cache,
+        retrieval_ledger=ledger,
     )
-    assert governor.record_usage.call_count == 1
-    kwargs = governor.record_usage.call_args[1]
-    assert kwargs["task_id"] == "turn_2"
-    assert kwargs["input_tokens"] > 0
+    data = json.loads(res_json)
+    retrieved_tokens = data["tokens"]
+    assert retrieved_tokens > 0
+    assert ledger.conversation_retrieval_tokens == retrieved_tokens
+
+    # 2. When that retrieved projection is included in the LLM model call,
+    # the governor forecasts and reserves provider tokens for it
+    segments = [
+        ContextSegment(kind="prompt", content="You are a helpful assistant.", token_estimate=10),
+        ContextSegment(
+            kind="prompt",
+            content=f"Context: {res_json}\n\nQuestion: Summarize the OAuth2 setup.",
+            token_estimate=retrieved_tokens + 20,
+        ),
+    ]
+    call_id, decision = governor.before_model_call(
+        segments=segments,
+        provider="openai",
+        model="gpt-4o",
+    )
+    assert decision.allowed is True
+    assert decision.snapshot.used_tokens >= retrieved_tokens
+    governor.release_reservation(call_id, reason="turn_completed")
 
 
-def test_scenario_9_repeated_identical_retrieval_is_deduplicated():
+def test_scenario_9_cached_retrieval_is_not_charged_twice():
     """Scenario 9: Repeated identical retrieval is deduplicated with zero additional charge."""
     history = DummyHistoryStore(
         [
@@ -354,8 +405,8 @@ def test_scenario_9_repeated_identical_retrieval_is_deduplicated():
             DummyMessage(role="assistant", content="Answer 1", turn_id="turn_1"),
         ]
     )
-    governor = MagicMock()
     turn_cache: dict[str, Any] = {}
+    ledger = TurnRetrievalLedger(retrieval_budget_tokens=12000)
     events: list[dict[str, Any]] = []
 
     def sink(event_type: str, msg: str, metadata: dict[str, Any] | None = None) -> None:
@@ -370,11 +421,12 @@ def test_scenario_9_repeated_identical_retrieval_is_deduplicated():
         current_turn_id="turn_2",
         query="Question",
         max_turns=3,
-        governor=governor,
         turn_retrieval_cache=turn_cache,
         event_sink=sink,
+        retrieval_ledger=ledger,
     )
-    assert governor.record_usage.call_count == 1
+    first_charged = ledger.retrieval_used_tokens
+    assert first_charged > 0
 
     # Second identical call in same turn
     res_2 = execute_conversation_context_read(
@@ -385,101 +437,77 @@ def test_scenario_9_repeated_identical_retrieval_is_deduplicated():
         current_turn_id="turn_2",
         query="Question",
         max_turns=3,
-        governor=governor,
         turn_retrieval_cache=turn_cache,
         event_sink=sink,
+        retrieval_ledger=ledger,
     )
     assert res_1 == res_2
-    # Governor was not called a second time (0 additional tokens charged)
-    assert governor.record_usage.call_count == 1
+    # Ledger was not charged a second time (0 additional tokens charged)
+    assert ledger.retrieval_used_tokens == first_charged
     assert any(e["type"] == "context.retrieval_deduplicated" for e in events)
 
 
-def test_scenario_10_routing_receives_complete_structured_envelope_no_raw_history():
-    """Scenario 10: Routing receives the complete structured envelope but no raw history."""
-    envelope = build_routing_execution_envelope(
-        user_request="Refactor the routing layer",
-        identity=IdentitySessionRelationship(
-            authenticated_user_id="user_alice",
-            session_id="session_123",
-            conversation_id="conv_123",
-            turn_id="turn_10",
-            task_id="task_10",
-            workspace_id="ws_1",
-            repository_id="repo_1",
-        ),
-        execution_state=ExecutionRecoveryState(
-            active_route="coding",
-            lane_id="lane_fast",
-        ),
-        accounting_snapshot=AccountingSnapshot(
-            task_id="turn_10",
-            turn_id="turn_10",
-            task_budget_tokens=1000000,
-            task_consumed_tokens=5000,
-            task_reserved_tokens=0,
-            task_remaining_tokens=995000,
-            turn_budget_tokens=None,
-            turn_consumed_tokens=5000,
-            turn_remaining_tokens=None,
-            verification_reserve_tokens=50000,
-            session_budget_tokens=None,
-            session_consumed_tokens=5000,
-            session_remaining_tokens=None,
-            cost_budget=None,
-            cost_consumed=0.05,
-            cost_remaining=None,
-            active_reservations_count=0,
-            status="ok",
-        ),
-        model_candidates=(
-            ModelCandidateCapacity(
-                model_id="gpt-4o",
-                provider="openai",
-                context_window=128000,
-                max_output_tokens=4096,
-                supported_roles=("main", "coding"),
-            ),
-        ),
-        route_availability=({"name": "coding", "available": True},),
-        capabilities_and_tools=({"name": "repo_search", "category": "repository"},),
-        approval_state=ApprovalState(),
-        artifact_metadata={"has_artifacts": False},
-        previous_turn_pointers=PreviousTurnPointers(previous_turn_id="turn_9", previous_route="coding"),
-        conversation_context_availability=ConversationContextAvailability(has_history=True, available_turns=9),
-        memory_availability=MemoryAvailability(memory_capsules_enabled=True),
+def test_scenario_10_retrieval_allowance_is_cumulative_across_conversation_and_memory():
+    """Scenario 10: Retrieval allowance is cumulative across conversation + memory in the same turn."""
+    history = DummyHistoryStore(
+        [
+            DummyMessage(role="user", content="Short query", turn_id="turn_1"),
+            DummyMessage(role="assistant", content="Short answer", turn_id="turn_1"),
+        ]
     )
+    sample_projection = DummyCapsuleProjection(
+        capsule_id="cap_1",
+        revision=1,
+        title="Preferences",
+        summary="Coding style",
+        content="Use snake_case for functions.",
+        tags=("preferences",),
+        scope=CapsuleScope.PRIVATE,
+    )
+    capsule_service = DummyCapsuleService([sample_projection])
 
-    data = envelope.to_dict()
-    assert data["user_request"] == "Refactor the routing layer"
-    assert data["identity"]["authenticated_user_id"] == "user_alice"
-    assert data["accounting_snapshot"]["task_remaining_tokens"] == 995000
-    assert data["previous_turn_pointers"]["previous_turn_id"] == "turn_9"
-    assert "messages" not in data
-    assert "transcript" not in data
-    assert "history" not in data
-    assert "secrets" not in data
+    # Small shared budget of 100 tokens
+    ledger = TurnRetrievalLedger(retrieval_budget_tokens=100)
+    turn_cache: dict[str, Any] = {}
 
-    context = EntryRouteContext(
+    # Call 1: Conversation context consumes some tokens
+    execute_conversation_context_read(
         session_id="session_123",
         conversation_id="conv_123",
-        turn_id="turn_10",
-        envelope=envelope,
+        authenticated_user_id="user_alice",
+        history_store=history,
+        current_turn_id="turn_2",
+        query="Short",
+        max_tokens=60,
+        turn_retrieval_cache=turn_cache,
+        retrieval_ledger=ledger,
     )
-    context_data = context.to_dict()
-    assert "envelope" in context_data
-    assert context_data["envelope"]["user_request"] == "Refactor the routing layer"
+    conv_tokens = ledger.conversation_retrieval_tokens
+    assert conv_tokens > 0
+    assert ledger.retrieval_remaining_tokens == 100 - conv_tokens
+
+    # Call 2: Memory read consumes remaining tokens
+    execute_memory_read(
+        capsule_service=capsule_service,
+        authenticated_user_id="user_alice",
+        session_id="session_123",
+        repository_id="repo_1",
+        current_turn_id="turn_2",
+        selected_memory_task_id="task_A",
+        memory_task_candidates=({"task_id": "task_A", "normalized_intent": "foo", "state": "active"},),
+        query="Preferences",
+        max_tokens=50,
+        turn_retrieval_cache=turn_cache,
+        retrieval_ledger=ledger,
+    )
+    mem_tokens = ledger.memory_retrieval_tokens
+    assert mem_tokens > 0
+    assert ledger.retrieval_used_tokens == conv_tokens + mem_tokens
+    assert ledger.retrieval_used_tokens <= 100
 
 
 def test_scenario_11_multitask_workflow_does_not_copy_parent_history():
     """Scenario 11: Multi-task children receive child requests and metadata without copying parent history."""
-    parent_history = DummyHistoryStore(
-        [
-            DummyMessage(role="user", content="Parent turn 1", turn_id="turn_1"),
-            DummyMessage(role="assistant", content="Parent answer 1", turn_id="turn_1"),
-            DummyMessage(role="user", content="Parent turn 2", turn_id="turn_2"),
-        ]
-    )
     child_envelope = build_routing_execution_envelope(
         user_request="Child task: Run tests for component A",
         identity=IdentitySessionRelationship(

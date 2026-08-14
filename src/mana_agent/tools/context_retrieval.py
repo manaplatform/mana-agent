@@ -9,7 +9,7 @@ by the trusted host and cannot be overridden by model inputs.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,6 +24,42 @@ from mana_agent.memory.capsules.models import (
     MemoryPrincipal,
 )
 from mana_agent.memory.capsules.service import CapsuleService
+
+
+@dataclass
+class TurnRetrievalLedger:
+    """Host-owned turn ledger tracking cumulative retrieval token allowances."""
+
+    retrieval_budget_tokens: int = 12000
+    conversation_retrieval_tokens: int = 0
+    memory_retrieval_tokens: int = 0
+
+    @property
+    def retrieval_used_tokens(self) -> int:
+        return self.conversation_retrieval_tokens + self.memory_retrieval_tokens
+
+    @property
+    def retrieval_remaining_tokens(self) -> int:
+        return max(0, self.retrieval_budget_tokens - self.retrieval_used_tokens)
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "retrieval_budget_tokens": self.retrieval_budget_tokens,
+            "conversation_retrieval_tokens": self.conversation_retrieval_tokens,
+            "memory_retrieval_tokens": self.memory_retrieval_tokens,
+            "retrieval_used_tokens": self.retrieval_used_tokens,
+            "retrieval_remaining_tokens": self.retrieval_remaining_tokens,
+        }
+
+
+class MemoryTaskBinding:
+    """Trusted mutable binding allowing runtime task authorization after routing."""
+
+    def __init__(self, selected_memory_task_id: str = "") -> None:
+        self.selected_memory_task_id = str(selected_memory_task_id or "").strip()
+
+    def bind(self, task_id: str) -> None:
+        self.selected_memory_task_id = str(task_id or "").strip()
 
 
 class ConversationContextReadInput(BaseModel):
@@ -74,10 +110,6 @@ class MemoryReadInput(BaseModel):
         le=4000,
         description="Maximum tokens to return.",
     )
-    task_id: str | None = Field(
-        default=None,
-        description="Optional offered candidate task ID to scope the memory search.",
-    )
     tags: list[str] | None = Field(
         default=None,
         description="Optional tag filters for memory capsules.",
@@ -98,11 +130,18 @@ def execute_conversation_context_read(
     governor: ContextCostGovernor | None = None,
     turn_retrieval_cache: dict[str, Any] | None = None,
     event_sink: Callable[..., Any] | None = None,
+    retrieval_ledger: TurnRetrievalLedger | None = None,
     retrieval_budget: int = 12000,
 ) -> str:
     """Read bounded episodic conversation context for the active authorized session."""
     bounded_max_turns = max(1, min(int(max_turns or 5), 20))
-    bounded_max_tokens = max(1, min(int(max_tokens or 2000), retrieval_budget))
+    remaining_allowance = (
+        retrieval_ledger.retrieval_remaining_tokens
+        if retrieval_ledger is not None
+        else retrieval_budget
+    )
+    effective_token_limit = min(int(max_tokens or 2000), remaining_allowance, retrieval_budget)
+    bounded_max_tokens = max(0, effective_token_limit)
     norm_query = str(query or "").strip().lower()
     norm_before = str(before_turn_id or "").strip()
 
@@ -111,7 +150,7 @@ def execute_conversation_context_read(
         session_id,
         norm_query,
         bounded_max_turns,
-        bounded_max_tokens,
+        int(max_tokens or 2000),
         norm_before,
     )
     if turn_retrieval_cache is not None and cache_key in turn_retrieval_cache:
@@ -129,6 +168,19 @@ def execute_conversation_context_read(
                 },
             )
         return cached
+
+    if bounded_max_tokens <= 0:
+        empty_payload = {
+            "source": "conversation_context",
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "turns_returned": 0,
+            "tokens": 0,
+            "empty": True,
+            "truncated": False,
+            "turns": [],
+        }
+        return json.dumps(empty_payload, ensure_ascii=False)
 
     messages: list[Any] = []
     if history_store is not None:
@@ -203,17 +255,8 @@ def execute_conversation_context_read(
     if turn_retrieval_cache is not None:
         turn_retrieval_cache[cache_key] = encoded
 
-    if governor is not None and used_tokens > 0:
-        try:
-            governor.record_usage(
-                task_id=current_turn_id,
-                turn_id=current_turn_id,
-                input_tokens=used_tokens,
-                output_tokens=0,
-                cost=0.0,
-            )
-        except Exception:
-            pass
+    if retrieval_ledger is not None and used_tokens > 0:
+        retrieval_ledger.conversation_retrieval_tokens += used_tokens
 
     if callable(event_sink):
         event_sink(
@@ -241,7 +284,9 @@ def execute_memory_read(
     authenticated_user_id: str,
     session_id: str,
     repository_id: str,
+    current_turn_id: str = "",
     current_task_id: str = "",
+    selected_memory_task_id: str = "",
     parent_task_id: str | None = None,
     memory_task_candidates: tuple[dict[str, str], ...] = (),
     query: str = "",
@@ -252,13 +297,21 @@ def execute_memory_read(
     governor: ContextCostGovernor | None = None,
     turn_retrieval_cache: dict[str, Any] | None = None,
     event_sink: Callable[..., Any] | None = None,
+    retrieval_ledger: TurnRetrievalLedger | None = None,
     retrieval_budget: int = 4000,
 ) -> str:
-    """Read authorized durable memory capsules for authenticated principal and task."""
+    """Read authorized durable memory capsules for authenticated principal and validated task."""
+    effective_turn_id = current_turn_id or current_task_id
+    effective_selected_task = str(selected_memory_task_id or task_id or "").strip()
     bounded_max_capsules = max(1, min(int(max_capsules or 3), 10))
-    bounded_max_tokens = max(1, min(int(max_tokens or 1000), retrieval_budget))
+    remaining_allowance = (
+        retrieval_ledger.retrieval_remaining_tokens
+        if retrieval_ledger is not None
+        else retrieval_budget
+    )
+    effective_token_limit = min(int(max_tokens or 1000), remaining_allowance, retrieval_budget)
+    bounded_max_tokens = max(0, effective_token_limit)
     norm_query = str(query or "").strip()
-    norm_task_id = str(task_id or "").strip()
     norm_tags = tuple(sorted(str(t).strip().lower() for t in (tags or []) if str(t).strip()))
 
     cache_key = (
@@ -268,8 +321,8 @@ def execute_memory_read(
         repository_id,
         norm_query,
         bounded_max_capsules,
-        bounded_max_tokens,
-        norm_task_id,
+        int(max_tokens or 1000),
+        effective_selected_task,
         norm_tags,
     )
     if turn_retrieval_cache is not None and cache_key in turn_retrieval_cache:
@@ -281,7 +334,7 @@ def execute_memory_read(
                 metadata={
                     "tool": "memory_read",
                     "session_id": session_id,
-                    "turn_id": current_task_id,
+                    "turn_id": effective_turn_id,
                     "tokens_charged": 0,
                     "deduplicated": True,
                 },
@@ -292,9 +345,12 @@ def execute_memory_read(
     if not authenticated_user_id:
         error_payload = {
             "source": "memory_capsules",
+            "status": "no_match",
+            "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
             "empty": True,
+            "goal_satisfied": False,
             "error": "Private memory retrieval requires an authenticated user identity. No memory was read.",
             "capsules": [],
         }
@@ -305,7 +361,7 @@ def execute_memory_read(
                 "Memory retrieval rejected: unauthenticated",
                 metadata={
                     "session_id": session_id,
-                    "turn_id": current_task_id,
+                    "turn_id": effective_turn_id,
                     "empty_result": True,
                     "error": "unauthenticated",
                     "history_injected": False,
@@ -313,67 +369,78 @@ def execute_memory_read(
             )
         return encoded
 
-    # Validate candidate task_id if supplied
+    # Validate candidate task_id against router-offered candidates ONLY.
+    # Turn IDs and parent execution IDs are NEVER authorized implicitly.
     offered_tasks = {
         str(item.get("task_id") or "").strip()
         for item in memory_task_candidates
         if str(item.get("task_id") or "").strip()
     }
-    if current_task_id:
-        offered_tasks.add(current_task_id)
-    if parent_task_id:
-        offered_tasks.add(parent_task_id)
 
-    effective_task_id = norm_task_id
-    if norm_task_id:
-        if norm_task_id not in offered_tasks:
-            error_payload = {
-                "source": "memory_capsules",
-                "capsules_returned": 0,
-                "tokens": 0,
-                "empty": True,
-                "error": f"Requested task_id {norm_task_id!r} was not offered to the router. Access denied.",
-                "capsules": [],
-            }
-            encoded = json.dumps(error_payload, ensure_ascii=False)
-            if callable(event_sink):
-                event_sink(
-                    "context.memory_read",
-                    "Memory retrieval rejected: task not offered",
-                    metadata={
-                        "session_id": session_id,
-                        "turn_id": current_task_id,
-                        "task_id": norm_task_id,
-                        "empty_result": True,
-                        "error": "task_not_offered",
-                        "history_injected": False,
-                    },
-                )
-            return encoded
-    else:
-        # Pick the single offered task ID or current task ID
-        if len(offered_tasks) == 1:
-            effective_task_id = next(iter(offered_tasks))
-        elif current_task_id:
-            effective_task_id = current_task_id
+    if not effective_selected_task or effective_selected_task not in offered_tasks:
+        error_payload = {
+            "source": "memory_capsules",
+            "status": "no_match",
+            "selected_memory_task_id": effective_selected_task,
+            "capsules_returned": 0,
+            "tokens": 0,
+            "empty": True,
+            "goal_satisfied": False,
+            "error": (
+                f"Selected memory task {effective_selected_task!r} was not offered to the router. Access denied."
+                if effective_selected_task
+                else "No memory task was authorized by entry routing. Access denied."
+            ),
+            "capsules": [],
+        }
+        encoded = json.dumps(error_payload, ensure_ascii=False)
+        if callable(event_sink):
+            event_sink(
+                "context.memory_read",
+                "Memory retrieval rejected: task not offered",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "empty_result": True,
+                    "error": "task_not_offered",
+                    "history_injected": False,
+                },
+            )
+        return encoded
+
+    if bounded_max_tokens <= 0:
+        empty_payload = {
+            "source": "memory_capsules",
+            "status": "no_match",
+            "selected_memory_task_id": effective_selected_task,
+            "capsules_returned": 0,
+            "tokens": 0,
+            "empty": True,
+            "goal_satisfied": False,
+            "capsules": [],
+        }
+        return json.dumps(empty_payload, ensure_ascii=False)
 
     if capsule_service is None or not getattr(
         getattr(capsule_service, "config", None), "enabled", True
     ):
         empty_payload = {
             "source": "memory_capsules",
+            "status": "no_match",
+            "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
             "empty": True,
+            "goal_satisfied": False,
             "capsules": [],
         }
-        encoded = json.dumps(empty_payload, ensure_ascii=False)
-        return encoded
+        return json.dumps(empty_payload, ensure_ascii=False)
 
     principal = MemoryPrincipal(
         user_id=authenticated_user_id,
         project_id=repository_id or None,
-        task_id=effective_task_id or "gateway:chat",
+        task_id=effective_selected_task,
         agent_id="gateway:chat",
         capabilities=frozenset({"memory.capsule.read.private"}),
     )
@@ -382,7 +449,7 @@ def execute_memory_read(
         organisation_id=None,
         project_id=repository_id or None,
         team_ids=frozenset(),
-        task_id=effective_task_id or "gateway:chat",
+        task_id=effective_selected_task,
         agent_id="gateway:chat",
         session_id=session_id,
     )
@@ -397,14 +464,17 @@ def execute_memory_read(
                 max_capsules=bounded_max_capsules,
                 max_tokens=bounded_max_tokens,
             ),
-            correlation_id=current_task_id,
+            correlation_id=effective_turn_id,
         )
     except Exception as exc:
         error_payload = {
             "source": "memory_capsules",
+            "status": "no_match",
+            "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
             "empty": True,
+            "goal_satisfied": False,
             "error": f"Memory query error: {exc}",
             "capsules": [],
         }
@@ -414,17 +484,21 @@ def execute_memory_read(
     if norm_tags:
         target_tags = set(norm_tags)
         projections = [
-            p for p in projections if target_tags.intersection(t.lower() for t in p.tags)
+            p
+            for p in projections
+            if target_tags.intersection(
+                t.lower() for t in getattr(p, "tags", ()) or ()
+            )
         ]
 
     capsule_rows = [
         {
-            "capsule_id": p.capsule_id,
-            "revision": p.revision,
-            "title": p.title,
-            "summary": p.summary,
-            "content": p.content,
-            "tags": list(p.tags),
+            "capsule_id": getattr(p, "capsule_id", ""),
+            "revision": getattr(p, "revision", 0),
+            "title": getattr(p, "title", ""),
+            "summary": getattr(p, "summary", ""),
+            "content": getattr(p, "content", ""),
+            "tags": list(getattr(p, "tags", ()) or ()),
         }
         for p in projections[:bounded_max_capsules]
     ]
@@ -437,11 +511,15 @@ def execute_memory_read(
             capsule_rows.pop()
         used_tokens = estimate_value_tokens(capsule_rows)
 
+    matched = len(capsule_rows) > 0
     payload = {
         "source": "memory_capsules",
+        "status": "matched" if matched else "no_match",
+        "selected_memory_task_id": effective_selected_task,
         "capsules_returned": len(capsule_rows),
         "tokens": used_tokens,
         "empty": len(capsule_rows) == 0,
+        "goal_satisfied": matched,
         "truncated": truncated,
         "capsules": capsule_rows,
     }
@@ -450,17 +528,8 @@ def execute_memory_read(
     if turn_retrieval_cache is not None:
         turn_retrieval_cache[cache_key] = encoded
 
-    if governor is not None and used_tokens > 0:
-        try:
-            governor.record_usage(
-                task_id=current_task_id,
-                turn_id=current_task_id,
-                input_tokens=used_tokens,
-                output_tokens=0,
-                cost=0.0,
-            )
-        except Exception:
-            pass
+    if retrieval_ledger is not None and used_tokens > 0:
+        retrieval_ledger.memory_retrieval_tokens += used_tokens
 
     if callable(event_sink):
         event_sink(
@@ -468,11 +537,12 @@ def execute_memory_read(
             "Memory capsules retrieved",
             metadata={
                 "session_id": session_id,
-                "turn_id": current_task_id,
+                "turn_id": effective_turn_id,
                 "query": norm_query,
                 "capsules_count": payload["capsules_returned"],
                 "tokens": used_tokens,
                 "empty_result": payload["empty"],
+                "goal_satisfied": matched,
                 "truncated": truncated,
                 "history_injected": False,
             },
@@ -490,11 +560,13 @@ def build_context_retrieval_tools(
     capsule_service: CapsuleService | None = None,
     repository_id: str = "",
     current_turn_id: str = "",
+    selected_memory_task_id: str | MemoryTaskBinding = "",
     parent_task_id: str | None = None,
     memory_task_candidates: tuple[dict[str, str], ...] = (),
     governor: ContextCostGovernor | None = None,
     turn_retrieval_cache: dict[str, Any] | None = None,
     event_sink: Callable[..., Any] | None = None,
+    retrieval_ledger: TurnRetrievalLedger | None = None,
     conversation_budget: int = 12000,
     memory_budget: int = 4000,
 ) -> list[BaseTool]:
@@ -520,6 +592,7 @@ def build_context_retrieval_tools(
             governor=governor,
             turn_retrieval_cache=turn_retrieval_cache,
             event_sink=event_sink,
+            retrieval_ledger=retrieval_ledger,
             retrieval_budget=conversation_budget,
         )
 
@@ -527,26 +600,31 @@ def build_context_retrieval_tools(
         query: str = "",
         max_capsules: int = 3,
         max_tokens: int = 1000,
-        task_id: str | None = None,
         tags: list[str] | None = None,
         **_extra: Any,
     ) -> str:
+        effective_task = (
+            selected_memory_task_id.selected_memory_task_id
+            if isinstance(selected_memory_task_id, MemoryTaskBinding)
+            else str(selected_memory_task_id or "")
+        )
         return execute_memory_read(
             capsule_service=capsule_service,
             authenticated_user_id=authenticated_user_id,
             session_id=session_id,
             repository_id=repository_id,
-            current_task_id=current_turn_id,
+            current_turn_id=current_turn_id,
+            selected_memory_task_id=effective_task,
             parent_task_id=parent_task_id,
             memory_task_candidates=memory_task_candidates,
             query=query,
             max_capsules=max_capsules,
             max_tokens=max_tokens,
-            task_id=task_id,
             tags=tags,
             governor=governor,
             turn_retrieval_cache=turn_retrieval_cache,
             event_sink=event_sink,
+            retrieval_ledger=retrieval_ledger,
             retrieval_budget=memory_budget,
         )
 
@@ -575,6 +653,8 @@ def build_context_retrieval_tools(
 __all__ = [
     "ConversationContextReadInput",
     "MemoryReadInput",
+    "MemoryTaskBinding",
+    "TurnRetrievalLedger",
     "build_context_retrieval_tools",
     "execute_conversation_context_read",
     "execute_memory_read",
