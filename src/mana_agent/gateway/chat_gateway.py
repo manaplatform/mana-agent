@@ -130,6 +130,7 @@ from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.server import ServerManagementService
 from mana_agent.server.tools import SERVER_TOOL_SPECS
 from mana_agent.media import (
+    GenerationStatus,
     ImageGenerationRequest,
     MediaOperationDecision,
     MediaService,
@@ -7238,6 +7239,10 @@ class AgentChatGateway:
                     output_format=media.output_format
                     or str(defaults.get("output_format") or "png"),
                     background=media.background,
+                    aspect_ratio=media.aspect_ratio
+                    or str(defaults.get("aspect_ratio") or ""),
+                    resolution=media.resolution
+                    or str(defaults.get("resolution") or ""),
                     reference_artifact_ids=media.reference_artifact_ids,
                 )
                 result = self.media_service.generate_image(
@@ -7309,6 +7314,43 @@ class AgentChatGateway:
                 payload={"route": "media"},
             )
 
+        # Record media usage in context cost governor if available
+        governor = getattr(getattr(self, "_stack", None), "context_cost_governor", None)
+        if governor is not None and result.usage:
+            governor.record_media_generation(
+                call_id=result.generation_id,
+                cost=result.usage.get("cost"),
+                usage=result.usage,
+                provider=result.provider,
+                model=result.model,
+                media_type=result.media_type.value,
+                turn_id=context.turn_id,
+                task_id=context.turn_id,
+                session_id=context.session_id,
+            )
+
+        sources = [
+            {
+                "type": "media_artifact",
+                "artifact_id": art.artifact_id,
+                "path": art.local_path,
+                "mime_type": art.mime_type,
+                "size_bytes": art.size_bytes,
+                "provider": result.provider,
+                "model": result.model,
+            }
+            for art in result.artifacts
+        ]
+        trace = [
+            {
+                "tool_name": f"media.{result.media_type.value}.generate",
+                "provider": result.provider,
+                "model": result.model,
+                "status": result.status.value,
+                "artifacts": [art.artifact_id for art in result.artifacts],
+            }
+        ]
+
         primary = result.primary_artifact
         if primary is not None:
             answer = (
@@ -7322,11 +7364,19 @@ class AgentChatGateway:
             )
         return ChatTurnResult(
             answer=answer,
+            sources=sources,
+            trace=trace,
             mode=f"route-media-{result.status.value}",
             decision=decision,
             payload={
                 "route": "media",
+                "provider": result.provider,
+                "image_model": result.model,
+                "output_artifacts": [art.local_path for art in result.artifacts],
                 "generation": result.model_dump(mode="json"),
+                "verification_status": "passed"
+                if result.status == GenerationStatus.COMPLETED
+                else result.status.value,
             },
         )
 

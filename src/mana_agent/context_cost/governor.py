@@ -772,6 +772,91 @@ class ContextCostGovernor:
         emit_context_event(self.event_sink, "cost.updated", title="Context and cost usage updated", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         return normalized
 
+    def record_media_generation(
+        self,
+        call_id: str,
+        *,
+        cost: float | Decimal | None = None,
+        usage: Any = None,
+        provider: str = "openrouter",
+        model: str = "",
+        media_type: str = "image",
+        turn_id: str = "",
+        task_id: str = "",
+        root_task_id: str = "",
+        attempt_id: str = "",
+        lane: str = "media",
+        session_id: str = "",
+    ) -> None:
+        """Record image/media generation cost and usage against task/attempt/session."""
+        actual_cost_val = float(cost) if cost is not None else 0.0
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        if isinstance(usage, dict):
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+            if cost is None and usage.get("cost") is not None:
+                actual_cost_val = float(usage["cost"])
+        with self._lock:
+            if call_id in self._reconciled_call_ids:
+                return
+            self._reconciled_call_ids.add(call_id)
+            self.ledger.record(
+                tokens=total_tokens,
+                input_cost=0.0,
+                output_cost=actual_cost_val,
+                estimated=False,
+            )
+            self.metrics["actual_cost"] = float(self.metrics.get("actual_cost", 0.0)) + actual_cost_val
+            if task_id:
+                task_usage = self._task_usage.setdefault(
+                    task_id,
+                    {
+                        "consumed_input_tokens": 0,
+                        "consumed_output_tokens": 0,
+                        "estimated_cost": 0.0,
+                        "actual_cost": 0.0,
+                        "actual_cost_known": True,
+                    },
+                )
+                task_usage["consumed_input_tokens"] = int(task_usage.get("consumed_input_tokens", 0)) + prompt_tokens
+                task_usage["consumed_output_tokens"] = int(task_usage.get("consumed_output_tokens", 0)) + completion_tokens
+                task_usage["actual_cost"] = float(task_usage.get("actual_cost", 0.0)) + actual_cost_val
+                task_usage["actual_cost_known"] = True
+
+        metadata = self._base_metadata(
+            provider=provider,
+            model=model,
+            turn_id=turn_id,
+            task_id=task_id,
+            agent_id="media",
+        )
+        metadata.update({
+            "media_call_id": call_id,
+            "media_type": media_type,
+            "root_task_id": root_task_id,
+            "attempt_id": attempt_id,
+            "lane": lane,
+            "cost": actual_cost_val,
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "used_tokens": total_tokens,
+            "action": "record_media_usage",
+            "reason": "media_provider_usage",
+        })
+        self.logger.write(metadata)
+        emit_context_event(
+            self.event_sink,
+            "cost.updated",
+            title="Media generation cost updated",
+            metadata=metadata,
+            session_id=session_id or self.session_id,
+            turn_id=turn_id,
+            agent_id="media",
+        )
+
     def task_usage(self, task_id: str) -> dict[str, Any]:
         """Return provider-accounted model usage attributed to one durable task."""
         with self._lock:

@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Implemented native OpenRouter image generation for Mana-Agent's media lane.
+  - Implemented `OpenRouterMediaProvider` with dedicated image endpoints (`GET /api/v1/images/models` for discovery and `POST /api/v1/images` for image generation), base64 decoding, credential redaction, and capability classification.
+  - Extended media models (`ImageGenerationRequest`, `MediaArtifact`, `GenerationResult`) with `aspect_ratio`, `resolution`, artifact metadata fields (`task_id`, `session_id`, `provider`, `model`, `media_type`, `filename`), and `usage` tracking.
+  - Replaced simple `media_image_disabled` with capability/configuration-aware feature gating (`media_image_disabled`, `media_provider_not_configured`, `media_provider_auth_required`, `media_image_model_unsupported`).
+  - Integrated with `MediaArtifactStore` for on-disk artifact verification and lifecycle management, and with `ContextCostGovernor.record_media_generation` for provider cost accounting (`usage.cost`).
+  - Extended configuration TUI (`mana-agent configure`) with default aspect ratio inputs and cached image model filtering.
+  - User verification required: `python -m pytest tests/test_openrouter_image_generation.py tests/test_media_generation.py tests/test_openrouter_provider.py -q`.
+
 - Fixed premature termination and budget accounting bugs where cumulative lane usage was conflated with current-turn usage, intermediate tool calls (e.g. search returning resource IDs) were falsely treated as complete user tasks, and soft step thresholds aborted multi-step workflows.
   - Decoupled `turn_budget_tokens` and `turn_consumed_tokens` from lifetime cumulative `consumed_tokens` in `LaneBudget` and `LaneCoordinator`, ensuring fresh turns reset turn accounting without losing cumulative session/lane tracking.
   - Added structured completion and continuation semantics (`status`, `pending_required_work`, `stop_reason`, `intermediate_results`) to `AskResponseWithTrace` and `ChatGateway`.

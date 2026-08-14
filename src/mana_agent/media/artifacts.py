@@ -139,15 +139,22 @@ class MediaArtifactStore:
                 / f"{media_type.value}-{index + 1}-{digest[:12]}{extension}"
             )
         self._atomic_write(destination, data)
+        meta = metadata or {}
         artifact = MediaArtifact(
             artifact_id=artifact_id,
             local_path=str(destination),
             mime_type=effective,
             size_bytes=len(data),
             sha256=digest,
-            width=(metadata or {}).get("width"),
-            height=(metadata or {}).get("height"),
-            duration_seconds=(metadata or {}).get("duration_seconds"),
+            width=meta.get("width"),
+            height=meta.get("height"),
+            duration_seconds=meta.get("duration_seconds"),
+            task_id=str(meta.get("task_id") or ""),
+            session_id=str(meta.get("session_id") or ""),
+            media_type=media_type.value,
+            filename=destination.name,
+            provider=str(meta.get("provider") or ""),
+            model=str(meta.get("model") or ""),
         )
         self._atomic_json(
             metadata_directory / f"{artifact_id}.json",

@@ -37,6 +37,8 @@ class ImageGenerationRequest(StrictModel):
     quality: str = Field(default="auto", max_length=32)
     output_format: str = Field(default="png", pattern=r"^(png|jpeg|webp)$")
     background: str | None = Field(default=None, max_length=32)
+    aspect_ratio: str = Field(default="", max_length=32)
+    resolution: str = Field(default="", max_length=32)
     reference_artifact_ids: tuple[str, ...] = ()
     idempotency_key: str = Field(default="", max_length=200)
 
@@ -74,6 +76,13 @@ class MediaArtifact(StrictModel):
     width: int | None = Field(default=None, gt=0)
     height: int | None = Field(default=None, gt=0)
     duration_seconds: float | None = Field(default=None, ge=0)
+    task_id: str = ""
+    session_id: str = ""
+    media_type: str = ""
+    filename: str = ""
+    provider: str = ""
+    model: str = ""
+    created_at: str = Field(default_factory=utc_now_iso)
 
 
 class GenerationResult(StrictModel):
@@ -90,6 +99,7 @@ class GenerationResult(StrictModel):
     error_code: str = ""
     error_detail: str = ""
     request: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def primary_artifact(self) -> MediaArtifact | None:

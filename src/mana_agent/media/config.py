@@ -98,9 +98,14 @@ class MediaConfig(BaseModel):
                 f"media_{media_type.value}_disabled",
                 f"{label} generation is disabled.",
             )
-        if not modality.provider or not modality.model:
+        if not modality.provider:
+            raise MediaConfigurationError(
+                "media_provider_not_configured",
+                f"{label} generation provider is not configured.",
+            )
+        if not modality.model:
             raise MediaConfigurationError(
                 f"media_{media_type.value}_not_configured",
-                f"{label} generation is not configured.",
+                f"{label} generation model is not configured.",
             )
         return modality
