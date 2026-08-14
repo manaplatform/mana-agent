@@ -32,4 +32,5 @@ __all__ = [
     "TaskReservationExceededError", "TokenEstimate", "TokenEstimationRequest",
     "UnknownModelProfileError", "VerificationBudgetExceededError", "build_core_tools",
     "calculate_cost", "compress_tool_result", "normalize_provider_usage", "render_envelope",
+    "ToolResultEnvelope",
 ]

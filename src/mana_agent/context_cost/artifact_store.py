@@ -71,7 +71,11 @@ class ContextArtifactStore:
         line_start: int | None = None,
         line_end: int | None = None,
         json_path: str | None = None,
+        section: str | None = None,
+        record_start: int | None = None,
+        record_count: int | None = None,
         search: str | None = None,
+        query: str | None = None,
     ) -> Any:
         digest = reference.artifact_id.removeprefix("sha256:") if isinstance(reference, ArtifactReference) else str(reference).removeprefix("sha256:")
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest.lower()):
@@ -97,14 +101,62 @@ class ContextArtifactStore:
             for part in parts:
                 value = value[int(part)] if isinstance(value, list) else value[part]
             return value
+        if section:
+            lines = content.splitlines()
+            target_heading = section.strip().lstrip("#").strip().casefold()
+            capturing = False
+            captured_lines: list[str] = []
+            capture_level = 0
+            for line in lines:
+                match = re.match(r"^(#{1,6})\s+(.*)$", line)
+                if match:
+                    level = len(match.group(1))
+                    heading_text = match.group(2).strip().casefold()
+                    if capturing:
+                        if level <= capture_level:
+                            break
+                        captured_lines.append(line)
+                    elif target_heading in heading_text:
+                        capturing = True
+                        capture_level = level
+                        captured_lines.append(line)
+                elif capturing:
+                    captured_lines.append(line)
+            if captured_lines:
+                return "\n".join(captured_lines)[: max(1, min(int(limit), 64_000))]
+        if record_start is not None or record_count is not None:
+            start_rec = max(0, int(record_start or 0))
+            count_rec = max(1, min(int(record_count or 50), 500))
+            try:
+                data = json.loads(content)
+                if isinstance(data, list):
+                    return data[start_rec : start_rec + count_rec]
+                if isinstance(data, dict):
+                    keys = list(data.keys())[start_rec : start_rec + count_rec]
+                    return {k: data[k] for k in keys}
+            except (json.JSONDecodeError, TypeError):
+                lines = content.splitlines()
+                return "\n".join(lines[start_rec : start_rec + count_rec])
         if line_start is not None:
             lines = content.splitlines()
             start = max(1, int(line_start)) - 1
             end = min(len(lines), int(line_end or line_start))
             return "\n".join(lines[start:end])
-        if search:
-            matches = [line for line in content.splitlines() if search.casefold() in line.casefold()]
-            return "\n".join(matches)[: max(1, min(int(limit), 64_000))]
+        target_search = search or query
+        if target_search:
+            lines = content.splitlines()
+            matches = [line for line in lines if target_search.casefold() in line.casefold()]
+            if not matches:
+                terms = [t.casefold() for t in target_search.split() if len(t) > 2]
+                if terms:
+                    scored = []
+                    for line in lines:
+                        score = sum(t in line.casefold() for t in terms)
+                        if score > 0:
+                            scored.append((score, line))
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    matches = [line for _, line in scored]
+            return "\n".join(matches[:100])[: max(1, min(int(limit), 64_000))]
         bounded_limit = max(1, min(int(limit), 64_000))
         bounded_offset = max(0, int(offset))
         return content[bounded_offset : bounded_offset + bounded_limit]

@@ -82,6 +82,8 @@ class ApiManagerService:
         text_reference: str = "pasted-text",
         path: str = "",
         url: str = "",
+        documentation_ref: str = "",
+        session_id: str = "",
         semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
         save: bool = True,
         ephemeral: bool = False,
@@ -89,11 +91,23 @@ class ApiManagerService:
     ) -> dict[str, Any]:
         publish_api_event(
             "api.documentation.import.started",
-            {"name": name, "source_kind": "file" if path else "url" if url else "text"},
+            {"name": name, "source_kind": "file" if path else "url" if url else "artifact" if documentation_ref else "text"},
         )
+        if documentation_ref and not text and not path and not url:
+            from mana_agent.context_cost.artifact_store import ContextArtifactStore
+            store = ContextArtifactStore()
+            text = store.read(
+                documentation_ref,
+                session_id=session_id or "api-inspection",
+                repository_id=str(self.workspace_root),
+                workspace_id=str(self.workspace_root),
+                limit=10 * 1024 * 1024,
+            )
+            text_reference = documentation_ref
+
         selected_sources = sum(bool(item) for item in (text, path, url))
         if selected_sources != 1:
-            raise ValueError("Select exactly one documentation source: text, path, or URL.")
+            raise ValueError("Select exactly one documentation source: text, path, url, or documentation_ref.")
         try:
             if path:
                 integration = self.importer.from_file(
@@ -160,6 +174,7 @@ class ApiManagerService:
         text: str = "",
         path: str = "",
         url: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         """Read one authorized documentation source without inferring API semantics."""
         if sum(bool(item) for item in (text, path, url)) != 1:
@@ -182,12 +197,28 @@ class ApiManagerService:
             payload = text.encode("utf-8")
         if len(payload) > 10 * 1024 * 1024:
             raise ValueError("Documentation exceeds the 10 MiB inspection limit.")
+
+        from mana_agent.context_cost.artifact_store import ContextArtifactStore
+        store = ContextArtifactStore()
+        raw_text = payload.decode("utf-8", errors="replace")
+        artifact = store.put(
+            raw_text,
+            session_id=session_id or "api-inspection",
+            repository_id=str(self.workspace_root),
+            workspace_id=str(self.workspace_root),
+            content_type=content_type,
+        )
+
+        preview = raw_text[:2000]
+        truncated = len(raw_text) > 2000
         return {
             "reference": reference,
+            "documentation_ref": artifact.artifact_id,
             "content_type": content_type,
-            "text": payload.decode("utf-8", errors="strict"),
             "bytes": len(payload),
-            "truncated": False,
+            "text": preview,
+            "truncated": truncated,
+            "more_available": truncated,
         }
 
     def list_integrations(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:

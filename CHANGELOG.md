@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-15
 
+- Implemented Combined Part 2–3: Bounded Tool Context, API Artifactization, Durable Recovery, and Observability.
+  - Added canonical `ToolResultEnvelope` and integrated with `ContextCostGovernor.prepare_tool_result()`, ensuring all large external/tool results are persisted durably and exposed to models strictly as bounded projections.
+  - Enhanced `ContextArtifactStore.read()` and `context_read_artifact` tool to support selector-based continuation (`json_path`, markdown `section`, `record_start`/`record_count`, `line_start`/`line_end`, and `search`/`query`).
+  - Refactored API Manager lifecycle to be artifact-first: `inspect_documentation` persists raw docs and returns bounded metadata + `documentation_ref`; `import_documentation` resolves from `documentation_ref`; `ApiExecutor` writes authoritative responses to `ContextArtifactStore`, returning bounded projections with `response_artifact_ref`.
+  - Hardened multi-task execution in `ChatGateway` to pass prerequisite outputs as bounded projections with references.
+  - Hardened `FollowupClassifier` to eliminate silent retrieval error swallowing, returning structured failure state and populating `related_turn_ids` and `retrieval_refs` on `FollowupClassification`.
+  - Enforced strict memory status codes in `execute_memory_read` (`matched`, `no_match`, `unauthorized`, `not_configured`, `query_failed`, `retrieval_budget_exhausted`).
+  - Expanded `ContextManifest` with explicit token breakdowns and reference lists per component (`current_turn_tokens`, `conversation_tokens`, `memory_tokens`, `tool_tokens`, `artifact_tokens`, `dependency_tokens`, `skill_tokens`).
+  - Updated TUI `ExecutionPanel` with context utilization ratio, task envelope token budget, and compactions saved tokens.
+  - Added comprehensive test suite in `tests/context_cost/test_bounded_context_and_recovery.py`.
+  - User verification required: `python -m pytest tests/context_cost/test_bounded_context_and_recovery.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_context_retrieval_tools.py tests/gateway/test_followup_classifier.py -v`.
+
 - Fixed `checkpoint_resume_invalid` error on live data and multi-task routes by aligning prompt contracts with safety validation constraints.
   - Updated `CHECKPOINT_RESUME_PROMPT` in `src/mana_agent/gateway/checkpoint_resume.py` to explicitly specify handling for `entry_route_requires_live_data=true`, mandating `start_fresh` with `fresh_data_required=true` and prohibiting `resume_checkpoint`, `retry_task`, or `replan_task` when live external state requires fresh execution.
   - Clarified prompt instructions for `fresh_data_required`, `same_work`, `safe_to_continue`, and candidate task/checkpoint ID field rules across `start_fresh`, `resume_checkpoint`, `retry_task`, `replan_task`, and `stop`.

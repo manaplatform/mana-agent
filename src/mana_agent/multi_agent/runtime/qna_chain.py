@@ -163,7 +163,19 @@ class QnAChain:
                                 tool_res = str(tool)
                         except Exception as exc:
                             tool_res = f'{{"error": "{exc}"}}'
-                        messages.append(ToolMessage(content=str(tool_res), tool_call_id=call_id))
+                        governor = getattr(self.llm, "context_cost_governor", None)
+                        if governor is not None and getattr(governor, "enabled", False):
+                            rendered_res = governor.prepare_tool_result(
+                                tool_res,
+                                tool_name=fn_name,
+                                tool_call_id=call_id,
+                                turn_id="qna_chat",
+                            )
+                        else:
+                            from mana_agent.context_cost.compression import normalize_permitted_result
+                            norm = normalize_permitted_result(tool_res)
+                            rendered_res = norm if isinstance(norm, str) else json.dumps(norm, ensure_ascii=False, default=str)
+                        messages.append(ToolMessage(content=rendered_res, tool_call_id=call_id))
                 continue
 
             # Check for text-based tool call strings emitted directly by model
@@ -190,11 +202,23 @@ class QnAChain:
                             tool_res = str(tool)
                     except Exception as exc:
                         tool_res = f'{{"error": "{exc}"}}'
+                    governor = getattr(self.llm, "context_cost_governor", None)
+                    if governor is not None and getattr(governor, "enabled", False):
+                        rendered_res = governor.prepare_tool_result(
+                            tool_res,
+                            tool_name=matched_tool_name,
+                            tool_call_id=f"call_{uuid.uuid4().hex[:8]}",
+                            turn_id="qna_chat",
+                        )
+                    else:
+                        from mana_agent.context_cost.compression import normalize_permitted_result
+                        norm = normalize_permitted_result(tool_res)
+                        rendered_res = norm if isinstance(norm, str) else json.dumps(norm, ensure_ascii=False, default=str)
                     messages.append(AIMessage(content=content_text))
                     messages.append(
                         HumanMessage(
                             content=(
-                                f"Retrieved context for `{matched_tool_name}`:\n{tool_res}\n\n"
+                                f"Retrieved context for `{matched_tool_name}`:\n{rendered_res}\n\n"
                                 "Please answer the user's conversational request now using the context above."
                             )
                         )

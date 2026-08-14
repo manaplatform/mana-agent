@@ -61,6 +61,8 @@ class FollowupClassification:
     related_task_id: str
     safe_to_continue: bool
     reason: str
+    related_turn_ids: tuple[str, ...] = ()
+    retrieval_refs: tuple[str, ...] = ()
 
 
 _PROMPT = """Classify this newly received chat turn. A completed task does not complete its conversation.
@@ -221,8 +223,12 @@ class FollowupClassifier:
                     else:
                         res_data = {"result": str(tool_res)}
                     retrieved_contexts.append(res_data)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    retrieved_contexts.append({
+                        "status": "query_failed",
+                        "error": str(exc),
+                        "query": query,
+                    })
                 continue
             break
 
@@ -282,11 +288,29 @@ class FollowupClassifier:
                 "executed. Reason: decision did not authorize continuation: "
                 f"{output.reason}"
             )
+        related_turn_ids: list[str] = []
+        retrieval_refs: list[str] = []
+        for ctx in retrieved_contexts:
+            if isinstance(ctx, dict):
+                turns = ctx.get("turns") or []
+                if isinstance(turns, list):
+                    for turn in turns:
+                        if isinstance(turn, dict) and turn.get("turn_id"):
+                            related_turn_ids.append(str(turn["turn_id"]))
+                if ctx.get("artifact_ref"):
+                    retrieval_refs.append(str(ctx["artifact_ref"]))
+        if pointers is not None:
+            prev = getattr(pointers, "previous_turn_id", "")
+            if prev and prev not in related_turn_ids:
+                related_turn_ids.append(str(prev))
+
         fields = {
             "category": output.category,
             "related_task_id": output.related_task_id,
             "safe_to_continue": output.safe_to_continue,
             "reason": output.reason or "Followup classified",
             "decision_id": f"followup:{uuid.uuid4().hex[:12]}",
+            "related_turn_ids": tuple(dict.fromkeys(related_turn_ids)),
+            "retrieval_refs": tuple(dict.fromkeys(retrieval_refs)),
         }
         return FollowupClassification(**fields)

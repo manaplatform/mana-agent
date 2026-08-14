@@ -1142,16 +1142,15 @@ def test_api_route_decision_normalizes_risk_reason_and_tuple_fields() -> None:
             "task_intent": "search operations",
             "workflow": "operation_search",
             "confidence": 0.95,
-            "matched_terms": "quran",
+            "matched_terms": "invoice",
             "required_missing_inputs": ["verse"],
             "risk_reason": "Read-only search operation.",
             "safe_to_continue": True,
         }
     )
     assert route.reason == "Read-only search operation."
-    assert route.matched_terms == ("quran",)
+    assert route.matched_terms == ("invoice",)
     assert route.required_missing_inputs == ("verse",)
-
 
 
 def test_registry_and_executor_emit_redacted_events(

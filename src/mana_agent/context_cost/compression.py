@@ -6,13 +6,14 @@ import csv
 import io
 import json
 import re
+import uuid
 from collections import Counter
 from dataclasses import replace
 from typing import Any
 
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.context_cost.estimator import estimate_value_tokens
-from mana_agent.context_cost.models import CompressionEnvelope
+from mana_agent.context_cost.models import CompressionEnvelope, ToolResultEnvelope
 from mana_agent.utils.redaction import redact_json_line, redact_secrets
 
 
@@ -52,6 +53,65 @@ def detect_content_type(value: Any, *, tool_name: str = "") -> str:
         except csv.Error:
             pass
     return "text"
+
+
+def create_tool_result_envelope(
+    value: Any,
+    *,
+    tool_name: str,
+    tool_call_id: str = "",
+    store: ContextArtifactStore,
+    session_id: str,
+    repository_id: str,
+    workspace_id: str,
+    status: str = "success",
+    source_refs: tuple[str, ...] = (),
+    replayable: bool = True,
+    sensitive: bool = False,
+) -> ToolResultEnvelope:
+    permitted = normalize_permitted_result(value)
+    content_type = detect_content_type(permitted, tool_name=tool_name)
+    reference = store.put(
+        permitted,
+        session_id=session_id,
+        repository_id=repository_id,
+        workspace_id=workspace_id,
+        content_type=content_type,
+    )
+    summary_value = permitted
+    if content_type == "json" and isinstance(permitted, str):
+        try:
+            summary_value = json.loads(permitted)
+        except json.JSONDecodeError:
+            summary_value = permitted
+    summary, important, omitted = _compact(summary_value, content_type)
+    original_tokens = estimate_value_tokens(permitted)
+
+    inline_proj = {
+        "summary": summary,
+        "important_items": important,
+        "omitted_counts": omitted,
+        "content_type": content_type,
+    }
+    proj_tokens = estimate_value_tokens(inline_proj)
+    has_omitted = bool(omitted and any(v > 0 for v in omitted.values()))
+
+    return ToolResultEnvelope(
+        tool_name=tool_name,
+        tool_call_id=tool_call_id or f"tool-{uuid.uuid4().hex[:12]}",
+        status=status,
+        artifact_ref=reference.artifact_id,
+        content_hash=reference.content_hash,
+        original_tokens=original_tokens,
+        projection_tokens=proj_tokens,
+        inline_projection=inline_proj,
+        truncated=has_omitted,
+        more_available=has_omitted,
+        source_refs=tuple(source_refs),
+        content_type=content_type,
+        replayable=replayable,
+        sensitive=sensitive,
+    )
 
 
 def compress_tool_result(
@@ -160,8 +220,18 @@ def _representative(value: Any) -> Any:
     return value
 
 
-def render_envelope(envelope: CompressionEnvelope) -> str:
-    return json.dumps(envelope.as_dict(), ensure_ascii=False, sort_keys=True, default=str)
+def render_envelope(envelope: Any) -> str:
+    if hasattr(envelope, "as_dict"):
+        return json.dumps(envelope.as_dict(), ensure_ascii=False, sort_keys=True, default=str)
+    if isinstance(envelope, dict):
+        return json.dumps(envelope, ensure_ascii=False, sort_keys=True, default=str)
+    return str(envelope)
 
 
-__all__ = ["compress_tool_result", "detect_content_type", "normalize_permitted_result", "render_envelope"]
+__all__ = [
+    "compress_tool_result",
+    "create_tool_result_envelope",
+    "detect_content_type",
+    "normalize_permitted_result",
+    "render_envelope",
+]

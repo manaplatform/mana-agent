@@ -91,6 +91,7 @@ class _Import(_Decision):
     text: str = Field(default="", max_length=10 * 1024 * 1024)
     path: str = ""
     url: str = ""
+    documentation_ref: str = ""
     semantic_definition: SemanticDefinition | None = None
     save: bool = True
     ephemeral: bool = False
@@ -100,8 +101,8 @@ class _Import(_Decision):
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> "_Import":
-        if sum(bool(item) for item in (self.text, self.path, self.url)) != 1:
-            raise ValueError("Select exactly one of text, path, or url.")
+        if sum(bool(item) for item in (self.text, self.path, self.url, self.documentation_ref)) != 1:
+            raise ValueError("Select exactly one of text, path, url, or documentation_ref.")
         return self
 
 
@@ -225,6 +226,8 @@ def build_api_manager_langchain_tools(
                 text=request.text,
                 path=request.path,
                 url=request.url,
+                documentation_ref=request.documentation_ref,
+                session_id=request.session_id,
                 semantic_definition=request.semantic_definition,
                 save=request.save,
                 ephemeral=request.ephemeral,
@@ -243,6 +246,7 @@ def build_api_manager_langchain_tools(
                 source_decision_id=request.source_decision_id,
                 text=request.text,
                 text_reference=request.documentation_reference,
+                session_id=request.session_id,
                 semantic_definition=request.semantic_definition,
                 save=request.save,
                 ephemeral=request.ephemeral,
@@ -303,12 +307,12 @@ def build_api_manager_langchain_tools(
             name="api_docs_inspect",
             description=(
                 "Read one authorized API documentation URL, workspace file, or pasted text source "
-                "through the API network/file policy. Returns source evidence only and never infers, "
-                "imports, or executes an operation."
+                "through the API network/file policy. Returns source evidence and documentation_ref "
+                "and never infers, imports, or executes an operation."
             ),
             args_schema=_Inspect,
             func=lambda source_decision_id, session_id, text="", path="", url="": encode(
-                lambda: manager.inspect_documentation(text=text, path=path, url=url),
+                lambda: manager.inspect_documentation(text=text, path=path, url=url, session_id=session_id),
                 session_id=session_id,
                 source_decision_id=source_decision_id,
             ),

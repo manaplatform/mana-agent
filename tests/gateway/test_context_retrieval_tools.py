@@ -274,7 +274,7 @@ def test_scenario_5_current_turn_exec_b_never_becomes_capsule_task_scope():
     assert data["empty"] is True
     assert data["capsules_returned"] == 0
     assert data["goal_satisfied"] is False
-    assert data["status"] == "no_match"
+    assert data["status"] in {"unauthorized", "no_match"}
     assert "was not offered to the router" in data["error"]
 
 

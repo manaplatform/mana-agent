@@ -309,7 +309,11 @@ def execute_memory_read(
         if retrieval_ledger is not None
         else retrieval_budget
     )
-    effective_token_limit = min(int(max_tokens or 1000), remaining_allowance, retrieval_budget)
+    effective_token_limit = min(
+        int(max_tokens if max_tokens is not None else 1000),
+        remaining_allowance,
+        retrieval_budget,
+    )
     bounded_max_tokens = max(0, effective_token_limit)
     norm_query = str(query or "").strip()
     norm_tags = tuple(sorted(str(t).strip().lower() for t in (tags or []) if str(t).strip()))
@@ -345,7 +349,7 @@ def execute_memory_read(
     if not authenticated_user_id:
         error_payload = {
             "source": "memory_capsules",
-            "status": "no_match",
+            "status": "unauthorized",
             "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
@@ -380,7 +384,7 @@ def execute_memory_read(
     if not effective_selected_task or effective_selected_task not in offered_tasks:
         error_payload = {
             "source": "memory_capsules",
-            "status": "no_match",
+            "status": "unauthorized",
             "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
@@ -412,12 +416,13 @@ def execute_memory_read(
     if bounded_max_tokens <= 0:
         empty_payload = {
             "source": "memory_capsules",
-            "status": "no_match",
+            "status": "retrieval_budget_exhausted",
             "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
             "empty": True,
             "goal_satisfied": False,
+            "error": "Turn retrieval budget exhausted.",
             "capsules": [],
         }
         return json.dumps(empty_payload, ensure_ascii=False)
@@ -427,12 +432,13 @@ def execute_memory_read(
     ):
         empty_payload = {
             "source": "memory_capsules",
-            "status": "no_match",
+            "status": "not_configured",
             "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,
             "empty": True,
             "goal_satisfied": False,
+            "error": "Memory capsule service is not configured or disabled.",
             "capsules": [],
         }
         return json.dumps(empty_payload, ensure_ascii=False)
@@ -469,7 +475,7 @@ def execute_memory_read(
     except Exception as exc:
         error_payload = {
             "source": "memory_capsules",
-            "status": "no_match",
+            "status": "query_failed",
             "selected_memory_task_id": effective_selected_task,
             "capsules_returned": 0,
             "tokens": 0,

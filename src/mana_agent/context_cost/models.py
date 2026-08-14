@@ -45,6 +45,21 @@ class ContextManifest:
     reasons: tuple[str, ...]
     compression_references: tuple[str, ...]
     artifact_reference: str = ""
+    current_turn_refs: tuple[str, ...] = ()
+    current_turn_tokens: int = 0
+    conversation_refs: tuple[str, ...] = ()
+    conversation_tokens: int = 0
+    memory_refs: tuple[str, ...] = ()
+    memory_tokens: int = 0
+    tool_refs: tuple[str, ...] = ()
+    tool_tokens: int = 0
+    artifact_refs: tuple[str, ...] = ()
+    artifact_tokens: int = 0
+    dependency_refs: tuple[str, ...] = ()
+    dependency_tokens: int = 0
+    skill_refs: tuple[str, ...] = ()
+    skill_tokens: int = 0
+    component_token_breakdown: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +271,30 @@ class CompressionEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolResultEnvelope:
+    tool_name: str
+    tool_call_id: str
+    status: str
+    artifact_ref: str
+    content_hash: str
+    original_tokens: int
+    projection_tokens: int
+    inline_projection: Any
+    truncated: bool
+    more_available: bool
+    source_refs: tuple[str, ...] = ()
+    content_type: str = "text"
+    replayable: bool = True
+    sensitive: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["type"] = "mana.context.tool_result_envelope"
+        result["compression_envelope"] = "mana.context.compression_envelope"
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class GovernorDecision:
     action: str
     reason: str
@@ -367,5 +406,5 @@ __all__ = [
     "AccountingSnapshot", "ActiveCapabilitySet", "ArtifactReference", "BudgetReservation", "BudgetSnapshot", "CapabilityManifestEntry",
     "CompressionEnvelope", "ContextBreakdown", "ContextBudget", "ContextBudgetExceeded",
     "ContextManifest", "ContextSegment", "CostLedger", "GovernorDecision", "GovernorMode",
-    "ProviderCallForecast", "TaskExecutionForecast",
+    "ProviderCallForecast", "TaskExecutionForecast", "ToolResultEnvelope",
 ]

@@ -12,7 +12,12 @@ from dataclasses import replace
 from typing import Any, Iterator, Iterable, Sequence
 
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
-from mana_agent.context_cost.compression import compress_tool_result, normalize_permitted_result, render_envelope
+from mana_agent.context_cost.compression import (
+    compress_tool_result,
+    create_tool_result_envelope,
+    normalize_permitted_result,
+    render_envelope,
+)
 from mana_agent.context_cost.estimator import breakdown_for_segments, estimate_tool_schema_tokens, estimate_value_tokens
 from mana_agent.context_cost.events import emit_context_event
 from mana_agent.context_cost.logger import ContextCostLogger
@@ -1268,11 +1273,15 @@ class ContextCostGovernor:
                 if segment.kind == kind and segment.source_id
             )
 
+        def tokens_for_kind(kind: str) -> int:
+            return sum(segment.token_estimate for segment in segments if segment.kind == kind)
+
         compression_refs = tuple(
             str(segment.metadata.get("artifact_ref"))
             for segment in segments
             if segment.metadata.get("artifact_ref")
         )
+        breakdown = breakdown_for_segments(segments)
         manifest_id = f"manifest-{uuid.uuid4().hex}"
         manifest = ContextManifest(
             manifest_id=manifest_id,
@@ -1285,12 +1294,27 @@ class ContextCostGovernor:
             included_skills=sources("skill"),
             included_tool_schemas=sources("schema"),
             included_artifacts=sources("artifact") + compression_refs,
-            token_estimate=breakdown_for_segments(segments).input_tokens,
+            token_estimate=breakdown.input_tokens,
             reasons=tuple(
                 str(segment.metadata.get("reason") or segment.kind)
                 for segment in segments
             ),
             compression_references=compression_refs,
+            current_turn_refs=sources("user") + sources("current_turn"),
+            current_turn_tokens=tokens_for_kind("user") + tokens_for_kind("current_turn"),
+            conversation_refs=sources("history") + sources("conversation"),
+            conversation_tokens=tokens_for_kind("history") + tokens_for_kind("conversation"),
+            memory_refs=sources("memory"),
+            memory_tokens=tokens_for_kind("memory"),
+            tool_refs=sources("tool_result") + sources("tool"),
+            tool_tokens=tokens_for_kind("tool_result") + tokens_for_kind("tool"),
+            artifact_refs=sources("artifact") + compression_refs,
+            artifact_tokens=tokens_for_kind("artifact"),
+            dependency_refs=sources("dependency") + sources("prerequisite"),
+            dependency_tokens=tokens_for_kind("dependency") + tokens_for_kind("prerequisite"),
+            skill_refs=sources("skill"),
+            skill_tokens=tokens_for_kind("skill"),
+            component_token_breakdown=breakdown.as_dict(),
         )
         reference = self.artifacts.put(
             __import__("dataclasses").asdict(manifest),
@@ -1315,6 +1339,10 @@ class ContextCostGovernor:
         subagent_id: str | None = None,
         step_id: str = "",
         force: bool = False,
+        status: str = "success",
+        source_refs: tuple[str, ...] = (),
+        replayable: bool = True,
+        sensitive: bool = False,
     ) -> str:
         permitted = normalize_permitted_result(result)
         original_tokens = estimate_value_tokens(permitted)
@@ -1328,22 +1356,31 @@ class ContextCostGovernor:
             rendered = permitted if isinstance(permitted, str) else json.dumps(permitted, ensure_ascii=False, sort_keys=True, default=str)
             self.tracker.record_tool_result(tool_call_id or f"tool-{uuid.uuid4().hex}", rendered, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id, turn_id=turn_id)
             return rendered
-        envelope = compress_tool_result(
-            permitted, tool_name=tool_name, store=self.artifacts, session_id=self.session_id,
-            repository_id=self.repository_id, workspace_id=self.workspace_id,
+        envelope = create_tool_result_envelope(
+            permitted,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            store=self.artifacts,
+            session_id=self.session_id,
+            repository_id=self.repository_id,
+            workspace_id=self.workspace_id,
+            status=status,
+            source_refs=source_refs,
+            replayable=replayable,
+            sensitive=sensitive,
         )
-        saved = max(0, envelope.original_token_estimate - envelope.compact_token_estimate)
+        saved = max(0, envelope.original_tokens - envelope.projection_tokens)
         self.metrics["compression_tokens_saved"] = int(self.metrics["compression_tokens_saved"]) + saved
         self.metrics["context_compactions"] = int(self.metrics["context_compactions"]) + 1
         rendered = render_envelope(envelope)
-        self.tracker.record_tool_result(tool_call_id or f"tool-{uuid.uuid4().hex}", rendered, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id, turn_id=turn_id)
+        self.tracker.record_tool_result(envelope.tool_call_id, rendered, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id, turn_id=turn_id)
         metadata = self._base_metadata(turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         metadata.update({
-            "tool_name": tool_name, "tool_call_id": tool_call_id,
-            "original_tool_result_tokens": envelope.original_token_estimate,
-            "compressed_tool_result_tokens": envelope.compact_token_estimate,
-            "tokens_saved": saved, "compression_ratio": envelope.compression_ratio,
-            "artifact_ref": envelope.artifact_ref.artifact_id, "artifact_hash": envelope.content_hash,
+            "tool_name": tool_name, "tool_call_id": envelope.tool_call_id,
+            "original_tool_result_tokens": envelope.original_tokens,
+            "compressed_tool_result_tokens": envelope.projection_tokens,
+            "tokens_saved": saved,
+            "artifact_ref": envelope.artifact_ref, "artifact_hash": envelope.content_hash,
             "action": "compress_tool_result", "reason": "tool_result_threshold", "estimated": True,
         })
         self.logger.write(metadata)

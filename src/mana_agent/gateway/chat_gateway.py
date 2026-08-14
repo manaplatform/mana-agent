@@ -6417,8 +6417,10 @@ class AgentChatGateway:
                 for dependency_id in child_task.depends_on:
                     dependency = board.get_task(dependency_id)
                     if dependency.result_summary:
+                        bounded_summary = str(dependency.result_summary)[:1000]
+                        trunc_note = f" ... [truncated; ref: {dependency_id}]" if len(str(dependency.result_summary)) > 1000 else ""
                         prerequisite_results.append(
-                            f"{dependency.title}:\n{dependency.result_summary}"
+                            f"[Dependency: {dependency_id}] {dependency.title}:\n{bounded_summary}{trunc_note}"
                         )
                 execution_item = item.model_copy(
                     update={
@@ -6426,7 +6428,7 @@ class AgentChatGateway:
                             item.request
                             if not prerequisite_results
                             else item.request
-                            + "\n\nValidated prerequisite results:\n\n"
+                            + "\n\nValidated prerequisite projections:\n\n"
                             + "\n\n".join(prerequisite_results)
                         )
                     }
