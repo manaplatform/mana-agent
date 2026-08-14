@@ -12,6 +12,7 @@ from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
     BudgetForecast,
     BudgetRevision,
+    CheckpointResumeEligibility,
     CompletionContract,
     CompletionContractType,
     ExecutionState,
@@ -23,6 +24,7 @@ from mana_agent.execution_supervisor.store import LocalExecutionStore
 from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
 
 __all__ = [
+    "CheckpointResumeEligibility",
     "CompletionContract",
     "CompletionContractType",
     "ExecutionState",

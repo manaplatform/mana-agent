@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
+from mana_agent.execution_supervisor.models import TERMINAL_STATES
 
 # Compact structured JSON is small (reason ≤ 480 chars), but some providers
 # (notably NVIDIA DeepSeek V4 with default thinking/reasoning_effort=high)
@@ -80,8 +81,10 @@ CHECKPOINT_RESUME_PROMPT = """You decide whether a new user request may resume o
 Return a decision only, never answer the user.
 
 Chat turns auto-select durable work without requiring /tasks. Use this decision matrix:
-1) same incomplete work with a still-valid checkpoint → resume_checkpoint (continue saved progress)
-2) same work that failed or was interrupted, side effects safe to repeat → retry_task (same task id)
+1) same incomplete work with a still-valid, eligible checkpoint → resume_checkpoint (continue saved progress).
+   Terminal tasks (completed, failed, cancelled, budget_exhausted) cannot be resumed via resume_checkpoint.
+2) same work that failed or was interrupted, side effects safe to repeat → retry_task (same task id,
+   creates a new attempt, leave checkpoint_id empty)
 3) same work whose multi-task/job plan was blocked, reverted, or must restart incomplete steps →
    replan_task (same task id, leave checkpoint_id empty so the job restarts from its first
    incomplete step; completed children may remain complete)
@@ -187,7 +190,9 @@ class CheckpointResumeDecider:
             (str(item["task_id"]), str(item["checkpoint_id"]))
             for item in candidates
             if str(item.get("checkpoint_id") or "")
-            and str(item.get("state") or "") != "completed"
+            and str(item.get("state") or "") not in {s.value for s in TERMINAL_STATES}
+            and not bool(item.get("is_terminal"))
+            and bool(item.get("resume_eligible", True))
         }
         # Same-task restart/replan may target any non-completed offered task,
         # including ones that still list a checkpoint. Those actions intentionally

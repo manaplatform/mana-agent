@@ -33,6 +33,7 @@ from mana_agent.execution_supervisor.models import (
     BudgetRevision,
     CancellationStatus,
     CheckpointRecord,
+    CheckpointResumeEligibility,
     CompletionContract,
     CompletionContractType,
     EscrowLookupStatus,
@@ -99,6 +100,13 @@ class ExecutionSupervisor:
             self.startup_recovery_summary = self.recover()
 
     def _emit(self, event_type: str, task: TaskRecord, **details: Any) -> ExecutionEvent:
+        last_cp_id = task.checkpoint_id or None
+        resume_cp_id: str | None = None
+        if last_cp_id and task.state not in TERMINAL_STATES and task.state != ExecutionState.CANCELLING:
+            eligibility = self.validate_checkpoint_resume(task, allow_explicit_retry_seed=False)
+            if eligibility.resumable and eligibility.checkpoint:
+                resume_cp_id = eligibility.checkpoint.checkpoint_id
+
         event_details = {
             "assigned_agent": task.assigned_agent,
             "assigned_model": task.assigned_model,
@@ -106,6 +114,8 @@ class ExecutionSupervisor:
             "runtime_provider": task.runtime_provider,
             "lease_owner": task.lease_owner,
             "checkpoint_id": task.checkpoint_id,
+            "last_checkpoint_id": last_cp_id,
+            "resume_checkpoint_id": resume_cp_id,
             "attempt_generation": task.attempt_generation,
             "session_id": task.session_id,
             "workspace_id": task.workspace_id,
@@ -2073,9 +2083,16 @@ class ExecutionSupervisor:
         )
         checkpoint = None
         if decision.action == RecoveryAction.RESUME_CHECKPOINT:
-            checkpoint = self.store.get_checkpoint(decision.resume_checkpoint_id or task.checkpoint_id)
-            if checkpoint is None:
-                raise RetrySafetyError("selected checkpoint is missing or corrupt")
+            eligibility = self.validate_checkpoint_resume(
+                task,
+                decision.resume_checkpoint_id or task.checkpoint_id,
+                allow_explicit_retry_seed=True,
+            )
+            if not eligibility.resumable or eligibility.checkpoint is None:
+                raise RetrySafetyError(
+                    f"selected checkpoint is missing or corrupt ({eligibility.reason}): {eligibility.error_message}"
+                )
+            checkpoint = eligibility.checkpoint
         backoff = self.retry_policy.backoff_seconds(task, decision.retry_category)
         target_state = (
             ExecutionState.REPLANNING
@@ -2153,14 +2170,264 @@ class ExecutionSupervisor:
         task, _ = self.store.update_task(task_id, enrich)
         return task
 
+    def validate_checkpoint_resume(
+        self,
+        task: TaskRecord | str,
+        checkpoint: CheckpointRecord | str | None = None,
+        *,
+        workspace_id: str = "",
+        repository_id: str = "",
+        allow_explicit_retry_seed: bool = False,
+    ) -> CheckpointResumeEligibility:
+        """Validate whether a checkpoint is eligible for execution continuation.
+
+        Recovery precedence:
+            terminal durable result > terminal task state > resumable checkpoint > generic recovery
+        """
+        task_rec: TaskRecord | None
+        if isinstance(task, str):
+            task_rec = self.store.get_task_or_none(task)
+        else:
+            task_rec = task
+
+        if task_rec is None:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="task_not_found",
+                error_code="TASK_NOT_FOUND",
+                error_message="Task record not found",
+            )
+
+        task_id = task_rec.task_id
+        is_term = task_rec.state in TERMINAL_STATES or task_rec.state == ExecutionState.CANCELLING
+
+        # Terminal state check for implicit resume
+        if not allow_explicit_retry_seed:
+            if is_term:
+                return CheckpointResumeEligibility(
+                    resumable=False,
+                    reason="terminal_execution",
+                    error_code="TERMINAL_EXECUTION",
+                    error_message=f"Task {task_id} is in terminal state {task_rec.state.value}",
+                    task_id=task_id,
+                    checkpoint_id=task_rec.checkpoint_id,
+                    state=task_rec.state.value,
+                    is_terminal=True,
+                )
+
+            # Check if a durable terminal result exists in escrow
+            escrow_res = (
+                self.store.get_result(task_rec.result_id)
+                if task_rec.result_id
+                else self.store.get_result_by_execution_id(task_id)
+            )
+            if escrow_res is not None and (
+                escrow_res.supervisor_state in {s.value for s in TERMINAL_STATES}
+                or escrow_res.status == EscrowStatus.ACKNOWLEDGED
+                or is_term
+            ):
+                return CheckpointResumeEligibility(
+                    resumable=False,
+                    reason="terminal_result_exists",
+                    error_code="TERMINAL_RESULT_EXISTS",
+                    error_message=f"Durable terminal result exists for execution {task_id}",
+                    task_id=task_id,
+                    checkpoint_id=task_rec.checkpoint_id,
+                    state=task_rec.state.value,
+                    is_terminal=True,
+                )
+
+        # Human inbox wait check
+        if bool(getattr(task_rec, "waiting_inbox_item_id", "") or "") and task_rec.state is ExecutionState.WAITING:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="human_wait_required",
+                error_code="HUMAN_WAIT_REQUIRED",
+                error_message="Human inbox waits resume only through the durable inbox claim path",
+                task_id=task_id,
+                checkpoint_id=task_rec.checkpoint_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        # Deadline check
+        if task_rec.wall_clock_deadline_exceeded(self.clock()):
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="deadline_exceeded",
+                error_code="DEADLINE_EXCEEDED",
+                error_message=f"Task {task_id} wall-clock deadline has exceeded",
+                task_id=task_id,
+                checkpoint_id=task_rec.checkpoint_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        # Workspace / repository match
+        if workspace_id and task_rec.workspace_id and task_rec.workspace_id != workspace_id:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="workspace_mismatch",
+                error_code="WORKSPACE_MISMATCH",
+                error_message=f"Task workspace {task_rec.workspace_id} does not match {workspace_id}",
+                task_id=task_id,
+                checkpoint_id=task_rec.checkpoint_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+        if repository_id and task_rec.repository_id and task_rec.repository_id != repository_id:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="repository_mismatch",
+                error_code="REPOSITORY_MISMATCH",
+                error_message=f"Task repository {task_rec.repository_id} does not match {repository_id}",
+                task_id=task_id,
+                checkpoint_id=task_rec.checkpoint_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        # Checkpoint lookup
+        target_cp_id = ""
+        if isinstance(checkpoint, str):
+            target_cp_id = checkpoint
+        elif checkpoint is not None:
+            target_cp_id = checkpoint.checkpoint_id
+        else:
+            target_cp_id = task_rec.checkpoint_id
+
+        if not target_cp_id:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="missing_checkpoint",
+                error_code="CHECKPOINT_NOT_FOUND",
+                error_message="Task has no checkpoint ID",
+                task_id=task_id,
+                checkpoint_id="",
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        cp_rec: CheckpointRecord | None = None
+        if isinstance(checkpoint, CheckpointRecord):
+            cp_rec = checkpoint
+        else:
+            try:
+                cp_root = getattr(self.store, "root", None)
+                if cp_root is not None:
+                    cp_file = Path(cp_root) / "checkpoints" / f"{target_cp_id}.json"
+                    if cp_file.is_file():
+                        try:
+                            raw_data = cp_file.read_text(encoding="utf-8")
+                            cp_rec = CheckpointRecord.model_validate_json(raw_data)
+                        except Exception as exc:
+                            return CheckpointResumeEligibility(
+                                resumable=False,
+                                reason="checkpoint_corrupt",
+                                error_code="CHECKPOINT_CORRUPT",
+                                error_message=f"Checkpoint {target_cp_id} is corrupt or unreadable: {exc}",
+                                task_id=task_id,
+                                checkpoint_id=target_cp_id,
+                                state=task_rec.state.value,
+                                is_terminal=is_term,
+                            )
+                if cp_rec is None:
+                    cp_rec = self.store.get_checkpoint(target_cp_id)
+            except (ExecutionSupervisorError, ValueError, OSError, Exception) as exc:
+                return CheckpointResumeEligibility(
+                    resumable=False,
+                    reason="checkpoint_corrupt",
+                    error_code="CHECKPOINT_CORRUPT",
+                    error_message=f"Checkpoint {target_cp_id} is corrupt or unreadable: {exc}",
+                    task_id=task_id,
+                    checkpoint_id=target_cp_id,
+                    state=task_rec.state.value,
+                    is_terminal=is_term,
+                )
+
+        if cp_rec is None:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="checkpoint_not_found",
+                error_code="CHECKPOINT_NOT_FOUND",
+                error_message=f"Checkpoint record {target_cp_id} not found in store",
+                task_id=task_id,
+                checkpoint_id=target_cp_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        if cp_rec.task_id != task_id:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="task_id_mismatch",
+                error_code="CHECKPOINT_TASK_MISMATCH",
+                error_message=f"Checkpoint task {cp_rec.task_id} does not match {task_id}",
+                task_id=task_id,
+                checkpoint_id=target_cp_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        if task_rec.attempt_id and cp_rec.attempt_id != task_rec.attempt_id and not allow_explicit_retry_seed:
+            return CheckpointResumeEligibility(
+                resumable=False,
+                reason="attempt_superseded",
+                error_code="ATTEMPT_SUPERSEDED",
+                error_message=f"Checkpoint attempt {cp_rec.attempt_id} superseded by {task_rec.attempt_id}",
+                task_id=task_id,
+                checkpoint_id=target_cp_id,
+                state=task_rec.state.value,
+                is_terminal=is_term,
+            )
+
+        # Boundary check: before_verification requires a candidate result or valid verification subject
+        boundary = str(cp_rec.resume_cursor or cp_rec.resume_payload.get("boundary") or "")
+        if boundary == "before_verification":
+            has_files = bool(cp_rec.generated_files)
+            has_artifacts = bool(cp_rec.artifact_references or cp_rec.result_escrow_references)
+            has_changed = bool(cp_rec.resume_payload.get("changed_files"))
+            has_intermediate = bool(cp_rec.resume_payload.get("intermediate_results"))
+            has_task_artefacts = bool(task_rec.completion_artefacts)
+            has_mode = bool(cp_rec.resume_payload.get("mode"))
+            has_payload_error = bool(cp_rec.resume_payload.get("error"))
+
+            if has_payload_error or not (has_files or has_artifacts or has_changed or has_intermediate or has_task_artefacts or (has_mode and not has_payload_error and cp_rec.resume_payload.get("mode") not in {"route-media-error", "lane-verification-failed"})):
+                return CheckpointResumeEligibility(
+                    resumable=False,
+                    reason="missing_execution_result",
+                    error_code="INVALID_VERIFICATION_BOUNDARY",
+                    error_message="Verification-boundary checkpoint has no candidate result or valid subject to verify",
+                    task_id=task_id,
+                    checkpoint_id=target_cp_id,
+                    boundary=boundary,
+                    state=task_rec.state.value,
+                    is_terminal=is_term,
+                )
+
+        return CheckpointResumeEligibility(
+            resumable=True,
+            reason="resumable",
+            task_id=task_id,
+            checkpoint_id=target_cp_id,
+            boundary=boundary,
+            state=task_rec.state.value,
+            is_terminal=False,
+            checkpoint=cp_rec,
+        )
+
+    def get_resumable_checkpoint(self, task_id: str) -> CheckpointRecord | None:
+        """Return the checkpoint record only if it is proven eligible and safe for resume."""
+        eligibility = self.validate_checkpoint_resume(task_id, allow_explicit_retry_seed=False)
+        return eligibility.checkpoint if eligibility.resumable else None
+
     def resume_checkpoint(self, task_id: str) -> CheckpointRecord:
-        task = self.store.get_task(task_id)
-        if not task.checkpoint_id:
-            raise RetrySafetyError("task has no validated checkpoint to resume")
-        checkpoint = self.store.get_checkpoint(task.checkpoint_id)
-        if checkpoint is None or checkpoint.task_id != task.task_id:
-            raise RetrySafetyError("selected checkpoint is missing, corrupt, or belongs to another task")
-        return checkpoint
+        eligibility = self.validate_checkpoint_resume(task_id, allow_explicit_retry_seed=False)
+        if not eligibility.resumable or eligibility.checkpoint is None:
+            raise RetrySafetyError(
+                f"checkpoint resume invalid ({eligibility.reason}): {eligibility.error_message}"
+            )
+        return eligibility.checkpoint
 
     def release_retry(self, task_id: str) -> TaskRecord:
         current = self.store.get_task(task_id)

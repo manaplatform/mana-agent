@@ -112,6 +112,7 @@ from mana_agent.execution_supervisor.models import (
     RecoveryDecision,
     RetryCategory,
     SideEffectClassification,
+    TERMINAL_STATES,
 )
 from mana_agent.execution_supervisor.budget_decision import BudgetOverrunDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
@@ -4482,6 +4483,85 @@ class AgentChatGateway:
                         resume_decision.action == "resume_checkpoint"
                         and not force_new_task_for_dead
                     ):
+                        eligibility = (
+                            self._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+                                resume_decision.task_id,
+                                resume_decision.checkpoint_id,
+                                allow_explicit_retry_seed=False,
+                            )
+                        )
+                        if not eligibility.resumable:
+                            lookup = self._lane_coordinator.get_verified_execution_result(
+                                resume_decision.task_id
+                            )
+                            if (
+                                lookup.status == EscrowLookupStatus.FOUND
+                                and lookup.result is not None
+                                and lookup.is_terminal
+                            ):
+                                durable_result = dict(lookup.result.payload.get("chat_result") or {})
+                                ans = (
+                                    durable_result.get("answer")
+                                    or lookup.result.error_metadata.get("reason")
+                                    or (lookup.task.failure_reason if lookup.task else "")
+                                    or f"Status: {lookup.result.supervisor_state}"
+                                )
+                                result = ChatTurnResult(
+                                    answer=str(ans),
+                                    error=(
+                                        lookup.result.error_metadata.get("reason")
+                                        or (lookup.task.failure_reason if lookup.task else "")
+                                        if lookup.result.supervisor_state == "failed"
+                                        else None
+                                    ),
+                                    mode=durable_result.get("mode") or "verified-task-status",
+                                    changed_files=list(durable_result.get("changed_files") or []),
+                                    payload={
+                                        **dict(durable_result.get("payload") or {}),
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "verified_result_reused": True,
+                                        "status": lookup.result.supervisor_state,
+                                        "is_terminal": lookup.is_terminal,
+                                        "is_resumable": lookup.is_resumable,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif eligibility.is_terminal and lookup.task is not None:
+                                result = ChatTurnResult(
+                                    answer=lookup.task.failure_reason or f"Task ended as {lookup.task.state.value}.",
+                                    error=lookup.task.failure_reason if lookup.task.state == ExecutionState.FAILED else None,
+                                    mode=f"lane-{lookup.task.state.value.replace('_', '-')}",
+                                    payload={
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "status": lookup.task.state.value,
+                                        "is_terminal": True,
+                                        "is_resumable": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            raise CheckpointResumeError(
+                                f"Model decision selected non-resumable checkpoint for task {resume_decision.task_id}. "
+                                f"Reason: {eligibility.reason} - {eligibility.error_message}",
+                                code="checkpoint_resume_invalid",
+                            )
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -4500,7 +4580,7 @@ class AgentChatGateway:
                             decision=recovery_decision,
                             session_id=session_id,
                         )
-                        checkpoint = (
+                        checkpoint = eligibility.checkpoint or (
                             self._lane_coordinator.execution_supervisor.resume_checkpoint(
                                 resume_decision.task_id
                             )
@@ -4745,17 +4825,18 @@ class AgentChatGateway:
                                 ]
                                 if not actual_tools:
                                     result.error = "completion_verification_failed"
-                            self._lane_coordinator.checkpoint(
-                                reservation.execution.task_id,
-                                boundary="before_verification",
-                                resume_payload={
-                                    "mode": result.mode,
-                                    "changed_files": list(result.changed_files),
-                                    "intermediate_results": dict(result.payload.get("intermediate_results") or {}),
-                                },
-                                completed_steps=("routing", "execute_route"),
-                                pending_steps=("verify", "final_response"),
-                            )
+                            if not result.error:
+                                self._lane_coordinator.checkpoint(
+                                    reservation.execution.task_id,
+                                    boundary="before_verification",
+                                    resume_payload={
+                                        "mode": result.mode,
+                                        "changed_files": list(result.changed_files),
+                                        "intermediate_results": dict(result.payload.get("intermediate_results") or {}),
+                                    },
+                                    completed_steps=("routing", "execute_route"),
+                                    pending_steps=("verify", "final_response"),
+                                )
                             status = str(result.payload.get("status") or ("completed" if not result.error else "failed"))
                             pending_required_work_exists = bool(
                                 result.payload.get("pending_required_work", False)
@@ -5332,6 +5413,17 @@ class AgentChatGateway:
             )
         selected_model = ""
         if resume_decision.action == "resume_checkpoint":
+            eligibility = self._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+                recovery_target,
+                resume_decision.checkpoint_id,
+                allow_explicit_retry_seed=True,
+            )
+            if not eligibility.resumable:
+                raise CheckpointResumeError(
+                    f"Multi-task recovery checkpoint is invalid for task {recovery_target}. "
+                    f"Reason: {eligibility.reason} - {eligibility.error_message}",
+                    code="checkpoint_resume_invalid",
+                )
             recovery_decision = RecoveryDecision(
                 decision_id=resume_decision.decision_id,
                 task_id=recovery_target,
@@ -6384,11 +6476,16 @@ class AgentChatGateway:
             checkpoint = None
             checkpoint_error = ""
             deadline_exceeded = task.wall_clock_deadline_exceeded(now)
-            if task.checkpoint_id and not deadline_exceeded and not waiting_for_human:
-                try:
-                    checkpoint = supervisor.resume_checkpoint(task.task_id)
-                except ExecutionSupervisorError as exc:
-                    checkpoint_error = redact_text(str(exc))
+            eligibility = supervisor.validate_checkpoint_resume(
+                task,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+                allow_explicit_retry_seed=False,
+            )
+            if eligibility.resumable and not deadline_exceeded and not waiting_for_human:
+                checkpoint = eligibility.checkpoint
+            elif not eligibility.resumable and task.checkpoint_id and not eligibility.is_terminal:
+                checkpoint_error = redact_text(eligibility.error_message or eligibility.reason)
             try:
                 board_task = self._lane_coordinator.taskboard.get_task(
                     execution.taskboard_task_id if execution is not None else task.task_id
@@ -6413,6 +6510,11 @@ class AgentChatGateway:
                 "checkpoint_id": checkpoint.checkpoint_id if checkpoint else "",
                 "checkpoint_available": checkpoint is not None,
                 "checkpoint_error": checkpoint_error,
+                "last_checkpoint_id": task.checkpoint_id or "",
+                "resume_checkpoint_id": checkpoint.checkpoint_id if checkpoint else "",
+                "resume_eligible": eligibility.resumable,
+                "resume_rejection_reason": eligibility.reason if not eligibility.resumable else "",
+                "is_terminal": task.state in TERMINAL_STATES,
                 "normalized_intent": redact_text(task.normalized_intent),
                 "lane": selected_lane.value if isinstance(selected_lane, LaneId) else selected_lane,
                 "session_id": task.session_id,

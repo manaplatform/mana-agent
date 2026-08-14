@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed `checkpoint_resume_invalid` caused by automatic resume of terminal execution checkpoints in the execution supervisor and chat recovery gateway.
+  - Enforced recovery precedence: `terminal durable result > terminal task state > resumable checkpoint > generic recovery`.
+  - Added `CheckpointResumeEligibility` typed model and `validate_checkpoint_resume` / `get_resumable_checkpoint` methods to `ExecutionSupervisor`, preventing implicit resume of terminal executions (`completed`, `failed`, `cancelled`, `budget_exhausted`) while preserving checkpoints for diagnostics and explicit retry.
+  - Updated `_emit` in `ExecutionSupervisor` to distinguish `last_checkpoint_id` (snapshot provenance) from `resume_checkpoint_id` (continuation-eligible checkpoint or null on terminal states).
+  - Updated `CheckpointResumeDecider` prompt and candidate pairing to filter out terminal states and candidates with `resume_eligible=False`.
+  - Updated `_recovery_candidates` and chat turn recovery in `ChatGateway` to prioritize durable escrow terminal results (such as `media_image_disabled`) over invalid checkpoint resume attempts.
+  - Fixed `before_verification` checkpointing in `_execute_entry_route` to only record checkpoints when execution produced valid candidate results/artifacts and not on route errors.
+  - Added comprehensive regression tests covering Scenarios A through I in `tests/gateway/test_checkpoint_resume_invariants.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py tests/execution_supervisor/test_result_escrow_recovery.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py`.
+
 - Implemented native OpenRouter image generation for Mana-Agent's media lane.
   - Implemented `OpenRouterMediaProvider` with dedicated image endpoints (`GET /api/v1/images/models` for discovery and `POST /api/v1/images` for image generation), base64 decoding, credential redaction, and capability classification.
   - Extended media models (`ImageGenerationRequest`, `MediaArtifact`, `GenerationResult`) with `aspect_ratio`, `resolution`, artifact metadata fields (`task_id`, `session_id`, `provider`, `model`, `media_type`, `filename`), and `usage` tracking.

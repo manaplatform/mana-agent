@@ -49,6 +49,8 @@ from mana_agent.execution_supervisor.errors import (
 )
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
+    CheckpointRecord,
+    CheckpointResumeEligibility,
     EscrowLookupStatus,
     ExecutionState,
     RecoveryAction,
@@ -1958,6 +1960,24 @@ class LaneCoordinator:
         )
         return execution
 
+    def validate_checkpoint_resume(
+        self,
+        task: Any,
+        checkpoint: CheckpointRecord | str | None = None,
+        *,
+        workspace_id: str = "",
+        repository_id: str = "",
+        allow_explicit_retry_seed: bool = False,
+    ) -> CheckpointResumeEligibility:
+        """Authoritative checkpoint resumability validation."""
+        return self.execution_supervisor.validate_checkpoint_resume(
+            task,
+            checkpoint,
+            workspace_id=workspace_id or self.taskboard.store.workspace_id,
+            repository_id=repository_id or self.taskboard.store.repository_id,
+            allow_explicit_retry_seed=allow_explicit_retry_seed,
+        )
+
     def resume_checkpoint(
         self,
         task_id: str,
@@ -1972,12 +1992,15 @@ class LaneCoordinator:
             raise LaneCoordinatorError(
                 "model-selected checkpoint does not match the durable task checkpoint"
             )
-        try:
-            self.execution_supervisor.resume_checkpoint(task_id)
-        except ExecutionSupervisorError as exc:
+        eligibility = self.execution_supervisor.validate_checkpoint_resume(
+            task_id,
+            decision.resume_checkpoint_id,
+            allow_explicit_retry_seed=True,
+        )
+        if not eligibility.resumable:
             raise LaneCoordinatorError(
-                f"checkpoint recovery validation failed; no retry was executed: {exc}"
-            ) from exc
+                f"checkpoint recovery validation failed; no retry was executed: {eligibility.reason} - {eligibility.error_message}"
+            )
         return self._retry_existing_task(
             execution,
             decision=decision,

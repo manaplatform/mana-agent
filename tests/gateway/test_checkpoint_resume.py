@@ -67,7 +67,7 @@ def candidate() -> dict[str, object]:
         "checkpoint_id": "checkpoint_existing",
         "normalized_intent": "continue repository refactor",
         "lane": "coding",
-        "state": "failed",
+        "state": "running",
         "updated_at": "2026-08-01T10:00:00Z",
         "failure_reason": "worker stopped",
         "completed_steps": ["inspect"],
@@ -75,6 +75,7 @@ def candidate() -> dict[str, object]:
         "resume_payload_fields": ["cursor"],
         "generated_files": [],
         "verification_status": "pending",
+        "resume_eligible": True,
     }
 
 
@@ -507,3 +508,71 @@ def test_model_may_start_fresh_for_same_work_when_no_recoverable_candidates() ->
 
     assert decision.action == "start_fresh"
     assert decision.same_work is True
+
+
+def test_terminal_failed_task_checkpoint_cannot_be_implicitly_resumed() -> None:
+    failed_candidate = candidate()
+    failed_candidate["state"] = "failed"
+    failed_candidate["resume_eligible"] = False
+    failed_candidate["is_terminal"] = True
+
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "resume-terminal-fail",
+                "action": "resume_checkpoint",
+                "task_id": "task_existing",
+                "checkpoint_id": "checkpoint_existing",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": True,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "attempt to resume a terminal failed task",
+            }
+        )
+    )
+
+    with pytest.raises(CheckpointResumeError, match="selected checkpoint is not an offered durable candidate"):
+        decider.decide(
+            current_request="continue the failed task",
+            route="coding",
+            requires_live_data=False,
+            candidates=[failed_candidate],
+        )
+
+
+def test_terminal_failed_task_can_be_retried_with_new_attempt() -> None:
+    failed_candidate = candidate()
+    failed_candidate["state"] = "failed"
+    failed_candidate["resume_eligible"] = False
+    failed_candidate["is_terminal"] = True
+
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "decision_id": "retry-terminal-fail",
+                "action": "retry_task",
+                "task_id": "task_existing",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "retry failed task under existing identity with new attempt",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="retry the failed repository task",
+        route="coding",
+        requires_live_data=False,
+        candidates=[failed_candidate],
+    )
+
+    assert decision.action == "retry_task"
+    assert decision.task_id == "task_existing"
+    assert decision.checkpoint_id == ""
+
