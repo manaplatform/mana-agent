@@ -1312,6 +1312,7 @@ class LaneCoordinator:
                 LaneTaskState.VERIFYING: TaskStatus.NEEDS_REVIEW,
                 LaneTaskState.CANCELLED: TaskStatus.CANCELLED,
                 LaneTaskState.PENDING_BUDGET_DECISION: TaskStatus.NEEDS_REVIEW,
+                LaneTaskState.BUDGET_EXHAUSTED: TaskStatus.BLOCKED,
             }.get(state, TaskStatus.FAILED)
             reason = error or execution.error or f"lane execution ended as {state.value}"
             if mapped_status == TaskStatus.DONE:
@@ -1330,7 +1331,7 @@ class LaneCoordinator:
                 self.taskboard.update_status(
                     execution.taskboard_task_id,
                     mapped_status,
-                    reason=reason if mapped_status == TaskStatus.FAILED else None,
+                    reason=reason if mapped_status in {TaskStatus.FAILED, TaskStatus.BLOCKED} else None,
                 )
             self._persist_locked()
         self.lock_manager.release_task(task_id)

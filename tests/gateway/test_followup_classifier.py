@@ -177,3 +177,51 @@ def test_task_bound_category_with_unsafe_still_raises() -> None:
             candidates=[{"task_id": "task_1"}, {"task_id": "task_2"}],
         )
 
+
+def test_context_budget_blocked_followup_classification() -> None:
+    from mana_agent.context_cost.models import (
+        BudgetSnapshot,
+        ContextBreakdown,
+        ContextBudget,
+        ContextBudgetExceeded,
+        GovernorDecision,
+    )
+
+    class _BlockedModel:
+        def with_structured_output(self, _schema, *, method: str, strict: bool):
+            return self
+
+        def invoke(self, _messages):
+            snapshot = BudgetSnapshot(
+                breakdown=ContextBreakdown(),
+                budget=ContextBudget(context_window=8000),
+                used_tokens=9000,
+                remaining_tokens=0,
+                utilization_ratio=1.125,
+                cumulative_tokens=9000,
+                remaining_task_tokens=0,
+                cumulative_cost=0.05,
+                remaining_cost=0.0,
+                estimated=True,
+                status="blocked",
+            )
+            raise ContextBudgetExceeded(
+                GovernorDecision(
+                    action="block",
+                    reason="context_limit_deficit:1000",
+                    allowed=False,
+                    snapshot=snapshot,
+                )
+            )
+
+    classifier = FollowupClassifier(_BlockedModel())
+    with pytest.raises(FollowupClassificationError) as exc_info:
+        classifier.decide(
+            message="continue that task",
+            recent_history=[],
+            candidates=[{"task_id": "task_1"}],
+        )
+    assert exc_info.value.code == "context_budget_blocked"
+    assert "Context budget blocked" in str(exc_info.value)
+
+

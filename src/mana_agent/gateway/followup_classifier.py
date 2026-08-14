@@ -10,8 +10,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 
+from mana_agent.context_cost.models import ContextBudgetExceeded
+
+
 class FollowupClassificationError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class FollowupClassificationOutput(BaseModel):
@@ -82,6 +87,12 @@ class FollowupClassifier:
             else:
                 raw = self.llm.invoke([SystemMessage(content=_PROMPT), HumanMessage(content=json.dumps(payload, ensure_ascii=False))])
                 output = FollowupClassificationOutput.model_validate_json(str(getattr(raw, "content", raw)))
+        except ContextBudgetExceeded as exc:
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was executed. "
+                f"Reason: {exc}",
+                code="context_budget_blocked",
+            ) from exc
         except Exception as exc:
             raise FollowupClassificationError(f"Model decision failed: followup_classification. No fallback action was executed. Reason: {exc}") from exc
         offered = {str(item.get("task_id") or "") for item in candidates}

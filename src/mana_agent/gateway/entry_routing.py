@@ -9,6 +9,7 @@ from typing import Any, Callable, Literal, get_args
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
+from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 from mana_agent.media.models import MediaOperationDecision
@@ -208,6 +209,10 @@ class EntryRoutingOutput(_StrictRoutingOutput):
 
 class EntryRoutingError(RuntimeError):
     """The model did not return a valid entry-routing decision."""
+
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class EntryRouteRegistry:
@@ -622,6 +627,13 @@ class EntryRouter:
             return decision
         except EntryRoutingError:
             raise
+        except ContextBudgetExceeded as exc:
+            record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                f"Reason: {exc}",
+                code="context_budget_blocked",
+            ) from exc
         except Exception as exc:
             record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
             raise EntryRoutingError(

@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed `ContextBudgetExceeded` handling, reaccounting, and budget charging on finish across chat gateway execution and routing boundaries.
+  - Handled `ContextBudgetExceeded` in `ChatGateway.process_turn`, `_recover_or_execute_multi_task`, `_execute_multi_task_route`, `_execute_validated_child_route`, and single-turn route execution, mapping it to structured `context-budget-blocked` results.
+  - Added reaccounting and budget charging on finish (`_synchronize_lane_usage` and `_finish_lane` with `LaneTaskState.BUDGET_EXHAUSTED`) when a single-turn or multi-task child lane encounters `ContextBudgetExceeded` or `ModelContextLimitError`.
+  - Added typed `context_budget_blocked` error codes to `EntryRoutingError` and `FollowupClassificationError` so model budget limit blocks in entry routing and follow-up classification cleanly propagate without unhandled runtime exceptions.
+  - Mapped `LaneTaskState.BUDGET_EXHAUSTED` to `TaskStatus.BLOCKED` in `LaneCoordinator.finish`.
+  - Added regression tests in `tests/gateway/test_chat_gateway.py`, `tests/gateway/test_entry_routing.py`, and `tests/gateway/test_followup_classifier.py`.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py tests/gateway/test_followup_classifier.py tests/gateway/test_turn_budget_accounting.py -v`.
+
+
 - Fixed memory-capsule result, legacy identity migration, and verification semantics on `fix/multitask-memory-context-propagation`.
   - Implemented safe, explicit legacy local identity migration (`migrate_legacy_local_identities`) in `CapsuleRepository` and `CapsuleService` that migrates locally owned records (`root`, local OS user) to the canonical Mana user identity with full provenance tracking and revision incrementing while strictly preserving ACL isolation and forbidding runtime fallback authorization.
   - Updated `_execute_memory_route` to return structured memory evidence (`memory_record_count`, `memory_lookup_status`, `goal_satisfied`, `verification_status`) so empty queries return `goal_satisfied=False` and `verification_status="failed"` without inferring verification from prose.

@@ -57,6 +57,7 @@ from mana_agent.gateway.lane_coordinator import (
 )
 from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneId, LaneTaskState, select_lane
 from mana_agent.context_cost.accounting import ModelContextLimitError, TokenEstimationRequest
+from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.context_cost.profiles import ModelIdentity
 from mana_agent.gateway.routing import GatewayRoutingError
 from mana_agent.gateway.artifact_routing import (
@@ -3891,11 +3892,15 @@ class AgentChatGateway:
             except EntryRoutingError as exc:
                 result = ChatTurnResult(
                     answer=str(exc),
-                    error=str(exc),
-                    mode="route-error",
+                    error=getattr(exc, "code", "") or str(exc),
+                    mode=(
+                        "route-budget-blocked"
+                        if getattr(exc, "code", "") == "context_budget_blocked"
+                        else "route-error"
+                    ),
                     payload={
                         "route": "unsupported",
-                        "error_code": "entry_route_invalid",
+                        "error_code": getattr(exc, "code", "") or "entry_route_invalid",
                     },
                 )
             else:
@@ -3974,8 +3979,12 @@ class AgentChatGateway:
                     except FollowupClassificationError as exc:
                         result = ChatTurnResult(
                             answer=str(exc),
-                            error="followup_classification_invalid",
-                            mode="followup-classification-error",
+                            error=getattr(exc, "code", "") or "followup_classification_invalid",
+                            mode=(
+                                "checkpoint-resume-budget-blocked"
+                                if getattr(exc, "code", "") == "context_budget_blocked"
+                                else "followup-classification-error"
+                            ),
                             payload={"route": "multi_task"},
                         )
                     except LaneCoordinatorError as exc:
@@ -3987,6 +3996,35 @@ class AgentChatGateway:
                             error=getattr(exc, "code", "lane_coordinator_error"),
                             mode="lane-error",
                             payload={"route": "multi_task"},
+                        )
+                    except ModelContextLimitError as exc:
+                        result = ChatTurnResult(
+                            answer=(
+                                f"Gateway execution failed: {exc}. "
+                                "No direct model fallback was executed."
+                            ),
+                            error="context_budget_blocked",
+                            mode="context-budget-blocked",
+                            payload={
+                                "route": "multi_task",
+                                "required": exc.required,
+                                "effective_limit": exc.effective_limit,
+                                "deficit": exc.deficit,
+                            },
+                        )
+                    except ContextBudgetExceeded as exc:
+                        result = ChatTurnResult(
+                            answer=(
+                                f"Gateway execution failed: {exc}. "
+                                "No direct model fallback was executed."
+                            ),
+                            error="context_budget_blocked",
+                            mode="context-budget-blocked",
+                            payload={
+                                "route": "multi_task",
+                                "reason": exc.decision.reason,
+                                "snapshot": asdict(exc.decision.snapshot) if hasattr(exc.decision, "snapshot") else {},
+                            },
                         )
                     return self._finalize_turn_result(
                         result=result,
@@ -4801,9 +4839,14 @@ class AgentChatGateway:
                             if recovered_task and result.error is None:
                                 result.error = ""
                         except BaseException as exc:
+                            target_state = (
+                                LaneTaskState.BUDGET_EXHAUSTED
+                                if isinstance(exc, (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError))
+                                else LaneTaskState.FAILED
+                            )
                             self._finish_lane(
                                 reservation.execution.task_id,
-                                state=LaneTaskState.FAILED,
+                                state=target_state,
                                 error=str(exc),
                             )
                             raise
@@ -4915,6 +4958,8 @@ class AgentChatGateway:
                                         finished = self._lane_coordinator.inspect_task(
                                             reservation.execution.task_id
                                         )
+                                    except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+                                        raise
                                     except Exception as exc:
                                         decision_unavailable = True
                                         result.error = None
@@ -5011,8 +5056,12 @@ class AgentChatGateway:
                 except FollowupClassificationError as exc:
                     result = ChatTurnResult(
                         answer=str(exc),
-                        error="followup_classification_invalid",
-                        mode="followup-classification-error",
+                        error=getattr(exc, "code", "") or "followup_classification_invalid",
+                        mode=(
+                            "checkpoint-resume-budget-blocked"
+                            if getattr(exc, "code", "") == "context_budget_blocked"
+                            else "followup-classification-error"
+                        ),
                         payload={"route": entry_decision.route},
                     )
                 except CheckpointResumeError as exc:
@@ -5042,6 +5091,20 @@ class AgentChatGateway:
                             "required": exc.required,
                             "effective_limit": exc.effective_limit,
                             "deficit": exc.deficit,
+                        },
+                    )
+                except ContextBudgetExceeded as exc:
+                    result = ChatTurnResult(
+                        answer=(
+                            f"Gateway execution failed: {exc}. "
+                            "No direct model fallback was executed."
+                        ),
+                        error="context_budget_blocked",
+                        mode="context-budget-blocked",
+                        payload={
+                            "route": entry_decision.route,
+                            "reason": exc.decision.reason,
+                            "snapshot": asdict(exc.decision.snapshot) if hasattr(exc.decision, "snapshot") else {},
                         },
                     )
                 except LaneCoordinatorError as exc:
@@ -5850,7 +5913,13 @@ class AgentChatGateway:
                     sink=sink,
                     options=dict(options),
                 )
-            except (ModelContextLimitError, LaneBudgetError) as exc:
+            except (ModelContextLimitError, LaneBudgetError, ContextBudgetExceeded) as exc:
+                self._synchronize_lane_usage(child_task_id)
+                self._finish_lane(
+                    child_task_id,
+                    state=LaneTaskState.BUDGET_EXHAUSTED,
+                    error=str(exc),
+                )
                 board.update_status(
                     child_task_id,
                     TaskStatus.BLOCKED,
@@ -6243,15 +6312,28 @@ class AgentChatGateway:
                 },
                 pending_steps=("execute_route", "verify", "final_response"),
             )
-            result = self._execute_entry_route(
-                decision=decision,
-                context=context,
-                text=item.request,
-                state=state,
-                ask_service=ask_service,
-                sink=sink,
-                options=child_options,
-            )
+            try:
+                result = self._execute_entry_route(
+                    decision=decision,
+                    context=context,
+                    text=item.request,
+                    state=state,
+                    ask_service=ask_service,
+                    sink=sink,
+                    options=child_options,
+                )
+            except BaseException as exc:
+                target_state = (
+                    LaneTaskState.BUDGET_EXHAUSTED
+                    if isinstance(exc, (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError))
+                    else LaneTaskState.FAILED
+                )
+                self._finish_lane(
+                    reservation.execution.task_id,
+                    state=target_state,
+                    error=str(exc),
+                )
+                raise
         approval_ids = self._approval_request_ids(result.payload)
         awaiting = result.mode in {"remote-awaiting-permission"} or bool(approval_ids)
         if awaiting:
@@ -6840,6 +6922,8 @@ class AgentChatGateway:
                     state=state,
                     options=options,
                 )
+            except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+                raise
             except Exception as exc:
                 return ChatTurnResult(
                     answer="",
@@ -8252,6 +8336,8 @@ class AgentChatGateway:
                 flow_id=context.session_id,
                 run_id=context.turn_id,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8517,6 +8603,8 @@ class AgentChatGateway:
                 flow_id=context.session_id,
                 run_id=context.turn_id,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8677,6 +8765,8 @@ class AgentChatGateway:
                 run_id=context.turn_id,
                 transactional_parent_task_id=lane_task_id or None,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8937,6 +9027,8 @@ class AgentChatGateway:
                 run_id=context.turn_id,
                 transactional_parent_task_id=lane_task_id,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -9030,6 +9122,8 @@ class AgentChatGateway:
                 required_mcp_server=provider_id,
                 transactional_parent_task_id=lane_task_id or None,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -9361,6 +9455,8 @@ class AgentChatGateway:
                             "Transactional action approval required",
                             metadata=approval,
                         )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             self._record_computer_route_rejection(
                 context=context,

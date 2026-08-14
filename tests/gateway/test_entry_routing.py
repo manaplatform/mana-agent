@@ -1899,3 +1899,48 @@ def test_new_closes_previous_and_opens_fresh_session(tmp_path: Path, monkeypatch
     assert second != first
     assert first not in {item.session_id for item in service.store.list_sessions()}
     assert service.store.get_session(second).status == "active"
+
+
+def test_entry_routing_context_budget_blocked(tmp_path: Path, monkeypatch) -> None:
+    from mana_agent.context_cost.models import (
+        BudgetSnapshot,
+        ContextBreakdown,
+        ContextBudget,
+        ContextBudgetExceeded,
+        GovernorDecision,
+    )
+
+    class _BlockedRouterModel:
+        def with_structured_output(self, _schema, *, method: str, strict: bool):
+            return self
+
+        def invoke(self, _messages):
+            snapshot = BudgetSnapshot(
+                breakdown=ContextBreakdown(),
+                budget=ContextBudget(context_window=8000),
+                used_tokens=9000,
+                remaining_tokens=0,
+                utilization_ratio=1.125,
+                cumulative_tokens=9000,
+                remaining_task_tokens=0,
+                cumulative_cost=0.05,
+                remaining_cost=0.0,
+                estimated=True,
+                status="blocked",
+            )
+            raise ContextBudgetExceeded(
+                GovernorDecision(
+                    action="block",
+                    reason="context_limit_deficit:1000",
+                    allowed=False,
+                    snapshot=snapshot,
+                )
+            )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _BlockedRouterModel())
+    sid = gateway.create_session(frontend="test")
+    result = gateway.process_turn(sid, "Hello world")
+    assert result.error == "context_budget_blocked"
+    assert result.mode == "route-budget-blocked"
+
