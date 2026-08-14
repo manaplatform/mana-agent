@@ -591,3 +591,67 @@ def test_checkpoint_resume_accepts_long_reason_without_string_length_error() -> 
     assert decision.reason == long_reason.strip()
 
 
+def test_live_data_route_cannot_replan_old_task() -> None:
+    replan_candidate = candidate()
+    replan_candidate["checkpoint_id"] = ""
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "action": "replan_task",
+                "task_id": "task_existing",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": True,
+                "safe_to_continue": True,
+                "reason": "revise plan for live route",
+            }
+        )
+    )
+
+    with pytest.raises(CheckpointResumeError, match="same-task retry or replan safety fields are inconsistent"):
+        decider.decide(
+            current_request="https://brain-map.org/support/documentation/human-brain-atlas-api",
+            route="multi_task",
+            requires_live_data=True,
+            candidates=[replan_candidate],
+        )
+
+
+def test_multi_task_live_data_route_starts_fresh_when_candidates_exist() -> None:
+    existing_root = candidate()
+    existing_root["task_type"] = "multi_task_root"
+    existing_root["entry_route"] = "multi_task"
+    existing_root["child_task_ids"] = ["task_child_1", "task_child_2"]
+
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "action": "start_fresh",
+                "task_id": "",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": True,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": False,
+                "safe_to_continue": True,
+                "reason": "live URL analysis requires fresh data execution under a new task identity",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="https://brain-map.org/support/documentation/human-brain-atlas-api inspect this API",
+        route="multi_task",
+        requires_live_data=True,
+        candidates=[existing_root],
+    )
+
+    assert decision.action == "start_fresh"
+    assert decision.fresh_data_required is True
+    assert decision.same_work is True
+    assert decision.task_id == ""
+    assert decision.checkpoint_id == ""
+
+

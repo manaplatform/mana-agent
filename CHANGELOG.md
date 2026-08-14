@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-15
 
+- Fixed `checkpoint_resume_invalid` error on live data and multi-task routes by aligning prompt contracts with safety validation constraints.
+  - Updated `CHECKPOINT_RESUME_PROMPT` in `src/mana_agent/gateway/checkpoint_resume.py` to explicitly specify handling for `entry_route_requires_live_data=true`, mandating `start_fresh` with `fresh_data_required=true` and prohibiting `resume_checkpoint`, `retry_task`, or `replan_task` when live external state requires fresh execution.
+  - Clarified prompt instructions for `fresh_data_required`, `same_work`, `safe_to_continue`, and candidate task/checkpoint ID field rules across `start_fresh`, `resume_checkpoint`, `retry_task`, `replan_task`, and `stop`.
+  - Added regression test coverage in `tests/gateway/test_checkpoint_resume.py` covering multi-task live data fresh start and live route replan safety enforcement.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py tests/gateway/test_entry_routing.py -v`.
+
 - Fixed entry router model invocation and test suite compatibility.
   - Handled `with_structured_output` implementations/mocks lacking `include_raw` support in `src/mana_agent/gateway/entry_routing.py`.
   - Added required `token_estimate` argument to `ContextSegment` instantiation in `test_scenario_8_retrieved_context_participates_in_provider_call_estimate` in `tests/gateway/test_context_retrieval_tools.py`.
