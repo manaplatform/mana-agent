@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed `UnboundLocalError` for `pending_required_work_exists` in `chat_gateway.py` and `TypeError` for `load_model_cache` in `configuration_app.py`.
+  - Initialized `pending_required_work_exists` prior to approval and permission handling in `AgentChatGateway.process_turn`, ensuring all waiting, approval, and completion branches consistently propagate lane pending work status.
+  - Corrected `validate_checkpoint_resume` invocation in single-turn resume in `AgentChatGateway.process_turn` to pass `allow_explicit_retry_seed=True` when validating explicit model `resume_checkpoint` decisions.
+  - Updated `ManaConfigurationApp._media_model_options` to resolve the target provider's `base_url` and pass required `provider` and `base_url` positional arguments to `load_model_cache`.
+  - User verification required: `pytest tests/gateway/test_entry_routing.py tests/test_memory_architecture.py`.
+
 - Fixed `checkpoint_resume_invalid` caused by automatic resume of terminal execution checkpoints in the execution supervisor and chat recovery gateway.
   - Enforced recovery precedence: `terminal durable result > terminal task state > resumable checkpoint > generic recovery`.
   - Added `CheckpointResumeEligibility` typed model and `validate_checkpoint_resume` / `get_resumable_checkpoint` methods to `ExecutionSupervisor`, preventing implicit resume of terminal executions (`completed`, `failed`, `cancelled`, `budget_exhausted`) while preserving checkpoints for diagnostics and explicit retry.

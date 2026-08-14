@@ -403,13 +403,24 @@ class ManaConfigurationApp(App[bool]):
         purpose: str = "image",
     ) -> list[tuple[str, str]]:
         from mana_agent.config.model_catalog import ModelCapability
+        from mana_agent.config.provider_registry import PROVIDERS
         from mana_agent.config.user_config import load_model_cache
 
         model = str(values.get("model") or default)
         options = [(f"{model}  · current/manual", model)]
-        cache = load_model_cache()
         target_provider = provider or str(values.get("provider") or "openai")
-        cached_models = cache.get(target_provider, [])
+        base_url = str(values.get("base_url") or "").strip()
+        if not base_url:
+            try:
+                base_url = PROVIDERS.get(target_provider).default_base_url
+            except Exception:
+                base_url = ""
+        cached = (
+            load_model_cache(target_provider, base_url)
+            if target_provider and base_url
+            else None
+        )
+        cached_models = cached.models if cached else []
         for item in cached_models:
             if isinstance(item, dict):
                 model_id = str(item.get("id") or "").strip()

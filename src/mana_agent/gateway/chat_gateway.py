@@ -4487,7 +4487,7 @@ class AgentChatGateway:
                             self._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
                                 resume_decision.task_id,
                                 resume_decision.checkpoint_id,
-                                allow_explicit_retry_seed=False,
+                                allow_explicit_retry_seed=True,
                             )
                         )
                         if not eligibility.resumable:
@@ -4792,6 +4792,28 @@ class AgentChatGateway:
                             )
                             raise
                         approval_ids = self._approval_request_ids(result.payload)
+                        status = str(
+                            result.payload.get("status")
+                            or ("completed" if not result.error else "failed")
+                        )
+                        pending_required_work_exists = bool(
+                            result.payload.get("pending_required_work", False)
+                        )
+                        if not pending_required_work_exists:
+                            if result.mode == "remote-awaiting-permission" or approval_ids:
+                                pending_required_work_exists = True
+                            elif status in (
+                                "pass_budget_exhausted",
+                                "needs_continuation",
+                                "blocked",
+                                "budget_exhausted",
+                            ):
+                                pending_required_work_exists = True
+                            elif status == "completed":
+                                pending_required_work_exists = False
+                            else:
+                                pending_required_work_exists = bool(result.error)
+
                         if result.mode == "remote-awaiting-permission":
                             self._synchronize_lane_usage(
                                 reservation.execution.task_id
@@ -4837,18 +4859,6 @@ class AgentChatGateway:
                                     completed_steps=("routing", "execute_route"),
                                     pending_steps=("verify", "final_response"),
                                 )
-                            status = str(result.payload.get("status") or ("completed" if not result.error else "failed"))
-                            pending_required_work_exists = bool(
-                                result.payload.get("pending_required_work", False)
-                            )
-                            if not pending_required_work_exists:
-                                if status in ("pass_budget_exhausted", "needs_continuation", "blocked", "budget_exhausted"):
-                                    pending_required_work_exists = True
-                                elif status == "completed":
-                                    pending_required_work_exists = False
-                                else:
-                                    pending_required_work_exists = bool(result.error)
-
                             target_state = (
                                 LaneTaskState.FAILED
                                 if result.error
