@@ -286,10 +286,10 @@ class MediaService:
                     "media_reference_mime_invalid",
                     "Image and video references must be managed image artifacts.",
                 )
-        if model != modality.model:
-            raise MediaValidationError(
-                "media_model_not_configured",
-                "The requested media model is not the configured model.",
+        if not model:
+            raise MediaConfigurationError(
+                f"media_{media_type.value}_not_configured",
+                f"{media_type.value.capitalize()} generation model is not configured.",
             )
         if (
             media_type is MediaType.VIDEO
@@ -410,10 +410,10 @@ class MediaService:
         self, result: GenerationResult
     ) -> tuple[MediaModalityConfig, MediaProvider]:
         modality = self.config.require(result.media_type)
-        if modality.provider != result.provider or modality.model != result.model:
+        if modality.provider != result.provider:
             raise MediaConfigurationError(
                 "media_generation_configuration_changed",
-                "The persisted generation requires its original configured provider and model.",
+                "The persisted generation requires its original configured provider.",
             )
         api_key = self.config.api_key(result.media_type, self.settings_values)
         return modality, self.providers.create(modality, api_key)
