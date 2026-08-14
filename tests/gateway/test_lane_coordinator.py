@@ -1473,3 +1473,56 @@ def test_lane_coordinator_can_continue_turn_and_exhaustion(coordinator: LaneCoor
     )
     assert coordinator.is_turn_budget_exhausted(task_id)
     assert not coordinator.can_continue_turn(task_id)
+
+
+def test_replan_and_retry_on_verifying_and_pending_budget_states(
+    coordinator: LaneCoordinator,
+) -> None:
+    """Verifying and pending-budget stopped tasks are retryable and replannable."""
+    # 1. Task in VERIFYING state
+    res1 = _reserve(coordinator, LaneId.RESEARCH, intent="task verifying")
+    coordinator.start(res1)
+    task1_id = res1.execution.task_id
+    coordinator.transition(task1_id, LaneTaskState.VERIFYING, reason="verification failed")
+
+    replan_decision = RecoveryDecision(
+        decision_id="dec-replan-1",
+        task_id=task1_id,
+        action=RecoveryAction.REPLAN,
+        retry_category=RetryCategory.REPLAN,
+        reason="replan failed verification task",
+        safe_to_continue=True,
+    )
+    replan_res = coordinator.replan_task(
+        task1_id,
+        decision=replan_decision,
+        session_id="session-test",
+    )
+    assert replan_res.execution.task_id == task1_id
+
+    # 2. Task in PENDING_BUDGET_DECISION state
+    res2 = _reserve(coordinator, LaneId.RESEARCH, intent="task pending budget")
+    coordinator.start(res2)
+    task2_id = res2.execution.task_id
+    coordinator.transition(
+        task2_id,
+        LaneTaskState.PENDING_BUDGET_DECISION,
+        reason="budget overrun decision pending",
+    )
+
+    retry_decision = RecoveryDecision(
+        decision_id="dec-retry-2",
+        task_id=task2_id,
+        action=RecoveryAction.RETRY,
+        retry_category=RetryCategory.MODEL,
+        reason="retry pending budget task",
+        same_task_retry_authorized=True,
+        safe_to_continue=True,
+    )
+    retry_res = coordinator.retry_task(
+        task2_id,
+        decision=retry_decision,
+        session_id="session-test",
+    )
+    assert retry_res.execution.task_id == task2_id
+

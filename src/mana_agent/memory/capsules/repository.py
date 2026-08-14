@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -243,6 +243,79 @@ class CapsuleRepository:
             "access": self.access_records(capsule_id),
             "revision_history": self.revision_history(capsule_id),
         }
+
+    def migrate_legacy_local_identities(
+        self,
+        canonical_user_id: str,
+        *,
+        legacy_local_identities: set[str] | None = None,
+    ) -> int:
+        """Migrate locally owned legacy capsule records to canonical user identity.
+
+        Only records demonstrably owned by this local installation (e.g. root,
+        getpass.getuser(), or specified local OS accounts) are migrated.
+        Preserves ACL isolation and provenance without runtime fallback authorization.
+        """
+        import getpass
+        import os
+
+        canonical = str(canonical_user_id or "").strip()
+        if not canonical:
+            return 0
+
+        legacy_identities = set(legacy_local_identities or set())
+        if not legacy_identities:
+            try:
+                os_user = str(getpass.getuser() or "").strip()
+            except Exception:
+                os_user = ""
+            env_user = str(os.environ.get("USER") or os.environ.get("LOGNAME") or "").strip()
+            legacy_identities = {"root"}
+            if os_user:
+                legacy_identities.add(os_user)
+            if env_user:
+                legacy_identities.add(env_user)
+
+        legacy_identities.discard(canonical)
+        legacy_identities.discard("")
+        if not legacy_identities:
+            return 0
+
+        migrated_count = 0
+        with self._lock:
+            if not self.path.exists():
+                return 0
+            payload = self._load()
+            capsules = payload.get("capsules", {})
+            now = datetime.now(timezone.utc).isoformat()
+            for cid, cap in capsules.items():
+                owner = str(cap.get("owner_user_id") or "").strip()
+                if owner in legacy_identities:
+                    old_owner = owner
+                    cap["owner_user_id"] = canonical
+                    if isinstance(cap.get("created_by"), dict):
+                        if cap["created_by"].get("user_id") in legacy_identities:
+                            cap["created_by"]["user_id"] = canonical
+                    if isinstance(cap.get("updated_by"), dict):
+                        if cap["updated_by"].get("user_id") in legacy_identities:
+                            cap["updated_by"]["user_id"] = canonical
+                    cap["revision"] = int(cap.get("revision", 1)) + 1
+                    cap["updated_at"] = now
+                    evidence_list = list(cap.get("supporting_evidence") or [])
+                    evidence_list.append(f"migrated_identity:{old_owner}->{canonical}")
+                    cap["supporting_evidence"] = evidence_list
+                    payload.setdefault("history", {}).setdefault(cid, []).append(
+                        {
+                            "event": "legacy_identity_migration",
+                            "from_user_id": old_owner,
+                            "to_user_id": canonical,
+                            "timestamp": now,
+                        }
+                    )
+                    migrated_count += 1
+            if migrated_count > 0:
+                self._save(payload)
+        return migrated_count
 
 
 class RevisionConflict(RuntimeError):

@@ -5896,32 +5896,67 @@ class AgentChatGateway:
         approvals = [
             request_id for item in results for request_id in item.approval_request_ids
         ]
+        finished_root_state: str = ""
+        finished_root_error: str = ""
         if root_reservation.execution.state == LaneTaskState.CANCELLED:
             overall = "cancelled"
+            finished_root_state = LaneTaskState.CANCELLED.value
         elif statuses <= {"completed", "skipped"}:
             overall = "done"
             finished_root = self._finish_lane(
                 root_reservation.execution.task_id,
                 changed_files=changed_files,
-                verification_state={"children": child_payloads, "status": overall},
+                verification_state={
+                    "children": child_payloads,
+                    "status": overall,
+                    "chat_result": {
+                        "status": "completed",
+                        "route": "multi_task",
+                        "progress": f"{len(results)}/{len(results)} completed",
+                    },
+                },
             )
-            if finished_root.state is not LaneTaskState.COMPLETED:
+            finished_root_state = finished_root.state.value if hasattr(finished_root, "state") else str(finished_root)
+            finished_root_error = str(getattr(finished_root, "error", "") or "")
+            if finished_root.state is LaneTaskState.COMPLETED:
+                overall = "done"
+            elif finished_root.state is LaneTaskState.BUDGET_EXHAUSTED:
+                overall = "budget_exhausted"
+            elif finished_root.state is LaneTaskState.PENDING_BUDGET_DECISION:
+                overall = "budget_decision_pending"
+            elif finished_root.state is LaneTaskState.VERIFYING:
                 overall = "verification_failed"
+            elif finished_root.state is LaneTaskState.BLOCKED:
+                overall = "blocked"
+            elif finished_root.state is LaneTaskState.FAILED:
+                overall = "failed"
+            else:
+                overall = str(finished_root.state.value).lower()
         elif statuses.intersection({"blocked", "awaiting_approval"}):
             overall = "blocked"
             self._lane_coordinator.mark_blocked(
                 root_reservation.execution.task_id,
                 reason="one or more child tasks require a capability, prerequisite, or approval",
             )
+            finished_root_state = LaneTaskState.BLOCKED.value
         else:
             overall = "failed"
-            self._finish_lane(
+            finished_root = self._finish_lane(
                 root_reservation.execution.task_id,
                 state=LaneTaskState.FAILED,
                 changed_files=changed_files,
-                verification_state={"children": child_payloads, "status": overall},
+                verification_state={
+                    "children": child_payloads,
+                    "status": overall,
+                    "chat_result": {
+                        "status": "failed",
+                        "route": "multi_task",
+                    },
+                },
                 error="one or more child tasks failed and no safe continuation remains",
             )
+            finished_root_state = finished_root.state.value if hasattr(finished_root, "state") else str(finished_root)
+            finished_root_error = str(getattr(finished_root, "error", "") or "")
         completed_count = sum(
             item.status in {"completed", "skipped"} for item in results
         )
@@ -5960,6 +5995,8 @@ class AgentChatGateway:
                 "route": "multi_task",
                 "root_task_id": root_task.task_id,
                 "root_lane_task_id": root_reservation.execution.task_id,
+                "root_lane_state": finished_root_state,
+                "root_lane_error": finished_root_error,
                 "overall_status": overall,
                 "progress": f"{completed_count}/{len(results)} completed",
                 "decomposition": plan.model_dump(mode="json"),
@@ -6244,6 +6281,15 @@ class AgentChatGateway:
                 changed_files=result.changed_files,
                 error=str(result.error),
             )
+        elif result.payload.get("goal_satisfied") is False:
+            result.error = "goal_not_satisfied"
+            status = "failed"
+            self._finish_lane(
+                reservation.execution.task_id,
+                state=LaneTaskState.FAILED,
+                changed_files=result.changed_files,
+                error="goal_not_satisfied: Execution did not satisfy required criteria",
+            )
         else:
             if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"}:
                 actual_tools = [
@@ -6258,11 +6304,18 @@ class AgentChatGateway:
                         error="required_tool_missing: Execution required external tool work but no valid tool result was recorded",
                     )
                     status = "failed"
-            if not result.error:
+            if not result.error and result.payload.get("goal_satisfied") is not False:
                 finished = self._finish_lane(
                     reservation.execution.task_id,
                     changed_files=result.changed_files,
-                    verification_state={"mode": result.mode, "status": "completed"},
+                    verification_state={
+                        "mode": result.mode,
+                        "status": "completed",
+                        "chat_result": {
+                            "status": "completed",
+                            "route": decision.route,
+                        },
+                    },
                 )
                 status = (
                     "completed"
@@ -6279,12 +6332,28 @@ class AgentChatGateway:
                 child_task_id,
                 [str(path) for path in result.changed_files],
             )
+        raw_verification = str(result.payload.get("verification_status") or "").strip().lower()
+        if raw_verification in {"passed", "failed", "not_required", "pending"}:
+            verification_status = raw_verification
+        elif raw_verification == "verified":
+            verification_status = "passed"
+        elif raw_verification == "unverified":
+            verification_status = "failed"
+        elif result.error or result.payload.get("goal_satisfied") is False or status == "failed":
+            verification_status = "failed"
+        elif status == "completed":
+            verification_status = "passed"
+        elif status in {"awaiting_approval", "waiting"}:
+            verification_status = "pending"
+        elif status == "blocked":
+            verification_status = "failed"
+        else:
+            verification_status = "not_required"
+
         self._lane_coordinator.taskboard.update_orchestration(
             child_task_id,
             result_summary=result.answer[:4000],
-            verification_status=str(
-                result.payload.get("verification_status") or result.mode
-            ),
+            verification_status=verification_status,
             output_artifacts=artifacts,
             approval_request_ids=approval_ids,
         )
@@ -6296,14 +6365,13 @@ class AgentChatGateway:
             status=status,
             result=result.answer,
             blocker=str(result.error or "") if status != "completed" else "",
-            verification_status=str(
-                result.payload.get("verification_status") or result.mode
-            ),
+            verification_status=verification_status,
             changed_files=list(result.changed_files),
             artifacts=artifacts,
             approval_request_ids=approval_ids,
             payload=dict(result.payload),
         )
+
 
     @staticmethod
     def _approval_request_ids(payload: dict[str, Any]) -> list[str]:
@@ -7734,7 +7802,13 @@ class AgentChatGateway:
                     error="memory_task_id_invalid",
                     mode="route-memory-error",
                     decision=decision,
-                    payload={"route": "memory"},
+                    payload={
+                        "route": "memory",
+                        "memory_record_count": 0,
+                        "memory_lookup_status": "no_match",
+                        "goal_satisfied": False,
+                        "verification_status": "failed",
+                    },
                 )
             user_id = str(context.authenticated_user_id or "").strip()
             if not user_id:
@@ -7746,7 +7820,14 @@ class AgentChatGateway:
                     error="memory_principal_unavailable",
                     mode="route-memory-error",
                     decision=decision,
-                    payload={"route": "memory", "memory_task_id": task_id},
+                    payload={
+                        "route": "memory",
+                        "memory_task_id": task_id,
+                        "memory_record_count": 0,
+                        "memory_lookup_status": "no_match",
+                        "goal_satisfied": False,
+                        "verification_status": "failed",
+                    },
                 )
             if hasattr(memory_service, "user_id") and not getattr(memory_service, "user_id", None):
                 memory_service.user_id = user_id
@@ -7786,7 +7867,14 @@ class AgentChatGateway:
                     error="memory_retrieval_failed",
                     mode="route-memory-error",
                     decision=decision,
-                    payload={"route": "memory", "memory_task_id": task_id},
+                    payload={
+                        "route": "memory",
+                        "memory_task_id": task_id,
+                        "memory_record_count": 0,
+                        "memory_lookup_status": "no_match",
+                        "goal_satisfied": False,
+                        "verification_status": "failed",
+                    },
                 )
             evidence = [
                 redact_secrets(
@@ -7807,6 +7895,8 @@ class AgentChatGateway:
                     for item in evidence
                 )
             )
+            count = len(evidence)
+            matched = count > 0
             return ChatTurnResult(
                 answer=answer,
                 mode="route-memory",
@@ -7814,7 +7904,10 @@ class AgentChatGateway:
                 payload={
                     "route": "memory",
                     "memory_task_id": task_id,
-                    "memory_record_count": len(evidence),
+                    "memory_record_count": count,
+                    "memory_lookup_status": "matched" if matched else "no_match",
+                    "goal_satisfied": matched,
+                    "verification_status": "passed" if matched else "failed",
                 },
             )
 
@@ -7827,7 +7920,13 @@ class AgentChatGateway:
                 error="memory_task_id_invalid",
                 mode="route-memory-error",
                 decision=decision,
-                payload={"route": "memory"},
+                payload={
+                    "route": "memory",
+                    "memory_record_count": 0,
+                    "memory_lookup_status": "no_match",
+                    "goal_satisfied": False,
+                    "verification_status": "failed",
+                },
             )
         try:
             records = memory_service.search_blocking(

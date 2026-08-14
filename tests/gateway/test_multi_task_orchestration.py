@@ -695,15 +695,18 @@ class _CapsuleMemoryService:
     user_id = "user-multi-auth"
     config = SimpleNamespace(capsules=SimpleNamespace(enabled=True))
 
-    def __init__(self, user_id: str = "user-multi-auth") -> None:
+    def __init__(self, user_id: str = "user-multi-auth", return_capsules: bool = True) -> None:
         self.user_id = user_id
         self.capsules = self
         self.reads = 0
         self.calls: list[Any] = []
+        self.return_capsules = return_capsules
 
     def query_capsules(self, request: Any, *, correlation_id: str = "") -> list[Any]:
         self.reads += 1
         self.calls.append((request, correlation_id))
+        if not self.return_capsules:
+            return []
         return [
             SimpleNamespace(
                 capsule_id="capsule-whoami-1",
@@ -718,6 +721,7 @@ def _build_memory_gateway(
     root: Path,
     model: Any,
     user_id: str = "user-multi-auth",
+    return_capsules: bool = True,
 ) -> tuple[AgentChatGateway, _CapsuleMemoryService]:
     registry = EntryRouteRegistry()
     for name, description in (
@@ -771,7 +775,7 @@ def _build_memory_gateway(
         entry_router=router,
         memory_user_id=user_id,
     )
-    memory_service = _CapsuleMemoryService(user_id=user_id)
+    memory_service = _CapsuleMemoryService(user_id=user_id, return_capsules=return_capsules)
     gateway._stack.memory_service = memory_service
     return gateway, memory_service
 
@@ -1054,5 +1058,252 @@ def test_multi_task_child_missing_identity_fails_with_zero_reads(
     # 3. Dependent child is blocked
     assert by_local_id["report-memory-status"]["status"] == "blocked"
     assert result.payload.get("overall_status") != "done"
+
+
+def test_multi_task_child_empty_memory_result_fails_goal_and_blocks_dependent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero matching memory capsules fails child acceptance goal and prevents dependent execution."""
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    plan = MultiTaskPlan(
+        goal="Retrieve who-am-i memory and report status",
+        tasks=[
+            MultiTaskItem(
+                local_id="who-am-i-memory",
+                title="Read who am I memory",
+                request="Retrieve who-am-i private memory",
+                depends_on=[],
+                acceptance_criteria=["Memory retrieved"],
+                preferred_parallelism="automatic",
+                reason="Needs memory lookup",
+            ),
+            MultiTaskItem(
+                local_id="report-memory-status",
+                title="Report memory status",
+                request="Report the retrieved memory status",
+                depends_on=["who-am-i-memory"],
+                acceptance_criteria=["Status reported"],
+                preferred_parallelism="automatic",
+                reason="Depends on memory lookup",
+            ),
+        ],
+        final_acceptance_criteria=["All child tasks completed"],
+        reason="Compound memory and reporting workflow",
+    )
+    # Memory query will return 0 matching capsules
+    model = _MultiTaskMemoryModel(plan, memory_task_id="task-offered")
+    gateway, memory = _build_memory_gateway(
+        tmp_path, model, user_id="user-multi-auth", return_capsules=False
+    )
+
+    parent_context = EntryRouteContext(
+        session_id="session-mem-empty",
+        conversation_id="conv-mem-empty",
+        turn_id="turn-mem-empty",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {
+                "task_id": "task-offered",
+                "normalized_intent": "inspect user identity",
+                "state": "completed",
+            },
+        ),
+        authenticated_user_id="user-multi-auth",
+    )
+
+    result = gateway._recover_or_execute_multi_task(
+        decision=EntryRoutingDecision(
+            route="multi_task",
+            confidence=0.99,
+            reason="Compound memory workflow",
+            required_sources=("none",),
+        ),
+        context=parent_context,
+        text="Retrieve who-am-i private memory and report status",
+        state={},
+        ask_service=gateway.get_ask_service(),
+        sink=None,
+        options={},
+        turn_id="turn-mem-empty",
+        user_message_id="msg-mem-empty",
+    )
+
+    # 1. Memory query was attempted
+    assert memory.reads == 1
+
+    # 2. Child task failed because goal was unsatisfied (0 matching records)
+    children = result.payload.get("children", [])
+    by_local_id = {c["local_id"]: c for c in children}
+    assert by_local_id["who-am-i-memory"]["status"] == "failed"
+    assert by_local_id["who-am-i-memory"]["verification_status"] == "failed"
+    assert by_local_id["who-am-i-memory"]["verification_status"] != "route-memory"
+
+    # 3. Dependent child is blocked and overall compound task is not done
+    assert by_local_id["report-memory-status"]["status"] == "blocked"
+    assert result.payload.get("overall_status") in {"failed", "blocked"}
+
+
+def test_multi_task_two_of_two_completed_children_remains_overall_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When 2/2 children complete, overall status is done and root lane completes cleanly."""
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    plan = MultiTaskPlan(
+        goal="Retrieve who-am-i memory and report status",
+        tasks=[
+            MultiTaskItem(
+                local_id="who-am-i-memory",
+                title="Read who am I memory",
+                request="Retrieve who-am-i private memory",
+                depends_on=[],
+                acceptance_criteria=["Memory retrieved"],
+                preferred_parallelism="automatic",
+                reason="Needs memory lookup",
+            ),
+            MultiTaskItem(
+                local_id="report-memory-status",
+                title="Report memory status",
+                request="Report the retrieved memory status",
+                depends_on=["who-am-i-memory"],
+                acceptance_criteria=["Status reported"],
+                preferred_parallelism="automatic",
+                reason="Depends on memory lookup",
+            ),
+        ],
+        final_acceptance_criteria=["All child tasks completed"],
+        reason="Compound memory and reporting workflow",
+    )
+    model = _MultiTaskMemoryModel(plan, memory_task_id="task-offered")
+    gateway, memory = _build_memory_gateway(
+        tmp_path, model, user_id="user-multi-auth", return_capsules=True
+    )
+
+    parent_context = EntryRouteContext(
+        session_id="session-mem-success",
+        conversation_id="conv-mem-success",
+        turn_id="turn-mem-success",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {
+                "task_id": "task-offered",
+                "normalized_intent": "inspect user identity",
+                "state": "completed",
+            },
+        ),
+        authenticated_user_id="user-multi-auth",
+    )
+
+    result = gateway._recover_or_execute_multi_task(
+        decision=EntryRoutingDecision(
+            route="multi_task",
+            confidence=0.99,
+            reason="Compound memory workflow",
+            required_sources=("none",),
+        ),
+        context=parent_context,
+        text="Retrieve who-am-i private memory and report status",
+        state={},
+        ask_service=gateway.get_ask_service(),
+        sink=None,
+        options={},
+        turn_id="turn-mem-success",
+        user_message_id="msg-mem-success",
+    )
+
+    children = result.payload.get("children", [])
+    by_local_id = {c["local_id"]: c for c in children}
+    assert by_local_id["who-am-i-memory"]["status"] == "completed"
+    assert by_local_id["who-am-i-memory"]["verification_status"] == "passed"
+    assert by_local_id["report-memory-status"]["status"] == "completed"
+    assert by_local_id["report-memory-status"]["verification_status"] == "passed"
+    assert result.payload.get("overall_status") == "done"
+    assert result.payload.get("root_lane_state") == "completed"
+    assert result.payload.get("root_lane_error") == ""
+
+
+def test_multi_task_actual_completion_verification_failure_returns_verification_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When root lane completion verification fails, overall status reflects verification_failed."""
+    from mana_agent.gateway.lane_coordinator import LaneTaskState
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    plan = MultiTaskPlan(
+        goal="Retrieve who-am-i memory and report status",
+        tasks=[
+            MultiTaskItem(
+                local_id="who-am-i-memory",
+                title="Read who am I memory",
+                request="Retrieve who-am-i private memory",
+                depends_on=[],
+                acceptance_criteria=["Memory retrieved"],
+                preferred_parallelism="automatic",
+                reason="Needs memory lookup",
+            ),
+            MultiTaskItem(
+                local_id="report-memory-status",
+                title="Report memory status",
+                request="Report the retrieved memory status",
+                depends_on=["who-am-i-memory"],
+                acceptance_criteria=["Status reported"],
+                preferred_parallelism="automatic",
+                reason="Depends on memory lookup",
+            ),
+        ],
+        final_acceptance_criteria=["All child tasks completed"],
+        reason="Compound memory workflow",
+    )
+    model = _MultiTaskMemoryModel(plan, memory_task_id="task-offered")
+    gateway, memory = _build_memory_gateway(
+        tmp_path, model, user_id="user-multi-auth", return_capsules=True
+    )
+
+    # Monkeypatch _finish_lane to simulate a verification failure
+    orig_finish_lane = gateway._finish_lane
+
+    def mock_finish_lane(task_id: str, **kwargs: Any) -> Any:
+        finished = orig_finish_lane(task_id, **kwargs)
+        # If this is the root task finish, simulate VERIFYING state
+        if kwargs.get("state") != LaneTaskState.FAILED and "children" in (kwargs.get("verification_state") or {}):
+            return SimpleNamespace(state=LaneTaskState.VERIFYING, error="Contract file verification failed")
+        return finished
+
+    monkeypatch.setattr(gateway, "_finish_lane", mock_finish_lane)
+
+    parent_context = EntryRouteContext(
+        session_id="session-mem-verif-fail",
+        conversation_id="conv-mem-verif-fail",
+        turn_id="turn-mem-verif-fail",
+        memory_capsules_enabled=True,
+        memory_task_candidates=(
+            {
+                "task_id": "task-offered",
+                "normalized_intent": "inspect user identity",
+                "state": "completed",
+            },
+        ),
+        authenticated_user_id="user-multi-auth",
+    )
+
+    result = gateway._recover_or_execute_multi_task(
+        decision=EntryRoutingDecision(
+            route="multi_task",
+            confidence=0.99,
+            reason="Compound memory workflow",
+            required_sources=("none",),
+        ),
+        context=parent_context,
+        text="Retrieve who-am-i private memory",
+        state={},
+        ask_service=gateway.get_ask_service(),
+        sink=None,
+        options={},
+        turn_id="turn-mem-verif-fail",
+        user_message_id="msg-mem-verif-fail",
+    )
+
+    assert result.payload.get("overall_status") == "verification_failed"
+    assert result.payload.get("root_lane_state") == "verifying"
+    assert "Contract file verification failed" in result.payload.get("root_lane_error", "")
 
 

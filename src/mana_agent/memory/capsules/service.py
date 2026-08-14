@@ -88,6 +88,35 @@ class CapsuleService:
             organisation_scope_enabled=self.config.organisation_scope_enabled,
             user_scope_enabled=self.config.user_scope_enabled,
         )
+        canonical_user = str(
+            getattr(config, "user_id", "")
+            or getattr(self.config, "user_id", "")
+            or ""
+        ).strip()
+        if not canonical_user:
+            try:
+                from mana_agent.config.user_config import resolve_local_user_id
+
+                canonical_user = resolve_local_user_id()
+            except Exception:
+                canonical_user = ""
+        if canonical_user:
+            try:
+                self.repository.migrate_legacy_local_identities(canonical_user)
+            except Exception:
+                pass
+
+    def migrate_legacy_local_identities(
+        self,
+        canonical_user_id: str,
+        *,
+        legacy_local_identities: set[str] | None = None,
+    ) -> int:
+        """Migrate locally owned legacy capsule records to the canonical Mana user identity."""
+        return self.repository.migrate_legacy_local_identities(
+            canonical_user_id,
+            legacy_local_identities=legacy_local_identities,
+        )
 
     def effective_settings(self) -> dict[str, Any]:
         retention = self.config.retention

@@ -312,5 +312,227 @@ def test_memory_route_different_user_cannot_access_private_capsule(
     # Denied by ACL: 0 records returned for Bob
     assert result.error is None
     assert result.payload["memory_record_count"] == 0
+    assert result.payload["memory_lookup_status"] == "no_match"
+    assert result.payload["goal_satisfied"] is False
+    assert result.payload["verification_status"] == "failed"
     assert "No authorized private memory matched" in result.answer
     assert "alice-classified-data" not in result.answer
+
+
+def test_legacy_root_capsule_migrates_to_canonical_mana_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing locally owned legacy root capsule migrates to canonical Mana user with provenance."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("MANA_HOME", str(home))
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    capsule_service = CapsuleService(repo_root)
+
+    # Directly create a legacy capsule owned by 'root'
+    legacy_principal = MemoryPrincipal(
+        user_id="root",
+        project_id="repo-test",
+        task_id="task-legacy",
+        agent_id="gateway:chat",
+        capabilities=frozenset({"memory.capsule.write.private", "memory.capsule.read.private"}),
+    )
+    legacy_context = CapsuleTaskContext(
+        user_id="root",
+        organisation_id=None,
+        project_id="repo-test",
+        team_ids=frozenset(),
+        task_id="task-legacy",
+        agent_id="gateway:chat",
+        session_id="session-legacy",
+    )
+    seed = capsule_service.create_capsule(
+        principal=legacy_principal,
+        context=legacy_context,
+        scope=CapsuleScope.PRIVATE,
+        title="Legacy user profile",
+        summary="User profile created under legacy root identity",
+        content={"profile": "lead developer"},
+        origin_type="test",
+        origin_id="msg-legacy",
+    )
+    assert seed.owner_user_id == "root"
+
+    # Migrate legacy local identities to canonical user
+    canonical_user = "user_canonical_mana_999"
+    migrated_count = capsule_service.migrate_legacy_local_identities(
+        canonical_user,
+        legacy_local_identities={"root"},
+    )
+    assert migrated_count == 1
+
+    # Verify updated capsule
+    updated = capsule_service.repository.get(seed.capsule_id)
+    assert updated is not None
+    assert updated.owner_user_id == canonical_user
+    assert updated.created_by.user_id == canonical_user
+    assert updated.updated_by.user_id == canonical_user
+    assert any("migrated_identity:root->" in ev for ev in updated.supporting_evidence)
+
+
+def test_legacy_migration_does_not_expose_other_users_capsules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Migration strictly migrates local installation identities and never touches foreign users."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("MANA_HOME", str(home))
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    capsule_service = CapsuleService(repo_root)
+
+    # 1. Capsule owned by foreign user
+    foreign_principal = MemoryPrincipal(
+        user_id="user-foreign-victim",
+        project_id="repo-test",
+        task_id="task-foreign",
+        agent_id="gateway:chat",
+        capabilities=frozenset({"memory.capsule.write.private", "memory.capsule.read.private"}),
+    )
+    foreign_context = CapsuleTaskContext(
+        user_id="user-foreign-victim",
+        organisation_id=None,
+        project_id="repo-test",
+        team_ids=frozenset(),
+        task_id="task-foreign",
+        agent_id="gateway:chat",
+        session_id="session-foreign",
+    )
+    foreign_cap = capsule_service.create_capsule(
+        principal=foreign_principal,
+        context=foreign_context,
+        scope=CapsuleScope.PRIVATE,
+        title="Victim private secret",
+        summary="Secret confidential data",
+        content={"secret": "victim-secret-123"},
+        origin_type="test",
+        origin_id="msg-victim",
+    )
+
+    # 2. Run migration for a new user
+    migrated = capsule_service.migrate_legacy_local_identities(
+        "user-new-local",
+        legacy_local_identities={"root"},
+    )
+    assert migrated == 0
+
+    # 3. Foreign capsule is completely untouched
+    untouched = capsule_service.repository.get(foreign_cap.capsule_id)
+    assert untouched is not None
+    assert untouched.owner_user_id == "user-foreign-victim"
+
+
+def test_memory_route_structured_evidence_payload_and_verification_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Memory route returns explicit structured evidence and verification_status is never route-memory."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("MANA_HOME", str(home))
+    user_id = "user-auth-structure"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    capsule_service = CapsuleService(repo_root)
+
+    # Pre-seed matched capsule
+    writer_principal = MemoryPrincipal(
+        user_id=user_id,
+        project_id="repo-test",
+        task_id="task-match",
+        agent_id="gateway:chat",
+        capabilities=frozenset({"memory.capsule.write.private", "memory.capsule.read.private"}),
+    )
+    writer_context = CapsuleTaskContext(
+        user_id=user_id,
+        organisation_id=None,
+        project_id="repo-test",
+        team_ids=frozenset(),
+        task_id="task-match",
+        agent_id="gateway:chat",
+        session_id="session-1",
+    )
+    capsule_service.create_capsule(
+        principal=writer_principal,
+        context=writer_context,
+        scope=CapsuleScope.PRIVATE,
+        title="Server API token fact",
+        summary="Server API token is secret_xyz",
+        content={"token": "secret_xyz"},
+        origin_type="test",
+        origin_id="msg-match",
+    )
+
+    memory_mock = SimpleNamespace(
+        user_id=user_id,
+        config=SimpleNamespace(capsules=SimpleNamespace(enabled=True)),
+        capsules=capsule_service,
+    )
+    gateway = SimpleNamespace(
+        _stack=SimpleNamespace(memory_service=memory_mock, repository_id="repo-test"),
+        config=ChatGatewayConfig(memory_user_id=user_id),
+        settings=Settings(mana_memory_capsules_default_max_tokens=4000),
+    )
+
+    # Positive query: matched
+    pos_result = AgentChatGateway._execute_memory_route(
+        gateway,  # type: ignore[arg-type]
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read token memory",
+            required_sources=("memory",),
+            memory_task_id="task-match",
+        ),
+        context=EntryRouteContext(
+            session_id="session-1",
+            conversation_id="session-1",
+            turn_id="turn-1",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-match", "normalized_intent": "token", "state": "completed"},
+            ),
+            authenticated_user_id=user_id,
+        ),
+        query="Server API token",
+    )
+
+    assert pos_result.payload["memory_record_count"] == 1
+    assert pos_result.payload["memory_lookup_status"] == "matched"
+    assert pos_result.payload["goal_satisfied"] is True
+    assert pos_result.payload["verification_status"] == "passed"
+    assert pos_result.payload["verification_status"] != "route-memory"
+
+    # Negative query: no match
+    neg_result = AgentChatGateway._execute_memory_route(
+        gateway,  # type: ignore[arg-type]
+        decision=EntryRoutingDecision(
+            route="memory",
+            confidence=0.99,
+            reason="Read non-existent memory",
+            required_sources=("memory",),
+            memory_task_id="task-match",
+        ),
+        context=EntryRouteContext(
+            session_id="session-1",
+            conversation_id="session-1",
+            turn_id="turn-2",
+            memory_capsules_enabled=True,
+            memory_task_candidates=(
+                {"task_id": "task-match", "normalized_intent": "token", "state": "completed"},
+            ),
+            authenticated_user_id=user_id,
+        ),
+        query="completely unmatched non-existent query terms",
+    )
+
+    assert neg_result.payload["memory_record_count"] == 0
+    assert neg_result.payload["memory_lookup_status"] == "no_match"
+    assert neg_result.payload["goal_satisfied"] is False
+    assert neg_result.payload["verification_status"] == "failed"
+    assert neg_result.payload["verification_status"] != "route-memory"

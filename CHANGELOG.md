@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed memory-capsule result, legacy identity migration, and verification semantics on `fix/multitask-memory-context-propagation`.
+  - Implemented safe, explicit legacy local identity migration (`migrate_legacy_local_identities`) in `CapsuleRepository` and `CapsuleService` that migrates locally owned records (`root`, local OS user) to the canonical Mana user identity with full provenance tracking and revision incrementing while strictly preserving ACL isolation and forbidding runtime fallback authorization.
+  - Updated `_execute_memory_route` to return structured memory evidence (`memory_record_count`, `memory_lookup_status`, `goal_satisfied`, `verification_status`) so empty queries return `goal_satisfied=False` and `verification_status="failed"` without inferring verification from prose.
+  - Normalized multi-task child verification status calculation, removing `or result.mode` fallback so route mode (e.g. `route-memory`) is never persisted as a verification status.
+  - Enforced multi-task child completion requiring both execution success and goal satisfaction (`result.payload.get("goal_satisfied") is not False`), marking children with unsatisfied goals as failed.
+  - Provided canonical completed `chat_result` projection in multi-task root lane finish calls so completed multi-task compound executions are durably acknowledged without falling into `BUDGET_EXHAUSTED`.
+  - Preserved authoritative root lane status mapping (`done`, `budget_exhausted`, `budget_decision_pending`, `verification_failed`, `blocked`, `failed`) and added diagnostic `root_lane_state` and `root_lane_error` fields to the payload.
+  - Added `VERIFYING` and `PENDING_BUDGET_DECISION` to `LaneCoordinator._RETRYABLE_LANE_STATES` so tasks stopped in verification or budget overrun can be replanned or retried under validated model recovery decisions.
+  - Added regression tests in `tests/gateway/test_capsule_identity.py`, `tests/gateway/test_multi_task_orchestration.py`, and `tests/gateway/test_lane_coordinator.py`.
+  - User verification required: `python -m pytest tests/gateway/test_capsule_identity.py tests/gateway/test_multi_task_orchestration.py tests/gateway/test_lane_coordinator.py -v`.
+
+
 - Fixed authenticated-user identity propagation for private memory-capsule reads in local terminal and dashboard sessions.
   - Implemented canonical application identity resolution in `resolve_local_user_id` using `Settings.mana_user_id`, `config.toml` `MANA_USER_ID`, or persistent `~/.mana/identity.json` without using `root`, `$USER`, UID, hostname, or process ownership directly.
   - Extended `EntryRouteContext` with `authenticated_user_id` and propagated the canonical user identity through session entry, `route_context`, multi-task child contexts, and `_execute_memory_route`.

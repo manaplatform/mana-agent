@@ -1851,6 +1851,8 @@ class LaneCoordinator:
             # recoverable under a validated same-task decision.
             LaneTaskState.WAITING,
             LaneTaskState.PAUSED,
+            LaneTaskState.VERIFYING,
+            LaneTaskState.PENDING_BUDGET_DECISION,
         }
     )
 
