@@ -126,7 +126,7 @@ class Settings(BaseSettings):
         default=0.55, alias="MANA_ROUTING_MIN_CONFIDENCE"
     )
     mana_routing_task_token_budget: int = Field(
-        default=32_000, alias="MANA_ROUTING_TASK_TOKEN_BUDGET"
+        default=1_000_000, alias="MANA_ROUTING_TASK_TOKEN_BUDGET"
     )
     mana_routing_task_cost_budget: float | None = Field(
         default=None, alias="MANA_ROUTING_TASK_COST_BUDGET"

@@ -344,7 +344,7 @@ def test_multi_task_capacity_estimate_ignores_depleted_session_remaining(
     )
 
     # Shared session remaining is intentionally too small for a normal estimate.
-    with pytest.raises(ModelContextLimitError, match="effective limit is 50"):
+    with pytest.raises(ModelContextLimitError, match="remaining task budget is 50"):
         accounting.estimate(
             TokenEstimationRequest(
                 model_identity=ModelIdentity("fixture", "capacity-model"),

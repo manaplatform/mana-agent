@@ -125,7 +125,7 @@ def route_model(request: RoutingRequest, *, global_model: str, profiles=None) ->
 
 def routing_budgets_from_settings(settings) -> RoutingBudgets:
     return RoutingBudgets(
-        task_token_limit=getattr(settings, "mana_routing_task_token_budget", 32_000),
+        task_token_limit=getattr(settings, "mana_routing_task_token_budget", None),
         task_cost_limit=getattr(settings, "mana_routing_task_cost_budget", None),
         session_cost_remaining=getattr(settings, "mana_routing_session_cost_budget", None),
         competition_cost_limit=getattr(settings, "mana_routing_competition_cost_budget", None),

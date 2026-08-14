@@ -17,11 +17,22 @@ from mana_agent.context_cost.estimator import breakdown_for_segments, estimate_t
 from mana_agent.context_cost.events import emit_context_event
 from mana_agent.context_cost.logger import ContextCostLogger
 from mana_agent.context_cost.models import (
-    BudgetReservation, BudgetSnapshot, ContextBudget, ContextBudgetExceeded,
+    AccountingSnapshot, BudgetReservation, BudgetSnapshot, ContextBudget, ContextBudgetExceeded,
     ContextManifest, ContextSegment, CostLedger, GovernorDecision, GovernorMode,
+    ProviderCallForecast, TaskExecutionForecast,
 )
 from mana_agent.context_cost.pricing import calculate_cost
-from mana_agent.context_cost.accounting import AccountingReservation, ModelContextLimitError, ModelTokenAccountingService, TokenEstimationRequest
+from mana_agent.context_cost.accounting import (
+    AccountingReservation,
+    LaneBudgetExceededError,
+    ModelContextExceededError,
+    ModelContextLimitError,
+    ModelTokenAccountingService,
+    TaskBudgetExceededError,
+    TaskReservationExceededError,
+    TokenEstimationRequest,
+    VerificationBudgetExceededError,
+)
 from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver
 from mana_agent.context_cost.store import AccountingStore
 from mana_agent.execution_supervisor.models import BudgetForecast
@@ -39,13 +50,14 @@ class ContextCostGovernor:
         workspace_id: str = "",
         settings: Any,
         event_sink: Any | None = None,
+        mode: GovernorMode | str | None = None,
     ) -> None:
         self.session_id = str(session_id)
         self.repository_id = str(repository_id or "")
         self.workspace_id = str(workspace_id or "")
         self.settings = settings
         self.enabled = bool(getattr(settings, "mana_context_governor_enabled", True))
-        self.mode = GovernorMode(str(getattr(settings, "mana_context_governor_mode", "observe")))
+        self.mode = GovernorMode(mode) if mode is not None else GovernorMode(str(getattr(settings, "mana_context_governor_mode", "observe")))
         self.event_sink = event_sink
         self.tracker = TokenUsageTracker()
         self.ledger = CostLedger(
@@ -100,6 +112,10 @@ class ContextCostGovernor:
         self._accounting_reservations: dict[str, AccountingReservation] = {}
         self._reconciled_call_ids: set[str] = set()
         self._task_budget_reconciler: Any | None = None
+        self._task_consumed: dict[str, int] = {}
+        self._task_reservations: dict[str, dict[str, int]] = {}
+        self._turn_consumed: dict[str, int] = {}
+        self._turn_budgets: dict[str, int | None] = {}
 
     def set_task_budget_reconciler(self, reconciler: Any | None) -> None:
         """Register the gateway-owned, policy-validating budget revision boundary."""
@@ -239,17 +255,70 @@ class ContextCostGovernor:
             self._reconciled_call_ids.clear()
             self._context_manifests.clear()
             self._task_usage.clear()
+            self._task_consumed.clear()
+            self._task_reservations.clear()
+            self._turn_consumed.clear()
+            self._turn_budgets.clear()
             for key in self.metrics:
                 self.metrics[key] = 0.0 if "cost" in key else 0
+
+    def reset_turn_accounting(self, turn_id: str, *, allocated_tokens: int | None = None) -> None:
+        """Reset turn-scoped usage counter without resetting durable task consumption."""
+        with self._lock:
+            self._turn_consumed[turn_id] = 0
+            self._turn_budgets[turn_id] = allocated_tokens
+
+    def accounting_snapshot(self, task_id: str = "", turn_id: str = "") -> AccountingSnapshot:
+        with self._lock:
+            configured_task_budget = _positive_or_none(
+                getattr(self.settings, "mana_routing_task_token_budget", None)
+            ) or 0
+            task_consumed = self._task_consumed.get(task_id, 0)
+            active_res = self._task_reservations.get(task_id, {})
+            task_reserved = sum(active_res.values())
+            verification_ratio = float(getattr(self.settings, "mana_routing_verification_reserve_ratio", 0.15) or 0.0)
+            verification_reserve = int(configured_task_budget * verification_ratio)
+            task_remaining = max(0, configured_task_budget - task_consumed - task_reserved)
+
+            turn_budget = self._turn_budgets.get(turn_id)
+            turn_consumed = self._turn_consumed.get(turn_id, 0)
+            turn_remaining = None if turn_budget is None else max(0, turn_budget - turn_consumed)
+
+            session_budget = self.ledger.token_limit
+            session_consumed = self.ledger.tokens_used
+            session_remaining = self.ledger.remaining_tokens
+
+            cost_budget = self.ledger.cost_limit
+            cost_consumed = self.ledger.total_cost
+            cost_remaining = self.ledger.remaining_cost
+
+            return AccountingSnapshot(
+                task_id=task_id,
+                turn_id=turn_id,
+                task_budget_tokens=configured_task_budget,
+                task_consumed_tokens=task_consumed,
+                task_reserved_tokens=task_reserved,
+                task_remaining_tokens=task_remaining,
+                turn_budget_tokens=turn_budget,
+                turn_consumed_tokens=turn_consumed,
+                turn_remaining_tokens=turn_remaining,
+                verification_reserve_tokens=verification_reserve,
+                session_budget_tokens=session_budget,
+                session_consumed_tokens=session_consumed,
+                session_remaining_tokens=session_remaining,
+                cost_budget=cost_budget,
+                cost_consumed=cost_consumed,
+                cost_remaining=cost_remaining,
+                active_reservations_count=len(active_res),
+                status="ok" if (configured_task_budget == 0 or task_remaining > 0) else "budget_exhausted",
+            )
 
     def ensure_admission_budget(self, *, required_tokens: int | None = None) -> int | None:
         """Ensure a new chat message can admit another full task-sized run.
 
         ``mana_routing_task_token_budget`` is a per-task policy. Sequential
         follow-up and extend messages in one session must each receive a fresh
-        task-sized admission envelope. Prior completed work must not leave
-        ``task_token_remaining`` / ``session_token_remaining`` at 0 and block
-        the next message with ``effective limit is 0``.
+        task-sized admission envelope without inflating the configured task ceiling.
         """
         configured = _positive_or_none(
             getattr(self.settings, "mana_routing_task_token_budget", None)
@@ -264,17 +333,12 @@ class ContextCostGovernor:
             reserved_remaining = 0
             if reserve is not None and reserve.remaining_tokens is not None:
                 reserved_remaining = max(0, int(reserve.remaining_tokens))
-            # Implementation remaining is session remaining minus the still-held
-            # verification carve-out. Expand the session limit so a full new
-            # task budget fits after that carve-out.
             required_session_remaining = needed + reserved_remaining
             current_remaining = max(
                 0, int(self.ledger.token_limit) - int(self.ledger.tokens_used)
             )
             if current_remaining < required_session_remaining:
-                self.ledger.token_limit = int(self.ledger.token_limit) + (
-                    required_session_remaining - current_remaining
-                )
+                self.ledger.token_limit = int(self.ledger.tokens_used) + required_session_remaining
             return self._implementation_tokens_remaining()
 
     def _model_profile(self, provider: str, model: str) -> Any | None:
@@ -312,7 +376,7 @@ class ContextCostGovernor:
         lane_policy_limit: int | None = None,
     ):
         """Estimate one final, already-selected provider/model execution."""
-        return self.accounting.estimate(TokenEstimationRequest(
+        estimate = self.accounting.estimate(TokenEstimationRequest(
             model_identity=ModelIdentity(provider or "unknown", model),
             components=components,
             route=route,
@@ -327,6 +391,24 @@ class ContextCostGovernor:
             session_token_remaining=self.ledger.remaining_tokens,
             lane_policy_limit=lane_policy_limit,
         ))
+        metadata = {
+            "provider": provider,
+            "model": model,
+            "route": route,
+            "lane": lane,
+            "estimated_tokens": estimate.total_tokens,
+            "input_tokens": estimate.input_tokens,
+            "output_tokens": estimate.output_tokens,
+            "action": "estimate_execution",
+        }
+        emit_context_event(
+            self.event_sink,
+            "accounting.forecast",
+            title="Execution forecast created",
+            metadata=metadata,
+            session_id=self.session_id,
+        )
+        return estimate
 
     def child_governor(self, purpose: str, identifier: str, *, token_limit: int | None = None, cost_limit: float | None = None) -> CostLedger:
         return self.ledger.allocate_child(f"{purpose}:{identifier}", token_limit=token_limit, cost_limit=cost_limit)
@@ -426,8 +508,6 @@ class ContextCostGovernor:
                     else bool(historical_prediction_enabled)
                 ),
                 execution_kind=str(identity.get("execution_kind") or agent_id or "model_call"),
-                task_token_remaining=self._implementation_tokens_remaining(),
-                session_token_remaining=self.ledger.remaining_tokens,
             )
 
         removed_for_fit: list[ContextSegment] = []
@@ -548,6 +628,24 @@ class ContextCostGovernor:
         )
         verification_call = "verifier" in str(agent_id).casefold()
         with self._lock:
+            configured_task_budget = _positive_or_none(
+                getattr(self.settings, "mana_routing_task_token_budget", None)
+            ) or 0
+            task_consumed = self._task_consumed.get(task_id, 0)
+            task_res = self._task_reservations.get(task_id, {})
+            task_reserved = sum(task_res.values())
+            task_budget_blocked = (
+                bool(task_id)
+                and configured_task_budget > 0
+                and (task_consumed + task_reserved + used) > configured_task_budget
+            )
+            turn_budget = self._turn_budgets.get(turn_id)
+            turn_consumed = self._turn_consumed.get(turn_id, 0)
+            turn_budget_blocked = (
+                turn_budget is not None
+                and (turn_consumed + used) > turn_budget
+            )
+
             reserved_tokens = sum(
                 item.tokens for item in self._reservations.values()
                 if item.verification == verification_call
@@ -573,11 +671,16 @@ class ContextCostGovernor:
         if implementation_cost_remaining is not None:
             implementation_cost_remaining = max(0.0, implementation_cost_remaining - reserved_cost)
         remaining_cost = None if implementation_cost_remaining is None else max(0.0, implementation_cost_remaining - estimated_total_cost)
-        status = "blocked" if ratio >= budget.hard_limit_ratio else "warning" if ratio >= budget.warning_ratio else "ok"
+        status = "blocked" if (ratio >= budget.hard_limit_ratio or task_budget_blocked or turn_budget_blocked) else "warning" if ratio >= budget.warning_ratio else "ok"
         cost_blocked = implementation_cost_remaining is not None and (
             token_estimate.estimated_cost is None or estimated_total_cost > implementation_cost_remaining
         )
-        token_blocked = (ratio >= budget.hard_limit_ratio or (implementation_remaining is not None and used > implementation_remaining))
+        token_blocked = (
+            ratio >= budget.hard_limit_ratio
+            or (implementation_remaining is not None and used > implementation_remaining)
+            or task_budget_blocked
+            or turn_budget_blocked
+        )
         blocked = self.mode is GovernorMode.ENFORCE and (token_blocked or cost_blocked)
         action = (
             "block" if blocked
@@ -587,6 +690,8 @@ class ContextCostGovernor:
         )
         reason = (
             "monetary_budget_exhausted" if cost_blocked
+            else "task_budget_exceeded" if task_budget_blocked
+            else "turn_budget_exhausted" if turn_budget_blocked
             else "context_hard_limit" if token_blocked
             else "context_compaction_threshold" if action == "compact"
             else "caller_compaction_required" if action == "warn"
@@ -613,6 +718,8 @@ class ContextCostGovernor:
                     reservation_ids = task_usage.setdefault("accounting_reservation_ids", [])
                     if accounting_reservation.reservation_id not in reservation_ids:
                         reservation_ids.append(accounting_reservation.reservation_id)
+                    t_res = self._task_reservations.setdefault(task_id, {})
+                    t_res[accounting_reservation.reservation_id] = used
                 self._reservations[call_id] = BudgetReservation(
                     reservation_id=call_id,
                     operation_type="model_call",
@@ -648,7 +755,17 @@ class ContextCostGovernor:
             metric = "calls_blocked_cost" if cost_blocked else "calls_blocked_token"
             self.metrics[metric] = int(self.metrics[metric]) + 1
             self.metrics["overflow_preventions"] = int(self.metrics["overflow_preventions"]) + 1
+            metadata = self._base_metadata(provider=provider, model=model, turn_id=turn_id, task_id=task_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
+            metadata.update({"action": "block", "reason": reason, "used_tokens": used})
+            emit_context_event(self.event_sink, "accounting.rejection", title="Context budget blocked", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
+            emit_context_event(self.event_sink, "budget.blocked", title="Context budget blocked", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
             raise ContextBudgetExceeded(decision)
+
+        res_metadata = self._base_metadata(provider=provider, model=model, turn_id=turn_id, task_id=task_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
+        res_metadata.update({"action": "reserve", "reserved_tokens": used, "reservation_id": accounting_reservation.reservation_id})
+        emit_context_event(self.event_sink, "accounting.reservation", title="Token reservation created", metadata=res_metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
+        if status == "warning":
+            emit_context_event(self.event_sink, "budget.warning", title="Context budget warning", metadata=res_metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         return call_id, decision
 
     def record_model_call(
@@ -711,6 +828,13 @@ class ContextCostGovernor:
         with self._lock:
             self._reconciled_call_ids.add(call_id)
             self._reservations.pop(call_id, None)
+            if task_id:
+                task_res = self._task_reservations.get(task_id, {})
+                if accounting_reservation is not None:
+                    task_res.pop(accounting_reservation.reservation_id, None)
+                self._task_consumed[task_id] = self._task_consumed.get(task_id, 0) + normalized.total_tokens
+            if turn_id:
+                self._turn_consumed[turn_id] = self._turn_consumed.get(turn_id, 0) + normalized.total_tokens
             ledger = self.ledger
             owner_id = str(subagent_id or (agent_id if agent_id and agent_id != "main" else ""))
             if owner_id:
@@ -769,6 +893,7 @@ class ContextCostGovernor:
             "action": "record_usage", "reason": "provider_usage" if not normalized.estimated else "estimated_usage",
         })
         self.logger.write(metadata)
+        emit_context_event(self.event_sink, "accounting.reconciliation", title="Model call usage reconciled", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         emit_context_event(self.event_sink, "cost.updated", title="Context and cost usage updated", metadata=metadata, session_id=self.session_id, turn_id=turn_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         return normalized
 
@@ -882,8 +1007,10 @@ class ContextCostGovernor:
         with self._lock:
             reservation = self._reservations.pop(reservation_id, None)
             accounting_reservation = self._accounting_reservations.pop(reservation_id, None)
-            # Released operation ids must not be reused for a later distinct call.
             self._reconciled_call_ids.add(str(reservation_id))
+            if accounting_reservation is not None and accounting_reservation.task_id:
+                task_res = self._task_reservations.get(accounting_reservation.task_id, {})
+                task_res.pop(accounting_reservation.reservation_id, None)
         if accounting_reservation is not None:
             self.accounting.release(accounting_reservation, reason=reason)
         if reservation is None:
@@ -897,6 +1024,116 @@ class ContextCostGovernor:
             "reason": reason,
         })
         self.logger.write(metadata)
+        emit_context_event(
+            self.event_sink,
+            "accounting.rejection",
+            title="Reservation released",
+            metadata=metadata,
+            session_id=self.session_id,
+        )
+
+    def cancel_reservation(self, reservation_id: str, *, reason: str) -> None:
+        """Cancel an existing reservation."""
+        with self._lock:
+            reservation = self._reservations.pop(reservation_id, None)
+            accounting_reservation = self._accounting_reservations.pop(reservation_id, None)
+            self._reconciled_call_ids.add(str(reservation_id))
+            if accounting_reservation is not None and accounting_reservation.task_id:
+                task_res = self._task_reservations.get(accounting_reservation.task_id, {})
+                task_res.pop(accounting_reservation.reservation_id, None)
+        if accounting_reservation is not None:
+            self.accounting.cancel(accounting_reservation, reason=reason)
+        if reservation is None:
+            return
+        metadata = self._base_metadata()
+        metadata.update({
+            "reservation_id": reservation_id,
+            "reserved_tokens": reservation.tokens,
+            "reserved_cost": reservation.cost,
+            "action": "cancel_reservation",
+            "reason": reason,
+        })
+        self.logger.write(metadata)
+        emit_context_event(
+            self.event_sink,
+            "accounting.rejection",
+            title="Reservation cancelled",
+            metadata=metadata,
+            session_id=self.session_id,
+        )
+
+    def revise_reservation(
+        self,
+        call_id: str,
+        *,
+        new_segments: Sequence[ContextSegment],
+        expected_output_tokens: int | None = None,
+    ) -> AccountingReservation:
+        """Revise an active reservation with atomic invariant verification."""
+        with self._lock:
+            accounting_reservation = self._accounting_reservations.get(call_id)
+            if accounting_reservation is None:
+                raise KeyError(f"no active accounting reservation found for call_id {call_id!r}")
+            task_id = accounting_reservation.task_id
+            configured_task_budget = _positive_or_none(
+                getattr(self.settings, "mana_routing_task_token_budget", None)
+            ) or 0
+            task_consumed = self._task_consumed.get(task_id, 0)
+            task_res = self._task_reservations.get(task_id, {})
+            current_other_reserved = sum(
+                tokens for res_id, tokens in task_res.items()
+                if res_id != accounting_reservation.reservation_id
+            )
+
+            prev_estimate = accounting_reservation.estimate
+            resolved_provider = prev_estimate.model_identity.provider
+            model = prev_estimate.model_identity.model
+
+            req = TokenEstimationRequest(
+                model_identity=ModelIdentity(resolved_provider, model),
+                components={f"{s.kind}:{i}": s.content for i, s in enumerate(new_segments)},
+                route=accounting_reservation.prediction_key.route if accounting_reservation.prediction_key else "",
+                lane=accounting_reservation.prediction_key.lane if accounting_reservation.prediction_key else "",
+                requested_output_tokens=expected_output_tokens,
+                execution_kind=accounting_reservation.prediction_key.execution_kind if accounting_reservation.prediction_key else "model_call",
+            )
+            new_estimate = self.accounting.estimate(req)
+
+            if configured_task_budget > 0 and (task_consumed + current_other_reserved + new_estimate.total_tokens) > configured_task_budget:
+                deficit = (task_consumed + current_other_reserved + new_estimate.total_tokens) - configured_task_budget
+                raise TaskReservationExceededError(
+                    f"revised reservation requires {new_estimate.total_tokens} tokens which exceeds task budget ceiling {configured_task_budget} (deficit={deficit})",
+                    required=new_estimate.total_tokens,
+                    effective_limit=max(0, configured_task_budget - task_consumed - current_other_reserved),
+                )
+
+            revised = self.accounting.revise(accounting_reservation, req)
+            self._accounting_reservations[call_id] = revised
+            if task_id:
+                task_res[accounting_reservation.reservation_id] = new_estimate.total_tokens
+            if call_id in self._reservations:
+                self._reservations[call_id] = replace(
+                    self._reservations[call_id],
+                    tokens=new_estimate.total_tokens,
+                    cost=float(new_estimate.estimated_cost or 0.0),
+                )
+
+            metadata = self._base_metadata(task_id=task_id)
+            metadata.update({
+                "reservation_id": revised.reservation_id,
+                "call_id": call_id,
+                "new_tokens": new_estimate.total_tokens,
+                "action": "revise_reservation",
+            })
+            self.logger.write(metadata)
+            emit_context_event(
+                self.event_sink,
+                "accounting.revision",
+                title="Reservation revised",
+                metadata=metadata,
+                session_id=self.session_id,
+            )
+            return revised
 
     def _allocate_model_call_id(
         self,

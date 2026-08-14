@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Implemented Phase 0 — Accounting Foundation refactoring cumulative task budgets, per-provider-call context capacity, turn usage, and verification reserve.
+  - Updated configurable default `MANA_ROUTING_TASK_TOKEN_BUDGET` to `1_000_000` exclusively via settings and user config without introducing hardcoded accounting literals.
+  - Added typed forecast and snapshot contracts: `ProviderCallForecast`, `TaskExecutionForecast`, and `AccountingSnapshot`.
+  - Added typed accounting error hierarchy: `ModelContextLimitError`, `ModelContextExceededError`, `TaskBudgetExceededError`, `TaskReservationExceededError`, `LaneBudgetExceededError`, and `VerificationBudgetExceededError`.
+  - Separated provider-call context validation (comparing individual call tokens against model context window and max output capability) from task-level cumulative budget admission.
+  - Enforced atomic task reservation invariant (`task_consumed + task_reserved <= configured_task_budget`) across initial admissions, revisions, and multi-call execution.
+  - Separated durable cumulative task accounting from turn-scoped usage counters (`reset_turn_accounting`), preventing turn budget overflow and keeping verification reserve protected.
+  - Added reservation revision (`revise`) and cancellation (`cancel`) methods ensuring idempotent reconciliation and release without double counting.
+  - Added structured accounting events (`accounting.forecast`, `accounting.reservation`, `accounting.revision`, `accounting.reconciliation`, `accounting.rejection`, `budget.exhausted`, `context.forecast`).
+  - Added comprehensive test suite in `tests/context_cost/test_accounting_foundation.py` and updated `tests/gateway/test_multi_task_orchestration.py`.
+  - User verification required: `python -m pytest tests/context_cost/ tests/gateway/ -v`.
+
 - Fixed `ContextBudgetExceeded` handling, reaccounting, and budget charging on finish across chat gateway execution and routing boundaries.
   - Handled `ContextBudgetExceeded` in `ChatGateway.process_turn`, `_recover_or_execute_multi_task`, `_execute_multi_task_route`, `_execute_validated_child_route`, and single-turn route execution, mapping it to structured `context-budget-blocked` results.
   - Added reaccounting and budget charging on finish (`_synchronize_lane_usage` and `_finish_lane` with `LaneTaskState.BUDGET_EXHAUSTED`) when a single-turn or multi-task child lane encounters `ContextBudgetExceeded` or `ModelContextLimitError`.
