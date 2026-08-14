@@ -36,10 +36,11 @@ def _local_capsule_identity_resolver(root: Path) -> Any:
     Private and parent-child capsules remain unavailable because their durable
     task identities cannot be established by this local host.
     """
+    from mana_agent.config.user_config import resolve_local_user_id
     from mana_agent.memory import CapsuleTaskContext, MemoryPrincipal
     from mana_agent.workspaces.paths import repository_id_for_path
 
-    user_id = getpass.getuser()
+    user_id = resolve_local_user_id()
     project_id = repository_id_for_path(root)
     task_id = f"api-{project_id}"
     principal = MemoryPrincipal(

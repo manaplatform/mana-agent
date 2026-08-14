@@ -1014,6 +1014,7 @@ def test_gateway_memory_route_reads_only_the_selected_private_capsules(
         memory_task_candidates=(
             {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
         ),
+        authenticated_user_id="authenticated-user",
     )
     decision = EntryRoutingDecision(
         route="memory",

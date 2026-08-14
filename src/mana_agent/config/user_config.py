@@ -32,6 +32,10 @@ def secrets_file() -> Path:
     return config_dir() / "secrets.toml"
 
 
+def identity_file() -> Path:
+    return config_dir() / "identity.json"
+
+
 def model_cache_file() -> Path:
     return config_dir() / "model_cache.json"
 
@@ -55,6 +59,7 @@ MANAGED_SECRET_KEYS = frozenset(NON_PERSISTED_SECRET_KEYS)
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CONFIG_SCHEMA_VERSION": 2,
+    "MANA_USER_ID": "",
     "MANA_AI_PROVIDER": "openai",
     "MANA_PRIMARY_MODEL": "openai/gpt-4.1-mini",
     "MANA_EMBEDDING_MODEL": "openai/text-embedding-3-small",
@@ -401,6 +406,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
 FIELD_NAME_BY_ENV: dict[str, str] = {
     "media": "media",
     "spirit": "spirit",
+    "MANA_USER_ID": "mana_user_id",
     "MANA_AI_PROVIDER": "mana_ai_provider",
     "MANA_PRIMARY_MODEL": "mana_primary_model",
     "MANA_EMBEDDING_MODEL": "mana_embedding_model",
@@ -898,6 +904,93 @@ def save_effective_user_config(values: dict[str, Any], *, merge: bool = True) ->
 
 def has_user_config() -> bool:
     return config_file().exists() or secrets_file().exists()
+
+
+def load_user_identity() -> dict[str, Any]:
+    path = identity_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return dict(data)
+    except Exception:
+        return {}
+    return {}
+
+
+def save_user_identity(values: dict[str, Any]) -> None:
+    ensure_user_config_dir()
+    path = identity_file()
+    text = json.dumps(values, indent=2) + "\n"
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(text)
+        temp_path.replace(path)
+    except OSError as exc:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise UserConfigError(
+            f"Could not save {path.name}; the previous identity was preserved."
+        ) from exc
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def resolve_local_user_id(settings: Any | None = None) -> str:
+    """Resolve a stable Mana application user identity.
+
+    Local authentication resolves to a persistent application identity stored
+    in ~/.mana/identity.json or user configuration. It deliberately avoids
+    using root, $USER, UID, hostname, or process ownership.
+    """
+    import uuid
+
+    if settings is not None:
+        configured_id = str(
+            getattr(settings, "mana_user_id", "")
+            or getattr(settings, "memory_user_id", "")
+            or ""
+        ).strip()
+        if configured_id:
+            return configured_id
+
+    user_cfg = load_user_config()
+    cfg_user_id = str(
+        user_cfg.get("MANA_USER_ID")
+        or user_cfg.get("mana_user_id")
+        or user_cfg.get("user_id")
+        or ""
+    ).strip()
+    if cfg_user_id:
+        return cfg_user_id
+
+    identity = load_user_identity()
+    identity_user_id = str(identity.get("user_id") or "").strip()
+    if identity_user_id:
+        return identity_user_id
+
+    new_user_id = f"user_{uuid.uuid4().hex[:20]}"
+    try:
+        save_user_identity(
+            {
+                "user_id": new_user_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "schema_version": 1,
+            }
+        )
+    except Exception:
+        pass
+    return new_user_id
 
 
 def is_user_config_valid() -> bool:

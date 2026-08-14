@@ -604,6 +604,11 @@ class AgentChatGateway:
         self._workspaces = WorkspaceService()
 
         if config is None:
+            resolved_memory_user_id = str(memory_user_id or "").strip()
+            if not resolved_memory_user_id:
+                from mana_agent.config.user_config import resolve_local_user_id
+
+                resolved_memory_user_id = resolve_local_user_id(self.settings)
             config = ChatGatewayConfig(
                 model=model,
                 index_dir=index_dir,
@@ -663,7 +668,7 @@ class AgentChatGateway:
                     )
                 ),
                 session_id=session_id,
-                memory_user_id=memory_user_id,
+                memory_user_id=resolved_memory_user_id,
                 chat_service=chat_service,
                 coding_agent_instance=coding_agent_instance,
                 tools_orchestrator=tools_orchestrator,
@@ -671,6 +676,12 @@ class AgentChatGateway:
             )
         else:
             # Allow kwargs to override injected objects when config already set
+            if not str(config.memory_user_id or "").strip() and memory_user_id:
+                config.memory_user_id = str(memory_user_id).strip()
+            elif not str(config.memory_user_id or "").strip():
+                from mana_agent.config.user_config import resolve_local_user_id
+
+                config.memory_user_id = resolve_local_user_id(self.settings)
             if chat_service is not None:
                 config.chat_service = chat_service
             if coding_agent_instance is not None:
@@ -3843,6 +3854,11 @@ class AgentChatGateway:
                         False,
                     )
                 ),
+                authenticated_user_id=str(
+                    self.config.memory_user_id
+                    or getattr(self._stack.memory_service, "user_id", "")
+                    or ""
+                ).strip(),
             )
             entry_model_decision = self.routing_authority.route(
                 RoutingRequest(
@@ -5792,6 +5808,7 @@ class AgentChatGateway:
                 memory_capsules_enabled=context.memory_capsules_enabled,
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
+                authenticated_user_id=context.authenticated_user_id,
             )
             try:
                 with self._multi_task_route_lock:
@@ -7719,7 +7736,7 @@ class AgentChatGateway:
                     decision=decision,
                     payload={"route": "memory"},
                 )
-            user_id = str(getattr(memory_service, "user_id", "") or "").strip()
+            user_id = str(context.authenticated_user_id or "").strip()
             if not user_id:
                 return ChatTurnResult(
                     answer=(
@@ -7731,6 +7748,8 @@ class AgentChatGateway:
                     decision=decision,
                     payload={"route": "memory", "memory_task_id": task_id},
                 )
+            if hasattr(memory_service, "user_id") and not getattr(memory_service, "user_id", None):
+                memory_service.user_id = user_id
             from mana_agent.memory import CapsuleReadRequest
 
             principal = MemoryPrincipal(

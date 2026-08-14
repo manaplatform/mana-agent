@@ -86,6 +86,7 @@ class EntryRouteContext:
     memory_capsules_enabled: bool = False
     atomic_child: bool = False
     orchestration_parent_task_id: str = ""
+    authenticated_user_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

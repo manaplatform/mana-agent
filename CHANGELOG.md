@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed authenticated-user identity propagation for private memory-capsule reads in local terminal and dashboard sessions.
+  - Implemented canonical application identity resolution in `resolve_local_user_id` using `Settings.mana_user_id`, `config.toml` `MANA_USER_ID`, or persistent `~/.mana/identity.json` without using `root`, `$USER`, UID, hostname, or process ownership directly.
+  - Extended `EntryRouteContext` with `authenticated_user_id` and propagated the canonical user identity through session entry, `route_context`, multi-task child contexts, and `_execute_memory_route`.
+  - Updated `AgentChatGateway.__init__`, CLI terminal config (`chat_cli.py`), Dashboard (`streamlit_helpers.py`), and standalone API (`api/app.py`) to bind the canonical Mana user identity.
+  - Preserved deny-by-default authorization semantics: missing identities fail with zero private reads, unauthorized capsules are blocked, cross-user private capsule access is rejected, and `memory_task_candidates` verification is preserved.
+  - Added regression tests in `tests/gateway/test_capsule_identity.py` and `tests/gateway/test_multi_task_orchestration.py`.
+  - User verification required: `python -m pytest tests/gateway/test_capsule_identity.py tests/gateway/test_multi_task_orchestration.py -v`.
+
+
 - Fixed multi-task memory routing context propagation failure across the parent to child task boundary in `ChatGateway`.
   - Propagated `memory_task_candidates` and `memory_capsules_enabled` from parent `EntryRouteContext` to child `EntryRouteContext` inside `execute_child` in `AgentChatGateway`.
   - Preserved strict candidate validation and deny-by-default behavior ensuring unoffered `memory_task_id` decisions are rejected before any private memory reads occur.

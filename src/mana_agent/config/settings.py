@@ -320,6 +320,7 @@ class Settings(BaseSettings):
     mana_memory_timeout_seconds: int = Field(
         default=15, alias="MANA_MEMORY_TIMEOUT_SECONDS"
     )
+    mana_user_id: str = Field(default="", alias="MANA_USER_ID")
     mana_memory_capsules_enabled: bool = Field(default=True, alias="MANA_MEMORY_CAPSULES_ENABLED")
     mana_memory_capsules_default_max_capsules: int = Field(default=12, ge=1, le=100, alias="MANA_MEMORY_CAPSULES_DEFAULT_MAX_CAPSULES")
     mana_memory_capsules_default_max_tokens: int = Field(default=4000, ge=1, alias="MANA_MEMORY_CAPSULES_DEFAULT_MAX_TOKENS")
@@ -730,7 +731,7 @@ class Settings(BaseSettings):
     # Mana-managed settings are intentionally repository-independent.  Loading
     # a project's ``.env`` here can silently replace the API key selected in
     # the setup wizard with an unrelated development credential.
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = SettingsConfigDict(extra="ignore", populate_by_name=True)
 
     @classmethod
     def settings_customise_sources(
