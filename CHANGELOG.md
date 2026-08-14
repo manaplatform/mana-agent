@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed multi-task memory routing context propagation failure across the parent to child task boundary in `ChatGateway`.
+  - Propagated `memory_task_candidates` and `memory_capsules_enabled` from parent `EntryRouteContext` to child `EntryRouteContext` inside `execute_child` in `AgentChatGateway`.
+  - Preserved strict candidate validation and deny-by-default behavior ensuring unoffered `memory_task_id` decisions are rejected before any private memory reads occur.
+  - Added focused regression tests in `tests/gateway/test_multi_task_orchestration.py` verifying context propagation, authorized capsule reads, prerequisite satisfaction for dependent tasks, and deny-by-default rejection for unauthorized task IDs.
+  - User verification required: `python -m pytest tests/gateway/test_multi_task_orchestration.py -v`.
+
 - Fixed OpenRouter image-model discovery, capability validation, parameter derivation, and terminal failure handling.
   - Implemented authoritative image model catalog discovery via `GET /api/v1/images/models` with bounded TTL cache and single-refresh retry on miss in `OpenRouterMediaProvider`.
   - Added strict capability checking ensuring exact model ID existence in catalog and `"image"` in `architecture.output_modalities` without relying on substring heuristics or text model allowlists.

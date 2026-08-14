@@ -5333,7 +5333,7 @@ class AgentChatGateway:
         sink: Any,
         options: dict[str, Any],
         turn_id: str,
-        user_message_id: str,
+        user_message_id: str = "",
     ) -> ChatTurnResult:
         """Auto-select multi-task recovery or create a fresh compound root.
 
@@ -5788,6 +5788,8 @@ class AgentChatGateway:
                     attachments=options.get("attachments", ()),
                     target_files=options.get("target_files", ()),
                 ),
+                memory_task_candidates=context.memory_task_candidates,
+                memory_capsules_enabled=context.memory_capsules_enabled,
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
             )
