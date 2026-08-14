@@ -4,6 +4,32 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed `EntryRoutingOutput`, `FollowupClassificationOutput`, and `CheckpointResumeOutput` failing with `json_invalid` when models return markdown-fenced JSON (```` ```json ... ``` ````).
+  - Added `_coerce_routing_output` in `src/mana_agent/gateway/entry_routing.py` to extract JSON from strings, strip markdown code fences, and validate against `EntryRoutingOutput` regardless of whether `structured_output` returns an object, dict, or raw markdown string.
+  - Added `_coerce_followup_output` in `src/mana_agent/gateway/followup_classifier.py` and `_coerce_checkpoint_output` in `src/mana_agent/gateway/checkpoint_resume.py` to safely handle markdown code fences on structured model outputs.
+  - Added unit test in `tests/gateway/test_entry_routing.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -v`.
+
+- Fixed `checkpoint_resume_invalid` on extended reasoning strings and prevented duplicate messages from returning stale failed task results.
+  - Removed `max_length=480` constraint on `CheckpointResumeOutput.reason` in `src/mana_agent/gateway/checkpoint_resume.py` and added a before validator to normalize string inputs, preventing Pydantic `string_too_long` validation errors when reasoning models output full explanations.
+  - Updated `process_turn` in `src/mana_agent/gateway/chat_gateway.py` to only reuse cached escrow results for `duplicate_message` turns when the prior task reached a verified `COMPLETED` state; non-completed or failed prior tasks are now treated as retries and executed fresh rather than returning the stale error string as a successful response.
+  - Added test coverage in `tests/gateway/test_checkpoint_resume.py` and `tests/gateway/test_checkpoint_resume_invariants.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
+- Fixed `FollowupClassificationOutput` and `CheckpointResumeOutput` empty `decision_id` Pydantic validation failure by generating `decision_id` server-side via UUID instead of requiring it from the model.
+  - Removed `decision_id` from structured output schemas in `src/mana_agent/gateway/followup_classifier.py` and `src/mana_agent/gateway/checkpoint_resume.py`.
+  - Decision IDs are now deterministically generated after model output validation (`followup:<hex>` and `checkpoint:<hex>`).
+  - Updated test mocks in `tests/gateway/test_followup_classifier.py` and `tests/gateway/test_checkpoint_resume.py`.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py -v`.
+
+- Fixed API route workflow completion validation and decision schema handling for `api_workflow_decision_invalid`.
+  - Updated `_api_workflow_completion_from_trace` in `src/mana_agent/gateway/chat_gateway.py` to scan for the validated `api_workflow_decide` decision before operational tool calls, correctly recognizing workflow completion when the decision was established after an initial validation retry instead of falsely rejecting the turn.
+  - Added `@field_validator` to `_WorkflowDecision` in `src/mana_agent/api_manager/runtime_tools.py` to normalize single string or list inputs for `required_actions` into tuples before dependency validation.
+  - Added `@field_validator` and `@model_validator` to `ApiRouteDecision` in `src/mana_agent/api_manager/discovery.py` to normalize tuple fields and accept/map `risk_reason` to `reason`.
+  - Updated the API route system prompt in `src/mana_agent/gateway/chat_gateway.py` to align exact `ApiRouteDecision` field names (`reason` instead of `risk reason`).
+  - Added unit and route regression tests in `tests/gateway/test_api_manager_route.py` and `tests/test_api_manager.py`.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
 - Implemented Part 1 — Canonical Routing Execution Envelope and Tool-Based Context Retrieval.
   - Introduced `RoutingExecutionEnvelope` in `src/mana_agent/gateway/envelope.py` containing user request, identity relationships, recovery state, Phase-0 `AccountingSnapshot`, model capacities, route availability, tool catalog, approval state, artifact evidence, previous-turn pointers, conversation context availability, and memory availability without secrets, raw private memory, or raw chat transcripts.
   - Removed automatic history and memory transcript injection (`_conversation_prompt`, `_recall_followup_memory`) from execution model prompts across `ChatGateway`, `turn_engine`, and route handlers; provider models receive current turn only (`history_injected = False`).

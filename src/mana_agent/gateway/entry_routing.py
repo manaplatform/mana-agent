@@ -580,16 +580,9 @@ class EntryRouter:
                     method="json_schema",
                     strict=True,
                 ).invoke(messages)
-                decision_payload = EntryRoutingOutput.model_validate(response).model_dump()
             else:
                 response = self.llm.invoke(messages)
-                content = getattr(response, "content", response)
-                if isinstance(content, list):
-                    content = " ".join(
-                        str(part.get("text", part)) if isinstance(part, dict) else str(part)
-                        for part in content
-                    )
-                decision_payload = _extract_json(str(content))
+            decision_payload = _coerce_routing_output(response)
             try:
                 decision = self._validate(decision_payload, context=context)
             except EntryRoutingError as validation_error:
@@ -616,20 +609,9 @@ class EntryRouter:
                     response = structured_output(
                         EntryRoutingOutput, method="json_schema", strict=True
                     ).invoke(repair_messages)
-                    decision_payload = EntryRoutingOutput.model_validate(
-                        response
-                    ).model_dump()
                 else:
                     response = self.llm.invoke(repair_messages)
-                    content = getattr(response, "content", response)
-                    if isinstance(content, list):
-                        content = " ".join(
-                            str(part.get("text", part))
-                            if isinstance(part, dict)
-                            else str(part)
-                            for part in content
-                        )
-                    decision_payload = _extract_json(str(content))
+                decision_payload = _coerce_routing_output(response)
                 decision = self._validate(decision_payload, context=context)
             record_current(
                 "model.decision",
@@ -1015,6 +997,22 @@ def _extract_json(text: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("router output must be a JSON object")
     return payload
+
+
+def _coerce_routing_output(response: Any) -> dict[str, Any]:
+    if isinstance(response, EntryRoutingOutput):
+        return response.model_dump()
+    if isinstance(response, dict):
+        return EntryRoutingOutput.model_validate(response).model_dump()
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        content = " ".join(
+            str(part.get("text", part)) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    extracted = _extract_json(str(content))
+    return EntryRoutingOutput.model_validate(extracted).model_dump()
+
 
 
 def _public_urls(text: object) -> list[str]:

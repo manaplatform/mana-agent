@@ -23,7 +23,6 @@ def test_expansion_must_select_an_offered_task() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_1",
                 "category": "task_expansion",
                 "related_task_id": "task_1",
                 "safe_to_continue": True,
@@ -38,13 +37,13 @@ def test_expansion_must_select_an_offered_task() -> None:
     )
     assert decision.category == "task_expansion"
     assert decision.related_task_id == "task_1"
+    assert decision.decision_id.startswith("followup:")
 
 
 def test_followup_cannot_attach_to_an_unoffered_task() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_2",
                 "category": "followup_task",
                 "related_task_id": "task_missing",
                 "safe_to_continue": True,
@@ -64,7 +63,6 @@ def test_non_task_category_cannot_select_a_related_task() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_2b",
                 "category": "conversation_only",
                 "related_task_id": "task_1",
                 "safe_to_continue": True,
@@ -85,7 +83,6 @@ def test_completed_task_cannot_be_classified_as_a_resume() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_completed_resume",
                 "category": "resume_request",
                 "related_task_id": "task_completed",
                 "safe_to_continue": True,
@@ -111,7 +108,6 @@ def test_independent_category_overrides_unsafe_to_safe() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_3",
                 "category": "new_task",
                 "related_task_id": "",
                 "safe_to_continue": False,
@@ -135,7 +131,6 @@ def test_conversation_only_overrides_unsafe_to_safe() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_conv",
                 "category": "conversation_only",
                 "related_task_id": "",
                 "safe_to_continue": False,
@@ -158,7 +153,6 @@ def test_task_bound_category_with_unsafe_still_raises() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
             {
-                "decision_id": "followup_bound",
                 "category": "followup_task",
                 "related_task_id": "task_1",
                 "safe_to_continue": False,

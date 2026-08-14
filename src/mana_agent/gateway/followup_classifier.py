@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -22,7 +23,6 @@ class FollowupClassificationError(RuntimeError):
 
 class FollowupClassificationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    decision_id: str = Field(min_length=1)
     category: Literal["new_task", "followup_task", "task_expansion", "task_correction", "retry_request", "resume_request", "status_request", "clarification_answer", "conversation_only", "duplicate_message"]
     related_task_id: str = ""
     safe_to_continue: bool = Field(
@@ -72,6 +72,27 @@ inputs. Empty recent_history does not make a classification ambiguous when no of
 Do not block the user because their input is short or lacks conversational context."""
 
 
+def _coerce_followup_output(raw: Any) -> FollowupClassificationOutput:
+    if isinstance(raw, FollowupClassificationOutput):
+        return raw
+    if isinstance(raw, dict):
+        return FollowupClassificationOutput.model_validate(raw)
+    content = getattr(raw, "content", raw)
+    if isinstance(content, list):
+        content = " ".join(
+            str(part.get("text", part)) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    text = str(content).strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        text = text.removesuffix("```").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start : end + 1]
+    return FollowupClassificationOutput.model_validate_json(text)
+
+
 class FollowupClassifier:
     def __init__(self, llm: Any) -> None:
         self.llm = llm
@@ -88,10 +109,10 @@ class FollowupClassifier:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: decision model is unavailable.")
         safe_history = list(recent_history or [])
-        payload = {
+        payload: dict[str, Any] = {
             "message": message,
-            "recent_history": safe_history[-8:],
-            "candidates": candidates[-20:],
+            "recent_history": safe_history,
+            "candidates": candidates,
         }
         if pointers is not None and hasattr(pointers, "to_dict"):
             payload["pointers"] = pointers.to_dict()
@@ -101,10 +122,9 @@ class FollowupClassifier:
             structured = getattr(self.llm, "with_structured_output", None)
             if callable(structured):
                 raw = structured(FollowupClassificationOutput, method="json_schema", strict=True).invoke([SystemMessage(content=_PROMPT), HumanMessage(content=json.dumps(payload, ensure_ascii=False))])
-                output = FollowupClassificationOutput.model_validate(raw)
             else:
                 raw = self.llm.invoke([SystemMessage(content=_PROMPT), HumanMessage(content=json.dumps(payload, ensure_ascii=False))])
-                output = FollowupClassificationOutput.model_validate_json(str(getattr(raw, "content", raw)))
+            output = _coerce_followup_output(raw)
         except (ContextBudgetExceeded, ModelContextLimitError) as exc:
             raise FollowupClassificationError(
                 "Model decision failed: followup_classification. No fallback action was executed. "
@@ -151,4 +171,6 @@ class FollowupClassifier:
                 "executed. Reason: decision did not authorize continuation: "
                 f"{output.reason}"
             )
-        return FollowupClassification(**output.model_dump())
+        fields = output.model_dump()
+        fields["decision_id"] = f"followup:{uuid.uuid4().hex[:12]}"
+        return FollowupClassification(**fields)

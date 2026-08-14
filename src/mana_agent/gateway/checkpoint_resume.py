@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
@@ -51,7 +52,6 @@ def _checkpoint_resume_failure_reason(exc: BaseException) -> str:
 class CheckpointResumeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decision_id: str = Field(min_length=1)
     action: Literal["resume_checkpoint", "retry_task", "replan_task", "start_fresh", "stop"]
     task_id: str = ""
     checkpoint_id: str = ""
@@ -60,7 +60,15 @@ class CheckpointResumeOutput(BaseModel):
     checkpoint_still_valid: bool
     side_effects_safe_to_repeat: bool
     safe_to_continue: bool
-    reason: str = Field(min_length=1, max_length=480)
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _normalize_reason(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +143,27 @@ Return strict JSON matching the supplied schema.
 """
 
 
+def _coerce_checkpoint_output(response: Any) -> CheckpointResumeOutput:
+    if isinstance(response, CheckpointResumeOutput):
+        return response
+    if isinstance(response, dict):
+        return CheckpointResumeOutput.model_validate(response)
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        content = " ".join(
+            str(part.get("text", part)) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    text = str(content).strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        text = text.removesuffix("```").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start : end + 1]
+    return CheckpointResumeOutput.model_validate_json(text)
+
+
 class CheckpointResumeDecider:
     def __init__(self, llm: Any) -> None:
         self.llm = llm
@@ -170,11 +199,9 @@ class CheckpointResumeDecider:
                 response = structured(
                     CheckpointResumeOutput, method="json_schema", strict=True
                 ).invoke(messages, **invoke_kwargs)
-                output = CheckpointResumeOutput.model_validate(response)
             else:
                 response = self.llm.invoke(messages, **invoke_kwargs)
-                content = getattr(response, "content", response)
-                output = CheckpointResumeOutput.model_validate_json(str(content))
+            output = _coerce_checkpoint_output(response)
         except ContextBudgetExceeded as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
@@ -278,7 +305,9 @@ class CheckpointResumeDecider:
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
                     "Reason: stop cannot also authorize continued execution."
                 )
-        decision = CheckpointResumeDecision(**output.model_dump())
+        fields = output.model_dump()
+        fields["decision_id"] = f"checkpoint:{uuid.uuid4().hex[:12]}"
+        decision = CheckpointResumeDecision(**fields)
         record_current(
             "model.decision",
             {

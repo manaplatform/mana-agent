@@ -82,7 +82,6 @@ def candidate() -> dict[str, object]:
 def test_model_may_resume_exact_non_stale_checkpoint() -> None:
     model = StructuredDecisionModel(
             {
-                "decision_id": "resume-decision-1",
                 "action": "resume_checkpoint",
                 "task_id": "task_existing",
                 "checkpoint_id": "checkpoint_existing",
@@ -116,7 +115,6 @@ def test_model_may_replan_the_same_stopped_task() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "replan-decision-1",
                 "action": "replan_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "",
@@ -145,7 +143,6 @@ def test_empty_candidate_set_still_requires_a_model_decision() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "fresh-decision-1",
                 "action": "start_fresh",
                 "task_id": "",
                 "checkpoint_id": "",
@@ -164,7 +161,7 @@ def test_empty_candidate_set_still_requires_a_model_decision() -> None:
         route="coding",
         requires_live_data=False,
         candidates=[],
-    ).decision_id == "fresh-decision-1"
+    ).decision_id.startswith("checkpoint:")
 
 
 def test_context_budget_block_is_reported_as_a_typed_checkpoint_decision_error() -> None:
@@ -218,7 +215,6 @@ def test_live_data_route_cannot_reuse_checkpoint_even_if_model_requests_it() -> 
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "resume-decision-live",
                 "action": "resume_checkpoint",
                 "task_id": "task_existing",
                 "checkpoint_id": "checkpoint_existing",
@@ -245,7 +241,6 @@ def test_model_can_require_fresh_execution_for_time_sensitive_work() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "resume-decision-fresh",
                 "action": "start_fresh",
                 "task_id": "",
                 "checkpoint_id": "",
@@ -277,7 +272,6 @@ def test_mcp_submission_route_starts_fresh_instead_of_resuming_upload_checkpoint
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "fresh-kaggle-submission",
                 "action": "start_fresh",
                 "task_id": "",
                 "checkpoint_id": "",
@@ -309,7 +303,6 @@ def test_model_may_retry_same_stable_task_without_checkpoint() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "retry-task-decision",
                 "action": "retry_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "",
@@ -341,7 +334,6 @@ def test_model_may_retry_same_task_even_when_a_checkpoint_is_listed() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "retry-despite-checkpoint",
                 "action": "retry_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "",
@@ -372,7 +364,6 @@ def test_model_may_replan_same_task_even_when_a_checkpoint_is_listed() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "replan-despite-checkpoint",
                 "action": "replan_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "",
@@ -401,7 +392,6 @@ def test_retry_or_replan_must_not_carry_a_checkpoint_id() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "retry-with-checkpoint-id",
                 "action": "retry_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "checkpoint_existing",
@@ -430,7 +420,6 @@ def test_live_data_route_cannot_retry_old_task_without_checkpoint() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "retry-task-live",
                 "action": "retry_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "",
@@ -457,7 +446,6 @@ def test_model_cannot_start_new_task_for_same_stable_work() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "improper-fresh-task",
                 "action": "start_fresh",
                 "task_id": "",
                 "checkpoint_id": "",
@@ -485,7 +473,6 @@ def test_model_may_start_fresh_for_same_work_when_no_recoverable_candidates() ->
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "fresh-after-deadline",
                 "action": "start_fresh",
                 "task_id": "",
                 "checkpoint_id": "",
@@ -519,7 +506,6 @@ def test_terminal_failed_task_checkpoint_cannot_be_implicitly_resumed() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "resume-terminal-fail",
                 "action": "resume_checkpoint",
                 "task_id": "task_existing",
                 "checkpoint_id": "checkpoint_existing",
@@ -551,7 +537,6 @@ def test_terminal_failed_task_can_be_retried_with_new_attempt() -> None:
     decider = CheckpointResumeDecider(
         StructuredDecisionModel(
             {
-                "decision_id": "retry-terminal-fail",
                 "action": "retry_task",
                 "task_id": "task_existing",
                 "checkpoint_id": "",
@@ -575,4 +560,34 @@ def test_terminal_failed_task_can_be_retried_with_new_attempt() -> None:
     assert decision.action == "retry_task"
     assert decision.task_id == "task_existing"
     assert decision.checkpoint_id == ""
+
+
+def test_checkpoint_resume_accepts_long_reason_without_string_length_error() -> None:
+    long_reason = "This is an extensive reasoning explanation. " * 30  # ~1320 chars
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "action": "start_fresh",
+                "task_id": "",
+                "checkpoint_id": "",
+                "same_work": False,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": False,
+                "safe_to_continue": True,
+                "reason": long_reason,
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="start a brand new task",
+        route="coding",
+        requires_live_data=False,
+        candidates=[],
+    )
+
+    assert decision.action == "start_fresh"
+    assert decision.reason == long_reason.strip()
+
 

@@ -568,3 +568,92 @@ def test_api_workflow_rejects_unparseable_non_clipped_evidence() -> None:
 
     assert completion["valid"] is False
     assert completion["missing_actions"] == ["documentation_inspection"]
+
+
+def test_api_workflow_recovers_when_workflow_decision_retried_after_validation_error() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "error",
+                "output_preview": (
+                    "1 validation error for _WorkflowDecision\nrequired_actions\n"
+                    "  Input should be a valid tuple [type=tuple_type, input_value='operation_search', input_type=str]"
+                ),
+            },
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "search available operations",
+                            "required_actions": ["operation_search"],
+                            "reason": "Search is required to discover matching operations.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [
+                            {"operation_id": "lookup_verse", "integration_id": "api_123"}
+                        ],
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["error_code"] == ""
+    assert completion["missing_actions"] == []
+    assert completion["completed_actions"] == ["operation_search"]
+
+
+def test_api_workflow_rejects_when_first_tool_is_not_workflow_decide() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[]}',
+            }
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_decision_missing"
+
+
+def test_api_workflow_rejects_when_workflow_decision_never_succeeds() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "error",
+                "output_preview": "Validation error: invalid field",
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[]}',
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_decision_invalid"
+

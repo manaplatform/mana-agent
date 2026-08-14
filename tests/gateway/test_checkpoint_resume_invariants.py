@@ -438,3 +438,26 @@ def test_scenario_i_terminal_result_exists_while_checkpoint_is_corrupt_terminal_
     assert lookup.is_terminal is True
     assert lookup.result.supervisor_state == "failed"
     assert lookup.result.error_metadata.get("reason") == "service_unavailable"
+
+
+def test_failed_task_result_is_not_completed_for_duplicate_reuse(tmp_path: Path) -> None:
+    """A failed task result in escrow must not be treated as a completed verified result."""
+    supervisor = _make_supervisor(tmp_path)
+    task, _, _ = _start_task(
+        supervisor,
+        tmp_path,
+        normalized_intent="execute api search",
+    )
+    supervisor.transition(
+        task.task_id,
+        ExecutionState.FAILED,
+        reason="api_workflow_incomplete",
+    )
+
+    lookup = supervisor.get_verified_execution_result(task.task_id)
+    assert lookup.status == EscrowLookupStatus.FOUND
+    assert lookup.result is not None
+    assert lookup.result.supervisor_state == "failed"
+    # Reusing a duplicate message requires supervisor_state == 'completed'
+    assert lookup.result.supervisor_state != "completed"
+

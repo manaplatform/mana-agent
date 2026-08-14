@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mana_agent.api_manager.documentation import SemanticDefinition
 from mana_agent.api_manager.discovery import ApiRouteDecision
@@ -42,6 +42,15 @@ class _WorkflowDecision(_Decision):
     ] = Field(min_length=1)
     reason: str = Field(min_length=1)
     safe_to_continue: bool
+
+    @field_validator("required_actions", mode="before")
+    @classmethod
+    def _normalize_required_actions(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return (v,)
+        if isinstance(v, (list, set)):
+            return tuple(v)
+        return v
 
     @model_validator(mode="after")
     def validate_action_dependencies(self) -> "_WorkflowDecision":

@@ -1944,3 +1944,43 @@ def test_entry_routing_context_budget_blocked(tmp_path: Path, monkeypatch) -> No
     assert result.error == "context_budget_blocked"
     assert result.mode == "route-budget-blocked"
 
+
+def test_entry_routing_handles_markdown_wrapped_json_from_model(tmp_path: Path, monkeypatch) -> None:
+    class _MarkdownJsonRouterModel:
+        def with_structured_output(self, _schema, *, method: str, strict: bool):
+            return self
+
+        def invoke(self, _messages):
+            # Returns a markdown code block string
+            return (
+                "```json\n"
+                "{\n"
+                '  "route": "conversation",\n'
+                '  "confidence": 0.95,\n'
+                '  "reason": "General conversational query.",\n'
+                '  "required_sources": ["none"],\n'
+                '  "target_urls": [],\n'
+                '  "requires_live_data": false,\n'
+                '  "reason_code": "",\n'
+                '  "error_code": "",\n'
+                '  "reuse_active_route": false,\n'
+                '  "command_name": "",\n'
+                '  "command_arguments": [],\n'
+                '  "remote_request": null,\n'
+                '  "server_request": null,\n'
+                '  "mcp_request": null,\n'
+                '  "memory_task_id": "",\n'
+                '  "artifact_family": "",\n'
+                '  "media_request": {},\n'
+                '  "automation_operation": ""\n'
+                "}\n"
+                "```"
+            )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _MarkdownJsonRouterModel())
+    sid = gateway.create_session(frontend="test")
+    result = gateway.process_turn(sid, "Hello there!")
+    assert result.error is None
+
+

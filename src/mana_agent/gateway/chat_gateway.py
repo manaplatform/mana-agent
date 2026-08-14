@@ -401,9 +401,23 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             return {}
         return decoded if isinstance(decoded, dict) else {}
 
-    decision_payload = payload(traces[0])
-    decision = decision_payload.get("result") if decision_payload.get("ok") is True else None
-    if not isinstance(decision, dict) or not decision.get("safe_to_continue"):
+    decision_index = -1
+    decision = None
+    for idx, trace in enumerate(traces):
+        tool_name = str(trace.get("tool_name") or "")
+        if tool_name == "api_workflow_decide":
+            p = payload(trace)
+            if p.get("ok") is True and isinstance(p.get("result"), dict):
+                candidate = p["result"]
+                if candidate.get("safe_to_continue"):
+                    decision = candidate
+                    decision_index = idx
+                    break
+        elif tool_name in _API_WORKFLOW_EVIDENCE:
+            # Operational tool invoked before a validated workflow decision
+            break
+
+    if decision_index < 0 or not isinstance(decision, dict) or not decision.get("safe_to_continue"):
         return {
             "valid": False,
             "error_code": "api_workflow_decision_invalid",
@@ -418,7 +432,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     required = [str(item) for item in decision.get("required_actions") or []]
     completed: set[str] = set()
     execution_evidence: dict[str, Any] = {}
-    for trace in traces[1:]:
+    for trace in traces[decision_index + 1:]:
         action = _API_WORKFLOW_EVIDENCE.get(str(trace.get("tool_name") or ""))
         result = payload(trace)
         trace_succeeded = str(trace.get("status") or "").lower() == "ok"
@@ -4478,7 +4492,7 @@ class AgentChatGateway:
                                     "decision_id": followup.decision_id,
                                 },
                             )
-                        if followup.category in {"status_request", "duplicate_message"}:
+                        if followup.category == "status_request":
                             lookup = self._lane_coordinator.get_verified_execution_result(
                                 followup.related_task_id
                             )
@@ -4492,6 +4506,12 @@ class AgentChatGateway:
                                 )
                                 result = ChatTurnResult(
                                     answer=str(ans),
+                                    error=(
+                                        lookup.result.error_metadata.get("reason")
+                                        or (lookup.task.failure_reason if lookup.task else "")
+                                        if lookup.result.supervisor_state == "failed"
+                                        else durable_result.get("error")
+                                    ),
                                     mode=durable_result.get("mode") or "verified-task-status",
                                     changed_files=list(durable_result.get("changed_files") or []),
                                     payload={
@@ -4565,6 +4585,78 @@ class AgentChatGateway:
                                     f"[{lookup.error_code}] {lookup.error_message}"
                                 )
                                 raise CheckpointResumeError(err_msg)
+                        elif followup.category == "duplicate_message":
+                            lookup = self._lane_coordinator.get_verified_execution_result(
+                                followup.related_task_id
+                            )
+                            if (
+                                lookup.status == EscrowLookupStatus.FOUND
+                                and lookup.result is not None
+                                and lookup.result.supervisor_state == LaneTaskState.COMPLETED.value
+                            ):
+                                durable_result = dict(lookup.result.payload.get("chat_result") or {})
+                                ans = (
+                                    durable_result.get("answer")
+                                    or f"Status: {lookup.result.supervisor_state}"
+                                )
+                                result = ChatTurnResult(
+                                    answer=str(ans),
+                                    mode=durable_result.get("mode") or "verified-task-status",
+                                    changed_files=list(durable_result.get("changed_files") or []),
+                                    payload={
+                                        **dict(durable_result.get("payload") or {}),
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "verified_result_reused": True,
+                                        "status": lookup.result.supervisor_state,
+                                        "is_terminal": lookup.is_terminal,
+                                        "is_resumable": lookup.is_resumable,
+                                    },
+                                )
+                                if lookup.acknowledgement is None:
+                                    self._lane_coordinator.execution_supervisor.acknowledge_result(
+                                        lookup.result.result_id,
+                                        consumer_turn_id=turn_id,
+                                        consumer_execution_id=lookup.execution_id,
+                                    )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif lookup.status == EscrowLookupStatus.EXECUTION_STILL_RUNNING:
+                                result = ChatTurnResult(
+                                    answer=f"Task {followup.related_task_id} is currently running.",
+                                    mode="task-status",
+                                    payload={
+                                        "lane_task_id": followup.related_task_id,
+                                        "execution_id": followup.related_task_id,
+                                        "status": "running",
+                                        "is_terminal": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            else:
+                                recovery_candidates = [
+                                    item
+                                    for item in recoverable_task_candidates
+                                    if str(item.get("task_id") or "") == followup.related_task_id
+                                    and not bool(item.get("deadline_exceeded"))
+                                ]
+                                relation_type = "retry"
+                                previous_task_id = followup.related_task_id
                         if followup.category in {"conversation_only", "clarification_answer"}:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
@@ -8742,9 +8834,9 @@ class AgentChatGateway:
             "use browser tools as an API-call fallback. After the workflow decision, for a "
             "natural-language call against an integration, call "
             "api_operations_search first; "
-            "then construct a strict ApiRouteDecision with the same source_decision_id, task intent, "
-            "workflow, selected IDs, confidence, matched terms, missing inputs, risk reason, and "
-            "safe_to_continue. Pass it to preview and execution. Select an operation only from "
+            "then construct a strict ApiRouteDecision with the same source_decision_id, task_intent, "
+            "workflow, integration_id, operation_id, confidence, matched_terms, required_missing_inputs, "
+            "reason, and safe_to_continue. Pass it to preview and execution. Select an operation only from "
             "returned candidates using names, descriptions, tags, "
             "methods, paths, schemas, and risk. If candidates remain materially ambiguous, ask one "
             "focused clarification and do not preview or execute. Ask only for genuinely missing "
