@@ -75,10 +75,27 @@ class FollowupClassifier:
     def __init__(self, llm: Any) -> None:
         self.llm = llm
 
-    def decide(self, *, message: str, recent_history: list[tuple[str, str]], candidates: list[dict[str, Any]]) -> FollowupClassification:
+    def decide(
+        self,
+        *,
+        message: str,
+        recent_history: list[tuple[str, str]] | None = None,
+        candidates: list[dict[str, Any]],
+        pointers: Any | None = None,
+        retrieval_hints: list[str] | None = None,
+    ) -> FollowupClassification:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: decision model is unavailable.")
-        payload = {"message": message, "recent_history": recent_history[-8:], "candidates": candidates[-20:]}
+        safe_history = list(recent_history or [])
+        payload = {
+            "message": message,
+            "recent_history": safe_history[-8:],
+            "candidates": candidates[-20:],
+        }
+        if pointers is not None and hasattr(pointers, "to_dict"):
+            payload["pointers"] = pointers.to_dict()
+        if retrieval_hints:
+            payload["retrieval_hints"] = list(retrieval_hints)
         try:
             structured = getattr(self.llm, "with_structured_output", None)
             if callable(structured):

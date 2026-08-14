@@ -1306,9 +1306,8 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
     gateway.process_turn(session_id, "Remember one = b.")
     gateway.process_turn(session_id, "What is one?")
 
-    assert "Remember one = b." in prompts[1]
-    assert "Understood." in prompts[1]
-    assert prompts[1].count("What is one?") == 1
+    assert "Remember one = b." not in prompts[1]
+    assert prompts[1] == "What is one?"
     messages = gateway.session_messages(session_id)
     assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
     assert {message["session_id"] for message in messages} == {session_id}
@@ -1370,11 +1369,9 @@ def test_gateway_followup_uses_stack_owned_shared_memory(tmp_path: Path, monkeyp
     gateway.process_turn(session_id, "follow up")
 
     assert len(memory.writes) == 2
-    assert len(memory.searches) == 1
-    assert memory.searches[0].scope.session_id == session_id
+    assert len(memory.searches) == 0
     assert memory.writes[1].metadata["mana_kind"] == "chat_turn"
-    assert "Relevant shared memory:" in prompts[-1]
-    assert "remembered detail" in prompts[-1]
+    assert prompts[-1] == "follow up"
 
 
 def test_gateway_preserves_multiline_message_through_request_and_restored_history(
@@ -1432,8 +1429,7 @@ def test_answer_only_conversation_uses_validated_route_without_second_router(
 
     assert result.answer == "a is test"
     assert result.mode == "route-conversation"
-    assert "User: memory-test a=test" in prompts[-1]
-    assert prompts[-1].count("what is a?") == 1
+    assert prompts[-1] == "what is a?"
 
 
 def test_gateway_new_conversation_isolates_history(tmp_path: Path, monkeypatch) -> None:
@@ -1512,8 +1508,7 @@ def test_gateway_persists_tool_summary_for_followup_context(tmp_path: Path, monk
     session_id = gateway.create_session(frontend="test")
     gateway.process_turn(session_id, "Read the value.")
     gateway.process_turn(session_id, "What did the tool return?")
-
-    assert "Tool result: one=b" in prompts[-1]
+    assert prompts[-1] == "What did the tool return?"
     assert [row["role"] for row in gateway.session_messages(session_id)][:3] == ["user", "tool", "assistant"]
 
 

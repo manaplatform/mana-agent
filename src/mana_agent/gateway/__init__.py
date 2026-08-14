@@ -21,7 +21,17 @@ from .entry_routing import (
 from .stack import ChatStack, build_chat_stack
 from .lane_coordinator import LaneCoordinator
 from .routing import GatewayRoutingAuthority, GatewayRoutingError
-from .lanes import LaneContract, LaneId, LanePriority, LaneTaskState, LockMode
+from .envelope import (
+    ApprovalState,
+    ConversationContextAvailability,
+    ExecutionRecoveryState,
+    IdentitySessionRelationship,
+    MemoryAvailability,
+    ModelCandidateCapacity,
+    PreviousTurnPointers,
+    RoutingExecutionEnvelope,
+    build_routing_execution_envelope,
+)
 from .turn_engine import (
     ChatTurnResult,
     is_auto_chat_connector_turn,
@@ -64,4 +74,14 @@ __all__ = [
     "process_chat_turn",
     "should_use_coding_agent_turn",
     "is_auto_chat_connector_turn",
+    "ApprovalState",
+    "ConversationContextAvailability",
+    "ExecutionRecoveryState",
+    "IdentitySessionRelationship",
+    "MemoryAvailability",
+    "ModelCandidateCapacity",
+    "PreviousTurnPointers",
+    "RoutingExecutionEnvelope",
+    "build_routing_execution_envelope",
 ]
+

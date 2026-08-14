@@ -1908,10 +1908,31 @@ class AskAgent:
         from mana_agent.api_manager.runtime_tools import build_api_manager_langchain_tools
         api_manager_tools = build_api_manager_langchain_tools(self.project_root)
 
+        context_tools = []
+        if hasattr(self, "_context_retrieval_tools") and self._context_retrieval_tools:
+            context_tools = list(self._context_retrieval_tools)
+        else:
+            try:
+                from mana_agent.tools.context_retrieval import build_context_retrieval_tools
+
+                context_tools = build_context_retrieval_tools(
+                    session_id=str(getattr(self, "session_id", "default-session") or "default-session"),
+                    conversation_id=str(getattr(self, "conversation_id", "default-session") or "default-session"),
+                    authenticated_user_id=str(getattr(self, "authenticated_user_id", "") or ""),
+                    history_store=getattr(self, "history_store", None),
+                    capsule_service=getattr(self, "capsule_service", None),
+                    repository_id=str(getattr(self, "repository_id", "") or self.project_root),
+                    current_turn_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
+                    governor=getattr(self, "context_cost_governor", None),
+                )
+            except Exception:
+                context_tools = []
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
             *base_tools,
+            *context_tools,
             *build_email_langchain_tools(),
             *browser_tools,
             *computer_tools,
@@ -1924,6 +1945,10 @@ class AskAgent:
             *list(getattr(self, "tools", []) or []),
         ]
         return all_tools, traces, sources, warnings
+
+    def set_context_retrieval_tools(self, tools: Sequence[BaseTool]) -> None:
+        """Explicitly attach host-scoped context retrieval tools."""
+        self._context_retrieval_tools = list(tools)
 
     # ✅ NEW: public "ask" API (what your CodingAgent expects)
     def ask(

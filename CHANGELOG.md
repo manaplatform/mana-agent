@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Implemented Part 1 — Canonical Routing Execution Envelope and Tool-Based Context Retrieval.
+  - Introduced `RoutingExecutionEnvelope` in `src/mana_agent/gateway/envelope.py` containing user request, identity relationships, recovery state, Phase-0 `AccountingSnapshot`, model capacities, route availability, tool catalog, approval state, artifact evidence, previous-turn pointers, conversation context availability, and memory availability without secrets, raw private memory, or raw chat transcripts.
+  - Removed automatic history and memory transcript injection (`_conversation_prompt`, `_recall_followup_memory`) from execution model prompts across `ChatGateway`, `turn_engine`, and route handlers; provider models receive current turn only (`history_injected = False`).
+  - Added bounded episodic context retrieval tool `conversation_context_read` and durable memory retrieval tool `memory_read` in `src/mana_agent/tools/context_retrieval.py` with strict host-managed identity bindings and intra-turn deduplication.
+  - Registered `conversation_context_read` and `memory_read` in tool catalog, contracts, and runtime `AskAgent`.
+  - Updated follow-up classification and multi-task orchestration to pass structured envelopes and pointers without copying parent history transcripts.
+  - Added structured observability events (`routing.envelope_created`, `context.conversation_read`, `context.memory_read`, `context.retrieval_deduplicated`) and exposed retrieval metrics on turn payloads.
+  - Added comprehensive test suite in `tests/gateway/test_context_retrieval_tools.py` covering all 12 specified scenarios.
+  - User verification required: `python -m pytest tests/gateway/test_context_retrieval_tools.py -v`.
+
 - Implemented Phase 0 — Accounting Foundation refactoring cumulative task budgets, per-provider-call context capacity, turn usage, and verification reserve.
   - Updated configurable default `MANA_ROUTING_TASK_TOKEN_BUDGET` to `1_000_000` exclusively via settings and user config without introducing hardcoded accounting literals.
   - Added typed forecast and snapshot contracts: `ProviderCallForecast`, `TaskExecutionForecast`, and `AccountingSnapshot`.

@@ -97,6 +97,19 @@ from mana_agent.workspaces.preparation import (
 from mana_agent.evals.recorder import record_current
 from mana_agent.evals.redaction import redact_text
 from mana_agent.utils.redaction import redact_secrets
+from mana_agent.gateway.envelope import (
+    ApprovalState,
+    ConversationContextAvailability,
+    ExecutionRecoveryState,
+    IdentitySessionRelationship,
+    MemoryAvailability,
+    ModelCandidateCapacity,
+    PreviousTurnPointers,
+    RoutingExecutionEnvelope,
+    build_routing_execution_envelope,
+)
+from mana_agent.tools.context_retrieval import build_context_retrieval_tools
+from mana_agent.tools.catalog import list_auto_chat_tools
 from mana_agent.model_routing.models import (
     Complexity,
     LatencyClass,
@@ -3048,14 +3061,7 @@ class AgentChatGateway:
             self._append_session_message(
                 session_id, role="user", content=text, turn_id=turn_id
             )
-            hist = state.get("history", [])
             question = text
-            if hist:
-                transcript = "\n\n".join(f"User: {q}\nMana-Agent: {a}" for q, a in hist)
-                question = (
-                    f"Conversation history for continuity:\n{transcript}\n\n"
-                    f"Current user message:\n{text}"
-                )
             try:
                 resp = self._chat_service.ask(
                     question, k=getattr(self._chat_service, "_k", 6)
@@ -3792,23 +3798,15 @@ class AgentChatGateway:
             state["_turn_record"] = turn_record
             state["_turn_store"] = turn_store
             state["_user_message_id"] = user_message_id
-            has_prior_assistant = any(
-                message.get("role") == "assistant"
-                for message in list(state.get("messages") or [])[:-1]
-            )
+            turn_retrieval_cache: dict[str, Any] = {}
+            state["_turn_retrieval_cache"] = turn_retrieval_cache
+            state["conversation_retrieval_tokens"] = 0
+            state["memory_retrieval_tokens"] = 0
+            state["history_injected"] = False
+            state["followup_memory_context"] = ""
+            state["followup_memory_kind"] = ""
             memory_warning = ""
-            if has_prior_assistant:
-                memory_context, memory_warning = self._recall_followup_memory(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    query=text,
-                )
-                state["followup_memory_context"] = memory_context
-                state["followup_memory_kind"] = "legacy" if memory_context else ""
-            else:
-                state["followup_memory_context"] = ""
-                state["followup_memory_kind"] = ""
-            memory_context = str(state.get("followup_memory_context") or "")
+            memory_context = ""
             sink = event_sink or self._event_sink
             state["_turn_event_sink"] = sink
             if callable(sink):
@@ -3822,45 +3820,177 @@ class AgentChatGateway:
                     },
                 )
             ask_service = self.get_ask_service()
+            all_rec_candidates = self._recovery_candidates(
+                lane_id=None,
+                session_id=session_id,
+                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+            )
+            rec_task_candidates = [
+                item
+                for item in all_rec_candidates
+                if str(item.get("state") or "") != LaneTaskState.COMPLETED.value
+            ]
             memory_task_candidates = tuple(
                 {
                     "task_id": str(item.get("task_id") or ""),
                     "normalized_intent": str(item.get("normalized_intent") or ""),
                     "state": str(item.get("state") or ""),
                 }
-                for item in self._recovery_candidates(
-                    lane_id=None,
-                    session_id=session_id,
-                    workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
-                    repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                for item in all_rec_candidates
+            )
+            authenticated_user_id = str(
+                self.config.memory_user_id
+                or getattr(self._stack.memory_service, "user_id", "")
+                or ""
+            ).strip()
+            capsules_enabled = bool(
+                getattr(
+                    getattr(self._stack.memory_service.config, "capsules", None),
+                    "enabled",
+                    False,
                 )
             )
+            raw_messages = list(state.get("messages") or [])
+            prior_messages = [
+                m for m in raw_messages
+                if str(m.get("turn_id") or "") != turn_id
+                and m.get("role") in {"user", "assistant", "tool"}
+            ]
+            prior_turn_ids = {
+                str(m.get("turn_id") or "")
+                for m in prior_messages
+                if m.get("turn_id")
+            }
+            last_turn_id = str(prior_messages[-1].get("turn_id") or "") if prior_messages else ""
+            accounting_snapshot = self._stack.context_cost_governor.accounting_snapshot(
+                task_id=turn_id, turn_id=turn_id
+            )
+            model_candidates = tuple(
+                ModelCandidateCapacity(
+                    model_id=profile.model_id,
+                    provider=profile.provider,
+                    context_window=profile.context_window,
+                    max_output_tokens=profile.max_output_tokens,
+                    supported_roles=tuple(profile.supported_roles),
+                    supported_tools=tuple(profile.supported_tools),
+                    available=profile.available,
+                    latency_class=profile.latency_class.value,
+                    can_patch=profile.can_patch,
+                    can_verify=profile.can_verify,
+                )
+                for profile in self.routing_authority.router.profiles
+            )
+            approval_state = ApprovalState(
+                pending_server_approvals=tuple(
+                    dict(p) for p in self._pending_server_approvals.values()
+                ),
+                pending_action_approvals=(),
+                pending_user_approvals=(),
+            )
+            turn_pointers = PreviousTurnPointers(
+                previous_turn_id=last_turn_id,
+                previous_route=str(state.get("active_route") or ""),
+                previous_task_id="",
+                related_task_ids=(),
+                retrieval_hints=(),
+            )
+            conv_budget = int(getattr(self.settings, "mana_context_retrieval_max_tokens", 12000))
+            mem_budget = int(getattr(self.settings, "mana_memory_capsules_default_max_tokens", 4000))
+            conv_avail = ConversationContextAvailability(
+                has_history=bool(prior_messages),
+                available_turns=len(prior_turn_ids),
+                last_turn_id=last_turn_id,
+                retrieval_tool_available=True,
+                retrieval_token_budget=conv_budget,
+            )
+            mem_avail = MemoryAvailability(
+                memory_capsules_enabled=capsules_enabled,
+                memory_task_candidates=memory_task_candidates,
+                available_scopes=("private", "project"),
+                retrieval_tool_available=True,
+                retrieval_token_budget=mem_budget,
+            )
+            artifact_ev = artifact_routing_evidence(
+                root=self.root,
+                user_prompt=text,
+                attachments=options.get("attachments", ()),
+                target_files=options.get("target_files", ()),
+            )
+            routing_envelope = build_routing_execution_envelope(
+                user_request=text,
+                identity=IdentitySessionRelationship(
+                    authenticated_user_id=authenticated_user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    task_id=turn_id,
+                    workspace_id=str(self._stack.workspace_id or ""),
+                    repository_id=str(self._stack.repository_id or ""),
+                ),
+                execution_state=ExecutionRecoveryState(
+                    active_flow_id=state.get("active_flow_id"),
+                    active_route=str(state.get("active_route") or ""),
+                    lane_id=str(state.get("lane_id") or ""),
+                    lane_states=dict(state.get("lane_states") or {}),
+                    recoverable_task_candidates=tuple(rec_task_candidates),
+                    all_recovery_candidates=tuple(all_rec_candidates),
+                    pending_required_work=bool(state.get("pending_required_work", False)),
+                ),
+                accounting_snapshot=accounting_snapshot,
+                model_candidates=model_candidates,
+                route_availability=tuple(self._entry_route_registry.snapshot()),
+                capabilities_and_tools=tuple(list_auto_chat_tools()),
+                approval_state=approval_state,
+                artifact_metadata=artifact_ev,
+                previous_turn_pointers=turn_pointers,
+                conversation_context_availability=conv_avail,
+                memory_availability=mem_avail,
+            )
+            record_current(
+                "gateway.envelope.created",
+                {"envelope": routing_envelope.to_dict(), "turn_id": turn_id},
+            )
+            if callable(sink):
+                sink(
+                    "routing_envelope_created",
+                    "Routing execution envelope created",
+                    metadata={
+                        "turn_id": turn_id,
+                        "session_id": session_id,
+                        "history_injected": False,
+                    },
+                )
             route_context = EntryRouteContext(
                 session_id=session_id,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 previous_route=str(state.get("active_route") or ""),
-                conversation_summary=_conversation_prompt(state, text),
-                artifact_evidence=artifact_routing_evidence(
-                    root=self.root,
-                    user_prompt=text,
-                    attachments=options.get("attachments", ()),
-                    target_files=options.get("target_files", ()),
-                ),
+                conversation_summary="",
+                artifact_evidence=artifact_ev,
                 memory_task_candidates=memory_task_candidates,
-                memory_capsules_enabled=bool(
-                    getattr(
-                        getattr(self._stack.memory_service.config, "capsules", None),
-                        "enabled",
-                        False,
-                    )
-                ),
-                authenticated_user_id=str(
-                    self.config.memory_user_id
-                    or getattr(self._stack.memory_service, "user_id", "")
-                    or ""
-                ).strip(),
+                memory_capsules_enabled=capsules_enabled,
+                authenticated_user_id=authenticated_user_id,
+                envelope=routing_envelope,
             )
+            context_retrieval_tools = build_context_retrieval_tools(
+                session_id=session_id,
+                conversation_id=conversation_id,
+                authenticated_user_id=authenticated_user_id,
+                history_store=self._history_store,
+                capsule_service=getattr(self._stack.memory_service, "capsules", None),
+                repository_id=str(self._stack.repository_id or ""),
+                current_turn_id=turn_id,
+                memory_task_candidates=memory_task_candidates,
+                governor=self._stack.context_cost_governor,
+                turn_retrieval_cache=turn_retrieval_cache,
+                event_sink=sink,
+                conversation_budget=conv_avail.retrieval_token_budget,
+                memory_budget=mem_avail.retrieval_token_budget,
+            )
+            if ask_service is not None and getattr(ask_service, "ask_agent", None) is not None:
+                if hasattr(ask_service.ask_agent, "set_context_retrieval_tools"):
+                    ask_service.ask_agent.set_context_retrieval_tools(context_retrieval_tools)
             entry_model_decision = self.routing_authority.route(
                 RoutingRequest(
                     role="head_decision",
@@ -4155,10 +4285,10 @@ class AgentChatGateway:
                         ),
                         required_tools=frozenset(route_tools),
                         estimation_components={
-                            "conversation_history": list(state.get("messages") or [])[:-1],
+                            "conversation_history": [],
                             "attachments": list(options.get("attachments") or ()),
                             "required_tools": list(route_tools),
-                            "retrieved_memory": memory_context,
+                            "retrieved_memory": "",
                         },
                         expected_tool_calls=(
                             max(0, int(self.config.agent_max_steps) - 1)
@@ -4256,9 +4386,9 @@ class AgentChatGateway:
                             request_text=text,
                             session_id=session_id,
                             context_components={
-                                "conversation_history": list(state.get("messages") or [])[:-1],
+                                "conversation_history": [],
                                 "attachments": list(options.get("attachments") or ()),
-                                "retrieved_memory": memory_context,
+                                "retrieved_memory": "",
                                 "required_tools": list(route_tools),
                             },
                         )
@@ -4322,8 +4452,10 @@ class AgentChatGateway:
                     if recoverable_task_candidates:
                         followup = FollowupClassifier(followup_model).decide(
                             message=text,
-                            recent_history=list(state.get("history") or []),
+                            recent_history=[],
                             candidates=recoverable_task_candidates,
+                            pointers=turn_pointers,
+                            retrieval_hints=["conversation_context_read" if conv_avail.has_history else ""],
                         )
                         turn_record.normalized_intent = followup.category
                         turn_record.routing_decision_id = followup.decision_id
@@ -4332,13 +4464,8 @@ class AgentChatGateway:
                         )
                         turn_record.status = "classified"
                         turn_store.update(turn_record)
-                        if followup.related_task_id:
-                            state["followup_memory_context"] = self._recall_task_capsules(
-                                task_id=followup.related_task_id,
-                                session_id=session_id,
-                                query=text,
-                            )
-                            state["followup_memory_kind"] = "capsule"
+                        state["followup_memory_context"] = ""
+                        state["followup_memory_kind"] = ""
                         if callable(sink):
                             sink(
                                 "followup_classified",
@@ -5305,6 +5432,11 @@ class AgentChatGateway:
             )
         if write_warning:
             result.warnings.append(write_warning)
+        conv_tokens = int(state.get("conversation_retrieval_tokens", 0) or 0)
+        mem_tokens = int(state.get("memory_retrieval_tokens", 0) or 0)
+        result.payload["history_injected"] = False
+        result.payload.setdefault("conversation_retrieval_tokens", conv_tokens)
+        result.payload.setdefault("memory_retrieval_tokens", mem_tokens)
         record_current(
             "gateway.turn.finished",
             {
@@ -5855,23 +5987,79 @@ class AgentChatGateway:
             self._lane_coordinator.start(root_reservation)
 
         def execute_child(item: Any, child_task_id: str) -> MultiTaskChildResult:
-            child_context = EntryRouteContext(
-                session_id=context.session_id,
-                conversation_id=context.conversation_id,
-                turn_id=f"{context.turn_id}:{item.local_id}",
-                previous_route="",
-                conversation_summary=context.conversation_summary,
-                artifact_evidence=artifact_routing_evidence(
+            child_accounting = self._stack.context_cost_governor.accounting_snapshot(
+                task_id=child_task_id, turn_id=context.turn_id
+            )
+            child_envelope = build_routing_execution_envelope(
+                user_request=item.request,
+                identity=IdentitySessionRelationship(
+                    authenticated_user_id=context.authenticated_user_id,
+                    session_id=context.session_id,
+                    conversation_id=context.conversation_id,
+                    turn_id=f"{context.turn_id}:{item.local_id}",
+                    task_id=child_task_id,
+                    parent_task_id=root_task.task_id,
+                    workspace_id=str(board.store.workspace_id or ""),
+                    repository_id=str(board.store.repository_id or ""),
+                ),
+                execution_state=ExecutionRecoveryState(
+                    active_route="",
+                    lane_id="",
+                    recoverable_task_candidates=(),
+                    all_recovery_candidates=(),
+                ),
+                accounting_snapshot=child_accounting,
+                model_candidates=tuple(
+                    ModelCandidateCapacity(
+                        model_id=p.model_id,
+                        provider=p.provider,
+                        context_window=p.context_window,
+                        max_output_tokens=p.max_output_tokens,
+                        supported_roles=tuple(p.supported_roles),
+                        supported_tools=tuple(p.supported_tools),
+                        available=p.available,
+                        latency_class=p.latency_class.value,
+                        can_patch=p.can_patch,
+                        can_verify=p.can_verify,
+                    )
+                    for p in self.routing_authority.router.profiles
+                ),
+                route_availability=tuple(self._entry_route_registry.snapshot()),
+                capabilities_and_tools=tuple(list_auto_chat_tools()),
+                approval_state=ApprovalState(),
+                artifact_metadata=artifact_routing_evidence(
                     root=self.root,
                     user_prompt=item.request,
                     attachments=options.get("attachments", ()),
                     target_files=options.get("target_files", ()),
                 ),
+                previous_turn_pointers=PreviousTurnPointers(
+                    previous_task_id=root_task.task_id,
+                ),
+                conversation_context_availability=ConversationContextAvailability(
+                    has_history=False,
+                    available_turns=0,
+                    retrieval_tool_available=True,
+                ),
+                memory_availability=MemoryAvailability(
+                    memory_capsules_enabled=context.memory_capsules_enabled,
+                    memory_task_candidates=context.memory_task_candidates,
+                    retrieval_tool_available=True,
+                ),
+            )
+            child_context = EntryRouteContext(
+                session_id=context.session_id,
+                conversation_id=context.conversation_id,
+                turn_id=f"{context.turn_id}:{item.local_id}",
+                previous_route="",
+                conversation_summary="",
+                artifact_evidence=child_envelope.artifact_metadata,
                 memory_task_candidates=context.memory_task_candidates,
                 memory_capsules_enabled=context.memory_capsules_enabled,
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
                 authenticated_user_id=context.authenticated_user_id,
+                envelope=child_envelope,
             )
             try:
                 with self._multi_task_route_lock:
@@ -6811,11 +6999,7 @@ class AgentChatGateway:
         options: dict[str, Any],
     ) -> ChatTurnResult:
         lane_task_id = str(options.get("_lane_task_id") or "")
-        execution_text = (
-            text
-            if bool(options.get("_isolated_child_prompt"))
-            else _conversation_prompt(state, text)
-        )
+        execution_text = text
         resume_context = options.get("_resume_checkpoint_context")
         if isinstance(resume_context, dict):
             execution_text += (
@@ -7405,7 +7589,7 @@ class AgentChatGateway:
                     question=text,
                     root=self.root,
                     required_tool=required_tool,
-                    memory_context=_conversation_prompt(state, text),
+                    memory_context="",
                 )
             except SearchOperationDecisionError as exc:
                 return ChatTurnResult(

@@ -88,9 +88,25 @@ class EntryRouteContext:
     atomic_child: bool = False
     orchestration_parent_task_id: str = ""
     authenticated_user_id: str = ""
+    envelope: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        base = {
+            "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
+            "turn_id": self.turn_id,
+            "previous_route": self.previous_route,
+            "conversation_summary": self.conversation_summary,
+            "artifact_evidence": dict(self.artifact_evidence),
+            "memory_task_candidates": [dict(c) for c in self.memory_task_candidates],
+            "memory_capsules_enabled": self.memory_capsules_enabled,
+            "atomic_child": self.atomic_child,
+            "orchestration_parent_task_id": self.orchestration_parent_task_id,
+            "authenticated_user_id": self.authenticated_user_id,
+        }
+        if self.envelope is not None and hasattr(self.envelope, "to_dict"):
+            base["envelope"] = self.envelope.to_dict()
+        return base
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,6 +516,7 @@ class EntryRouter:
         *,
         user_prompt: str,
         context: EntryRouteContext,
+        envelope: Any | None = None,
     ) -> EntryRoutingDecision:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise EntryRoutingError(
@@ -512,6 +529,7 @@ class EntryRouter:
         disallowed_routes = ["multi_task"] if atomic_child else []
         if disallowed_routes:
             routes = [row for row in routes if row["name"] not in disallowed_routes]
+        effective_envelope = envelope or getattr(context, "envelope", None)
         payload = {
             "user_prompt": str(user_prompt or "").strip(),
             "context": context.to_dict(),
