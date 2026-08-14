@@ -106,6 +106,10 @@ def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | N
         if lowered.startswith(key.casefold()):
             return limits
     provider_id = str(provider or "").strip().casefold()
+    if "claude" in lowered or provider_id == "anthropic":
+        return (200_000, 16_384)
+    if "gemini" in lowered or provider_id == "google":
+        return (1_000_000, 16_384)
     if provider_id == "openai" and lowered.startswith("gpt-5"):
         return (400_000, 128_000)
     if provider_id == "openai" and lowered.startswith("gpt-4.1"):

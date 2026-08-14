@@ -9,6 +9,7 @@ from typing import Any, Callable, Literal, get_args
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
+from mana_agent.context_cost.accounting import ModelContextLimitError
 from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
@@ -645,7 +646,7 @@ class EntryRouter:
             return decision
         except EntryRoutingError:
             raise
-        except ContextBudgetExceeded as exc:
+        except (ContextBudgetExceeded, ModelContextLimitError) as exc:
             record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "

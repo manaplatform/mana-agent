@@ -12,6 +12,8 @@ All notable repository changes should be recorded here.
   - Updated follow-up classification and multi-task orchestration to pass structured envelopes and pointers without copying parent history transcripts.
   - Added structured observability events (`routing.envelope_created`, `context.conversation_read`, `context.memory_read`, `context.retrieval_deduplicated`) and exposed retrieval metrics on turn payloads.
   - Added comprehensive test suite in `tests/gateway/test_context_retrieval_tools.py` covering all 12 specified scenarios.
+  - Handled `ContextBudgetExceeded` and `ModelContextLimitError` in `EntryRouter.route` and `FollowupClassifier.decide` ensuring zero budget charge and clean propagation when context/task budgets are exhausted.
+  - Added maintained token limits for Claude and Gemini model families in `src/mana_agent/config/model_catalog.py` preventing false 16k context window deficits on 200k+ models.
   - User verification required: `python -m pytest tests/gateway/test_context_retrieval_tools.py -v`.
 
 - Implemented Phase 0 — Accounting Foundation refactoring cumulative task budgets, per-provider-call context capacity, turn usage, and verification reserve.
