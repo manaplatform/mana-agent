@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-14
 
+- Fixed premature termination and budget accounting bugs where cumulative lane usage was conflated with current-turn usage, intermediate tool calls (e.g. search returning resource IDs) were falsely treated as complete user tasks, and soft step thresholds aborted multi-step workflows.
+  - Decoupled `turn_budget_tokens` and `turn_consumed_tokens` from lifetime cumulative `consumed_tokens` in `LaneBudget` and `LaneCoordinator`, ensuring fresh turns reset turn accounting without losing cumulative session/lane tracking.
+  - Added structured completion and continuation semantics (`status`, `pending_required_work`, `stop_reason`, `intermediate_results`) to `AskResponseWithTrace` and `ChatGateway`.
+  - Fixed premature tool loop breakout in `AskAgent` on soft step thresholds (`remaining_steps <= 1`), allowing required follow-up tool calls (such as fetching email content after search) to execute.
+  - Preserved intermediate tool results across durable checkpoints and return structured terminal states (`status: budget_exhausted`, `pending_required_work: True`, `resume_required: True`) when hard budgets are genuinely exhausted.
+  - User verification required: `python -m pytest tests/gateway/test_turn_budget_accounting.py tests/gateway/test_lane_coordinator.py tests/test_ask_agent.py -v`
+
+
 - Fixed `FollowupClassifier` false-negative that blocked independent inputs (bare email addresses, terse messages) when existing durable tasks were present. The LLM would classify the input as `new_task` but set `safe_to_continue=false`, causing a hard failure. Strengthened the classifier prompt and added a structural invariant guard: independent classifications (`new_task`, `conversation_only`, `clarification_answer`) with no related task now always proceed, since they are unambiguous by construction.
   - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py::test_failed_followup_classification_stops_before_recovery_or_new_work -v`
 

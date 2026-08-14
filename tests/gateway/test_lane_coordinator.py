@@ -1454,3 +1454,22 @@ def test_synchronize_usage_tracks_turn_tokens(coordinator: LaneCoordinator) -> N
     assert execution.budget.consumed_output_tokens == 75
     assert execution.budget.turn_consumed_tokens == 75
     assert execution.budget.turn_remaining_tokens == 425
+
+
+def test_lane_coordinator_can_continue_turn_and_exhaustion(coordinator: LaneCoordinator) -> None:
+    reservation = _reserve(coordinator, LaneId.RESEARCH, intent="can continue")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+
+    coordinator.reset_turn_accounting(task_id, allocated_tokens=1000)
+    assert not coordinator.is_turn_budget_exhausted(task_id)
+    assert coordinator.can_continue_turn(task_id, required_reserve=200)
+
+    # Consume entire turn budget
+    coordinator.synchronize_usage(
+        task_id,
+        consumed_input_tokens=600,
+        consumed_output_tokens=400,
+    )
+    assert coordinator.is_turn_budget_exhausted(task_id)
+    assert not coordinator.can_continue_turn(task_id)

@@ -4750,17 +4750,35 @@ class AgentChatGateway:
                                 resume_payload={
                                     "mode": result.mode,
                                     "changed_files": list(result.changed_files),
+                                    "intermediate_results": dict(result.payload.get("intermediate_results") or {}),
                                 },
                                 completed_steps=("routing", "execute_route"),
                                 pending_steps=("verify", "final_response"),
                             )
+                            status = str(result.payload.get("status") or ("completed" if not result.error else "failed"))
+                            pending_required_work_exists = bool(
+                                result.payload.get("pending_required_work", False)
+                            )
+                            if not pending_required_work_exists:
+                                if status in ("pass_budget_exhausted", "needs_continuation", "blocked", "budget_exhausted"):
+                                    pending_required_work_exists = True
+                                elif status == "completed":
+                                    pending_required_work_exists = False
+                                else:
+                                    pending_required_work_exists = bool(result.error)
+
+                            target_state = (
+                                LaneTaskState.FAILED
+                                if result.error
+                                else LaneTaskState.COMPLETED
+                                if (status == "completed" and not pending_required_work_exists)
+                                else LaneTaskState.BUDGET_EXHAUSTED
+                                if status == "budget_exhausted"
+                                else LaneTaskState.RUNNING
+                            )
                             finished = self._finish_lane(
                                 reservation.execution.task_id,
-                                state=(
-                                    LaneTaskState.FAILED
-                                    if result.error
-                                    else LaneTaskState.COMPLETED
-                                ),
+                                state=target_state,
                                 changed_files=result.changed_files,
                                 verification_state={
                                     "mode": result.mode,
@@ -4788,9 +4806,6 @@ class AgentChatGateway:
                                         )
                                     except Exception as exc:
                                         decision_unavailable = True
-                                        # A pending decision is a durable, safe handoff rather
-                                        # than a failed chat turn. The result remains available
-                                        # for a later validated decision.
                                         result.error = None
                                         result.mode = "lane-budget-decision-pending"
                                         result.answer = (
@@ -4827,32 +4842,28 @@ class AgentChatGateway:
                                             "budget-overrun recovery is scheduled"
                                         )
                                         result.payload["budget_overrun_status"] = "recovery_scheduled"
-                                status = result.payload.get("status")
-                                if status == "completed":
-                                    pending_required_work_exists = False
-                                elif status in ("pass_budget_exhausted", "blocked"):
-                                    pending_required_work_exists = True
-                                else:
-                                    pending_required_work_exists = (
-                                        finished.state is not LaneTaskState.COMPLETED
-                                    )
 
-                                budget_exhausted = reservation.execution.budget.turn_remaining_tokens <= 0
+                                budget_exhausted = (
+                                    status == "budget_exhausted"
+                                    or reservation.execution.budget.is_turn_budget_exhausted
+                                )
 
-                                if status == "completed":
+                                if status == "completed" and not pending_required_work_exists:
                                     pass  # Keep result as is, do not override with budget_exhausted
                                 elif (
-                                    status != "completed"
-                                    and pending_required_work_exists
+                                    pending_required_work_exists
                                     and budget_exhausted
                                 ):
                                     result.error = "lane_budget_exhausted"
                                     result.mode = "lane-budget-exhausted"
+                                    result.payload["status"] = "budget_exhausted"
+                                    result.payload["pending_required_work"] = True
+                                    result.payload["resume_required"] = True
                                     result.answer = (
-                                        "The selected workflow exceeded its reserved execution "
-                                        "budget before its result could be accepted. "
-                                        f"{finished.error or 'No result was accepted.'}"
-                                    )
+                                        "The selected workflow reached its budget limit while work remained pending. "
+                                        "Intermediate results were checkpointed and can be resumed. "
+                                        f"{finished.error or ''}"
+                                    ).strip()
                                 elif status == "blocked" and not result.error:
                                     result.error = "lane_blocked"
                                     result.mode = "lane-blocked"
@@ -4866,6 +4877,8 @@ class AgentChatGateway:
                                         LaneTaskState.COMPLETED,
                                         LaneTaskState.PENDING_BUDGET_DECISION,
                                         LaneTaskState.QUEUED,
+                                        LaneTaskState.RUNNING,
+                                        LaneTaskState.WAITING,
                                     }
                                 ):
                                     result.error = "completion_verification_failed"
@@ -4881,6 +4894,7 @@ class AgentChatGateway:
                                 "lane_task_id": reservation.execution.task_id,
                                 "duplicate": False,
                                 "routing_decision": execution_decision.concise(),
+                                "pending_required_work": pending_required_work_exists,
                             }
                         )
                 except FollowupClassificationError as exc:
@@ -8599,7 +8613,7 @@ class AgentChatGateway:
                 question=text,
                 index_dir=self._index_dir or default_index_dir(self.root),
                 k=self._resolved_k,
-                max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                max_steps=max(10, int(self.config.agent_max_steps or 10)),
                 timeout_seconds=max(30, self._agent_timeout_seconds),
                 callbacks=callbacks,
                 system_prompt=system_prompt,
@@ -8626,6 +8640,10 @@ class AgentChatGateway:
         answer = str(getattr(response, "answer", response) or "").strip()
         trace = _serialize_tool_traces(response)
         warnings = [str(item) for item in (getattr(response, "warnings", []) or [])]
+        status = getattr(response, "status", "completed")
+        pending_required_work = getattr(response, "pending_required_work", False)
+        stop_reason = getattr(response, "stop_reason", "")
+        intermediate_results = getattr(response, "intermediate_results", {})
         return ChatTurnResult(
             answer=answer,
             sources=list(getattr(response, "sources", []) or []),
@@ -8633,7 +8651,13 @@ class AgentChatGateway:
             decision=decision,
             trace=trace,
             warnings=warnings,
-            payload={"route": "gmail"},
+            payload={
+                "route": "gmail",
+                "status": status,
+                "pending_required_work": pending_required_work,
+                "stop_reason": stop_reason,
+                "intermediate_results": intermediate_results,
+            },
         )
 
     def _execute_mcp_route(
@@ -8794,6 +8818,10 @@ class AgentChatGateway:
                     "failed_tool": str(failed.get("tool_name") or "mcp"),
                 },
             )
+        status = getattr(response, "status", "completed")
+        pending_required_work = getattr(response, "pending_required_work", False)
+        stop_reason = getattr(response, "stop_reason", "")
+        intermediate_results = getattr(response, "intermediate_results", {})
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),
             sources=list(getattr(response, "sources", []) or []),
@@ -8801,7 +8829,14 @@ class AgentChatGateway:
             decision=decision,
             trace=trace,
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={"route": "mcp", "provider_id": provider_id},
+            payload={
+                "route": "mcp",
+                "provider_id": provider_id,
+                "status": status,
+                "pending_required_work": pending_required_work,
+                "stop_reason": stop_reason,
+                "intermediate_results": intermediate_results,
+            },
         )
 
     def _execute_computer_route(

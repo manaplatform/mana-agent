@@ -98,16 +98,25 @@ class AskResponse:
     sources: list[SearchHit]
     source_groups: list[SourceGroup] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    status: str = "completed"
+    pending_required_work: bool = False
+    stop_reason: str = ""
+    intermediate_results: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "answer": self.answer,
             "sources": [item.to_dict() for item in self.sources],
+            "status": self.status,
+            "pending_required_work": self.pending_required_work,
+            "stop_reason": self.stop_reason,
         }
         if self.source_groups:
             payload["source_groups"] = [item.to_dict() for item in self.source_groups]
         if self.warnings:
             payload["warnings"] = self.warnings
+        if self.intermediate_results:
+            payload["intermediate_results"] = self.intermediate_results
         return payload
 
 

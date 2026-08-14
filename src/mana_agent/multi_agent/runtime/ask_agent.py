@@ -2299,20 +2299,13 @@ class AskAgent:
             need_forced_write = (
                 mutation_required and not mutation_succeeded and bound_mutation is not None
             )
-            # When the remaining tool budget is too low to make further progress,
-            # stop calling tools and synthesize a final answer from the evidence
-            # gathered so far rather than risk ending with no answer at all.
+            # When steps are limited, force a write if a mutation is required.
+            # Otherwise, allow the step to proceed so required follow-up tool calls can execute.
             remaining_steps = max_steps - step_idx
             if remaining_steps <= 1 and step_idx > 0 and not final_answer:
-                # A mutation-required run must not bail to a natural-language
-                # answer here: that guarantees zero mutations and a downstream
-                # tools_only_violation. Spend the final step forcing a write.
                 if need_forced_write and not forced_write_done:
                     forced_write_done = True
                     messages.append(HumanMessage(content=_FORCED_WRITE_INSTRUCTION))
-                else:
-                    force_synthesis_reason = force_synthesis_reason or "remaining_tool_budget_low"
-                    break
 
             # Once a forced write is in flight, restrict the model to mutation
             # tools so it can only act, never read again, until a write lands.
@@ -2882,6 +2875,7 @@ class AskAgent:
             if force_synthesis_reason and not final_answer:
                 break
 
+        natural_completion = final_answer != ""
         # Final-answer fallback: never surface the raw step-limit string. Always
         # synthesize a best-effort answer from the collected evidence/trace.
         if not final_answer:
@@ -2908,12 +2902,29 @@ class AskAgent:
             key=lambda item: (item.file_path, item.start_line, item.end_line, item.symbol_name),
         )
 
+        intermediate_results = self._extract_intermediate_results(traces)
+        if natural_completion:
+            status = "completed"
+            pending_required_work = False
+            stop_reason = "completed"
+        else:
+            stop_reason = force_synthesis_reason or "max_steps_reached"
+            pending_required_work = True
+            if any(t.status == "blocked" and "budget exhausted" in str(t.output_preview).lower() for t in traces):
+                status = "budget_exhausted"
+            else:
+                status = "needs_continuation"
+
         result = AskResponseWithTrace(
             answer=final_answer,
             sources=deduped_sources,
             mode="agent-tools",
             trace=traces,
             warnings=warnings,
+            status=status,
+            pending_required_work=pending_required_work,
+            stop_reason=stop_reason,
+            intermediate_results=intermediate_results,
         )
         if require_read_files > 0 and len(unique_read_files) < require_read_files:
             result.warnings.append(
@@ -2966,6 +2977,28 @@ class AskAgent:
             )
 
         return result
+
+    @staticmethod
+    def _extract_intermediate_results(traces: list[ToolInvocationTrace]) -> dict[str, Any]:
+        collected: dict[str, Any] = {}
+        for trace in traces:
+            if trace.status != "ok" or not trace.output_preview:
+                continue
+            try:
+                payload = json.loads(trace.output_preview)
+                if isinstance(payload, dict):
+                    for k, v in payload.items():
+                        if k in {"message_id", "id", "email_id", "thread_id", "file_path", "resource_id", "candidates"}:
+                            collected[k] = v
+                        elif k in {"messages", "items", "results", "emails"} and isinstance(v, list) and v:
+                            first = v[0]
+                            if isinstance(first, dict):
+                                for sub_k in {"id", "message_id", "email_id", "thread_id"}:
+                                    if sub_k in first:
+                                        collected[sub_k] = first[sub_k]
+            except Exception:
+                pass
+        return collected
 
     def _prepare_external_search_context(
         self,
