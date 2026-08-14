@@ -105,6 +105,8 @@ from mana_agent.model_routing.models import (
 from mana_agent.execution_supervisor.models import (
     ActionRequestState,
     BudgetForecast,
+    EscrowLookupStatus,
+    EscrowStatus,
     ExecutionState,
     RecoveryAction,
     RecoveryDecision,
@@ -4105,6 +4107,8 @@ class AgentChatGateway:
                         expected_tool_calls=(
                             max(0, int(self.config.agent_max_steps) - 1)
                             if entry_decision.route == "canvas"
+                            else max(1, len(route_tools))
+                            if route_tools
                             else 0
                         ),
                         expected_model_calls=(
@@ -4292,19 +4296,92 @@ class AgentChatGateway:
                                 },
                             )
                         if followup.category in {"status_request", "duplicate_message"}:
-                            supervised = self._lane_coordinator.execution_supervisor
-                            verified_task = supervised.store.get_task(followup.related_task_id)
-                            escrow = supervised.store.get_result(verified_task.result_id)
-                            if escrow is None:
-                                raise CheckpointResumeError("Verified execution result escrow is unavailable; no stored status was returned.")
-                            durable_result = dict(escrow.payload.get("chat_result") or {})
-                            result = ChatTurnResult(
-                                answer=str(durable_result.get("answer") or "Verified result is available for the selected task."),
-                                mode="verified-task-status",
-                                changed_files=list(durable_result.get("changed_files") or []),
-                                payload={**dict(durable_result.get("payload") or {}), "lane_task_id": verified_task.task_id, "execution_id": verified_task.task_id, "verified_result_reused": True},
+                            lookup = self._lane_coordinator.get_verified_execution_result(
+                                followup.related_task_id
                             )
-                            return self._finalize_turn_result(result=result, session_id=session_id, conversation_id=conversation_id, turn_id=turn_id, text=text, state=state, memory_warning=memory_warning)
+                            if lookup.status == EscrowLookupStatus.FOUND and lookup.result is not None:
+                                durable_result = dict(lookup.result.payload.get("chat_result") or {})
+                                ans = (
+                                    durable_result.get("answer")
+                                    or lookup.result.error_metadata.get("reason")
+                                    or (lookup.task.failure_reason if lookup.task else "")
+                                    or f"Status: {lookup.result.supervisor_state}"
+                                )
+                                result = ChatTurnResult(
+                                    answer=str(ans),
+                                    mode=durable_result.get("mode") or "verified-task-status",
+                                    changed_files=list(durable_result.get("changed_files") or []),
+                                    payload={
+                                        **dict(durable_result.get("payload") or {}),
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "verified_result_reused": True,
+                                        "status": lookup.result.supervisor_state,
+                                        "is_terminal": lookup.is_terminal,
+                                        "is_resumable": lookup.is_resumable,
+                                    },
+                                )
+                                if lookup.acknowledgement is None:
+                                    self._lane_coordinator.execution_supervisor.acknowledge_result(
+                                        lookup.result.result_id,
+                                        consumer_turn_id=turn_id,
+                                        consumer_execution_id=lookup.execution_id,
+                                    )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif lookup.status == EscrowLookupStatus.EXECUTION_STILL_RUNNING:
+                                result = ChatTurnResult(
+                                    answer=f"Task {followup.related_task_id} is currently running.",
+                                    mode="task-status",
+                                    payload={
+                                        "lane_task_id": followup.related_task_id,
+                                        "execution_id": followup.related_task_id,
+                                        "status": "running",
+                                        "is_terminal": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif lookup.status == EscrowLookupStatus.UNVERIFIED:
+                                result = ChatTurnResult(
+                                    answer=f"Task {followup.related_task_id} execution has completed and is pending verification.",
+                                    mode="task-status",
+                                    payload={
+                                        "lane_task_id": followup.related_task_id,
+                                        "execution_id": followup.related_task_id,
+                                        "status": "verifying",
+                                        "is_terminal": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            else:
+                                err_msg = (
+                                    f"Verified execution result escrow is unavailable: "
+                                    f"[{lookup.error_code}] {lookup.error_message}"
+                                )
+                                raise CheckpointResumeError(err_msg)
                         if followup.category in {"conversation_only", "clarification_answer"}:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
@@ -4575,6 +4652,11 @@ class AgentChatGateway:
                         # Follow-up, expand, retry, resume, and second+ messages
                         # recalculate the live reservation from this turn's
                         # forecast so exhausted prior usage cannot block work.
+                        budgets = self._routing_budgets_for_lane(lane_id)
+                        self._lane_coordinator.reset_turn_accounting(
+                            reservation.execution.task_id,
+                            allocated_tokens=budgets.task_token_limit or 0,
+                        )
                         self._recalculate_reservation_for_message(
                             reservation.execution.task_id,
                             execution_estimate=execution_estimate,
@@ -4656,6 +4738,12 @@ class AgentChatGateway:
                                 reason="waiting for interactive approval",
                             )
                         else:
+                            if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
+                                actual_tools = [
+                                    t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
+                                ]
+                                if not actual_tools:
+                                    result.error = "completion_verification_failed"
                             self._lane_coordinator.checkpoint(
                                 reservation.execution.task_id,
                                 boundary="before_verification",
@@ -4739,9 +4827,24 @@ class AgentChatGateway:
                                             "budget-overrun recovery is scheduled"
                                         )
                                         result.payload["budget_overrun_status"] = "recovery_scheduled"
-                                if (
-                                    not result.error
-                                    and finished.state is LaneTaskState.BUDGET_EXHAUSTED
+                                status = result.payload.get("status")
+                                if status == "completed":
+                                    pending_required_work_exists = False
+                                elif status in ("pass_budget_exhausted", "blocked"):
+                                    pending_required_work_exists = True
+                                else:
+                                    pending_required_work_exists = (
+                                        finished.state is not LaneTaskState.COMPLETED
+                                    )
+
+                                budget_exhausted = reservation.execution.budget.turn_remaining_tokens <= 0
+
+                                if status == "completed":
+                                    pass  # Keep result as is, do not override with budget_exhausted
+                                elif (
+                                    status != "completed"
+                                    and pending_required_work_exists
+                                    and budget_exhausted
                                 ):
                                     result.error = "lane_budget_exhausted"
                                     result.mode = "lane-budget-exhausted"
@@ -4749,6 +4852,13 @@ class AgentChatGateway:
                                         "The selected workflow exceeded its reserved execution "
                                         "budget before its result could be accepted. "
                                         f"{finished.error or 'No result was accepted.'}"
+                                    )
+                                elif status == "blocked" and not result.error:
+                                    result.error = "lane_blocked"
+                                    result.mode = "lane-blocked"
+                                    result.answer = (
+                                        "The task is blocked and requires operator intervention. "
+                                        f"{finished.error or ''}"
                                     )
                                 elif (
                                     not result.error
@@ -4887,6 +4997,15 @@ class AgentChatGateway:
             supervisor = self._lane_coordinator.execution_supervisor
             supervised = supervisor.store.get_task_or_none(execution_id)
             if supervised is not None:
+                if supervised.result_id:
+                    try:
+                        supervisor.acknowledge_result(
+                            supervised.result_id,
+                            consumer_turn_id=turn_id,
+                            consumer_execution_id=execution_id,
+                        )
+                    except Exception:
+                        pass
                 manifest = supervisor.store.artifact_manifest(execution_id) or {}
                 attempt = (
                     supervisor.store.get_attempt(supervised.attempt_id)
@@ -5987,16 +6106,30 @@ class AgentChatGateway:
                 error=str(result.error),
             )
         else:
-            finished = self._finish_lane(
-                reservation.execution.task_id,
-                changed_files=result.changed_files,
-                verification_state={"mode": result.mode, "status": "completed"},
-            )
-            status = (
-                "completed"
-                if finished.state == LaneTaskState.COMPLETED
-                else "failed"
-            )
+            if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"}:
+                actual_tools = [
+                    t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
+                ]
+                if not actual_tools:
+                    result.error = "completion_verification_failed"
+                    self._finish_lane(
+                        reservation.execution.task_id,
+                        state=LaneTaskState.FAILED,
+                        changed_files=result.changed_files,
+                        error="required_tool_missing: Execution required external tool work but no valid tool result was recorded",
+                    )
+                    status = "failed"
+            if not result.error:
+                finished = self._finish_lane(
+                    reservation.execution.task_id,
+                    changed_files=result.changed_files,
+                    verification_state={"mode": result.mode, "status": "completed"},
+                )
+                status = (
+                    "completed"
+                    if finished.state == LaneTaskState.COMPLETED
+                    else "failed"
+                )
         artifacts = [
             str(item.get("path"))
             for item in result.sources
@@ -6523,6 +6656,7 @@ class AgentChatGateway:
                 text=execution_text,
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
+                lane_task_id=lane_task_id,
             )
 
         if decision.route == "automation":
@@ -8435,6 +8569,7 @@ class AgentChatGateway:
         text: str,
         ask_service: Any,
         callbacks: Any,
+        lane_task_id: str = "",
     ) -> ChatTurnResult:
         ask_agent = getattr(ask_service, "ask_agent", None)
         if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
@@ -8478,6 +8613,7 @@ class AgentChatGateway:
                 },
                 flow_id=context.session_id,
                 run_id=context.turn_id,
+                transactional_parent_task_id=lane_task_id,
             )
         except Exception as exc:
             return ChatTurnResult(

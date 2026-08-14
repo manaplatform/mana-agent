@@ -157,7 +157,7 @@ class ManaConfigurationApp(App[bool]):
         media_provider_options = [
             (item.display_name, item.id)
             for item in PROVIDERS.all()
-            if item.id in {"openai", "custom"}
+            if item.id in {"openai", "custom", "openrouter"}
         ]
         search_options = [("Disabled", "disabled"), *((item.display_name, item.id) for item in SEARCH_PROVIDERS)]
         github_source = str(values.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "disabled")

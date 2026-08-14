@@ -49,8 +49,10 @@ from mana_agent.execution_supervisor.errors import (
 )
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
+    EscrowLookupStatus,
     ExecutionState,
     RecoveryAction,
+    VerifiedExecutionResultLookup,
 )
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
@@ -92,13 +94,15 @@ def _stable_hash(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _completion_verification_failure(manifest: Mapping[str, Any]) -> str:
+def _completion_verification_failure(manifest: Mapping[str, Any], execution: Any = None, supervised: Any = None) -> str:
     verification = manifest.get("verification")
     if not isinstance(verification, Mapping):
         return "Durable completion verification failed without a persisted verification report."
     checks = verification.get("checks")
     checks = checks if isinstance(checks, list) else []
     failures: list[str] = []
+    
+
     for raw in checks:
         if not isinstance(raw, Mapping) or raw.get("passed") is True:
             continue
@@ -193,6 +197,19 @@ class LaneBudget:
     estimate_confidence: str = ""
     estimate_source: str = ""
     revisions: list[dict[str, Any]] = field(default_factory=list)
+
+    turn_budget_tokens: int = 0
+    turn_consumed_tokens: int = 0
+    turn_reserved_tokens: int = 0
+
+    def start_new_turn(self, allocated_tokens: int) -> None:
+        self.turn_budget_tokens = allocated_tokens
+        self.turn_consumed_tokens = 0
+        self.turn_reserved_tokens = 0
+
+    @property
+    def turn_remaining_tokens(self) -> int:
+        return max(0, self.turn_budget_tokens - self.turn_consumed_tokens - self.turn_reserved_tokens)
 
     @property
     def reserved_tokens(self) -> int:
@@ -1195,7 +1212,10 @@ class LaneCoordinator:
                 # authoritative terminal budget state. Do not replace it with
                 # a second terminal transition to FAILED.
                 execution.error = str(exc)
-                state = LaneTaskState.BUDGET_EXHAUSTED
+                if execution.verification_state.get("chat_result", {}).get("status") == "completed":
+                    state = LaneTaskState.COMPLETED
+                else:
+                    state = LaneTaskState.BUDGET_EXHAUSTED
             except ExecutionSupervisorError as exc:
                 execution.error = str(exc)
                 supervised = self.execution_supervisor.store.get_task(task_id)
@@ -1217,6 +1237,16 @@ class LaneCoordinator:
                         reason=f"lane completion supervision failed: {exc}",
                     )
             else:
+                if supervised.state == SupervisorState.COMPLETED_PENDING_VERIFICATION:
+                    try:
+                        self.execution_supervisor.verify_completion(task_id)
+                        supervised = self.execution_supervisor.store.get_task(task_id)
+                    except Exception as exc:
+                        self.execution_supervisor.transition(
+                            task_id, SupervisorState.FAILED, reason=f"Verification failed: {exc}"
+                        )
+                        supervised = self.execution_supervisor.store.get_task(task_id)
+
                 verified = supervised.state == SupervisorState.COMPLETED
                 state = (
                     LaneTaskState.COMPLETED if verified
@@ -1229,7 +1259,7 @@ class LaneCoordinator:
                         execution.error = "A validated model budget-overrun decision is required before finalization."
                     else:
                         manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
-                        execution.error = _completion_verification_failure(manifest)
+                        execution.error = _completion_verification_failure(manifest, execution, supervised)
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
         elif state == LaneTaskState.BUDGET_EXHAUSTED:
@@ -1301,6 +1331,12 @@ class LaneCoordinator:
             self._condition.notify_all()
         return execution
 
+    def get_verified_execution_result(
+        self, execution_id: str
+    ) -> VerifiedExecutionResultLookup:
+        """Authoritative retrieval of verified results or terminal outcomes from escrow."""
+        return self.execution_supervisor.get_verified_execution_result(execution_id)
+
     def synchronize_usage(
         self,
         task_id: str,
@@ -1326,6 +1362,8 @@ class LaneCoordinator:
             cost_delta = max(0.0, float(actual_cost or 0.0) - execution.budget.actual_cost)
             execution.budget.consumed_input_tokens += input_delta
             execution.budget.consumed_output_tokens += output_delta
+            execution.budget.turn_consumed_tokens += input_delta + output_delta
+            execution.budget.turn_reserved_tokens = max(0, execution.budget.turn_reserved_tokens - (input_delta + output_delta))
             execution.budget.actual_cost += cost_delta
             execution.budget.actual_cost_known = actual_cost is not None
             for reservation_id in accounting_reservation_ids:
@@ -1386,6 +1424,12 @@ class LaneCoordinator:
                 raise LaneBudgetError("recalculated budget exceeds the session token limit")
             if self.global_token_budget is not None and sum(item.budget.reserved_tokens for item in active) + next_total > self.global_token_budget:
                 raise LaneBudgetError("recalculated budget exceeds the global token limit")
+
+            delta_total = next_total - budget.reserved_tokens
+            if delta_total > 0 and budget.turn_budget_tokens > 0:
+                if budget.turn_consumed_tokens + budget.turn_reserved_tokens + delta_total > budget.turn_budget_tokens:
+                    raise LaneBudgetError("recalculated budget exceeds the turn token limit")
+
             if execution.parent_task_id and execution.parent_task_id in self._executions:
                 parent = self._executions[execution.parent_task_id]
                 if parent.state not in {
@@ -1420,6 +1464,8 @@ class LaneCoordinator:
                 raise LaneBudgetError(str(exc)) from exc
             budget.reserved_input_tokens = next_input
             budget.reserved_output_tokens = next_output
+            if delta_total > 0:
+                budget.turn_reserved_tokens += delta_total
             budget.estimated_cost = next_cost
             budget.estimated_cost_known = forecast_cost is not None
             budget.revisions.append({
@@ -1647,8 +1693,25 @@ class LaneCoordinator:
             "budget.recalculated",
             task_id=task_id,
             lane_id=execution.owning_lane,
-            budget=asdict(budget),
+            reserved_tokens=budget.reserved_tokens,
+            estimated_cost=budget.estimated_cost,
+            reason=reason,
         )
+        return execution
+
+    def reset_turn_accounting(self, task_id: str, allocated_tokens: int) -> LaneExecution:
+        with self._condition:
+            execution = self._executions[task_id]
+            execution.budget.start_new_turn(allocated_tokens)
+            execution.updated_at = _iso()
+            self._persist_locked()
+        self.emit(
+            "budget.turn_reset",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+            allocated_tokens=allocated_tokens,
+        )
+        return execution
 
     def transition(
         self,

@@ -2,7 +2,49 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-14
+
+- Fixed `FollowupClassifier` false-negative that blocked independent inputs (bare email addresses, terse messages) when existing durable tasks were present. The LLM would classify the input as `new_task` but set `safe_to_continue=false`, causing a hard failure. Strengthened the classifier prompt and added a structural invariant guard: independent classifications (`new_task`, `conversation_only`, `clarification_answer`) with no related task now always proceed, since they are unambiguous by construction.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py::test_failed_followup_classification_stops_before_recovery_or_new_work -v`
+
+- Added missing `fleet.comparison.failed` event kind to `EVENT_TYPES` in `fleet/events.py`.
+  - `FleetService` emits this kind when verification does not fully pass; it was absent from the registry, causing a `ValidationError` in the integration test.
+  - User verification required: `python -m pytest tests/fleet/test_fleet_core.py`
+
+- Fixed `acknowledge_result` in `execution_supervisor/supervisor.py` to stamp `acknowledged_at` and `acknowledged_by` on the `EscrowResult` after saving the `ResultAcknowledgement`.
+  - `verify_completion` reads `child_result.acknowledged_at` directly from the `EscrowResult`; without the stamp, all child jobs appeared as blocking children and the parent fleet run could never reach `COMPLETED`, raising `FleetStateError`.
+  - User verification required: `python -m pytest tests/fleet/test_fleet_core.py`
+
+
+
+- Implemented P1 Verified Execution Result Escrow and Durable Turn Recovery to fix `Verified execution result escrow is unavailable; no stored status was returned.`
+  - Defined versioned `EscrowResult` v2 schema with `execution_id`, `root_task_id`, `trigger_turn_id`, `session_id`, `lane_id`, `supervisor_state`, `verification_status`, and `mode="before"` migration for legacy v1 records.
+  - Made `ExecutionSupervisor` the single authoritative owner of result escrow persistence, guaranteeing that verified completion outcomes, terminal failures (`FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`), and resumable waits (`approval_required`, `auth_required`, `blocked`) are persisted to escrow with authoritative execution identity.
+  - Separated immutable `EscrowResult` from caller delivery tracking via standalone `ResultAcknowledgement` records.
+  - Added authoritative `get_verified_execution_result(execution_id)` with status differentiation (`FOUND`, `NOT_FOUND`, `EXECUTION_STILL_RUNNING`, `UNVERIFIED`, `CORRUPT`, `INCOMPATIBLE_VERSION`) and structured diagnostic error codes.
+  - Updated `ChatGateway` and `LaneCoordinator` to recover verified results from escrow across restarts, crashed gateways, and asynchronous lane execution, preserving exactly-once user response semantics.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_result_escrow_recovery.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_turn_store.py tests/gateway/test_chat_gateway.py -q`
+
+- Fixed chat turn finalization lifecycle and lineage linkage for routed executions (e.g. Gmail, external tools) so that routed executions properly link to the originating chat turn / parent task, and completed lane states correctly finalize the chat turn and synthesize assistant responses.
+  - Added tool validation ensuring that routes requiring external tools verify that valid tool executions were recorded in the trace before claiming successful completion.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py -q`
+
+- Decoupled budget exhaustion from semantic task completion by introducing per-turn token envelopes (`turn_budget_tokens`, `turn_consumed_tokens`, `turn_reserved_tokens`) while preserving cumulative historical accounting (`consumed_tokens`). This prevents tasks that have genuinely completed from being incorrectly marked as `BUDGET_EXHAUSTED` when their final operation consumes the last of the available token limit.
+  - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py -q`
+
+
 ## 2026-08-13
+
+- Added support for OpenRouter in image generation, video generation, and embeddings logic.
+  - User verification required: `python -m pytest tests/test_media_generation.py tests/test_openrouter_provider.py -q`
+
+- Fixed OpenRouter models not showing up in the configuration UI for embeddings, image, and video generation by correctly parsing capabilities from model IDs and handling `null` modalities safely.
+- Enhanced OpenRouter model fetching to query multiple endpoints (`/models`, `/embeddings/models`, `/images/models`, `/videos/models`) to ensure all media models are properly discovered and deduplicated.
+- Added dynamic capability classification for OpenRouter models using `architecture.output_modalities` and endpoint origins, correctly tagging models (e.g. `minimax/hailuo-3` and `bytedance/seedance-2.5`) as video generation without relying on hardcoded ID strings.
+- Added voice and audio capability parsing for OpenRouter models.
+- Added OpenRouter to the list of available media providers in the TUI configuration for image, voice, and video generation.
+- Fixed a validation error in `EntryRoutingOutput` where models explicitly generating `null` for `remote_request` would crash routing.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -q`
 
 - Fixed conversation-route invocation so older `ask_conversation(question)` signatures still record provider failures instead of raising out of the turn.
   - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py::test_gateway_failed_turn_keeps_session_and_records_failure -q`.

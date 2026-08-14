@@ -17,13 +17,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterator, Protocol, TypeVar
 
-from mana_agent.execution_supervisor.errors import ConcurrentUpdateError, TaskNotFoundError
+from mana_agent.execution_supervisor.errors import (
+    ConcurrentUpdateError,
+    EscrowConflictError,
+    EscrowCorruptError,
+    EscrowIncompatibleVersionError,
+    EscrowNotFoundError,
+    TaskNotFoundError,
+)
 from mana_agent.execution_supervisor.models import (
     AttemptRecord,
     ActionRecord,
     CheckpointRecord,
     EscrowResult,
     ExecutionEvent,
+    ResultAcknowledgement,
     TaskRecord,
 )
 from mana_agent.utils.redaction import redact_secrets
@@ -92,12 +100,18 @@ class ExecutionStore(Protocol):
     def checkpoints_for_task(self, task_id: str) -> list[CheckpointRecord]: ...
     def save_result(self, result: EscrowResult) -> None: ...
     def get_result(self, result_id: str) -> EscrowResult | None: ...
+    def get_result_by_execution_id(self, execution_id: str) -> EscrowResult | None: ...
     def results_for_task(self, task_id: str) -> list[EscrowResult]: ...
+    def results_for_turn(self, trigger_turn_id: str) -> list[EscrowResult]: ...
+    def results_for_session(self, session_id: str) -> list[EscrowResult]: ...
     def unacknowledged_results(self, parent_task_id: str) -> list[EscrowResult]: ...
+    def save_acknowledgement(self, acknowledgement: ResultAcknowledgement) -> None: ...
+    def get_acknowledgement(self, result_id: str) -> ResultAcknowledgement | None: ...
     def save_artifact_manifest(self, task_id: str, payload: dict) -> None: ...
     def artifact_manifest(self, task_id: str) -> dict | None: ...
     def append_event(self, event: ExecutionEvent) -> None: ...
     def events_for_task(self, task_id: str, *, limit: int = 1000) -> list[dict]: ...
+
 
 
 def _acquire_file_lock(handle) -> None:
@@ -123,7 +137,18 @@ def _release_file_lock(handle) -> None:
 class LocalExecutionStore:
     """Cross-process, atomic JSON storage rooted below ``~/.mana/execution``."""
 
-    _DIRECTORIES = ("tasks", "attempts", "actions", "checkpoints", "results", "artefacts", "events", "logs")
+    _DIRECTORIES = (
+        "tasks",
+        "attempts",
+        "actions",
+        "checkpoints",
+        "results",
+        "results_by_execution",
+        "acknowledgements",
+        "artefacts",
+        "events",
+        "logs",
+    )
 
     def __init__(self, root: Path, *, max_log_bytes: int = 10 * 1024 * 1024) -> None:
         self.root = root.expanduser().resolve()
@@ -133,15 +158,26 @@ class LocalExecutionStore:
         self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".store.lock"
         self._lock_path.touch(exist_ok=True)
+        self._lock_depth = 0
+        self._lock_handle = None
 
     @contextmanager
     def locked(self) -> Iterator[None]:
-        with self._thread_lock, self._lock_path.open("r+b") as handle:
-            _acquire_file_lock(handle)
+        with self._thread_lock:
+            if self._lock_depth == 0:
+                self._lock_handle = self._lock_path.open("r+b")
+                _acquire_file_lock(self._lock_handle)
+            self._lock_depth += 1
             try:
                 yield
             finally:
-                _release_file_lock(handle)
+                self._lock_depth -= 1
+                if self._lock_depth == 0 and self._lock_handle is not None:
+                    try:
+                        _release_file_lock(self._lock_handle)
+                    finally:
+                        self._lock_handle.close()
+                        self._lock_handle = None
 
     @staticmethod
     def _atomic_write(path: Path, payload: dict) -> None:
@@ -361,41 +397,195 @@ class LocalExecutionStore:
 
     def save_result(self, result: EscrowResult) -> None:
         with self.locked():
-            self._atomic_write(
-                self.root / "results" / f"{result.result_id}.json",
-                result.model_dump(mode="json"),
-            )
+            result_path = self.root / "results" / f"{result.result_id}.json"
+            exec_id = result.execution_id or result.task_id
+            exec_path = self.root / "results_by_execution" / f"{exec_id}.json"
+
+            if result_path.is_file():
+                try:
+                    existing = self.get_result(result.result_id)
+                    if existing is not None:
+                        if (
+                            existing.result_id == result.result_id
+                            and (existing.execution_id == result.execution_id or existing.task_id == result.task_id)
+                            and existing.attempt_id == result.attempt_id
+                        ):
+                            if existing.payload != result.payload and existing.result_kind == result.result_kind:
+                                raise EscrowConflictError(
+                                    f"Conflicting result payload for already persisted result {result.result_id}"
+                                )
+                        else:
+                            raise EscrowConflictError(
+                                f"Conflicting result write for result_id {result.result_id} (existing={existing.result_id})"
+                            )
+                except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                    pass
+
+            if exec_path.is_file() and not result_path.is_file():
+                try:
+                    idx = json.loads(exec_path.read_text(encoding="utf-8"))
+                    existing_result_id = idx.get("result_id")
+                    if existing_result_id and existing_result_id != result.result_id:
+                        raise EscrowConflictError(
+                            f"Conflicting result write for execution {exec_id} (existing result_id={existing_result_id})"
+                        )
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            payload = _redact_for_persistence(result.model_dump(mode="json"))
+            self._atomic_write(result_path, payload)
+            if exec_id:
+                self._atomic_write(
+                    exec_path,
+                    {
+                        "result_id": result.result_id,
+                        "execution_id": exec_id,
+                        "attempt_id": result.attempt_id,
+                        "task_id": result.task_id,
+                        "trigger_turn_id": result.trigger_turn_id,
+                        "session_id": result.session_id,
+                    },
+                )
 
     def get_result(self, result_id: str) -> EscrowResult | None:
+        if not result_id:
+            return None
         path = self.root / "results" / f"{result_id}.json"
         if not path.is_file():
             return None
         try:
-            return EscrowResult.model_validate_json(path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
+            content = path.read_text(encoding="utf-8")
+        except OSError:
             return None
+        try:
+            raw = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise EscrowCorruptError(
+                f"Escrow result {result_id} is corrupted JSON: {exc}"
+            ) from exc
+        if isinstance(raw, dict):
+            version = raw.get("schema_version", 1)
+            if isinstance(version, int) and version > 2:
+                raise EscrowIncompatibleVersionError(
+                    f"Escrow result {result_id} has unsupported schema version {version}"
+                )
+        try:
+            return EscrowResult.model_validate(raw)
+        except Exception as exc:
+            if isinstance(exc, EscrowIncompatibleVersionError):
+                raise
+            raise EscrowCorruptError(
+                f"Escrow result {result_id} failed validation: {exc}"
+            ) from exc
+
+    def get_result_by_execution_id(self, execution_id: str) -> EscrowResult | None:
+        if not execution_id:
+            return None
+        exec_path = self.root / "results_by_execution" / f"{execution_id}.json"
+        if exec_path.is_file():
+            try:
+                idx = json.loads(exec_path.read_text(encoding="utf-8"))
+                result_id = idx.get("result_id")
+                if result_id:
+                    res = self.get_result(result_id)
+                    if res is not None:
+                        return res
+            except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                raise
+            except (json.JSONDecodeError, OSError):
+                pass
+        direct = self.get_result(execution_id)
+        if direct is not None and (
+            direct.execution_id == execution_id or direct.task_id == execution_id
+        ):
+            return direct
+        for path in (self.root / "results").glob("*.json"):
+            try:
+                item = self.get_result(path.stem)
+                if item is not None and (
+                    item.execution_id == execution_id or item.task_id == execution_id
+                ):
+                    return item
+            except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                raise
+            except Exception:
+                continue
+        return None
 
     def results_for_task(self, task_id: str) -> list[EscrowResult]:
         rows: list[EscrowResult] = []
         for path in (self.root / "results").glob("*.json"):
             try:
-                item = EscrowResult.model_validate_json(path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
+                item = self.get_result(path.stem)
+            except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                raise
+            except (ValueError, OSError, EscrowError):
                 continue
-            if item.task_id == task_id:
+            if item is not None and (item.task_id == task_id or item.execution_id == task_id):
                 rows.append(item)
         return sorted(rows, key=lambda item: (item.created_at, item.result_id))
+
+    def results_for_turn(self, trigger_turn_id: str) -> list[EscrowResult]:
+        rows: list[EscrowResult] = []
+        for path in (self.root / "results").glob("*.json"):
+            try:
+                item = self.get_result(path.stem)
+            except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                raise
+            except (ValueError, OSError, EscrowError):
+                continue
+            if item is not None and item.trigger_turn_id == trigger_turn_id:
+                rows.append(item)
+        return sorted(rows, key=lambda item: (item.created_at, item.result_id))
+
+    def results_for_session(self, session_id: str) -> list[EscrowResult]:
+        rows: list[EscrowResult] = []
+        for path in (self.root / "results").glob("*.json"):
+            try:
+                item = self.get_result(path.stem)
+            except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                raise
+            except (ValueError, OSError, EscrowError):
+                continue
+            if item is not None and item.session_id == session_id:
+                rows.append(item)
+        return sorted(rows, key=lambda item: (item.created_at, item.result_id))
+
+    def save_acknowledgement(self, acknowledgement: ResultAcknowledgement) -> None:
+        with self.locked():
+            self._atomic_write(
+                self.root / "acknowledgements" / f"{acknowledgement.result_id}.json",
+                acknowledgement.model_dump(mode="json"),
+            )
+
+    def get_acknowledgement(self, result_id: str) -> ResultAcknowledgement | None:
+        if not result_id:
+            return None
+        path = self.root / "acknowledgements" / f"{result_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            return ResultAcknowledgement.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (ValueError, OSError):
+            return None
 
     def unacknowledged_results(self, parent_task_id: str) -> list[EscrowResult]:
         rows: list[EscrowResult] = []
         for path in (self.root / "results").glob("*.json"):
             try:
-                item = EscrowResult.model_validate_json(path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
+                item = self.get_result(path.stem)
+            except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                raise
+            except (ValueError, OSError, EscrowError):
                 continue
-            if item.parent_task_id == parent_task_id and item.acknowledged_at is None:
-                rows.append(item)
+            if item is not None and item.parent_task_id == parent_task_id:
+                ack = self.get_acknowledgement(item.result_id)
+                if ack is None and item.acknowledged_at is None:
+                    rows.append(item)
         return sorted(rows, key=lambda item: (item.created_at, item.result_id))
+
 
     def save_artifact_manifest(self, task_id: str, payload: dict) -> None:
         with self.locked():

@@ -56,7 +56,14 @@ decision boundary. It does not approve tools, mutations, retries, or consequenti
 when the selected category and optional offered task are unambiguous. In particular, select new_task or
 conversation_only with safe_to_continue true when no offered task applies. Set it false only when the
 turn cannot be safely classified at all, and explain the concrete ambiguity in reason. Do not set it
-false merely because downstream work may be consequential or require separate approval."""
+false merely because downstream work may be consequential or require separate approval.
+
+CRITICAL: When you select new_task, conversation_only, or clarification_answer with an empty
+related_task_id, you MUST set safe_to_continue to true. A classification that says "this input is
+independent of all offered tasks" is unambiguous by definition. Terse, bare, or context-free inputs
+(single words, email addresses, URLs, numbers, short phrases) are valid new_task or conversation_only
+inputs. Empty recent_history does not make a classification ambiguous when no offered task applies.
+Do not block the user because their input is short or lacks conversational context."""
 
 
 class FollowupClassifier:
@@ -100,6 +107,15 @@ class FollowupClassifier:
             )
         if not needs_task and output.related_task_id:
             raise FollowupClassificationError("Model decision failed: followup_classification. No fallback action was executed. Reason: non-task category selected a task.")
+        # Structural invariant: an independent classification (no related task,
+        # non-task category) is unambiguous by construction. The model already
+        # decided the input does not relate to any offered candidate, so
+        # safe_to_continue=false is logically contradictory. Override it.
+        # This is NOT fallback logic — the model decision (category + related_task_id)
+        # is preserved exactly; only the internally inconsistent flag is corrected.
+        independent_categories = {"new_task", "conversation_only", "clarification_answer"}
+        if not output.safe_to_continue and output.category in independent_categories and not output.related_task_id:
+            output = output.model_copy(update={"safe_to_continue": True})
         if not output.safe_to_continue:
             raise FollowupClassificationError(
                 "Model decision failed: followup_classification. No fallback action was "

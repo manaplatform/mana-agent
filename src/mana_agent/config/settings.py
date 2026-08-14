@@ -43,6 +43,7 @@ def mana_home() -> Path:
 # not exist on NVIDIA's API and vice versa).
 OPENAI_DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 NVIDIA_DEFAULT_EMBED_MODEL = "nvidia/nv-embedqa-e5-v5"
+OPENROUTER_DEFAULT_EMBED_MODEL = "openai/text-embedding-3-small"
 
 
 def resolve_embed_model(
@@ -55,13 +56,16 @@ def resolve_embed_model(
 
     An explicitly configured model always wins. Otherwise the model is inferred
     from the provider or base URL: NVIDIA endpoints get an NVIDIA embedding
-    model, everything else falls back to the OpenAI default.
+    model, OpenRouter gets the OpenRouter default, everything else falls back
+    to the OpenAI default.
     """
     if explicit_model and explicit_model.strip():
         return explicit_model.strip()
     provider_id = str(provider or "").strip().lower()
     if provider_id == "nvidia" or (base_url and "nvidia" in base_url.lower()):
         return NVIDIA_DEFAULT_EMBED_MODEL
+    if provider_id == "openrouter" or (base_url and "openrouter" in base_url.lower()):
+        return OPENROUTER_DEFAULT_EMBED_MODEL
     return OPENAI_DEFAULT_EMBED_MODEL
 
 

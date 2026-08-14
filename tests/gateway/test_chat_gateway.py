@@ -1596,3 +1596,104 @@ def test_chat_session_history_redacts_secrets(monkeypatch, tmp_path: Path) -> No
     assert "private-token" not in stored.content
     assert "sk-private-key" not in stored.content
     assert stored.metadata["api_key"] == "***REDACTED***"
+
+
+def test_linkage_scenarios(tmp_path, monkeypatch) -> None:
+    gmail_calls: list[dict[str, Any]] = []
+
+    class _CodingTracker(_DummyCodingAgent):
+        def generate(self, request, **kwargs):
+            return super().generate(request, **kwargs)
+
+        def generate_auto_execute(self, request, **kwargs):
+            return super().generate_auto_execute(request, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    monkeypatch.setattr("mana_agent.gateway.stack.CodingAgent", _CodingTracker)
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.ToolWorkerClient",
+        lambda **kw: SimpleNamespace(start=lambda: None, health=lambda: True, init_payload_dict=lambda: {})
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.QueueManager",
+        lambda **kw: SimpleNamespace(attach_decision_provider=lambda x: None)
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.build_tools_executor_with_fallback",
+        lambda **kw: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.CodingMemoryService",
+        lambda **kw: SimpleNamespace()
+    )
+
+    from mana_agent.gateway import RouteAvailability, RouteRegistration
+    from mana_agent.gateway.followup_classifier import FollowupClassification
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *args, **kwargs: FollowupClassification(
+            decision_id="dec-1",
+            category="new_task",
+            related_task_id="",
+            reason="independent query",
+            safe_to_continue=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.gmail_route_availability",
+        lambda: RouteAvailability(available=True)
+    )
+    gw = AgentChatGateway(tmp_path, coding_agent=True, agent_tools=True)
+    gw._entry_route_registry.register(
+        RouteRegistration("gmail", "Gmail", lambda: RouteAvailability(available=True))
+    )
+
+
+
+    captured = {}
+    def _gmail_run(**kwargs):
+        captured["lane_task_id"] = kwargs.get("transactional_parent_task_id")
+        return SimpleNamespace(
+            answer="Success",
+            sources=[],
+            warnings=[],
+            trace=[{"tool_name": "email_search", "status": "ok", "output_preview": "1 message"}],
+            payload={"route": "gmail"}
+        )
+    gw.get_ask_service().ask_agent = SimpleNamespace(run=_gmail_run)
+    sid = gw.create_session(frontend="tui")
+    result = gw.process_turn(sid, "Check my latest Gmail", callbacks=[object()])
+    assert result.error is None
+    assert result.answer == "Success"
+
+    lane_task_id = captured.get("lane_task_id")
+    assert lane_task_id
+
+    task = gw._lane_coordinator.execution_supervisor.store.get_task(lane_task_id)
+    assert task.state.value == "completed"
+    from mana_agent.gateway.lane_coordinator import LaneTaskState
+    assert gw._lane_coordinator.inspect_task(lane_task_id).state == LaneTaskState.COMPLETED
+
+    def _gmail_run_fail(**kwargs):
+        raise RuntimeError("simulated crash")
+    gw.get_ask_service().ask_agent = SimpleNamespace(run=_gmail_run_fail)
+    sid_fail = gw.create_session(frontend="tui")
+    result_fail = gw.process_turn(sid_fail, "Check my latest Gmail", callbacks=[object()])
+    assert "simulated crash" in result_fail.error
+
+    def _gmail_run_no_tools(**kwargs):
+        return SimpleNamespace(
+            answer="Success",
+            sources=[],
+            warnings=[],
+            trace=[],
+            payload={"route": "gmail"}
+        )
+    gw.get_ask_service().ask_agent = SimpleNamespace(run=_gmail_run_no_tools)
+    sid_no_tools = gw.create_session(frontend="tui")
+    result_no_tools = gw.process_turn(sid_no_tools, "Check my latest Gmail", callbacks=[object()])
+    assert result_no_tools.error == "completion_verification_failed"
