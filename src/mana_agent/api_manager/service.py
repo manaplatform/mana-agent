@@ -267,6 +267,7 @@ class ApiManagerService:
         session_id: str = "",
         source_decision_id: str = "",
         routing_decision: ApiRouteDecision | dict[str, Any],
+        context: Any | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         route = ApiRouteDecision.model_validate(routing_decision)
@@ -281,7 +282,7 @@ class ApiManagerService:
                 "Request identifiers do not match the validated model operation decision."
             )
         request, preview = self._prepare_request_and_preview(
-            session_id=session_id,
+            session_id=session_id or getattr(context, "session_id", "") or "default-session",
             task_intent=route.task_intent,
             **kwargs,
         )
@@ -303,7 +304,18 @@ class ApiManagerService:
                 "valid": True,
             },
         )
-        approval = self.approvals.prepare(request, preview)
+        approval = self.approvals.prepare(
+            request,
+            preview,
+            session_id=session_id or getattr(context, "session_id", ""),
+            conversation_id=getattr(context, "conversation_id", ""),
+            turn_id=getattr(context, "turn_id", ""),
+            execution_id=getattr(context, "execution_id", ""),
+            lane_task_id=getattr(context, "lane_task_id", ""),
+            checkpoint_id=getattr(context, "checkpoint_id", ""),
+            source_decision_id=source_decision_id or getattr(context, "source_decision_id", ""),
+            task_intent=route.task_intent,
+        )
         if approval:
             inbox_item_id = self._record_approval_notice(
                 request,
@@ -338,6 +350,7 @@ class ApiManagerService:
         approval_reference: str = "",
         session_id: str = "",
         routing_decision: ApiRouteDecision | dict[str, Any],
+        context: Any | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Execute one validated model-selected API operation.
@@ -581,7 +594,8 @@ class ApiManagerService:
 
         This remains compatible with the current gateway command path while
         returning truthful execution state. An HTTP request that ran but whose
-        upstream response failed is never reported as completed.
+        upstream response failed is never reported as completed. Duplicate approve
+        calls are idempotent and reuse the stored execution receipt.
         """
         if not approve:
             self.approvals.deny(
@@ -603,32 +617,81 @@ class ApiManagerService:
             client_type=client_type,
         )
 
-        result = self._execute_prepared_request(
-            request,
-            preview,
-            approval_reference=request_id,
-            task_intent=request.routing_task_intent,
-        )
-        payload = result.model_dump(mode="json")
+        pending = self.approvals.get_pending(request_id)
+        if pending and pending.executed and pending.execution_result is not None:
+            result = pending.execution_result
+            receipt_id = pending.receipt_id
+        else:
+            result = self._execute_prepared_request(
+                request,
+                preview,
+                approval_reference=request_id,
+                task_intent=request.routing_task_intent,
+            )
+            receipt_id = self.approvals.record_execution(request_id, result)
 
-        if not result.upstream_ok:
+        payload = (
+            result.model_dump(mode="json")
+            if hasattr(result, "model_dump")
+            else dict(result)
+            if isinstance(result, dict)
+            else {}
+        )
+        upstream_ok = (
+            getattr(result, "upstream_ok", False)
+            if not isinstance(result, dict)
+            else bool(result.get("upstream_ok", False))
+        )
+        executed = (
+            getattr(result, "executed", False)
+            if not isinstance(result, dict)
+            else bool(result.get("executed", False))
+        )
+        if pending and pending.executed:
+            executed = True
+            if pending.state in {"executed_resume_pending", "resumed", "completed"}:
+                upstream_ok = True
+        status_code = (
+            getattr(result, "status_code", 0)
+            if not isinstance(result, dict)
+            else int(result.get("status_code", 0) or 0)
+        )
+
+        provenance = {
+            "permission_request_id": request_id,
+            "session_id": getattr(pending, "session_id", session_id) if pending else session_id,
+            "conversation_id": getattr(pending, "conversation_id", "") if pending else "",
+            "turn_id": getattr(pending, "turn_id", "") if pending else "",
+            "execution_id": getattr(pending, "execution_id", "") if pending else "",
+            "lane_task_id": getattr(pending, "lane_task_id", "") if pending else "",
+            "checkpoint_id": getattr(pending, "checkpoint_id", "") if pending else "",
+            "task_intent": getattr(pending, "task_intent", "") if pending else "",
+        } if pending else {}
+
+        if not upstream_ok:
             return {
                 "approved": True,
-                "executed": bool(result.executed),
+                "executed": bool(executed),
                 "upstream_ok": False,
                 "status": "failed",
+                "receipt_id": receipt_id,
+                "result_receipt_id": receipt_id,
                 "error_code": "upstream_api_error",
-                "message": f"The upstream API returned HTTP {result.status_code}.",
+                "message": f"The upstream API returned HTTP {status_code}.",
                 "error_details": self._execution_failure_details(result),
                 "result": payload,
+                "provenance": provenance,
             }
 
         return {
             "approved": True,
-            "executed": bool(result.executed),
+            "executed": bool(executed),
             "upstream_ok": True,
             "status": "completed",
+            "receipt_id": receipt_id,
+            "result_receipt_id": receipt_id,
             "result": payload,
+            "provenance": provenance,
         }
 
     def _validate_route(

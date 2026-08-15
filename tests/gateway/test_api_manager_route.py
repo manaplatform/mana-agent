@@ -752,3 +752,118 @@ def test_tool_invocation_trace_preserves_structured_result_in_serialization() ->
     assert serialized[0]["result"]["result"]["status_code"] == 200
 
 
+def test_api_approval_resumes_continuation_and_completes_model_intent(tmp_path: Path) -> None:
+    events: list[tuple[str, str, dict]] = []
+
+    def sink(event_type: str, title: str = "", **kwargs: Any) -> None:
+        events.append((event_type, title, kwargs))
+
+    class ContinuationAskAgent:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def run(self, *, question: str, system_prompt: str, **kwargs: Any) -> SimpleNamespace:
+            self.calls.append({"question": question, "kwargs": kwargs})
+            assert "Validated API Execution Evidence" in question
+            return SimpleNamespace(
+                answer="خلاصه فارسی متن سفاریا پیدایش ۱:۱ بر اساس نتیجه اجرای ای‌پی‌آی.",
+                sources=[],
+                warnings=[],
+                trace=[],
+            )
+
+    ask_agent = ContinuationAskAgent()
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = sink
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    gateway._stack = SimpleNamespace(ask_service=SimpleNamespace(ask_agent=ask_agent))
+    gateway._sessions = {}
+    gateway._lane_coordinator = None
+
+    from mana_agent.api_manager.runtime_tools import api_manager_service
+    service = api_manager_service(tmp_path)
+    from mana_agent.api_manager.models import HttpMethod, OperationRiskLevel
+    from mana_agent.api_manager.request_builder import BuiltApiRequest, RequestPreview
+    from datetime import datetime, timezone, timedelta
+    req = BuiltApiRequest(
+        integration_id="api_1234567890abcdef12345678",
+        operation_id="get_sefaria_text",
+        method="GET",
+        url="https://www.sefaria.org/api/v3/texts/Genesis.1.1",
+        timeout_seconds=30.0,
+        risk_level=OperationRiskLevel.UPDATE,
+        session_id="conv_sefaria_session",
+        routing_task_intent="درخواست متن پیدایش ۱:۱ از سفاریا و ترجمه/خلاصه فارسی",
+    )
+    prev = RequestPreview(
+        integration_id="api_1234567890abcdef12345678",
+        integration_name="Sefaria",
+        operation_id="get_sefaria_text",
+        operation_name="Get Text",
+        method="GET",
+        redacted_url="https://www.sefaria.org/api/v3/texts/Genesis.1.1",
+        redacted_headers={},
+        query_parameters={},
+        body_summary={},
+        expected_side_effects="Read or update Sefaria text.",
+        risk_level=OperationRiskLevel.UPDATE,
+        approval_required=True,
+    )
+    details = service.approvals.prepare(
+        req,
+        prev,
+        session_id="conv_sefaria_session",
+        conversation_id="conv_sefaria_session",
+        turn_id="turn_123",
+        task_intent="درخواست متن پیدایش ۱:۱ از سفاریا و ترجمه/خلاصه فارسی",
+    )
+    approval_id = details["permission_request_id"]
+
+    # Mock low-level execute_prepared_request to simulate successful HTTP call
+    from types import MethodType
+    def mock_execute(self, request, preview, **kwargs):
+        return SimpleNamespace(
+            executed=True,
+            upstream_ok=True,
+            status_code=200,
+            json_body={"he": "בְּרֵאשִׁ֖ית", "text": "In the beginning"},
+            model_dump=lambda mode="json": {
+                "executed": True,
+                "upstream_ok": True,
+                "status_code": 200,
+                "json_body": {"he": "בְּרֵאשִׁ֖ית", "text": "In the beginning"},
+            },
+        )
+    service._execute_prepared_request = MethodType(mock_execute, service)
+
+    result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+
+    assert result["status"] == "completed"
+    assert result["resume"] == "completed"
+    assert "خلاصه فارسی" in result["answer"]
+    assert len(ask_agent.calls) == 1
+
+    event_types = [e[0] for e in events]
+    assert "api.approval_decided" in event_types
+    assert "turn.resume_requested" in event_types
+    assert "turn.finished" in event_types
+
+    # Duplicate call is idempotent and does not run model or HTTP again
+    duplicate_result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+    assert duplicate_result["status"] == "completed"
+    assert len(ask_agent.calls) == 1
+
+
+

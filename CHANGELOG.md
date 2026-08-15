@@ -4,8 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-15
 
-- Updated `ChatGateway` follow-up lifecycle handling to preserve completed-task lineage, keep recovery candidates terminal-safe, replay canonical requests for retry/resume, provide bounded classifier dialogue, and expose runtime revision metadata.
-  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_followup_retry_lifecycle.py -v`
+- Fixed the Dashboard and Gateway API approval lifecycle, host-bound session identity, idempotency, and task continuation resumption.
+  - Bound `ApiToolExecutionContext` in `src/mana_agent/api_manager/runtime_tools.py` and `src/mana_agent/multi_agent/runtime/ask_agent.py` to make host runtime identity authoritative, rejecting model-supplied `session_id` or `source_decision_id` mismatches before approval creation.
+  - Enhanced `_PendingApproval` and `PendingApiApprovalBroker` in `src/mana_agent/api_manager/executor.py` and `src/mana_agent/api_manager/service.py` to store full turn provenance (`conversation_id`, `turn_id`, `execution_id`, `lane_task_id`, `task_intent`), enforce cross-session rejection, persist execution receipts, and support idempotent duplicate approvals.
+  - Updated `AgentChatGateway.api_approval_command` and added `_resume_api_continuation` in `src/mana_agent/gateway/chat_gateway.py` to resume blocked execution from the stored task state, execute HTTP at most once, supply validated API result evidence to model continuation, emit `api.approval_decided`, `turn.resume_requested`, and `turn.finished` from the resumed branch, and complete the original user intent.
+  - Fixed `_canonical_task_request` in `src/mana_agent/gateway/chat_gateway.py` to fall back to normalized task intent when explicit trigger turn linkage is missing, and fixed `_recovery_candidates` to preserve recoverable candidates across session boundaries for the workspace.
+  - Updated `/conversations/{conversation_id}/api-approvals/{approval_request_id}` in `src/mana_agent/api/routes/conversations.py` to return the complete lifecycle shape (`approved`, `executed`, `upstream_ok`, `resume`, `approval_request_id`, `result_receipt_id`, `assistant_message`) and removed premature duplicate `turn.finished` emissions.
+  - Updated `src/mana_agent/dashboard/components/live_chat.js` permission card state machine and rendering (`pending` → `approving & resuming` → `completed · resumed` / `approved · executed` / `denied`).
+  - Added comprehensive test suites in `tests/test_api_manager.py`, `tests/gateway/test_api_manager_route.py`, and `tests/test_api_conversations.py`.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py tests/test_api_conversations.py tests/gateway/test_entry_routing.py tests/gateway/test_lane_coordinator.py -v`.
 
 ## 2026-08-15
 
