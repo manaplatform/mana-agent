@@ -260,7 +260,7 @@
       };
       state.permissionRequests.set(permissionRequestId, {
         ...previous,
-        status: text(metadata.decision) === "approve" ? "approved" : "denied",
+        status: "decided",
         decision: text(metadata.decision),
       });
     } else if (type === "turn.resume_requested") {

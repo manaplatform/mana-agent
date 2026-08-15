@@ -2,6 +2,12 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-16
+
+- Fixed permission request reducer status transitions in `src/mana_agent/dashboard/components/live_chat.js`.
+  - Updated `applyEvent` to set permission request status to `decided` upon receiving `computer.permission_decided`, `server.approval_decided`, `api.approval_decided`, `action.approval.granted`, and `action.approval.denied` events.
+  - User verification required: `pytest tests/test_dashboard_live_chat.py -v` and `node --test tests/dashboard/live_chat_reducer.test.mjs`.
+
 ## 2026-08-15
 
 - Fixed the Dashboard and Gateway API approval lifecycle, host-bound session identity, idempotency, and task continuation resumption.
