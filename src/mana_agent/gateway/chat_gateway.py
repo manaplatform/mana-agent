@@ -7327,6 +7327,8 @@ class AgentChatGateway:
                     for action in supervisor.store.actions_for_task(task.task_id)
                 ],
             }
+            if session_id and execution.session_id and execution.session_id != session_id:
+                continue
             candidates.append(candidate)
             seen.add(task.task_id)
             if len(candidates) >= 20:
