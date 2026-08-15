@@ -19,6 +19,7 @@ from mana_agent.multi_agent.runtime.prompts import (
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 from mana_agent.spirit.adapter import apply_spirit_instruction
 from mana_agent.spirit.self_model import compose_runtime_self
+from mana_agent.utils.text import extract_model_text
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class QnAChain:
         started = perf_counter()
         response = chain.invoke({"question": question, "context": context})
         elapsed_ms = (perf_counter() - started) * 1000
+        extracted_res = extract_model_text(getattr(response, "content", response))
         run_logger = getattr(self, "run_logger", None)
         if run_logger is not None:
             run_logger.log(
@@ -101,11 +103,11 @@ class QnAChain:
                     "question": question,
                     "context": context,
                     "duration_ms": round(elapsed_ms, 3),
-                    "response": str(response.content),
+                    "response": extracted_res,
                 }
             )
         logger.info("QnA chain completed in %.2fms", elapsed_ms)
-        return str(response.content)
+        return extracted_res
 
     def chat(
         self,
@@ -113,6 +115,7 @@ class QnAChain:
         *,
         runtime_self: Any | None = None,
         context_tools: Sequence[Any] | None = None,
+        recent_history: Sequence[Any] | None = None,
     ) -> str:
         """Answer from the session transcript after the routed Self is bound, executing bounded retrieval if needed."""
         current = runtime_self or compose_runtime_self(
@@ -137,8 +140,21 @@ class QnAChain:
             SystemMessage(
                 content=apply_spirit_instruction(CONVERSATION_SYSTEM_PROMPT, current)
             ),
-            HumanMessage(content=question),
         ]
+        if recent_history:
+            for item in recent_history:
+                if isinstance(item, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
+                    messages.append(item)
+                elif isinstance(item, dict):
+                    role = str(item.get("role") or "").lower()
+                    content_str = extract_model_text(item.get("content", ""))
+                    if not content_str:
+                        continue
+                    if role == "user":
+                        messages.append(HumanMessage(content=content_str))
+                    elif role == "assistant":
+                        messages.append(AIMessage(content=content_str))
+        messages.append(HumanMessage(content=question))
 
         max_retrieval_rounds = 2
         for _ in range(max_retrieval_rounds + 1):
@@ -178,16 +194,9 @@ class QnAChain:
                         messages.append(ToolMessage(content=rendered_res, tool_call_id=call_id))
                 continue
 
-            # Check for text-based tool call strings emitted directly by model
-            content = getattr(response, "content", response)
-            if isinstance(content, list):
-                content_text = " ".join(
-                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
-                    for part in content
-                )
-            else:
-                content_text = str(content or "")
+            content_text = extract_model_text(getattr(response, "content", response))
 
+            # Check for text-based tool call strings emitted directly by model
             match = re.search(r"\[Tool Call:\s*([a-zA-Z0-9_]+)\]", content_text, re.IGNORECASE)
             if match and tool_map:
                 matched_tool_name = match.group(1)
@@ -227,4 +236,4 @@ class QnAChain:
 
             return content_text.strip()
 
-        return str(getattr(response, "content", response) or "").strip()
+        return extract_model_text(getattr(response, "content", response)).strip()

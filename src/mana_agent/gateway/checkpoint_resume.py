@@ -155,18 +155,16 @@ Return strict JSON matching the supplied schema.
 """
 
 
+from mana_agent.utils.text import extract_model_text
+
+
 def _coerce_checkpoint_output(response: Any) -> CheckpointResumeOutput:
     if isinstance(response, CheckpointResumeOutput):
         return response
     if isinstance(response, dict):
         return CheckpointResumeOutput.model_validate(response)
     content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = " ".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    text = str(content).strip()
+    text = extract_model_text(content)
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```").strip()
         text = text.removesuffix("```").strip()

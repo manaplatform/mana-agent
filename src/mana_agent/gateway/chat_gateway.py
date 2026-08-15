@@ -517,10 +517,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         # - a textual model claim
         # --------------------------------------------------------------
         if action == "request_execution":
-            if result.get("ok") is not True:
-                continue
-
-            executed = result.get("result")
+            executed = result.get("result") if isinstance(result.get("result"), dict) else result
 
             if not isinstance(executed, dict):
                 continue
@@ -7039,6 +7036,16 @@ class AgentChatGateway:
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
             kwargs["context_tools"] = context_tools
+        if "recent_history" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            raw_messages = list(state.get("messages") or [])
+            recent_history = [
+                m for m in raw_messages
+                if m.get("role") in {"user", "assistant"}
+                and str(m.get("content") or "").strip()
+            ]
+            kwargs["recent_history"] = recent_history[-6:]
         return ask_conversation(execution_text, **kwargs)
 
     def _conversation_runtime_self(

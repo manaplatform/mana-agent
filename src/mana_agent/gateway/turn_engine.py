@@ -103,13 +103,10 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 
 
 def _message_text(response: Any) -> str:
+    from mana_agent.utils.text import extract_model_text
+
     content = getattr(response, "content", response)
-    if isinstance(content, list):
-        return " ".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return str(content or "")
+    return extract_model_text(content)
 
 
 def _extract_search_operation_query(
@@ -673,6 +670,7 @@ def _serialize_tool_traces(resp: Any) -> list[dict[str, Any]]:
                 "duration_ms": float(getattr(item, "duration_ms", 0.0) or 0.0),
                 "status": str(getattr(item, "status", "ok") or "ok"),
                 "output_preview": str(getattr(item, "output_preview", "") or "")[:4000],
+                "result": getattr(item, "result", None),
             }
         )
     return out

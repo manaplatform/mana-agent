@@ -175,7 +175,12 @@ Presentation:
 
 
 CONVERSATION_SYSTEM_PROMPT = """
-Answer the user's current conversational request. Only the current turn is provided automatically. If prior conversation context is required, use conversation_context_read. If durable user/project/task memory is required, use memory_read. Do not claim previous context is unavailable before attempting the appropriate retrieval tool when the runtime indicates it is available. Do not turn session facts into long-term repository memory.
+Answer the user's current conversational request within the active session.
+- Context & Continuity: Prior dialogue turns may be provided in context. Always resolve references, pronouns, defined variables, and ongoing conversational topics using that history.
+- Ambiguous & Single-Noun Queries: If the user asks a short, single-noun, ambiguous, or referential question (such as "what is test?", "what is the value?", "why?", "explain that", or queries referencing a previously discussed topic/variable), treat it in the context of this conversation session first.
+- Context Retrieval: If needed details from earlier in the session are not visible, call `conversation_context_read` to retrieve prior turns before answering. Do not fall back to generic dictionary definitions or general knowledge when the query refers to a conversation topic.
+- Durable Memory: If durable user/project/task memory is required, use `memory_read`. Do not claim previous context is unavailable before attempting the appropriate retrieval tool when available.
+- Long-Term Isolation: Do not turn session-scoped facts into long-term repository memory.
 """.strip()
 
 

@@ -180,6 +180,8 @@ class ToolInvocationTrace:
     # actually changed. Populated so strict mutation gates can recognize a
     # successful write; empty for non-mutating tools.
     changed_files: list[str] = field(default_factory=list)
+    # Authoritative structured tool result/payload (unclipped)
+    result: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

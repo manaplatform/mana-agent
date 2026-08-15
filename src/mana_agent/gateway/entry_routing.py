@@ -1077,13 +1077,10 @@ def _coerce_routing_output(response: Any) -> dict[str, Any]:
         return response.model_dump()
     if isinstance(response, dict):
         return response
+    from mana_agent.utils.text import extract_model_text
+
     content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = " ".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    extracted = _extract_json(str(content))
+    extracted = _extract_json(extract_model_text(content))
     return extracted
 
 

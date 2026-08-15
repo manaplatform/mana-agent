@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-15
 
+- Implemented reasoning/thinking block filtering and enhanced conversational follow-up context recall.
+  - Added centralized `extract_model_text` helper in `src/mana_agent/utils/text.py` to discard internal `reasoning`, `thought`, and `thinking` metadata blocks from model responses instead of leaking stringified dictionaries.
+  - Updated `QnAChain` in `src/mana_agent/multi_agent/runtime/qna_chain.py` to use `extract_model_text` and accept/inject `recent_history` dialogue turns into conversation prompt messages.
+  - Updated `ChatService.ask_conversation` in `src/mana_agent/services/chat_service.py` and `ChatGateway._invoke_conversation` in `src/mana_agent/gateway/chat_gateway.py` to pass bounded recent dialogue history turns to the conversation chain.
+  - Updated `CONVERSATION_SYSTEM_PROMPT` in `src/mana_agent/multi_agent/runtime/prompts.py` to prioritize session continuity and instruct the agent to resolve ambiguous single-noun / referential queries within conversation context and call `conversation_context_read` before falling back to generic dictionary definitions.
+  - Updated decision and output coercion extractors across `src/mana_agent/gateway/checkpoint_resume.py`, `src/mana_agent/gateway/entry_routing.py`, `src/mana_agent/gateway/followup_classifier.py`, `src/mana_agent/gateway/turn_engine.py`, `src/mana_agent/multi_agent/routing/agent_decision.py`, `src/mana_agent/multi_agent/runtime/entry_router.py`, and `src/mana_agent/search/decision.py` to use `extract_model_text`.
+  - Added unit test coverage in `tests/test_model_text_extraction.py` and `tests/test_conversation_followup_context.py`.
+  - User verification required: `python -m pytest tests/test_model_text_extraction.py tests/test_conversation_followup_context.py tests/gateway/test_chat_gateway.py -v`.
+
+
+- Fixed `api_workflow_incomplete` error caused by `output_preview` truncation corrupting structured execution evidence.
+  - Added `result: Any = None` field to `ToolInvocationTrace` in `src/mana_agent/analysis/models.py` to preserve unclipped structured tool execution payloads alongside human-readable previews.
+  - Updated `AskAgent.run` in `src/mana_agent/multi_agent/runtime/ask_agent.py` to populate `ToolInvocationTrace.result` with parsed or unclipped tool execution payloads.
+  - Updated `_extract_intermediate_results` in `src/mana_agent/multi_agent/runtime/ask_agent.py` and `_serialize_tool_traces` in `src/mana_agent/gateway/turn_engine.py` to prioritize `trace.result`.
+  - Updated `_api_workflow_completion_from_trace` in `src/mana_agent/gateway/chat_gateway.py` to extract `executed` evidence from unclipped structured tool payloads even when `output_preview` is truncated.
+  - Added unit test coverage in `tests/gateway/test_api_manager_route.py` verifying that truncated `output_preview` with structured `result` completes API workflows without `api_workflow_incomplete` failure.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_ask_agent.py tests/gateway/test_turn_budget_accounting.py -v`.
+
 - Implemented Combined Part 2–3: Bounded Tool Context, API Artifactization, Durable Recovery, and Observability.
   - Added canonical `ToolResultEnvelope` and integrated with `ContextCostGovernor.prepare_tool_result()`, ensuring all large external/tool results are persisted durably and exposed to models strictly as bounded projections.
   - Enhanced `ContextArtifactStore.read()` and `context_read_artifact` tool to support selector-based continuation (`json_path`, markdown `section`, `record_start`/`record_count`, `line_start`/`line_end`, and `search`/`query`).

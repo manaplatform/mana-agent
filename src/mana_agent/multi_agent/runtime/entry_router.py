@@ -175,11 +175,11 @@ class EntryRouter:
             raise RouteDecisionError(
                 f"Model decision failed: entry_route. No action executed. Reason: {exc}"
             ) from exc
-        content = getattr(response, "content", response)
-        if isinstance(content, list):
-            content = " ".join(str(part.get("text", part)) if isinstance(part, dict) else str(part) for part in content)
+        from mana_agent.utils.text import extract_model_text
+
+        content = extract_model_text(getattr(response, "content", response))
         try:
-            data = _extract_json(str(content))
+            data = _extract_json(content)
             return validate_route_decision(data)
         except Exception as exc:  # noqa: BLE001 - validation failure blocks execution
             raise RouteDecisionError(

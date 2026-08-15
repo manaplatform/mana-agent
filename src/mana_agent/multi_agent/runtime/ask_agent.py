@@ -2785,6 +2785,16 @@ class AskAgent:
                         if governor.enabled and tool_reservation_id:
                             governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:
+                            tool_result_payload = None
+                            if isinstance(content, (dict, list)):
+                                tool_result_payload = content
+                            elif isinstance(content, str) and content.strip():
+                                try:
+                                    decoded = json.loads(content)
+                                    if isinstance(decoded, (dict, list)):
+                                        tool_result_payload = decoded
+                                except Exception:
+                                    tool_result_payload = content
                             traces.append(
                                 ToolInvocationTrace(
                                     tool_name=name,
@@ -2797,6 +2807,7 @@ class AskAgent:
                                         args=args if isinstance(args, dict) else {},
                                         content=content,
                                     ),
+                                    result=tool_result_payload,
                                 )
                             )
                     except Exception as exc:
@@ -2813,6 +2824,7 @@ class AskAgent:
                                 duration_ms=0.0,
                                 status="error",
                                 output_preview=str(exc)[:4000],
+                                result={"error": str(exc)},
                             )
                         )
                     persist_tool_call(
@@ -3007,22 +3019,32 @@ class AskAgent:
     def _extract_intermediate_results(traces: list[ToolInvocationTrace]) -> dict[str, Any]:
         collected: dict[str, Any] = {}
         for trace in traces:
-            if trace.status != "ok" or not trace.output_preview:
+            if trace.status != "ok":
                 continue
-            try:
-                payload = json.loads(trace.output_preview)
-                if isinstance(payload, dict):
-                    for k, v in payload.items():
-                        if k in {"message_id", "id", "email_id", "thread_id", "file_path", "resource_id", "candidates"}:
-                            collected[k] = v
-                        elif k in {"messages", "items", "results", "emails"} and isinstance(v, list) and v:
-                            first = v[0]
-                            if isinstance(first, dict):
-                                for sub_k in {"id", "message_id", "email_id", "thread_id"}:
-                                    if sub_k in first:
-                                        collected[sub_k] = first[sub_k]
-            except Exception:
-                pass
+            payload = None
+            if getattr(trace, "result", None) is not None:
+                if isinstance(trace.result, dict):
+                    payload = trace.result
+                elif isinstance(trace.result, str) and trace.result.strip():
+                    try:
+                        payload = json.loads(trace.result)
+                    except Exception:
+                        pass
+            if payload is None and trace.output_preview:
+                try:
+                    payload = json.loads(trace.output_preview)
+                except Exception:
+                    pass
+            if isinstance(payload, dict):
+                for k, v in payload.items():
+                    if k in {"message_id", "id", "email_id", "thread_id", "file_path", "resource_id", "candidates"}:
+                        collected[k] = v
+                    elif k in {"messages", "items", "results", "emails"} and isinstance(v, list) and v:
+                        first = v[0]
+                        if isinstance(first, dict):
+                            for sub_k in {"id", "message_id", "email_id", "thread_id"}:
+                                if sub_k in first:
+                                    collected[sub_k] = first[sub_k]
         return collected
 
     def _prepare_external_search_context(

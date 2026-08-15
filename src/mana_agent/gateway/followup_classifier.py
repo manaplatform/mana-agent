@@ -116,13 +116,10 @@ def _coerce_followup_output(raw: Any) -> FollowupClassificationOutput:
             ),
             reason="Tool call requested context retrieval",
         )
+    from mana_agent.utils.text import extract_model_text
+
     content = getattr(raw, "content", raw)
-    if isinstance(content, list):
-        content = " ".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    text = str(content).strip()
+    text = extract_model_text(content)
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```").strip()
         text = text.removesuffix("```").strip()

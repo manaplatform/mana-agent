@@ -91,10 +91,10 @@ class SearchDecisionEngine:
                     HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
                 ]
             )
-            content = getattr(response, "content", response)
-            if isinstance(content, list):
-                content = " ".join(str(part.get("text", part)) if isinstance(part, dict) else str(part) for part in content)
-            data = _extract_json(str(content))
+            from mana_agent.utils.text import extract_model_text
+
+            content = extract_model_text(getattr(response, "content", response))
+            data = _extract_json(content)
             return self._decision_from_payload(data, fallback_query=user_query)
         except Exception:
             return None

@@ -103,6 +103,7 @@ class ChatService:
         *,
         runtime_self: Any | None = None,
         context_tools: Sequence[Any] | None = None,
+        recent_history: Sequence[Any] | None = None,
     ) -> Any:
         """Execute a model-selected conversational turn without a second router."""
         qna_chain = getattr(self._ask_service, "qna_chain", None)
@@ -125,6 +126,10 @@ class ChatService:
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
             kwargs["context_tools"] = context_tools
+        if "recent_history" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            kwargs["recent_history"] = recent_history
         return chat(payload, **kwargs)
 
     def ask(

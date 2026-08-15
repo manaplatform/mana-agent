@@ -59,13 +59,15 @@ class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
     class _EntryModel:
+        def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
+            return self
+
         def invoke(self, messages, **_kwargs):
             payload = json.loads(messages[-1].content)
-            if "recovery_candidates" in payload:
+            if "recovery_candidates" in payload or (messages and "You decide whether a new user request may resume" in str(messages[0].content)):
                 return SimpleNamespace(
                     content=json.dumps(
                         {
-                            "decision_id": "test-start-fresh",
                             "action": "start_fresh",
                             "task_id": "",
                             "checkpoint_id": "",
@@ -77,6 +79,18 @@ class _DummyAskService:
                             "side_effects_safe_to_repeat": False,
                             "safe_to_continue": True,
                             "reason": "the test model selected a fresh execution",
+                        }
+                    )
+                )
+            if "candidates" in payload or (messages and "Classify this newly received chat turn" in str(messages[0].content)):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "action": "classify",
+                            "category": "new_task",
+                            "related_task_id": "",
+                            "safe_to_continue": True,
+                            "reason": "independent task",
                         }
                     )
                 )
@@ -113,7 +127,7 @@ class _DummyAskService:
     ask_agent = SimpleNamespace(llm=None, update_model=lambda m: None, model="dummy")
     qna_chain = SimpleNamespace(
         llm=None,
-        chat=lambda question: "(dummy conversational response)",
+        chat=lambda question, **kwargs: "(dummy conversational response)",
     )
 
     def ask(self, *args, **kwargs):

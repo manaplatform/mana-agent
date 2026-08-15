@@ -349,10 +349,10 @@ class AgentDecisionEngine:
                     HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
                 ]
             )
-            content = getattr(response, "content", response)
-            if isinstance(content, list):
-                content = " ".join(str(part.get("text", part)) if isinstance(part, dict) else str(part) for part in content)
-            data = _extract_json(str(content))
+            from mana_agent.utils.text import extract_model_text
+
+            content = extract_model_text(getattr(response, "content", response))
+            data = _extract_json(content)
             proposed = self._decision_from_payload(data)
             review_response = self.llm.invoke(
                 [
@@ -373,13 +373,8 @@ class AgentDecisionEngine:
                     ),
                 ]
             )
-            review_content = getattr(review_response, "content", review_response)
-            if isinstance(review_content, list):
-                review_content = " ".join(
-                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
-                    for part in review_content
-                )
-            reviewed = self._decision_from_payload(_extract_json(str(review_content)))
+            review_content = extract_model_text(getattr(review_response, "content", review_response))
+            reviewed = self._decision_from_payload(_extract_json(review_content))
             record_current(
                 "model.decision",
                 {
