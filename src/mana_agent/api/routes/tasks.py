@@ -164,7 +164,7 @@ def resume_task(
         task = _call(lambda: supervisor.retry(task_id, body.decision))
     resumed = _call(lambda: supervisor.release_retry(task.task_id))
     payload = resumed.model_dump(mode="json")
-    checkpoint = _call(lambda: supervisor.resume_checkpoint(task.task_id)) if task.checkpoint_id else None
+    checkpoint = _call(lambda: supervisor.get_resumable_checkpoint(task.task_id)) if task.checkpoint_id else None
     payload["checkpoint"] = checkpoint.model_dump(mode="json") if checkpoint else None
     return payload
 

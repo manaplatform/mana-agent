@@ -49,6 +49,8 @@ from mana_agent.execution_supervisor.errors import (
 )
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
+    CheckpointRecord,
+    CheckpointResumeEligibility,
     EscrowLookupStatus,
     ExecutionState,
     RecoveryAction,
@@ -208,7 +210,15 @@ class LaneBudget:
         self.turn_reserved_tokens = 0
 
     @property
+    def is_turn_budget_exhausted(self) -> bool:
+        return self.turn_budget_tokens > 0 and (
+            self.turn_consumed_tokens + self.turn_reserved_tokens >= self.turn_budget_tokens
+        )
+
+    @property
     def turn_remaining_tokens(self) -> int:
+        if self.turn_budget_tokens <= 0:
+            return 1_000_000_000
         return max(0, self.turn_budget_tokens - self.turn_consumed_tokens - self.turn_reserved_tokens)
 
     @property
@@ -1104,6 +1114,12 @@ class LaneCoordinator:
             incremental_usage = consumed_input_tokens > 0 or consumed_output_tokens > 0
             execution.budget.consumed_input_tokens += max(0, consumed_input_tokens)
             execution.budget.consumed_output_tokens += max(0, consumed_output_tokens)
+            execution.budget.turn_consumed_tokens += max(0, consumed_input_tokens) + max(0, consumed_output_tokens)
+            execution.budget.turn_reserved_tokens = max(
+                0,
+                execution.budget.turn_reserved_tokens
+                - (max(0, consumed_input_tokens) + max(0, consumed_output_tokens)),
+            )
             execution.budget.actual_cost += max(0.0, float(actual_cost or 0.0))
             if actual_cost is not None:
                 execution.budget.actual_cost_known = (
@@ -1116,6 +1132,12 @@ class LaneCoordinator:
                 parent_had_usage = parent.budget.consumed_tokens > 0
                 parent.budget.consumed_input_tokens += max(0, consumed_input_tokens)
                 parent.budget.consumed_output_tokens += max(0, consumed_output_tokens)
+                parent.budget.turn_consumed_tokens += max(0, consumed_input_tokens) + max(0, consumed_output_tokens)
+                parent.budget.turn_reserved_tokens = max(
+                    0,
+                    parent.budget.turn_reserved_tokens
+                    - (max(0, consumed_input_tokens) + max(0, consumed_output_tokens)),
+                )
                 parent.budget.actual_cost += max(0.0, float(actual_cost or 0.0))
                 if actual_cost is not None:
                     parent.budget.actual_cost_known = (
@@ -1290,6 +1312,7 @@ class LaneCoordinator:
                 LaneTaskState.VERIFYING: TaskStatus.NEEDS_REVIEW,
                 LaneTaskState.CANCELLED: TaskStatus.CANCELLED,
                 LaneTaskState.PENDING_BUDGET_DECISION: TaskStatus.NEEDS_REVIEW,
+                LaneTaskState.BUDGET_EXHAUSTED: TaskStatus.BLOCKED,
             }.get(state, TaskStatus.FAILED)
             reason = error or execution.error or f"lane execution ended as {state.value}"
             if mapped_status == TaskStatus.DONE:
@@ -1308,7 +1331,7 @@ class LaneCoordinator:
                 self.taskboard.update_status(
                     execution.taskboard_task_id,
                     mapped_status,
-                    reason=reason if mapped_status == TaskStatus.FAILED else None,
+                    reason=reason if mapped_status in {TaskStatus.FAILED, TaskStatus.BLOCKED} else None,
                 )
             self._persist_locked()
         self.lock_manager.release_task(task_id)
@@ -1374,6 +1397,10 @@ class LaneCoordinator:
                 parent_had_usage = parent.budget.consumed_tokens > 0
                 parent.budget.consumed_input_tokens += input_delta
                 parent.budget.consumed_output_tokens += output_delta
+                parent.budget.turn_consumed_tokens += input_delta + output_delta
+                parent.budget.turn_reserved_tokens = max(
+                    0, parent.budget.turn_reserved_tokens - (input_delta + output_delta)
+                )
                 parent.budget.actual_cost += cost_delta
                 parent.budget.actual_cost_known = (
                     (not parent_had_usage or parent.budget.actual_cost_known)
@@ -1825,6 +1852,8 @@ class LaneCoordinator:
             # recoverable under a validated same-task decision.
             LaneTaskState.WAITING,
             LaneTaskState.PAUSED,
+            LaneTaskState.VERIFYING,
+            LaneTaskState.PENDING_BUDGET_DECISION,
         }
     )
 
@@ -1934,6 +1963,24 @@ class LaneCoordinator:
         )
         return execution
 
+    def validate_checkpoint_resume(
+        self,
+        task: Any,
+        checkpoint: CheckpointRecord | str | None = None,
+        *,
+        workspace_id: str = "",
+        repository_id: str = "",
+        allow_explicit_retry_seed: bool = False,
+    ) -> CheckpointResumeEligibility:
+        """Authoritative checkpoint resumability validation."""
+        return self.execution_supervisor.validate_checkpoint_resume(
+            task,
+            checkpoint,
+            workspace_id=workspace_id or self.taskboard.store.workspace_id,
+            repository_id=repository_id or self.taskboard.store.repository_id,
+            allow_explicit_retry_seed=allow_explicit_retry_seed,
+        )
+
     def resume_checkpoint(
         self,
         task_id: str,
@@ -1948,12 +1995,15 @@ class LaneCoordinator:
             raise LaneCoordinatorError(
                 "model-selected checkpoint does not match the durable task checkpoint"
             )
-        try:
-            self.execution_supervisor.resume_checkpoint(task_id)
-        except ExecutionSupervisorError as exc:
+        eligibility = self.execution_supervisor.validate_checkpoint_resume(
+            task_id,
+            decision.resume_checkpoint_id,
+            allow_explicit_retry_seed=True,
+        )
+        if not eligibility.resumable:
             raise LaneCoordinatorError(
-                f"checkpoint recovery validation failed; no retry was executed: {exc}"
-            ) from exc
+                f"checkpoint recovery validation failed; no retry was executed: {eligibility.reason} - {eligibility.error_message}"
+            )
         return self._retry_existing_task(
             execution,
             decision=decision,
@@ -2398,6 +2448,57 @@ class LaneCoordinator:
             return (max(0, PRIORITY_ORDER[priority] - age_promotions), int(item["sequence"]))
 
         return str(min(self._waiters, key=score)["waiter_id"]) if self._waiters else ""
+
+    def is_turn_budget_exhausted(self, task_id: str) -> bool:
+        with self._condition:
+            execution = self._executions.get(task_id)
+            if execution is None:
+                return True
+            return execution.budget.is_turn_budget_exhausted
+
+    def can_continue_turn(self, task_id: str, *, required_reserve: int = 0) -> bool:
+        with self._condition:
+            execution = self._executions.get(task_id)
+            if execution is None:
+                return False
+            budget = execution.budget
+            if budget.is_turn_budget_exhausted:
+                return False
+            contract = self.contracts.get(execution.owning_lane)
+            if contract and contract.token_budget is not None:
+                if budget.consumed_tokens + required_reserve > contract.token_budget:
+                    return False
+            if self.session_token_budget is not None:
+                active = [
+                    item
+                    for item in self._executions.values()
+                    if item.state in ACTIVE_LANE_STATES and item.task_id != task_id
+                ]
+                if (
+                    sum(
+                        item.budget.reserved_tokens
+                        for item in active
+                        if item.session_id == execution.session_id
+                    )
+                    + budget.consumed_tokens
+                    + required_reserve
+                    > self.session_token_budget
+                ):
+                    return False
+            if self.global_token_budget is not None:
+                active = [
+                    item
+                    for item in self._executions.values()
+                    if item.state in ACTIVE_LANE_STATES and item.task_id != task_id
+                ]
+                if (
+                    sum(item.budget.reserved_tokens for item in active)
+                    + budget.consumed_tokens
+                    + required_reserve
+                    > self.global_token_budget
+                ):
+                    return False
+            return True
 
     def _assert_budget(self, contract: LaneContract, session_id: str, requested: LaneBudget) -> None:
         if (

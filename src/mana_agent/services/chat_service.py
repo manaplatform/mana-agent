@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, Sequence
+import inspect
 
 from mana_agent.config.settings import Settings, default_index_dir
 from mana_agent.services.ask_service import AskService
@@ -96,7 +97,14 @@ class ChatService:
     def index_dirs(self) -> list[Path]:
         return list(self._index_dirs)
 
-    def ask_conversation(self, question: str, *, runtime_self: Any | None = None) -> Any:
+    def ask_conversation(
+        self,
+        question: str,
+        *,
+        runtime_self: Any | None = None,
+        context_tools: Sequence[Any] | None = None,
+        recent_history: Sequence[Any] | None = None,
+    ) -> Any:
         """Execute a model-selected conversational turn without a second router."""
         qna_chain = getattr(self._ask_service, "qna_chain", None)
         chat = getattr(qna_chain, "chat", None)
@@ -105,12 +113,24 @@ class ChatService:
                 "Conversation route selected, but the conversational model is not configured."
             )
         payload = str(question or "").strip()
-        if runtime_self is None:
-            return chat(payload)
+        kwargs: dict[str, Any] = {}
         try:
-            return chat(payload, runtime_self=runtime_self)
-        except TypeError:
-            return chat(payload)
+            parameters = inspect.signature(chat).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "runtime_self" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            kwargs["runtime_self"] = runtime_self
+        if "context_tools" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            kwargs["context_tools"] = context_tools
+        if "recent_history" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            kwargs["recent_history"] = recent_history
+        return chat(payload, **kwargs)
 
     def ask(
         self,

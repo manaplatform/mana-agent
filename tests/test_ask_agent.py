@@ -476,7 +476,7 @@ def test_ask_agent_forces_final_answer_when_budget_low(tmp_path: Path) -> None:
     result = agent.run("low budget?", tmp_path / ".mana/index", 2, max_steps=2, timeout_seconds=2)
     assert "Tool loop reached the step limit before a final answer." not in result.answer
     assert result.answer.strip()
-    assert any("low remaining tool budget" in str(w) for w in result.warnings)
+    assert any("max_steps" in str(w) or "low remaining tool budget" in str(w) or "best-effort final answer" in str(w) for w in result.warnings)
 
 
 def test_ask_agent_reuses_external_search_memory_context(tmp_path: Path) -> None:

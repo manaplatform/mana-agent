@@ -411,3 +411,68 @@ def test_stable_layer_order_starts_with_spirit() -> None:
     assert "core_identity" in PROMPT_LAYER_ORDER
     assert PROMPT_LAYER_ORDER.index("spirit") < PROMPT_LAYER_ORDER.index("repo_rules")
     assert PROMPT_LAYER_ORDER.index("spirit") < PROMPT_LAYER_ORDER.index("verification_rules")
+
+
+def test_conversation_executor_executes_context_tool_call() -> None:
+    class _Tool:
+        name = "conversation_context_read"
+
+        def invoke(self, args):
+            return json.dumps({"turns": [{"role": "user", "content": "previous turn"}]})
+
+    class _BoundLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[{"name": "conversation_context_read", "args": {"max_turns": 1}, "id": "call_123"}],
+                )
+            return SimpleNamespace(content="Based on our previous turn, here is the answer.")
+
+    class _LLM:
+        def bind_tools(self, tools):
+            return _BoundLLM()
+
+    chain = QnAChain.__new__(QnAChain)
+    chain.llm = _LLM()
+    chain.model = "claude-sonnet-5"
+    chain.provider = "openrouter"
+
+    tool = _Tool()
+    answer = chain.chat("what was that?", context_tools=[tool])
+    assert answer == "Based on our previous turn, here is the answer."
+
+
+def test_conversation_executor_recovers_from_text_tool_call() -> None:
+    class _Tool:
+        name = "conversation_context_read"
+
+        def invoke(self, args):
+            return json.dumps({"turns": [{"role": "user", "content": "previous message"}]})
+
+    class _LLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content="**[Tool Call: conversation_context_read]**",
+                    tool_calls=[],
+                )
+            return SimpleNamespace(content="I checked our conversation: you said previous message.")
+
+    chain = QnAChain.__new__(QnAChain)
+    chain.llm = _LLM()
+    chain.model = "claude-sonnet-5"
+    chain.provider = "openrouter"
+
+    tool = _Tool()
+    answer = chain.chat("check earlier", context_tools=[tool])
+    assert answer == "I checked our conversation: you said previous message."
+

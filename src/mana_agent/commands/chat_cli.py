@@ -45,6 +45,7 @@ from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup
 from mana_agent.skills.chat import ChatSkillCoordinator
 from mana_agent.connectors.browser.session import BrowserSessionManager
+from mana_agent.config.user_config import resolve_local_user_id
 from mana_agent.gateway import AgentChatGateway, ChatGatewayConfig
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
@@ -883,6 +884,7 @@ def chat(
         agent_unlimited=agent_unlimited,
         agent_timeout_seconds=agent_timeout_seconds,
         session_id=gateway_session_id,
+        memory_user_id=resolve_local_user_id(settings),
     )
     try:
         gateway = AgentChatGateway(root, config=gateway_config, settings=settings)

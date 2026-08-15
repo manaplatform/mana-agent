@@ -63,6 +63,8 @@ class ApiExecutionResult(StrictModel):
     json_body: Any = None
     text_body: str = ""
     file_reference: str = ""
+    response_artifact_ref: str = ""
+    artifact_ref: str = ""
     binary_metadata: dict[str, Any] = Field(default_factory=dict)
     latency_ms: float
     redirects: tuple[str, ...] = ()
@@ -612,6 +614,45 @@ class ApiExecutor:
                         },
                     )
                 file_reference = str(target)
+        digest = hashlib.sha256(response.body).hexdigest()
+        from mana_agent.context_cost.artifact_store import ContextArtifactStore
+        store = ContextArtifactStore()
+        payload_str = response.body.decode("utf-8", errors="replace") if (
+            content_type == "application/json"
+            or content_type.endswith("+json")
+            or content_type.startswith("text/")
+            or content_type in {"application/xml", "application/javascript", "application/x-yaml"}
+        ) else digest
+        raw_ref = store.put(
+            payload_str,
+            session_id=request.session_id or "api-execution",
+            repository_id=request.integration_id,
+            workspace_id=request.integration_id,
+            content_type=content_type,
+        )
+        response_artifact_ref = raw_ref.artifact_id
+
+        projected_json = json_body
+        if json_body is not None:
+            raw_json_str = json.dumps(json_body, ensure_ascii=False)
+            if len(raw_json_str) > 8000:
+                if isinstance(json_body, list):
+                    projected_json = json_body[:20] + [{
+                        "_truncated": True,
+                        "_omitted_records": max(0, len(json_body) - 20),
+                        "_response_artifact_ref": response_artifact_ref,
+                    }]
+                elif isinstance(json_body, dict):
+                    keys = list(json_body.keys())
+                    projected_json = {k: json_body[k] for k in keys[:20]}
+                    if len(keys) > 20:
+                        projected_json["_omitted_keys"] = len(keys) - 20
+                    projected_json["_response_artifact_ref"] = response_artifact_ref
+
+        projected_text = text_body
+        if len(text_body) > 4000:
+            projected_text = text_body[:4000] + f"\n\n[... {len(text_body) - 4000} chars omitted. See artifact {response_artifact_ref}]"
+
         body_kind = "json" if json_body is not None else "text" if text_body else "file" if file_reference else "binary_metadata"
         rate_limit = {
             key: value
@@ -635,9 +676,11 @@ class ApiExecutor:
             headers=redact_mapping(safe_headers, secret_values=request.secret_values),
             content_type=content_type,
             body_kind=body_kind,
-            json_body=redact_mapping(json_body, secret_values=request.secret_values),
-            text_body=redact_mapping(text_body, secret_values=request.secret_values),
+            json_body=redact_mapping(projected_json, secret_values=request.secret_values),
+            text_body=redact_mapping(projected_text, secret_values=request.secret_values),
             file_reference=file_reference,
+            response_artifact_ref=response_artifact_ref,
+            artifact_ref=response_artifact_ref,
             binary_metadata=binary_metadata,
             latency_ms=latency_ms,
             redirects=response.redirects,

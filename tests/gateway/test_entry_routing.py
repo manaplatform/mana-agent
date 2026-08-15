@@ -42,12 +42,14 @@ class _RouteModel:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
 
+    def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True) -> _RouteModel:
+        return self
+
     def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
         if messages[0].content == CHECKPOINT_RESUME_PROMPT:
             return SimpleNamespace(
                 content=json.dumps(
                     {
-                        "decision_id": "test-start-fresh",
                         "action": "start_fresh",
                         "task_id": "",
                         "checkpoint_id": "",
@@ -57,6 +59,18 @@ class _RouteModel:
                         "side_effects_safe_to_repeat": False,
                         "safe_to_continue": True,
                         "reason": "Gmail data must be fetched again.",
+                    }
+                )
+            )
+        if "Classify this newly received chat turn" in str(messages[0].content):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "action": "classify",
+                        "category": "new_task",
+                        "related_task_id": "",
+                        "safe_to_continue": True,
+                        "reason": "independent turn",
                     }
                 )
             )
@@ -1014,6 +1028,7 @@ def test_gateway_memory_route_reads_only_the_selected_private_capsules(
         memory_task_candidates=(
             {"task_id": "task-offered", "normalized_intent": "audit", "state": "completed"},
         ),
+        authenticated_user_id="authenticated-user",
     )
     decision = EntryRoutingDecision(
         route="memory",
@@ -1898,3 +1913,175 @@ def test_new_closes_previous_and_opens_fresh_session(tmp_path: Path, monkeypatch
     assert second != first
     assert first not in {item.session_id for item in service.store.list_sessions()}
     assert service.store.get_session(second).status == "active"
+
+
+def test_entry_routing_context_budget_blocked(tmp_path: Path, monkeypatch) -> None:
+    from mana_agent.context_cost.models import (
+        BudgetSnapshot,
+        ContextBreakdown,
+        ContextBudget,
+        ContextBudgetExceeded,
+        GovernorDecision,
+    )
+
+    class _BlockedRouterModel:
+        def with_structured_output(self, _schema, *, method: str, strict: bool):
+            return self
+
+        def invoke(self, _messages):
+            snapshot = BudgetSnapshot(
+                breakdown=ContextBreakdown(),
+                budget=ContextBudget(context_window=8000),
+                used_tokens=9000,
+                remaining_tokens=0,
+                utilization_ratio=1.125,
+                cumulative_tokens=9000,
+                remaining_task_tokens=0,
+                cumulative_cost=0.05,
+                remaining_cost=0.0,
+                estimated=True,
+                status="blocked",
+            )
+            raise ContextBudgetExceeded(
+                GovernorDecision(
+                    action="block",
+                    reason="context_limit_deficit:1000",
+                    allowed=False,
+                    snapshot=snapshot,
+                )
+            )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _BlockedRouterModel())
+    sid = gateway.create_session(frontend="test")
+    result = gateway.process_turn(sid, "Hello world")
+    assert result.error == "context_budget_blocked"
+    assert result.mode == "route-budget-blocked"
+
+
+def test_entry_routing_handles_markdown_wrapped_json_from_model(tmp_path: Path, monkeypatch) -> None:
+    class _MarkdownJsonRouterModel:
+        def with_structured_output(self, _schema, *, method: str, strict: bool):
+            return self
+
+        def invoke(self, _messages):
+            # Returns a markdown code block string
+            return (
+                "```json\n"
+                "{\n"
+                '  "route": "conversation",\n'
+                '  "confidence": 0.95,\n'
+                '  "reason": "General conversational query.",\n'
+                '  "required_sources": ["none"],\n'
+                '  "target_urls": [],\n'
+                '  "requires_live_data": false,\n'
+                '  "reason_code": "",\n'
+                '  "error_code": "",\n'
+                '  "reuse_active_route": false,\n'
+                '  "command_name": "",\n'
+                '  "command_arguments": [],\n'
+                '  "remote_request": null,\n'
+                '  "server_request": null,\n'
+                '  "mcp_request": null,\n'
+                '  "memory_task_id": "",\n'
+                '  "artifact_family": "",\n'
+                '  "media_request": {},\n'
+                '  "automation_operation": ""\n'
+                "}\n"
+                "```"
+            )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    gateway, _, _ = _gateway(tmp_path, _MarkdownJsonRouterModel())
+    sid = gateway.create_session(frontend="test")
+    result = gateway.process_turn(sid, "Hello there!")
+    assert result.error is None
+
+
+
+class _ProseWrappedStructuredRouteModel:
+    def with_structured_output(
+        self,
+        schema: Any,
+        **kwargs: Any,
+    ) -> Any:
+        assert schema is EntryRoutingOutput
+        assert kwargs["method"] == "json_schema"
+        assert kwargs["strict"] is True
+        assert kwargs["include_raw"] is True
+
+        class _Structured:
+            def invoke(self, messages: list[Any]) -> dict[str, Any]:
+                payload = {
+                    "route": "api",
+                    "confidence": 0.99,
+                    "reason": "Import and use the requested external APIs.",
+                    "required_sources": ["api"],
+                    "target_urls": [
+                        "https://api.open-meteo.com/v1/forecast",
+                        "https://official-joke-api.appspot.com/random_joke",
+                    ],
+                    "requires_live_data": True,
+                    "reason_code": "API_INTEGRATION",
+                    "error_code": "",
+                    "reuse_active_route": False,
+                    "command_name": "",
+                    "command_arguments": [],
+                    "remote_request": None,
+                    "server_request": None,
+                    "mcp_request": None,
+                    "memory_task_id": "",
+                    "artifact_family": "",
+                    "media_request": None,
+                    "automation_operation": "",
+                }
+
+                return {
+                    "raw": SimpleNamespace(
+                        content=(
+                            "Import both APIs and analyze them first.\n"
+                            + json.dumps(payload)
+                        ),
+                        usage_metadata={"input_tokens": 100, "output_tokens": 100},
+                    ),
+                    "parsed": None,
+                    "parsing_error": ValueError(
+                        "Invalid JSON: expected ident at line 1 column 2"
+                    ),
+                }
+
+        return _Structured()
+
+    def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
+        raise AssertionError(
+            "raw fallback must not make a second model call"
+        )
+
+
+def test_entry_router_recovers_json_from_prose_wrapped_structured_output() -> None:
+    registry = _registry()
+
+    router = EntryRouter(
+        llm=_ProseWrappedStructuredRouteModel(),
+        registry=registry,
+    )
+
+    decision = router.route(
+        user_prompt=(
+            "https://api.open-meteo.com/v1/forecast\n"
+            "https://official-joke-api.appspot.com/random_joke\n"
+            "Import both APIs."
+        ),
+        context=EntryRouteContext(
+            session_id="session_test",
+            conversation_id="session_test",
+            turn_id="turn_test",
+        ),
+    )
+
+    assert decision.route == "api"
+    assert decision.required_sources == ("api",)
+    assert decision.target_urls == (
+        "https://api.open-meteo.com/v1/forecast",
+        "https://official-joke-api.appspot.com/random_joke",
+    )

@@ -9,6 +9,8 @@ from typing import Any, Callable, Literal, get_args
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
+from mana_agent.context_cost.accounting import ModelContextLimitError
+from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 from mana_agent.media.models import MediaOperationDecision
@@ -86,9 +88,26 @@ class EntryRouteContext:
     memory_capsules_enabled: bool = False
     atomic_child: bool = False
     orchestration_parent_task_id: str = ""
+    authenticated_user_id: str = ""
+    envelope: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        base = {
+            "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
+            "turn_id": self.turn_id,
+            "previous_route": self.previous_route,
+            "conversation_summary": self.conversation_summary,
+            "artifact_evidence": dict(self.artifact_evidence),
+            "memory_task_candidates": [dict(c) for c in self.memory_task_candidates],
+            "memory_capsules_enabled": self.memory_capsules_enabled,
+            "atomic_child": self.atomic_child,
+            "orchestration_parent_task_id": self.orchestration_parent_task_id,
+            "authenticated_user_id": self.authenticated_user_id,
+        }
+        if self.envelope is not None and hasattr(self.envelope, "to_dict"):
+            base["envelope"] = self.envelope.to_dict()
+        return base
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +226,10 @@ class EntryRoutingOutput(_StrictRoutingOutput):
 
 class EntryRoutingError(RuntimeError):
     """The model did not return a valid entry-routing decision."""
+
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class EntryRouteRegistry:
@@ -494,6 +517,7 @@ class EntryRouter:
         *,
         user_prompt: str,
         context: EntryRouteContext,
+        envelope: Any | None = None,
     ) -> EntryRoutingDecision:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise EntryRoutingError(
@@ -506,6 +530,7 @@ class EntryRouter:
         disallowed_routes = ["multi_task"] if atomic_child else []
         if disallowed_routes:
             routes = [row for row in routes if row["name"] not in disallowed_routes]
+        effective_envelope = envelope or getattr(context, "envelope", None)
         payload = {
             "user_prompt": str(user_prompt or "").strip(),
             "context": context.to_dict(),
@@ -549,22 +574,11 @@ class EntryRouter:
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             ]
             structured_output = getattr(self.llm, "with_structured_output", None)
-            if callable(structured_output):
-                response = structured_output(
-                    EntryRoutingOutput,
-                    method="json_schema",
-                    strict=True,
-                ).invoke(messages)
-                decision_payload = EntryRoutingOutput.model_validate(response).model_dump()
-            else:
-                response = self.llm.invoke(messages)
-                content = getattr(response, "content", response)
-                if isinstance(content, list):
-                    content = " ".join(
-                        str(part.get("text", part)) if isinstance(part, dict) else str(part)
-                        for part in content
-                    )
-                decision_payload = _extract_json(str(content))
+            response, decision_payload = _invoke_routing_model(
+                self.llm,
+                messages,
+            )
+            decision_payload = _coerce_routing_output(response)
             try:
                 decision = self._validate(decision_payload, context=context)
             except EntryRoutingError as validation_error:
@@ -587,24 +601,11 @@ class EntryRouter:
                         )
                     ),
                 ]
-                if callable(structured_output):
-                    response = structured_output(
-                        EntryRoutingOutput, method="json_schema", strict=True
-                    ).invoke(repair_messages)
-                    decision_payload = EntryRoutingOutput.model_validate(
-                        response
-                    ).model_dump()
-                else:
-                    response = self.llm.invoke(repair_messages)
-                    content = getattr(response, "content", response)
-                    if isinstance(content, list):
-                        content = " ".join(
-                            str(part.get("text", part))
-                            if isinstance(part, dict)
-                            else str(part)
-                            for part in content
-                        )
-                    decision_payload = _extract_json(str(content))
+                response, decision_payload = _invoke_routing_model(
+                    self.llm,
+                    repair_messages,
+                )
+                decision_payload = _coerce_routing_output(response)
                 decision = self._validate(decision_payload, context=context)
             record_current(
                 "model.decision",
@@ -621,6 +622,13 @@ class EntryRouter:
             return decision
         except EntryRoutingError:
             raise
+        except (ContextBudgetExceeded, ModelContextLimitError) as exc:
+            record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                f"Reason: {exc}",
+                code="context_budget_blocked",
+            ) from exc
         except Exception as exc:
             record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
             raise EntryRoutingError(
@@ -983,6 +991,98 @@ def _extract_json(text: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("router output must be a JSON object")
     return payload
+
+
+def _invoke_routing_model(
+    llm: Any,
+    messages: list[Any],
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Invoke the entry-routing model exactly once.
+
+    Prefer strict structured output, but retain the raw AIMessage so a provider
+    that prepends/appends prose around an otherwise valid JSON object does not
+    destroy the entire turn.
+
+    Recovery does NOT bypass EntryRouter._validate().
+    """
+    structured_output = getattr(llm, "with_structured_output", None)
+
+    if not callable(structured_output):
+        response = llm.invoke(messages)
+        return response, _coerce_routing_output(response)
+
+    try:
+        runner = structured_output(
+            EntryRoutingOutput,
+            method="json_schema",
+            strict=True,
+            include_raw=True,
+        )
+    except TypeError:
+        try:
+            runner = structured_output(
+                EntryRoutingOutput,
+                method="json_schema",
+                strict=True,
+            )
+        except TypeError:
+            runner = structured_output(EntryRoutingOutput)
+
+    result = runner.invoke(messages)
+
+    # LangChain include_raw=True contract:
+    #
+    # {
+    #     "raw": AIMessage(...),
+    #     "parsed": EntryRoutingOutput(...) | None,
+    #     "parsing_error": Exception | None,
+    # }
+    if isinstance(result, dict) and (
+        "raw" in result
+        or "parsed" in result
+        or "parsing_error" in result
+    ):
+        raw = result.get("raw")
+        parsed = result.get("parsed")
+        parsing_error = result.get("parsing_error")
+
+        if parsed is not None:
+            return raw or parsed, _coerce_routing_output(parsed)
+
+        # Important recovery path:
+        # structured parsing failed, but the raw response may contain a
+        # perfectly usable JSON object surrounded by provider/model prose.
+        if raw is not None:
+            try:
+                return raw, _coerce_routing_output(raw)
+            except Exception as raw_error:
+                # Preserve the original structured-parser error when possible.
+                if parsing_error is not None:
+                    raise parsing_error from raw_error
+                raise
+
+        if parsing_error is not None:
+            raise parsing_error
+
+        raise ValueError(
+            "structured entry-router response contained neither parsed nor raw output"
+        )
+
+    # Defensive compatibility with implementations that ignore include_raw.
+    return result, _coerce_routing_output(result)
+
+def _coerce_routing_output(response: Any) -> dict[str, Any]:
+    if isinstance(response, EntryRoutingOutput):
+        return response.model_dump()
+    if isinstance(response, dict):
+        return response
+    from mana_agent.utils.text import extract_model_text
+
+    content = getattr(response, "content", response)
+    extracted = _extract_json(extract_model_text(content))
+    return extracted
+
 
 
 def _public_urls(text: object) -> list[str]:

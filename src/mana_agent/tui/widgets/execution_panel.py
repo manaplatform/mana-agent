@@ -80,11 +80,20 @@ class ExecutionPanel(Vertical):
         if self.context_meter:
             used = self.context_meter.get("used_tokens", 0)
             maximum = self.context_meter.get("context_window", 0)
+            task_used = self.context_meter.get("task_used_tokens", 0)
+            task_budget = self.context_meter.get("task_budget_tokens", 0)
             ratio = float(self.context_meter.get("utilization_ratio", 0) or 0) * 100
             schema = (self.context_meter.get("breakdown") or {}).get("schema_tokens", self.context_meter.get("schema_tokens", 0))
             cost = float(self.context_meter.get("cumulative_cost", 0) or 0)
+            saved = self.context_meter.get("compression_tokens_saved") or self.context_meter.get("tokens_saved", 0)
             marker = "~" if self.context_meter.get("estimated", True) else ""
-            stats.append(f"ctx {used}/{maximum} ({ratio:.0f}%) · schema {schema} · {marker}${cost:.4f}")
+            stat_str = f"ctx {used}/{maximum} ({ratio:.0f}%) · schema {schema}"
+            if task_budget:
+                stat_str += f" · task {task_used}/{task_budget}"
+            if saved:
+                stat_str += f" · saved {saved}"
+            stat_str += f" · {marker}${cost:.4f}"
+            stats.append(stat_str)
         if self.footer:
             self.footer.update(" · ".join(stats))
         if self.details and event_type in {"turn.completed", "turn.cancelled", "error"}:

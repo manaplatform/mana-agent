@@ -1908,10 +1908,31 @@ class AskAgent:
         from mana_agent.api_manager.runtime_tools import build_api_manager_langchain_tools
         api_manager_tools = build_api_manager_langchain_tools(self.project_root)
 
+        context_tools = []
+        if hasattr(self, "_context_retrieval_tools") and self._context_retrieval_tools:
+            context_tools = list(self._context_retrieval_tools)
+        else:
+            try:
+                from mana_agent.tools.context_retrieval import build_context_retrieval_tools
+
+                context_tools = build_context_retrieval_tools(
+                    session_id=str(getattr(self, "session_id", "default-session") or "default-session"),
+                    conversation_id=str(getattr(self, "conversation_id", "default-session") or "default-session"),
+                    authenticated_user_id=str(getattr(self, "authenticated_user_id", "") or ""),
+                    history_store=getattr(self, "history_store", None),
+                    capsule_service=getattr(self, "capsule_service", None),
+                    repository_id=str(getattr(self, "repository_id", "") or self.project_root),
+                    current_turn_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
+                    governor=getattr(self, "context_cost_governor", None),
+                )
+            except Exception:
+                context_tools = []
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
             *base_tools,
+            *context_tools,
             *build_email_langchain_tools(),
             *browser_tools,
             *computer_tools,
@@ -1924,6 +1945,10 @@ class AskAgent:
             *list(getattr(self, "tools", []) or []),
         ]
         return all_tools, traces, sources, warnings
+
+    def set_context_retrieval_tools(self, tools: Sequence[BaseTool]) -> None:
+        """Explicitly attach host-scoped context retrieval tools."""
+        self._context_retrieval_tools = list(tools)
 
     # ✅ NEW: public "ask" API (what your CodingAgent expects)
     def ask(
@@ -2299,20 +2324,13 @@ class AskAgent:
             need_forced_write = (
                 mutation_required and not mutation_succeeded and bound_mutation is not None
             )
-            # When the remaining tool budget is too low to make further progress,
-            # stop calling tools and synthesize a final answer from the evidence
-            # gathered so far rather than risk ending with no answer at all.
+            # When steps are limited, force a write if a mutation is required.
+            # Otherwise, allow the step to proceed so required follow-up tool calls can execute.
             remaining_steps = max_steps - step_idx
             if remaining_steps <= 1 and step_idx > 0 and not final_answer:
-                # A mutation-required run must not bail to a natural-language
-                # answer here: that guarantees zero mutations and a downstream
-                # tools_only_violation. Spend the final step forcing a write.
                 if need_forced_write and not forced_write_done:
                     forced_write_done = True
                     messages.append(HumanMessage(content=_FORCED_WRITE_INSTRUCTION))
-                else:
-                    force_synthesis_reason = force_synthesis_reason or "remaining_tool_budget_low"
-                    break
 
             # Once a forced write is in flight, restrict the model to mutation
             # tools so it can only act, never read again, until a write lands.
@@ -2767,6 +2785,16 @@ class AskAgent:
                         if governor.enabled and tool_reservation_id:
                             governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:
+                            tool_result_payload = None
+                            if isinstance(content, (dict, list)):
+                                tool_result_payload = content
+                            elif isinstance(content, str) and content.strip():
+                                try:
+                                    decoded = json.loads(content)
+                                    if isinstance(decoded, (dict, list)):
+                                        tool_result_payload = decoded
+                                except Exception:
+                                    tool_result_payload = content
                             traces.append(
                                 ToolInvocationTrace(
                                     tool_name=name,
@@ -2779,6 +2807,7 @@ class AskAgent:
                                         args=args if isinstance(args, dict) else {},
                                         content=content,
                                     ),
+                                    result=tool_result_payload,
                                 )
                             )
                     except Exception as exc:
@@ -2795,6 +2824,7 @@ class AskAgent:
                                 duration_ms=0.0,
                                 status="error",
                                 output_preview=str(exc)[:4000],
+                                result={"error": str(exc)},
                             )
                         )
                     persist_tool_call(
@@ -2882,6 +2912,7 @@ class AskAgent:
             if force_synthesis_reason and not final_answer:
                 break
 
+        natural_completion = final_answer != ""
         # Final-answer fallback: never surface the raw step-limit string. Always
         # synthesize a best-effort answer from the collected evidence/trace.
         if not final_answer:
@@ -2908,12 +2939,29 @@ class AskAgent:
             key=lambda item: (item.file_path, item.start_line, item.end_line, item.symbol_name),
         )
 
+        intermediate_results = self._extract_intermediate_results(traces)
+        if natural_completion:
+            status = "completed"
+            pending_required_work = False
+            stop_reason = "completed"
+        else:
+            stop_reason = force_synthesis_reason or "max_steps_reached"
+            pending_required_work = True
+            if any(t.status == "blocked" and "budget exhausted" in str(t.output_preview).lower() for t in traces):
+                status = "budget_exhausted"
+            else:
+                status = "needs_continuation"
+
         result = AskResponseWithTrace(
             answer=final_answer,
             sources=deduped_sources,
             mode="agent-tools",
             trace=traces,
             warnings=warnings,
+            status=status,
+            pending_required_work=pending_required_work,
+            stop_reason=stop_reason,
+            intermediate_results=intermediate_results,
         )
         if require_read_files > 0 and len(unique_read_files) < require_read_files:
             result.warnings.append(
@@ -2966,6 +3014,38 @@ class AskAgent:
             )
 
         return result
+
+    @staticmethod
+    def _extract_intermediate_results(traces: list[ToolInvocationTrace]) -> dict[str, Any]:
+        collected: dict[str, Any] = {}
+        for trace in traces:
+            if trace.status != "ok":
+                continue
+            payload = None
+            if getattr(trace, "result", None) is not None:
+                if isinstance(trace.result, dict):
+                    payload = trace.result
+                elif isinstance(trace.result, str) and trace.result.strip():
+                    try:
+                        payload = json.loads(trace.result)
+                    except Exception:
+                        pass
+            if payload is None and trace.output_preview:
+                try:
+                    payload = json.loads(trace.output_preview)
+                except Exception:
+                    pass
+            if isinstance(payload, dict):
+                for k, v in payload.items():
+                    if k in {"message_id", "id", "email_id", "thread_id", "file_path", "resource_id", "candidates"}:
+                        collected[k] = v
+                    elif k in {"messages", "items", "results", "emails"} and isinstance(v, list) and v:
+                        first = v[0]
+                        if isinstance(first, dict):
+                            for sub_k in {"id", "message_id", "email_id", "thread_id"}:
+                                if sub_k in first:
+                                    collected[sub_k] = first[sub_k]
+        return collected
 
     def _prepare_external_search_context(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -14,6 +15,7 @@ class MediaError(RuntimeError):
     code: str
     detail: str
     retryable: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:
         return self.detail
@@ -24,6 +26,10 @@ class MediaConfigurationError(MediaError):
 
 
 class MediaCapabilityError(MediaError):
+    pass
+
+
+class MediaModelNotFoundError(MediaCapabilityError):
     pass
 
 

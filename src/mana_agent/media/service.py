@@ -286,10 +286,10 @@ class MediaService:
                     "media_reference_mime_invalid",
                     "Image and video references must be managed image artifacts.",
                 )
-        if model != modality.model:
-            raise MediaValidationError(
-                "media_model_not_configured",
-                "The requested media model is not the configured model.",
+        if not model:
+            raise MediaConfigurationError(
+                f"media_{media_type.value}_not_configured",
+                f"{media_type.value.capitalize()} generation model is not configured.",
             )
         if (
             media_type is MediaType.VIDEO
@@ -301,13 +301,23 @@ class MediaService:
                 "The requested video duration exceeds the configured maximum.",
             )
         api_key = self.config.api_key(media_type, self.settings_values)
+        if not api_key:
+            raise MediaConfigurationError(
+                "media_provider_auth_required",
+                f"Media provider authentication is not configured for {modality.provider}.",
+            )
         provider = self.providers.create(modality, api_key)
         capabilities = provider.capabilities(model)
         required = _REQUIRED_CAPABILITY[media_type]
         if required not in capabilities:
+            err_code = (
+                "media_image_model_unsupported"
+                if media_type is MediaType.IMAGE
+                else "media_model_capability_unsupported"
+            )
             raise MediaCapabilityError(
-                "media_model_capability_unsupported",
-                f"The selected model does not support {media_type.value} generation.",
+                err_code,
+                f"The selected model {model!r} does not support {media_type.value} generation.",
             )
         generation_id = f"media_{secrets.token_urlsafe(18)}"
         request = request.model_copy(
@@ -337,14 +347,30 @@ class MediaService:
             artifacts: tuple[MediaArtifact, ...] = ()
             if output.status is GenerationStatus.COMPLETED:
                 artifacts = self._persist_outputs(
-                    generation_id, media_type, output, modality, provider
+                    generation_id,
+                    media_type,
+                    output,
+                    modality,
+                    provider,
+                    session_id=session_id,
+                    model=model,
                 )
+            usage_dict = dict(output.metadata.get("usage") or {})
+            if "cost" in output.metadata and "cost" not in usage_dict:
+                usage_dict["cost"] = output.metadata["cost"]
+            if "actual_cost" in output.metadata and "actual_cost" not in usage_dict:
+                usage_dict["actual_cost"] = output.metadata["actual_cost"]
+            if "image_count" in output.metadata and "image_count" not in usage_dict:
+                usage_dict["image_count"] = output.metadata["image_count"]
+            if "provider_usage" in output.metadata and "provider_usage" not in usage_dict:
+                usage_dict["provider_usage"] = output.metadata["provider_usage"]
             result = result.model_copy(
                 update={
                     "status": output.status,
                     "artifacts": artifacts,
                     "provider_request_id": output.provider_request_id,
                     "progress": output.progress,
+                    "usage": usage_dict,
                     "error_code": "media_provider_generation_failed"
                     if output.status is GenerationStatus.FAILED
                     else "",
@@ -384,10 +410,10 @@ class MediaService:
         self, result: GenerationResult
     ) -> tuple[MediaModalityConfig, MediaProvider]:
         modality = self.config.require(result.media_type)
-        if modality.provider != result.provider or modality.model != result.model:
+        if modality.provider != result.provider:
             raise MediaConfigurationError(
                 "media_generation_configuration_changed",
-                "The persisted generation requires its original configured provider and model.",
+                "The persisted generation requires its original configured provider.",
             )
         api_key = self.config.api_key(result.media_type, self.settings_values)
         return modality, self.providers.create(modality, api_key)
@@ -399,6 +425,9 @@ class MediaService:
         output: ProviderOutput,
         modality: MediaModalityConfig,
         provider: MediaProvider,
+        *,
+        session_id: str = "",
+        model: str = "",
     ) -> tuple[MediaArtifact, ...]:
         content = list(output.content)
         mime_types = list(output.mime_types)
@@ -416,18 +445,36 @@ class MediaService:
             raise MediaValidationError(
                 "media_output_missing", "The provider returned no media output."
             )
-        return tuple(
-            self.artifacts.save(
+        saved_artifacts: list[MediaArtifact] = []
+        meta = {
+            **output.metadata,
+            "session_id": session_id,
+            "provider": modality.provider,
+            "model": model or modality.model,
+        }
+        for index, data in enumerate(content):
+            if not data or len(data) == 0:
+                raise MediaValidationError(
+                    "media_output_empty", "The provider returned empty media content."
+                )
+            artifact = self.artifacts.save(
                 generation_id=generation_id,
                 media_type=media_type,
                 data=data,
                 declared_mime=mime_types[index] if index < len(mime_types) else "",
                 max_bytes=modality.max_output_bytes,
                 index=index,
-                metadata=output.metadata,
+                metadata=meta,
             )
-            for index, data in enumerate(content)
-        )
+            # Verify artifact was persisted and can be read
+            artifact_file = Path(artifact.local_path)
+            if not artifact_file.is_file() or artifact_file.stat().st_size == 0:
+                raise MediaValidationError(
+                    "media_artifact_verification_failed",
+                    "The generated media artifact could not be verified on disk.",
+                )
+            saved_artifacts.append(artifact)
+        return tuple(saved_artifacts)
 
     def _save(self, session_id: str, result: GenerationResult) -> None:
         self.artifacts.save_generation(session_id, result.model_dump(mode="json"))

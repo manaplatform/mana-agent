@@ -72,12 +72,125 @@ class AccountingReservation:
     prediction_key: PredictionKey | None = None
 
 
+from mana_agent.context_cost.models import (
+    ProviderCallForecast,
+    TaskExecutionForecast,
+)
+
+
 class ModelContextLimitError(ValueError):
-    def __init__(self, message: str, *, required: int | None = None, effective_limit: int | None = None) -> None:
+    """Base error for context and budget limit violations."""
+    error_type: str = "context_limit_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        effective_limit: int | None = None,
+        error_type: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.required = required
         self.effective_limit = effective_limit
         self.deficit = None if required is None or effective_limit is None else max(0, required - effective_limit)
+        if error_type is not None:
+            self.error_type = error_type
+
+
+class ModelContextExceededError(ModelContextLimitError):
+    """Raised when an individual provider call's required context exceeds the model's context window or max output tokens."""
+    error_type: str = "model_context_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        effective_limit: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            required=required,
+            effective_limit=effective_limit,
+            error_type="model_context_exceeded",
+        )
+
+
+class TaskBudgetExceededError(ModelContextLimitError):
+    """Raised when cumulative task token usage exceeds the configured task token budget."""
+    error_type: str = "task_budget_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        effective_limit: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            required=required,
+            effective_limit=effective_limit,
+            error_type="task_budget_exceeded",
+        )
+
+
+class TaskReservationExceededError(ModelContextLimitError):
+    """Raised when active reservations + consumed tokens exceed the configured task budget."""
+    error_type: str = "task_reservation_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        effective_limit: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            required=required,
+            effective_limit=effective_limit,
+            error_type="task_reservation_exceeded",
+        )
+
+
+class LaneBudgetExceededError(ModelContextLimitError):
+    """Raised when execution exceeds lane policy limits."""
+    error_type: str = "lane_budget_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        effective_limit: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            required=required,
+            effective_limit=effective_limit,
+            error_type="lane_budget_exceeded",
+        )
+
+
+class VerificationBudgetExceededError(ModelContextLimitError):
+    """Raised when execution violates or intrudes on the explicit verification reserve."""
+    error_type: str = "verification_budget_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required: int | None = None,
+        effective_limit: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            required=required,
+            effective_limit=effective_limit,
+            error_type="verification_budget_exceeded",
+        )
 
 
 class ModelTokenAccountingService:
@@ -153,28 +266,72 @@ class ModelTokenAccountingService:
         component_tokens["safety_margin"] = margin
         input_tokens = base_input + margin
         if output > profile.max_output_tokens * calls:
-            raise ModelContextLimitError(
+            raise ModelContextExceededError(
                 f"requested output {output} exceeds {profile.identity.key} output capacity {profile.max_output_tokens * calls}",
                 required=output,
                 effective_limit=profile.max_output_tokens * calls,
             )
         total = input_tokens + output
-        limits = [profile.context_window * calls]
-        limits.extend(
-            int(value)
-            for value in (request.task_token_remaining, request.session_token_remaining, request.lane_policy_limit)
-            if value is not None
-        )
-        effective = min(limits)
-        if total > effective:
-            raise ModelContextLimitError(
-                f"estimated run requires {total} tokens but effective limit is {effective} for {profile.identity.key}; deficit={total - effective}",
+        model_capacity = profile.context_window * calls
+        if total > model_capacity:
+            raise ModelContextExceededError(
+                f"estimated run requires {total} tokens but model context capacity is {model_capacity} for {profile.identity.key}; deficit={total - model_capacity}",
                 required=total,
-                effective_limit=effective,
+                effective_limit=model_capacity,
             )
+
+        # Policy checks separate from model context limit
+        if request.lane_policy_limit is not None and total > request.lane_policy_limit:
+            raise LaneBudgetExceededError(
+                f"estimated run requires {total} tokens but lane policy limit is {request.lane_policy_limit} for {profile.identity.key}; deficit={total - request.lane_policy_limit}",
+                required=total,
+                effective_limit=request.lane_policy_limit,
+            )
+        if request.task_token_remaining is not None and total > request.task_token_remaining:
+            raise TaskBudgetExceededError(
+                f"estimated run requires {total} tokens but remaining task budget is {request.task_token_remaining} for {profile.identity.key}; deficit={total - request.task_token_remaining}",
+                required=total,
+                effective_limit=request.task_token_remaining,
+            )
+        if request.session_token_remaining is not None and total > request.session_token_remaining:
+            raise TaskBudgetExceededError(
+                f"estimated run requires {total} tokens but remaining session budget is {request.session_token_remaining} for {profile.identity.key}; deficit={total - request.session_token_remaining}",
+                required=total,
+                effective_limit=request.session_token_remaining,
+            )
+
         cost = self.calculate_cost(profile, input_tokens=input_tokens, output_tokens=output)
         confidence = "low" if tokenizer.confidence == "low" or profile.confidence == "low" else "medium" if tokenizer.confidence == "medium" else "high"
-        return TokenEstimate(request.model_identity, profile, input_tokens, output, total, cost, confidence, component_tokens, tuple(assumptions), effective, effective - total)
+        return TokenEstimate(
+            request.model_identity,
+            profile,
+            input_tokens,
+            output,
+            total,
+            cost,
+            confidence,
+            component_tokens,
+            tuple(assumptions),
+            model_capacity,
+            model_capacity - total,
+        )
+
+    def estimate_provider_call(self, request: TokenEstimationRequest) -> ProviderCallForecast:
+        estimate = self.estimate(request)
+        return ProviderCallForecast(
+            provider=estimate.model_identity.provider,
+            model=estimate.model_identity.model,
+            input_tokens=estimate.input_tokens,
+            output_tokens=estimate.output_tokens,
+            total_tokens=estimate.total_tokens,
+            safety_margin_tokens=int(estimate.components.get("safety_margin", 0)),
+            context_window=estimate.profile.context_window,
+            max_output_tokens=estimate.profile.max_output_tokens,
+            estimated_cost=estimate.estimated_cost,
+            confidence=estimate.confidence,
+            components=estimate.components,
+            assumptions=estimate.assumptions,
+        )
 
     def reserve(
         self,
@@ -197,6 +354,20 @@ class ModelTokenAccountingService:
         if existing.get("status") != "reserved":
             raise ValueError(f"accounting operation {operation_id!r} was already finalized")
         return reservation
+
+    def revise(
+        self,
+        reservation: AccountingReservation,
+        request: TokenEstimationRequest,
+    ) -> AccountingReservation:
+        stored = self.store.get(reservation.reservation_id)
+        if stored is not None and stored.get("status") != "reserved":
+            raise ValueError(f"cannot revise finalized reservation {reservation.reservation_id!r} with status {stored.get('status')!r}")
+        new_estimate = self.estimate(request)
+        revised = replace(reservation, estimate=new_estimate, prediction_key=self._prediction_key(request))
+        self.store.update(reservation.reservation_id, self._reservation_dict(revised))
+        self._finalized.pop(reservation.reservation_id, None)
+        return revised
 
     def reconcile(
         self,
@@ -297,6 +468,45 @@ class ModelTokenAccountingService:
         self._finalized[reservation.reservation_id] = released
         return released
 
+    def cancel(self, reservation: AccountingReservation, *, reason: str) -> AccountingReservation:
+        stored = self.store.get(reservation.reservation_id)
+        if stored is not None and stored.get("status") in {"reconciled", "released"}:
+            return self._finalized.get(
+                reservation.reservation_id,
+                replace(
+                    reservation,
+                    status=str(stored.get("status")),
+                    reconciled_at=str(stored.get("reconciled_at") or _now()),
+                ),
+            )
+        if stored is not None and stored.get("status") == "cancelled":
+            return self._finalized.get(
+                reservation.reservation_id,
+                replace(
+                    reservation,
+                    status="cancelled",
+                    reconciled_at=str(stored.get("reconciled_at") or _now()),
+                ),
+            )
+        cancelled = replace(reservation, status="cancelled", reconciled_at=_now())
+        payload = self._reservation_dict(cancelled)
+        payload["cancellation_reason"] = str(reason)
+        existing, finalized = self.store.update_if_status(
+            reservation.reservation_id,
+            expected_status="reserved",
+            record=payload,
+        )
+        if not finalized:
+            if existing.get("status") in {"reconciled", "released"}:
+                return self.reconcile(reservation) if existing.get("status") == "reconciled" else self.release(reservation, reason=reason)
+            return replace(
+                reservation,
+                status=str(existing.get("status") or reservation.status),
+                reconciled_at=str(existing.get("reconciled_at") or _now()),
+            )
+        self._finalized[reservation.reservation_id] = cancelled
+        return cancelled
+
     @staticmethod
     def calculate_cost(
         profile: ModelTokenProfile,
@@ -383,6 +593,16 @@ class ModelTokenAccountingService:
 
 
 __all__ = [
-    "AccountingReservation", "ModelContextLimitError", "ModelTokenAccountingService",
-    "TokenEstimate", "TokenEstimationRequest",
+    "AccountingReservation",
+    "LaneBudgetExceededError",
+    "ModelContextExceededError",
+    "ModelContextLimitError",
+    "ModelTokenAccountingService",
+    "ProviderCallForecast",
+    "TaskBudgetExceededError",
+    "TaskExecutionForecast",
+    "TaskReservationExceededError",
+    "TokenEstimate",
+    "TokenEstimationRequest",
+    "VerificationBudgetExceededError",
 ]

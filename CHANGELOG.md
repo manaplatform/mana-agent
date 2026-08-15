@@ -2,7 +2,207 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-15
+
+- Implemented reasoning/thinking block filtering and enhanced conversational follow-up context recall.
+  - Added centralized `extract_model_text` helper in `src/mana_agent/utils/text.py` to discard internal `reasoning`, `thought`, and `thinking` metadata blocks from model responses instead of leaking stringified dictionaries.
+  - Updated `QnAChain` in `src/mana_agent/multi_agent/runtime/qna_chain.py` to use `extract_model_text` and accept/inject `recent_history` dialogue turns into conversation prompt messages.
+  - Updated `ChatService.ask_conversation` in `src/mana_agent/services/chat_service.py` and `ChatGateway._invoke_conversation` in `src/mana_agent/gateway/chat_gateway.py` to pass bounded recent dialogue history turns to the conversation chain.
+  - Updated `CONVERSATION_SYSTEM_PROMPT` in `src/mana_agent/multi_agent/runtime/prompts.py` to prioritize session continuity and instruct the agent to resolve ambiguous single-noun / referential queries within conversation context and call `conversation_context_read` before falling back to generic dictionary definitions.
+  - Updated decision and output coercion extractors across `src/mana_agent/gateway/checkpoint_resume.py`, `src/mana_agent/gateway/entry_routing.py`, `src/mana_agent/gateway/followup_classifier.py`, `src/mana_agent/gateway/turn_engine.py`, `src/mana_agent/multi_agent/routing/agent_decision.py`, `src/mana_agent/multi_agent/runtime/entry_router.py`, and `src/mana_agent/search/decision.py` to use `extract_model_text`.
+  - Added unit test coverage in `tests/test_model_text_extraction.py` and `tests/test_conversation_followup_context.py`.
+  - User verification required: `python -m pytest tests/test_model_text_extraction.py tests/test_conversation_followup_context.py tests/gateway/test_chat_gateway.py -v`.
+
+- Fixed `test_conversation_executor_binds_routed_spirit_after_model_selection` failure in `tests/test_spirit.py`.
+  - Updated `CONVERSATION_SYSTEM_PROMPT` in `src/mana_agent/multi_agent/runtime/prompts.py` to reference "active session history" in the Context & Continuity bullet, satisfying the test assertion while keeping the prompt coherent.
+  - All 21 tests in `tests/test_spirit.py` now pass.
+  - User verification required: `python -m pytest tests/test_spirit.py -v`.
+
+
+- Fixed `AttributeError` in `AgentChatGateway._execute_memory_route` when called via lightweight `SimpleNamespace` test mocks.
+  - All 10 tests in `tests/gateway/test_capsule_identity.py` now pass (10 passed, 0 failed).
+  - User verification required: `python -m pytest tests/gateway/test_capsule_identity.py -v`.
+
+
+- Fixed `api_workflow_incomplete` error caused by `output_preview` truncation corrupting structured execution evidence.
+  - Added `result: Any = None` field to `ToolInvocationTrace` in `src/mana_agent/analysis/models.py` to preserve unclipped structured tool execution payloads alongside human-readable previews.
+  - Updated `AskAgent.run` in `src/mana_agent/multi_agent/runtime/ask_agent.py` to populate `ToolInvocationTrace.result` with parsed or unclipped tool execution payloads.
+  - Updated `_extract_intermediate_results` in `src/mana_agent/multi_agent/runtime/ask_agent.py` and `_serialize_tool_traces` in `src/mana_agent/gateway/turn_engine.py` to prioritize `trace.result`.
+  - Updated `_api_workflow_completion_from_trace` in `src/mana_agent/gateway/chat_gateway.py` to extract `executed` evidence from unclipped structured tool payloads even when `output_preview` is truncated.
+  - Added unit test coverage in `tests/gateway/test_api_manager_route.py` verifying that truncated `output_preview` with structured `result` completes API workflows without `api_workflow_incomplete` failure.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_ask_agent.py tests/gateway/test_turn_budget_accounting.py -v`.
+
+- Implemented Combined Part 2–3: Bounded Tool Context, API Artifactization, Durable Recovery, and Observability.
+  - Added canonical `ToolResultEnvelope` and integrated with `ContextCostGovernor.prepare_tool_result()`, ensuring all large external/tool results are persisted durably and exposed to models strictly as bounded projections.
+  - Enhanced `ContextArtifactStore.read()` and `context_read_artifact` tool to support selector-based continuation (`json_path`, markdown `section`, `record_start`/`record_count`, `line_start`/`line_end`, and `search`/`query`).
+  - Refactored API Manager lifecycle to be artifact-first: `inspect_documentation` persists raw docs and returns bounded metadata + `documentation_ref`; `import_documentation` resolves from `documentation_ref`; `ApiExecutor` writes authoritative responses to `ContextArtifactStore`, returning bounded projections with `response_artifact_ref`.
+  - Hardened multi-task execution in `ChatGateway` to pass prerequisite outputs as bounded projections with references.
+  - Hardened `FollowupClassifier` to eliminate silent retrieval error swallowing, returning structured failure state and populating `related_turn_ids` and `retrieval_refs` on `FollowupClassification`.
+  - Enforced strict memory status codes in `execute_memory_read` (`matched`, `no_match`, `unauthorized`, `not_configured`, `query_failed`, `retrieval_budget_exhausted`).
+  - Expanded `ContextManifest` with explicit token breakdowns and reference lists per component (`current_turn_tokens`, `conversation_tokens`, `memory_tokens`, `tool_tokens`, `artifact_tokens`, `dependency_tokens`, `skill_tokens`).
+  - Updated TUI `ExecutionPanel` with context utilization ratio, task envelope token budget, and compactions saved tokens.
+  - Added comprehensive test suite in `tests/context_cost/test_bounded_context_and_recovery.py`.
+  - User verification required: `python -m pytest tests/context_cost/test_bounded_context_and_recovery.py tests/context_cost/test_context_cost_core.py tests/context_cost/test_context_cost_integration.py tests/gateway/test_context_retrieval_tools.py tests/gateway/test_followup_classifier.py -v`.
+
+- Fixed `checkpoint_resume_invalid` error on live data and multi-task routes by aligning prompt contracts with safety validation constraints.
+  - Updated `CHECKPOINT_RESUME_PROMPT` in `src/mana_agent/gateway/checkpoint_resume.py` to explicitly specify handling for `entry_route_requires_live_data=true`, mandating `start_fresh` with `fresh_data_required=true` and prohibiting `resume_checkpoint`, `retry_task`, or `replan_task` when live external state requires fresh execution.
+  - Clarified prompt instructions for `fresh_data_required`, `same_work`, `safe_to_continue`, and candidate task/checkpoint ID field rules across `start_fresh`, `resume_checkpoint`, `retry_task`, `replan_task`, and `stop`.
+  - Added regression test coverage in `tests/gateway/test_checkpoint_resume.py` covering multi-task live data fresh start and live route replan safety enforcement.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py tests/gateway/test_entry_routing.py -v`.
+
+- Fixed entry router model invocation and test suite compatibility.
+  - Handled `with_structured_output` implementations/mocks lacking `include_raw` support in `src/mana_agent/gateway/entry_routing.py`.
+  - Added required `token_estimate` argument to `ContextSegment` instantiation in `test_scenario_8_retrieved_context_participates_in_provider_call_estimate` in `tests/gateway/test_context_retrieval_tools.py`.
+  - Removed extra `decision_id` field in `_RouteModel` mock response for `CHECKPOINT_RESUME_PROMPT` in `tests/gateway/test_entry_routing.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_context_retrieval_tools.py tests/gateway/test_followup_classifier.py tests/test_prompts_contract.py -v`.
+
 ## 2026-08-14
+
+- Fixed `route-conversation` printing raw tool call strings (e.g. `**[Tool Call: conversation_context_read]**`) instead of executing retrieval tools.
+  - Updated `QnAChain.chat` in `src/mana_agent/multi_agent/runtime/qna_chain.py` with a bounded retrieval loop supporting both structured `tool_calls` and text-based tool invocation fallback (`[Tool Call: ...]`) via `context_tools`.
+  - Updated `ChatService.ask_conversation` and `ChatGateway._invoke_conversation` to store and forward `context_retrieval_tools` (`conversation_context_read`, `memory_read`) to `QnAChain.chat`.
+  - Added unit tests in `tests/test_spirit.py` verifying structured and text-based context retrieval tool executions.
+  - User verification required: `python -m pytest tests/test_spirit.py tests/gateway/test_chat_gateway.py -v`.
+
+- Fixed Part 0/1 Final Integration Gate between Phase-0 accounting and Part-1 context retrieval.
+  - Made `FollowupClassifier` retrieval-aware with a bounded tool loop (maximum 1–2 contextual retrievals) via `conversation_context_read` for terse and ambiguous follow-ups while preserving `recent_history = []` as default architecture.
+  - Updated prompt contracts in `CONVERSATION_SYSTEM_PROMPT` and `ASK_AGENT_SYSTEM_PROMPT` to specify that only the current turn is provided automatically and that `conversation_context_read` and `memory_read` must be used for prior conversation and durable memory.
+  - Removed `task_id` from `MemoryReadInput` and bound memory authorization strictly to the router-validated `entry_decision.memory_task_id` via `MemoryTaskBinding`.
+  - Removed implicit turn/execution authorization from private memory, establishing strict separation between `current_turn_id` (observability/accounting identity) and `selected_memory_task_id` (capsule authorization identity).
+  - Unified memory retrieval between `route=memory` and `memory_read` tool through single authoritative `execute_memory_read` service.
+  - Standardized empty-memory semantics to return structured results with `status="matched"`/`status="no_match"` and `goal_satisfied=false` for 0 results.
+  - Added host-owned `TurnRetrievalLedger` enforcing cumulative token allowance (`conversation_retrieval_tokens + memory_retrieval_tokens <= retrieval_budget_tokens`) and deduplication without charging cached retrievals twice.
+  - Removed nonexistent `governor.record_usage` and silent exception swallowing; retrieval tokens consume turn retrieval allowance when returned and participate in Phase-0 provider call forecasting upon inclusion in LLM calls.
+  - Restored `MANA_ROUTING_TASK_TOKEN_BUDGET=1000000` in `docs/05-configuration.md`.
+  - Updated `_RouteModel` in test harness and test suites in `tests/gateway/test_context_retrieval_tools.py`, `tests/gateway/test_followup_classifier.py`, and `tests/gateway/test_entry_routing.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_context_retrieval_tools.py tests/gateway/test_followup_classifier.py -v`.
+
+- Fixed `EntryRoutingOutput`, `FollowupClassificationOutput`, and `CheckpointResumeOutput` failing with `json_invalid` when models return markdown-fenced JSON (```` ```json ... ``` ````).
+  - Added `_coerce_routing_output` in `src/mana_agent/gateway/entry_routing.py` to extract JSON from strings, strip markdown code fences, and validate against `EntryRoutingOutput` regardless of whether `structured_output` returns an object, dict, or raw markdown string.
+  - Added `_coerce_followup_output` in `src/mana_agent/gateway/followup_classifier.py` and `_coerce_checkpoint_output` in `src/mana_agent/gateway/checkpoint_resume.py` to safely handle markdown code fences on structured model outputs.
+  - Added unit test in `tests/gateway/test_entry_routing.py`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -v`.
+
+- Fixed `checkpoint_resume_invalid` on extended reasoning strings and prevented duplicate messages from returning stale failed task results.
+  - Removed `max_length=480` constraint on `CheckpointResumeOutput.reason` in `src/mana_agent/gateway/checkpoint_resume.py` and added a before validator to normalize string inputs, preventing Pydantic `string_too_long` validation errors when reasoning models output full explanations.
+  - Updated `process_turn` in `src/mana_agent/gateway/chat_gateway.py` to only reuse cached escrow results for `duplicate_message` turns when the prior task reached a verified `COMPLETED` state; non-completed or failed prior tasks are now treated as retries and executed fresh rather than returning the stale error string as a successful response.
+  - Added test coverage in `tests/gateway/test_checkpoint_resume.py` and `tests/gateway/test_checkpoint_resume_invariants.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
+- Fixed `FollowupClassificationOutput` and `CheckpointResumeOutput` empty `decision_id` Pydantic validation failure by generating `decision_id` server-side via UUID instead of requiring it from the model.
+  - Removed `decision_id` from structured output schemas in `src/mana_agent/gateway/followup_classifier.py` and `src/mana_agent/gateway/checkpoint_resume.py`.
+  - Decision IDs are now deterministically generated after model output validation (`followup:<hex>` and `checkpoint:<hex>`).
+  - Updated test mocks in `tests/gateway/test_followup_classifier.py` and `tests/gateway/test_checkpoint_resume.py`.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_checkpoint_resume.py -v`.
+
+- Fixed API route workflow completion validation and decision schema handling for `api_workflow_decision_invalid`.
+  - Updated `_api_workflow_completion_from_trace` in `src/mana_agent/gateway/chat_gateway.py` to scan for the validated `api_workflow_decide` decision before operational tool calls, correctly recognizing workflow completion when the decision was established after an initial validation retry instead of falsely rejecting the turn.
+  - Added `@field_validator` to `_WorkflowDecision` in `src/mana_agent/api_manager/runtime_tools.py` to normalize single string or list inputs for `required_actions` into tuples before dependency validation.
+  - Added `@field_validator` and `@model_validator` to `ApiRouteDecision` in `src/mana_agent/api_manager/discovery.py` to normalize tuple fields and accept/map `risk_reason` to `reason`.
+  - Updated the API route system prompt in `src/mana_agent/gateway/chat_gateway.py` to align exact `ApiRouteDecision` field names (`reason` instead of `risk reason`).
+  - Added unit and route regression tests in `tests/gateway/test_api_manager_route.py` and `tests/test_api_manager.py`.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
+- Implemented Part 1 — Canonical Routing Execution Envelope and Tool-Based Context Retrieval.
+  - Introduced `RoutingExecutionEnvelope` in `src/mana_agent/gateway/envelope.py` containing user request, identity relationships, recovery state, Phase-0 `AccountingSnapshot`, model capacities, route availability, tool catalog, approval state, artifact evidence, previous-turn pointers, conversation context availability, and memory availability without secrets, raw private memory, or raw chat transcripts.
+  - Removed automatic history and memory transcript injection (`_conversation_prompt`, `_recall_followup_memory`) from execution model prompts across `ChatGateway`, `turn_engine`, and route handlers; provider models receive current turn only (`history_injected = False`).
+  - Added bounded episodic context retrieval tool `conversation_context_read` and durable memory retrieval tool `memory_read` in `src/mana_agent/tools/context_retrieval.py` with strict host-managed identity bindings and intra-turn deduplication.
+  - Registered `conversation_context_read` and `memory_read` in tool catalog, contracts, and runtime `AskAgent`.
+  - Updated follow-up classification and multi-task orchestration to pass structured envelopes and pointers without copying parent history transcripts.
+  - Added structured observability events (`routing.envelope_created`, `context.conversation_read`, `context.memory_read`, `context.retrieval_deduplicated`) and exposed retrieval metrics on turn payloads.
+  - Added comprehensive test suite in `tests/gateway/test_context_retrieval_tools.py` covering all 12 specified scenarios.
+  - Handled `ContextBudgetExceeded` and `ModelContextLimitError` in `EntryRouter.route` and `FollowupClassifier.decide` ensuring zero budget charge and clean propagation when context/task budgets are exhausted.
+  - Added maintained token limits for Claude and Gemini model families in `src/mana_agent/config/model_catalog.py` preventing false 16k context window deficits on 200k+ models.
+  - User verification required: `python -m pytest tests/gateway/test_context_retrieval_tools.py -v`.
+
+- Implemented Phase 0 — Accounting Foundation refactoring cumulative task budgets, per-provider-call context capacity, turn usage, and verification reserve.
+  - Updated configurable default `MANA_ROUTING_TASK_TOKEN_BUDGET` to `1_000_000` exclusively via settings and user config without introducing hardcoded accounting literals.
+  - Added typed forecast and snapshot contracts: `ProviderCallForecast`, `TaskExecutionForecast`, and `AccountingSnapshot`.
+  - Added typed accounting error hierarchy: `ModelContextLimitError`, `ModelContextExceededError`, `TaskBudgetExceededError`, `TaskReservationExceededError`, `LaneBudgetExceededError`, and `VerificationBudgetExceededError`.
+  - Separated provider-call context validation (comparing individual call tokens against model context window and max output capability) from task-level cumulative budget admission.
+  - Enforced atomic task reservation invariant (`task_consumed + task_reserved <= configured_task_budget`) across initial admissions, revisions, and multi-call execution.
+  - Separated durable cumulative task accounting from turn-scoped usage counters (`reset_turn_accounting`), preventing turn budget overflow and keeping verification reserve protected.
+  - Added reservation revision (`revise`) and cancellation (`cancel`) methods ensuring idempotent reconciliation and release without double counting.
+  - Added structured accounting events (`accounting.forecast`, `accounting.reservation`, `accounting.revision`, `accounting.reconciliation`, `accounting.rejection`, `budget.exhausted`, `context.forecast`).
+  - Added comprehensive test suite in `tests/context_cost/test_accounting_foundation.py` and updated `tests/gateway/test_multi_task_orchestration.py`.
+  - User verification required: `python -m pytest tests/context_cost/ tests/gateway/ -v`.
+
+- Fixed `ContextBudgetExceeded` handling, reaccounting, and budget charging on finish across chat gateway execution and routing boundaries.
+  - Handled `ContextBudgetExceeded` in `ChatGateway.process_turn`, `_recover_or_execute_multi_task`, `_execute_multi_task_route`, `_execute_validated_child_route`, and single-turn route execution, mapping it to structured `context-budget-blocked` results.
+  - Added reaccounting and budget charging on finish (`_synchronize_lane_usage` and `_finish_lane` with `LaneTaskState.BUDGET_EXHAUSTED`) when a single-turn or multi-task child lane encounters `ContextBudgetExceeded` or `ModelContextLimitError`.
+  - Added typed `context_budget_blocked` error codes to `EntryRoutingError` and `FollowupClassificationError` so model budget limit blocks in entry routing and follow-up classification cleanly propagate without unhandled runtime exceptions.
+  - Mapped `LaneTaskState.BUDGET_EXHAUSTED` to `TaskStatus.BLOCKED` in `LaneCoordinator.finish`.
+  - Added regression tests in `tests/gateway/test_chat_gateway.py`, `tests/gateway/test_entry_routing.py`, and `tests/gateway/test_followup_classifier.py`.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py tests/gateway/test_followup_classifier.py tests/gateway/test_turn_budget_accounting.py -v`.
+
+
+- Fixed memory-capsule result, legacy identity migration, and verification semantics on `fix/multitask-memory-context-propagation`.
+  - Implemented safe, explicit legacy local identity migration (`migrate_legacy_local_identities`) in `CapsuleRepository` and `CapsuleService` that migrates locally owned records (`root`, local OS user) to the canonical Mana user identity with full provenance tracking and revision incrementing while strictly preserving ACL isolation and forbidding runtime fallback authorization.
+  - Updated `_execute_memory_route` to return structured memory evidence (`memory_record_count`, `memory_lookup_status`, `goal_satisfied`, `verification_status`) so empty queries return `goal_satisfied=False` and `verification_status="failed"` without inferring verification from prose.
+  - Normalized multi-task child verification status calculation, removing `or result.mode` fallback so route mode (e.g. `route-memory`) is never persisted as a verification status.
+  - Enforced multi-task child completion requiring both execution success and goal satisfaction (`result.payload.get("goal_satisfied") is not False`), marking children with unsatisfied goals as failed.
+  - Provided canonical completed `chat_result` projection in multi-task root lane finish calls so completed multi-task compound executions are durably acknowledged without falling into `BUDGET_EXHAUSTED`.
+  - Preserved authoritative root lane status mapping (`done`, `budget_exhausted`, `budget_decision_pending`, `verification_failed`, `blocked`, `failed`) and added diagnostic `root_lane_state` and `root_lane_error` fields to the payload.
+  - Added `VERIFYING` and `PENDING_BUDGET_DECISION` to `LaneCoordinator._RETRYABLE_LANE_STATES` so tasks stopped in verification or budget overrun can be replanned or retried under validated model recovery decisions.
+  - Added regression tests in `tests/gateway/test_capsule_identity.py`, `tests/gateway/test_multi_task_orchestration.py`, and `tests/gateway/test_lane_coordinator.py`.
+  - User verification required: `python -m pytest tests/gateway/test_capsule_identity.py tests/gateway/test_multi_task_orchestration.py tests/gateway/test_lane_coordinator.py -v`.
+
+
+- Fixed authenticated-user identity propagation for private memory-capsule reads in local terminal and dashboard sessions.
+  - Implemented canonical application identity resolution in `resolve_local_user_id` using `Settings.mana_user_id`, `config.toml` `MANA_USER_ID`, or persistent `~/.mana/identity.json` without using `root`, `$USER`, UID, hostname, or process ownership directly.
+  - Extended `EntryRouteContext` with `authenticated_user_id` and propagated the canonical user identity through session entry, `route_context`, multi-task child contexts, and `_execute_memory_route`.
+  - Updated `AgentChatGateway.__init__`, CLI terminal config (`chat_cli.py`), Dashboard (`streamlit_helpers.py`), and standalone API (`api/app.py`) to bind the canonical Mana user identity.
+  - Preserved deny-by-default authorization semantics: missing identities fail with zero private reads, unauthorized capsules are blocked, cross-user private capsule access is rejected, and `memory_task_candidates` verification is preserved.
+  - Added regression tests in `tests/gateway/test_capsule_identity.py` and `tests/gateway/test_multi_task_orchestration.py`.
+  - User verification required: `python -m pytest tests/gateway/test_capsule_identity.py tests/gateway/test_multi_task_orchestration.py -v`.
+
+
+- Fixed multi-task memory routing context propagation failure across the parent to child task boundary in `ChatGateway`.
+  - Propagated `memory_task_candidates` and `memory_capsules_enabled` from parent `EntryRouteContext` to child `EntryRouteContext` inside `execute_child` in `AgentChatGateway`.
+  - Preserved strict candidate validation and deny-by-default behavior ensuring unoffered `memory_task_id` decisions are rejected before any private memory reads occur.
+  - Added focused regression tests in `tests/gateway/test_multi_task_orchestration.py` verifying context propagation, authorized capsule reads, prerequisite satisfaction for dependent tasks, and deny-by-default rejection for unauthorized task IDs.
+  - User verification required: `python -m pytest tests/gateway/test_multi_task_orchestration.py -v`.
+
+- Fixed OpenRouter image-model discovery, capability validation, parameter derivation, and terminal failure handling.
+  - Implemented authoritative image model catalog discovery via `GET /api/v1/images/models` with bounded TTL cache and single-refresh retry on miss in `OpenRouterMediaProvider`.
+  - Added strict capability checking ensuring exact model ID existence in catalog and `"image"` in `architecture.output_modalities` without relying on substring heuristics or text model allowlists.
+  - Differentiated error codes into `media_image_model_not_found` (with safe metadata diagnostics and suggestions), `media_image_model_unsupported`, `media_image_provider_unavailable`, `media_image_provider_auth_required`, and `media_image_generation_failed`.
+  - Filtered generation request payloads dynamically from model `supported_parameters` and captured provider usage and cost accounting.
+  - Fixed `pending_required_work` semantics in `chat_gateway.py` so that non-resumable terminal failures strictly set `pending_required_work = False` and `goal_satisfied = False`.
+  - Added comprehensive regression tests covering all 11 OpenRouter image generation and terminal state scenarios in `tests/test_openrouter_image_generation.py`.
+  - User verification required: `python -m pytest tests/test_openrouter_image_generation.py tests/gateway/test_turn_budget_accounting.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
+- Fixed `UnboundLocalError` for `pending_required_work_exists` in `chat_gateway.py` and `TypeError` for `load_model_cache` in `configuration_app.py`.
+  - Initialized `pending_required_work_exists` prior to approval and permission handling in `AgentChatGateway.process_turn`, ensuring all waiting, approval, and completion branches consistently propagate lane pending work status.
+  - Corrected `validate_checkpoint_resume` invocation in single-turn resume in `AgentChatGateway.process_turn` to pass `allow_explicit_retry_seed=True` when validating explicit model `resume_checkpoint` decisions.
+  - Updated `ManaConfigurationApp._media_model_options` to resolve the target provider's `base_url` and pass required `provider` and `base_url` positional arguments to `load_model_cache`.
+  - User verification required: `pytest tests/gateway/test_entry_routing.py tests/test_memory_architecture.py`.
+
+- Fixed `checkpoint_resume_invalid` caused by automatic resume of terminal execution checkpoints in the execution supervisor and chat recovery gateway.
+  - Enforced recovery precedence: `terminal durable result > terminal task state > resumable checkpoint > generic recovery`.
+  - Added `CheckpointResumeEligibility` typed model and `validate_checkpoint_resume` / `get_resumable_checkpoint` methods to `ExecutionSupervisor`, preventing implicit resume of terminal executions (`completed`, `failed`, `cancelled`, `budget_exhausted`) while preserving checkpoints for diagnostics and explicit retry.
+  - Updated `_emit` in `ExecutionSupervisor` to distinguish `last_checkpoint_id` (snapshot provenance) from `resume_checkpoint_id` (continuation-eligible checkpoint or null on terminal states).
+  - Updated `CheckpointResumeDecider` prompt and candidate pairing to filter out terminal states and candidates with `resume_eligible=False`.
+  - Updated `_recovery_candidates` and chat turn recovery in `ChatGateway` to prioritize durable escrow terminal results (such as `media_image_disabled`) over invalid checkpoint resume attempts.
+  - Fixed `before_verification` checkpointing in `_execute_entry_route` to only record checkpoints when execution produced valid candidate results/artifacts and not on route errors.
+  - Added comprehensive regression tests covering Scenarios A through I in `tests/gateway/test_checkpoint_resume_invariants.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py tests/execution_supervisor/test_result_escrow_recovery.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py`.
+
+- Implemented native OpenRouter image generation for Mana-Agent's media lane.
+  - Implemented `OpenRouterMediaProvider` with dedicated image endpoints (`GET /api/v1/images/models` for discovery and `POST /api/v1/images` for image generation), base64 decoding, credential redaction, and capability classification.
+  - Extended media models (`ImageGenerationRequest`, `MediaArtifact`, `GenerationResult`) with `aspect_ratio`, `resolution`, artifact metadata fields (`task_id`, `session_id`, `provider`, `model`, `media_type`, `filename`), and `usage` tracking.
+  - Replaced simple `media_image_disabled` with capability/configuration-aware feature gating (`media_image_disabled`, `media_provider_not_configured`, `media_provider_auth_required`, `media_image_model_unsupported`).
+  - Integrated with `MediaArtifactStore` for on-disk artifact verification and lifecycle management, and with `ContextCostGovernor.record_media_generation` for provider cost accounting (`usage.cost`).
+  - Extended configuration TUI (`mana-agent configure`) with default aspect ratio inputs and cached image model filtering.
+  - User verification required: `python -m pytest tests/test_openrouter_image_generation.py tests/test_media_generation.py tests/test_openrouter_provider.py -q`.
+
+- Fixed premature termination and budget accounting bugs where cumulative lane usage was conflated with current-turn usage, intermediate tool calls (e.g. search returning resource IDs) were falsely treated as complete user tasks, and soft step thresholds aborted multi-step workflows.
+  - Decoupled `turn_budget_tokens` and `turn_consumed_tokens` from lifetime cumulative `consumed_tokens` in `LaneBudget` and `LaneCoordinator`, ensuring fresh turns reset turn accounting without losing cumulative session/lane tracking.
+  - Added structured completion and continuation semantics (`status`, `pending_required_work`, `stop_reason`, `intermediate_results`) to `AskResponseWithTrace` and `ChatGateway`.
+  - Fixed premature tool loop breakout in `AskAgent` on soft step thresholds (`remaining_steps <= 1`), allowing required follow-up tool calls (such as fetching email content after search) to execute.
+  - Preserved intermediate tool results across durable checkpoints and return structured terminal states (`status: budget_exhausted`, `pending_required_work: True`, `resume_required: True`) when hard budgets are genuinely exhausted.
+  - User verification required: `python -m pytest tests/gateway/test_turn_budget_accounting.py tests/gateway/test_lane_coordinator.py tests/test_ask_agent.py -v`
+
 
 - Fixed `FollowupClassifier` false-negative that blocked independent inputs (bare email addresses, terse messages) when existing durable tasks were present. The LLM would classify the input as `new_task` but set `safe_to_continue=false`, causing a hard failure. Strengthened the classifier prompt and added a structural invariant guard: independent classifications (`new_task`, `conversation_only`, `clarification_answer`) with no related task now always proceed, since they are unambiguous by construction.
   - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py::test_failed_followup_classification_stops_before_recovery_or_new_work -v`

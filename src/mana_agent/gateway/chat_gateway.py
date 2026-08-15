@@ -57,6 +57,7 @@ from mana_agent.gateway.lane_coordinator import (
 )
 from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneId, LaneTaskState, select_lane
 from mana_agent.context_cost.accounting import ModelContextLimitError, TokenEstimationRequest
+from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.context_cost.profiles import ModelIdentity
 from mana_agent.gateway.routing import GatewayRoutingError
 from mana_agent.gateway.artifact_routing import (
@@ -96,6 +97,24 @@ from mana_agent.workspaces.preparation import (
 from mana_agent.evals.recorder import record_current
 from mana_agent.evals.redaction import redact_text
 from mana_agent.utils.redaction import redact_secrets
+from mana_agent.gateway.envelope import (
+    ApprovalState,
+    ConversationContextAvailability,
+    ExecutionRecoveryState,
+    IdentitySessionRelationship,
+    MemoryAvailability,
+    ModelCandidateCapacity,
+    PreviousTurnPointers,
+    RoutingExecutionEnvelope,
+    build_routing_execution_envelope,
+)
+from mana_agent.tools.context_retrieval import (
+    MemoryTaskBinding,
+    TurnRetrievalLedger,
+    build_context_retrieval_tools,
+    execute_memory_read,
+)
+from mana_agent.tools.catalog import list_auto_chat_tools
 from mana_agent.model_routing.models import (
     Complexity,
     LatencyClass,
@@ -112,6 +131,7 @@ from mana_agent.execution_supervisor.models import (
     RecoveryDecision,
     RetryCategory,
     SideEffectClassification,
+    TERMINAL_STATES,
 )
 from mana_agent.execution_supervisor.budget_decision import BudgetOverrunDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
@@ -130,6 +150,7 @@ from mana_agent.remote_execution.service import RemoteExecutionService
 from mana_agent.server import ServerManagementService
 from mana_agent.server.tools import SERVER_TOOL_SPECS
 from mana_agent.media import (
+    GenerationStatus,
     ImageGenerationRequest,
     MediaOperationDecision,
     MediaService,
@@ -362,97 +383,224 @@ _API_WORKFLOW_EVIDENCE = {
 def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     """Validate exact successful tool evidence against the model workflow decision."""
     traces = _serialize_tool_traces(response)
+
     if not traces or traces[0].get("tool_name") != "api_workflow_decide":
         return {
             "valid": False,
             "error_code": "api_workflow_decision_missing",
             "message": (
-                "Model decision failed: api_workflow. The first API-route tool call was not a "
-                "validated workflow decision. No completion was recorded."
+                "Model decision failed: api_workflow. The first API-route tool call "
+                "was not a validated workflow decision. No completion was recorded."
             ),
             "required_actions": [],
             "completed_actions": [],
             "missing_actions": [],
+            "unexpected_actions": [],
+            "execution_evidence": {},
         }
 
     def payload(trace: dict[str, Any]) -> dict[str, Any]:
-        value: Any = trace.get("output_preview") or trace.get("result_summary")
-        if not isinstance(value, str):
-            return value if isinstance(value, dict) else {}
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
+        """Return the authoritative structured tool payload when available.
 
-    decision_payload = payload(traces[0])
-    decision = decision_payload.get("result") if decision_payload.get("ok") is True else None
-    if not isinstance(decision, dict) or not decision.get("safe_to_continue"):
+        Prefer the actual tool result over UI-oriented previews/summaries.
+        """
+        for key in (
+            "result",
+            "output_preview",
+            "result_summary",
+            "error",
+        ):
+            value: Any = trace.get(key)
+
+            if isinstance(value, dict):
+                return value
+
+            if isinstance(value, str) and value.strip():
+                try:
+                    decoded = json.loads(value)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+
+                if isinstance(decoded, dict):
+                    return decoded
+
+        return {}
+
+    def raw_payload(trace: dict[str, Any]) -> Any:
+        """Return the first available raw result representation."""
+        for key in (
+            "result",
+            "output_preview",
+            "result_summary",
+        ):
+            value = trace.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    decision_index = -1
+    decision: dict[str, Any] | None = None
+
+    for idx, trace in enumerate(traces):
+        tool_name = str(trace.get("tool_name") or "")
+
+        if tool_name == "api_workflow_decide":
+            result = payload(trace)
+
+            if result.get("ok") is True and isinstance(result.get("result"), dict):
+                candidate = result["result"]
+
+                if candidate.get("safe_to_continue") is True:
+                    decision = candidate
+                    decision_index = idx
+                    break
+
+        elif tool_name in _API_WORKFLOW_EVIDENCE:
+            # An operational API tool ran before the validated workflow decision.
+            break
+
+    if (
+        decision_index < 0
+        or not isinstance(decision, dict)
+        or decision.get("safe_to_continue") is not True
+    ):
         return {
             "valid": False,
             "error_code": "api_workflow_decision_invalid",
             "message": (
-                "Model decision failed: api_workflow. The workflow decision was invalid or unsafe. "
-                "No completion was recorded."
+                "Model decision failed: api_workflow. The workflow decision was "
+                "invalid or unsafe. No completion was recorded."
             ),
             "required_actions": [],
             "completed_actions": [],
             "missing_actions": [],
+            "unexpected_actions": [],
+            "execution_evidence": {},
         }
-    required = [str(item) for item in decision.get("required_actions") or []]
+
+    required = [
+        str(item)
+        for item in decision.get("required_actions") or []
+        if str(item).strip()
+    ]
+
     completed: set[str] = set()
     execution_evidence: dict[str, Any] = {}
-    for trace in traces[1:]:
-        action = _API_WORKFLOW_EVIDENCE.get(str(trace.get("tool_name") or ""))
+
+    for trace in traces[decision_index + 1:]:
+        tool_name = str(trace.get("tool_name") or "")
+        action = _API_WORKFLOW_EVIDENCE.get(tool_name)
+
+        if not action:
+            continue
+
         result = payload(trace)
         trace_succeeded = str(trace.get("status") or "").lower() == "ok"
         result_succeeded = result.get("ok") is True
-        raw_result = trace.get("output_preview") or trace.get("result_summary")
+
+        raw_result = raw_payload(trace)
+
         clipped_success_evidence = (
-            trace_succeeded
+            action != "request_execution"
+            and trace_succeeded
             and isinstance(raw_result, str)
             and len(raw_result) >= 4000
             and not result
         )
-        if action == "request_execution" and result.get("ok") is True:
-            executed = result.get("result")
+
+        # --------------------------------------------------------------
+        # Request execution requires authoritative structured evidence.
+        #
+        # Never infer execution success merely from:
+        # - tool status == ok
+        # - a clipped result
+        # - a textual model claim
+        # --------------------------------------------------------------
+        if action == "request_execution":
+            executed = result.get("result") if isinstance(result.get("result"), dict) else result
+
+            if not isinstance(executed, dict):
+                continue
+
             if (
-                isinstance(executed, dict)
-                and executed.get("executed") is True
-                and executed.get("upstream_ok") is True
-                and isinstance(executed.get("status_code"), int)
+                executed.get("executed") is not True
+                or executed.get("upstream_ok") is not True
+                or not isinstance(executed.get("status_code"), int)
+            ):
+                continue
+
+            completed.add(action)
+
+            execution_evidence = {
+                key: executed.get(key)
+                for key in (
+                    "integration_id",
+                    "operation_id",
+                    "method",
+                    "redacted_url",
+                    "status_code",
+                    "content_type",
+                    "body_kind",
+                    "json_body",
+                    "text_body",
+                    "file_reference",
+                    "latency_ms",
+                    "upstream_ok",
+                    "executed",
+                )
+                if executed.get(key) not in (None, "")
+            }
+
+            continue
+
+        # --------------------------------------------------------------
+        # Preview may legitimately stop before execution because trusted
+        # local approval is required.
+        # --------------------------------------------------------------
+        if action == "request_preview":
+            if result_succeeded:
+                preview_result = result.get("result")
+
+                if isinstance(preview_result, dict):
+                    # Both ordinary preview and approval-required preview
+                    # are successful completion of the preview action.
+                    completed.add(action)
+                    continue
+
+            # Compatibility with older permission-required result shape.
+            if (
+                result.get("error_code") == "permission_required"
+                and isinstance(result.get("details"), dict)
+                and str(
+                    result["details"].get("permission_scope") or ""
+                ) == "api.request.execute"
+                and str(
+                    result["details"].get("permission_request_id") or ""
+                ).strip()
             ):
                 completed.add(action)
-                execution_evidence = {
-                    key: executed.get(key)
-                    for key in (
-                        "method",
-                        "redacted_url",
-                        "status_code",
-                        "content_type",
-                        "body_kind",
-                        "json_body",
-                        "text_body",
-                        "file_reference",
-                        "latency_ms",
-                    )
-                    if executed.get(key) not in (None, "")
-                }
-        elif (
-            action == "request_preview"
-            and result.get("error_code") == "permission_required"
-            and isinstance(result.get("details"), dict)
-            and str(result["details"].get("permission_scope") or "")
-            == "api.request.execute"
-            and str(result["details"].get("permission_request_id") or "")
-        ):
-            # The preview successfully built the exact request, then stopped it
-            # before execution to await the trusted-local approval it created.
+                continue
+
+        # --------------------------------------------------------------
+        # Non-execution lifecycle steps may use normal safe_result()
+        # evidence. A clipped successful trace is acceptable here because
+        # these actions do not prove an external side effect occurred.
+        # --------------------------------------------------------------
+        if result_succeeded or clipped_success_evidence:
             completed.add(action)
-        elif action and (result_succeeded or clipped_success_evidence):
-            completed.add(action)
-    missing = [action for action in required if action not in completed]
-    unexpected = sorted(action for action in completed if action not in required)
+
+    missing = [
+        action
+        for action in required
+        if action not in completed
+    ]
+
+    unexpected = sorted(
+        action
+        for action in completed
+        if action not in required
+    )
+
     if unexpected:
         error_code = "api_workflow_action_not_selected"
         message = (
@@ -460,6 +608,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             + ", ".join(unexpected)
             + "."
         )
+
     elif missing:
         error_code = "api_workflow_incomplete"
         message = (
@@ -467,9 +616,11 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             + ", ".join(missing)
             + "."
         )
+
     else:
         error_code = ""
         message = "API workflow completion evidence is valid."
+
     return {
         "valid": not missing and not unexpected,
         "error_code": error_code,
@@ -481,7 +632,6 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         "unexpected_actions": unexpected,
         "execution_evidence": execution_evidence,
     }
-
 
 class _RoutePreflightComplete(RuntimeError):
     """Internal control flow for a truthful pre-dispatch capability response."""
@@ -602,6 +752,11 @@ class AgentChatGateway:
         self._workspaces = WorkspaceService()
 
         if config is None:
+            resolved_memory_user_id = str(memory_user_id or "").strip()
+            if not resolved_memory_user_id:
+                from mana_agent.config.user_config import resolve_local_user_id
+
+                resolved_memory_user_id = resolve_local_user_id(self.settings)
             config = ChatGatewayConfig(
                 model=model,
                 index_dir=index_dir,
@@ -661,7 +816,7 @@ class AgentChatGateway:
                     )
                 ),
                 session_id=session_id,
-                memory_user_id=memory_user_id,
+                memory_user_id=resolved_memory_user_id,
                 chat_service=chat_service,
                 coding_agent_instance=coding_agent_instance,
                 tools_orchestrator=tools_orchestrator,
@@ -669,6 +824,12 @@ class AgentChatGateway:
             )
         else:
             # Allow kwargs to override injected objects when config already set
+            if not str(config.memory_user_id or "").strip() and memory_user_id:
+                config.memory_user_id = str(memory_user_id).strip()
+            elif not str(config.memory_user_id or "").strip():
+                from mana_agent.config.user_config import resolve_local_user_id
+
+                config.memory_user_id = resolve_local_user_id(self.settings)
             if chat_service is not None:
                 config.chat_service = chat_service
             if coding_agent_instance is not None:
@@ -1809,6 +1970,7 @@ class AgentChatGateway:
                 raise LookupError("Durable server approval context is invalid.")
             self._pending_server_approvals[approval_request_id] = pending
         return item, pending
+    
 
     def api_approval_command(
         self,
@@ -1817,7 +1979,11 @@ class AgentChatGateway:
         session_id: str,
         client_type: str = "tui",
     ) -> dict[str, Any]:
-        """Approve and execute one exact session-bound API mutation."""
+        """Approve and execute one exact session-bound API request.
+
+        Gateway completion is reported only when the controlled runtime confirms
+        both execution and upstream success.
+        """
         from mana_agent.api_manager.events import api_event_scope
         from mana_agent.api_manager.runtime_tools import api_manager_service
 
@@ -1832,19 +1998,106 @@ class AgentChatGateway:
                 approve=True,
                 client_type=client_type,
             )
-        status_code = int(
-            ((result.get("result") or {}).get("status_code") or 0)
-            if isinstance(result, dict)
-            else 0
+
+        if not isinstance(result, dict):
+            return {
+                "status": "failed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "message": (
+                    "API approval returned an invalid execution result. "
+                    "Completion was not recorded."
+                ),
+            }
+
+        approved = result.get("approved") is True
+        executed = result.get("executed") is True
+
+        raw_execution = result.get("result")
+        execution = (
+            dict(raw_execution)
+            if isinstance(raw_execution, dict)
+            else {}
         )
-        execution = dict(result.get("result") or {}) if isinstance(result, dict) else {}
+
+        upstream_ok = execution.get("upstream_ok") is True
+
+        raw_status_code = execution.get("status_code")
+        try:
+            status_code = int(raw_status_code or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+
+        # Approval must never be reported as successful completion without
+        # authoritative evidence that the request actually executed.
+        if not approved:
+            return {
+                "status": "failed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "message": (
+                    "API approval was not granted. "
+                    "No successful external execution was recorded."
+                ),
+            }
+
+        if not executed:
+            return {
+                "status": "approved_not_executed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "message": (
+                    "The API request was approved, but execution was not confirmed. "
+                    "Completion was not recorded."
+                ),
+            }
+
+        # An executed HTTP request is not the same thing as a successful API
+        # operation. HTTP/upstream failure must remain a failed workflow result.
+        if not upstream_ok:
+            status_suffix = (
+                f" with HTTP status {status_code}"
+                if status_code
+                else ""
+            )
+
+            message = (
+                "The approved API request was executed"
+                f"{status_suffix}, but the upstream API did not report success. "
+                "The API workflow was not marked completed."
+            )
+
+            details = self._api_approval_completion_message(
+                execution,
+                status_code,
+            )
+
+            if details:
+                message = f"{message}\n\n{details}"
+
+            return {
+                "status": "failed",
+                "approval_request_id": approval_request_id,
+                "result": result,
+                "execution_evidence": execution,
+                "message": message,
+            }
+
+        # Successful completion requires all three:
+        #
+        # approved == True
+        # executed == True
+        # upstream_ok == True
         return {
             "status": "completed",
             "approval_request_id": approval_request_id,
             "result": result,
-            "message": self._api_approval_completion_message(execution, status_code),
+            "execution_evidence": execution,
+            "message": self._api_approval_completion_message(
+                execution,
+                status_code,
+            ),
         }
-
     @staticmethod
     def _api_approval_completion_message(
         execution: dict[str, Any],
@@ -3034,14 +3287,7 @@ class AgentChatGateway:
             self._append_session_message(
                 session_id, role="user", content=text, turn_id=turn_id
             )
-            hist = state.get("history", [])
             question = text
-            if hist:
-                transcript = "\n\n".join(f"User: {q}\nMana-Agent: {a}" for q, a in hist)
-                question = (
-                    f"Conversation history for continuity:\n{transcript}\n\n"
-                    f"Current user message:\n{text}"
-                )
             try:
                 resp = self._chat_service.ask(
                     question, k=getattr(self._chat_service, "_k", 6)
@@ -3778,23 +4024,26 @@ class AgentChatGateway:
             state["_turn_record"] = turn_record
             state["_turn_store"] = turn_store
             state["_user_message_id"] = user_message_id
-            has_prior_assistant = any(
-                message.get("role") == "assistant"
-                for message in list(state.get("messages") or [])[:-1]
-            )
-            memory_warning = ""
-            if has_prior_assistant:
-                memory_context, memory_warning = self._recall_followup_memory(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    query=text,
+            turn_retrieval_cache: dict[str, Any] = {}
+            state["_turn_retrieval_cache"] = turn_retrieval_cache
+            retrieval_ledger = TurnRetrievalLedger(
+                retrieval_budget_tokens=int(
+                    getattr(
+                        self.settings,
+                        "mana_context_retrieval_max_tokens",
+                        12000,
+                    )
+                    or 12000
                 )
-                state["followup_memory_context"] = memory_context
-                state["followup_memory_kind"] = "legacy" if memory_context else ""
-            else:
-                state["followup_memory_context"] = ""
-                state["followup_memory_kind"] = ""
-            memory_context = str(state.get("followup_memory_context") or "")
+            )
+            state["_retrieval_ledger"] = retrieval_ledger
+            state["conversation_retrieval_tokens"] = 0
+            state["memory_retrieval_tokens"] = 0
+            state["history_injected"] = False
+            state["followup_memory_context"] = ""
+            state["followup_memory_kind"] = ""
+            memory_warning = ""
+            memory_context = ""
             sink = event_sink or self._event_sink
             state["_turn_event_sink"] = sink
             if callable(sink):
@@ -3808,40 +4057,187 @@ class AgentChatGateway:
                     },
                 )
             ask_service = self.get_ask_service()
+            all_rec_candidates = self._recovery_candidates(
+                lane_id=None,
+                session_id=session_id,
+                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+            )
+            rec_task_candidates = [
+                item
+                for item in all_rec_candidates
+                if str(item.get("state") or "") != LaneTaskState.COMPLETED.value
+            ]
             memory_task_candidates = tuple(
                 {
                     "task_id": str(item.get("task_id") or ""),
                     "normalized_intent": str(item.get("normalized_intent") or ""),
                     "state": str(item.get("state") or ""),
                 }
-                for item in self._recovery_candidates(
-                    lane_id=None,
-                    session_id=session_id,
-                    workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
-                    repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                for item in all_rec_candidates
+            )
+            authenticated_user_id = str(
+                self.config.memory_user_id
+                or getattr(self._stack.memory_service, "user_id", "")
+                or ""
+            ).strip()
+            capsules_enabled = bool(
+                getattr(
+                    getattr(self._stack.memory_service.config, "capsules", None),
+                    "enabled",
+                    False,
                 )
             )
+            raw_messages = list(state.get("messages") or [])
+            prior_messages = [
+                m for m in raw_messages
+                if str(m.get("turn_id") or "") != turn_id
+                and m.get("role") in {"user", "assistant", "tool"}
+            ]
+            prior_turn_ids = {
+                str(m.get("turn_id") or "")
+                for m in prior_messages
+                if m.get("turn_id")
+            }
+            last_turn_id = str(prior_messages[-1].get("turn_id") or "") if prior_messages else ""
+            accounting_snapshot = self._stack.context_cost_governor.accounting_snapshot(
+                task_id=turn_id, turn_id=turn_id
+            )
+            model_candidates = tuple(
+                ModelCandidateCapacity(
+                    model_id=profile.model_id,
+                    provider=profile.provider,
+                    context_window=profile.context_window,
+                    max_output_tokens=profile.max_output_tokens,
+                    supported_roles=tuple(profile.supported_roles),
+                    supported_tools=tuple(profile.supported_tools),
+                    available=profile.available,
+                    latency_class=profile.latency_class.value,
+                    can_patch=profile.can_patch,
+                    can_verify=profile.can_verify,
+                )
+                for profile in self.routing_authority.router.profiles
+            )
+            approval_state = ApprovalState(
+                pending_server_approvals=tuple(
+                    dict(p) for p in self._pending_server_approvals.values()
+                ),
+                pending_action_approvals=(),
+                pending_user_approvals=(),
+            )
+            turn_pointers = PreviousTurnPointers(
+                previous_turn_id=last_turn_id,
+                previous_route=str(state.get("active_route") or ""),
+                previous_task_id="",
+                related_task_ids=(),
+                retrieval_hints=(),
+            )
+            conv_budget = int(getattr(self.settings, "mana_context_retrieval_max_tokens", 12000))
+            mem_budget = int(getattr(self.settings, "mana_memory_capsules_default_max_tokens", 4000))
+            conv_avail = ConversationContextAvailability(
+                has_history=bool(prior_messages),
+                available_turns=len(prior_turn_ids),
+                last_turn_id=last_turn_id,
+                retrieval_tool_available=True,
+                retrieval_token_budget=conv_budget,
+            )
+            mem_avail = MemoryAvailability(
+                memory_capsules_enabled=capsules_enabled,
+                memory_task_candidates=memory_task_candidates,
+                available_scopes=("private", "project"),
+                retrieval_tool_available=True,
+                retrieval_token_budget=mem_budget,
+            )
+            artifact_ev = artifact_routing_evidence(
+                root=self.root,
+                user_prompt=text,
+                attachments=options.get("attachments", ()),
+                target_files=options.get("target_files", ()),
+            )
+            routing_envelope = build_routing_execution_envelope(
+                user_request=text,
+                identity=IdentitySessionRelationship(
+                    authenticated_user_id=authenticated_user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    task_id=turn_id,
+                    workspace_id=str(self._stack.workspace_id or ""),
+                    repository_id=str(self._stack.repository_id or ""),
+                ),
+                execution_state=ExecutionRecoveryState(
+                    active_flow_id=state.get("active_flow_id"),
+                    active_route=str(state.get("active_route") or ""),
+                    lane_id=str(state.get("lane_id") or ""),
+                    lane_states=dict(state.get("lane_states") or {}),
+                    recoverable_task_candidates=tuple(rec_task_candidates),
+                    all_recovery_candidates=tuple(all_rec_candidates),
+                    pending_required_work=bool(state.get("pending_required_work", False)),
+                ),
+                accounting_snapshot=accounting_snapshot,
+                model_candidates=model_candidates,
+                route_availability=tuple(self._entry_route_registry.snapshot()),
+                capabilities_and_tools=tuple(list_auto_chat_tools()),
+                approval_state=approval_state,
+                artifact_metadata=artifact_ev,
+                previous_turn_pointers=turn_pointers,
+                conversation_context_availability=conv_avail,
+                memory_availability=mem_avail,
+            )
+            record_current(
+                "gateway.envelope.created",
+                {"envelope": routing_envelope.to_dict(), "turn_id": turn_id},
+            )
+            if callable(sink):
+                sink(
+                    "routing_envelope_created",
+                    "Routing execution envelope created",
+                    metadata={
+                        "turn_id": turn_id,
+                        "session_id": session_id,
+                        "history_injected": False,
+                    },
+                )
             route_context = EntryRouteContext(
                 session_id=session_id,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 previous_route=str(state.get("active_route") or ""),
-                conversation_summary=_conversation_prompt(state, text),
-                artifact_evidence=artifact_routing_evidence(
-                    root=self.root,
-                    user_prompt=text,
-                    attachments=options.get("attachments", ()),
-                    target_files=options.get("target_files", ()),
-                ),
+                conversation_summary="",
+                artifact_evidence=artifact_ev,
                 memory_task_candidates=memory_task_candidates,
-                memory_capsules_enabled=bool(
-                    getattr(
-                        getattr(self._stack.memory_service.config, "capsules", None),
-                        "enabled",
-                        False,
-                    )
-                ),
+                memory_capsules_enabled=capsules_enabled,
+                authenticated_user_id=authenticated_user_id,
+                envelope=routing_envelope,
             )
+            memory_task_binding = MemoryTaskBinding(selected_memory_task_id="")
+            state["_memory_task_binding"] = memory_task_binding
+            context_retrieval_tools = build_context_retrieval_tools(
+                session_id=session_id,
+                conversation_id=conversation_id,
+                authenticated_user_id=authenticated_user_id,
+                history_store=self._history_store,
+                capsule_service=getattr(self._stack.memory_service, "capsules", None),
+                repository_id=str(self._stack.repository_id or ""),
+                current_turn_id=turn_id,
+                selected_memory_task_id=memory_task_binding,
+                memory_task_candidates=memory_task_candidates,
+                governor=self._stack.context_cost_governor,
+                turn_retrieval_cache=turn_retrieval_cache,
+                event_sink=sink,
+                retrieval_ledger=retrieval_ledger,
+                conversation_budget=conv_avail.retrieval_token_budget,
+                memory_budget=mem_avail.retrieval_token_budget,
+            )
+            conversation_context_tool = next(
+                (t for t in context_retrieval_tools if t.name == "conversation_context_read"),
+                None,
+            )
+            state["_conversation_context_tool"] = conversation_context_tool
+            state["_context_retrieval_tools"] = context_retrieval_tools
+            if ask_service is not None and getattr(ask_service, "ask_agent", None) is not None:
+                if hasattr(ask_service.ask_agent, "set_context_retrieval_tools"):
+                    ask_service.ask_agent.set_context_retrieval_tools(context_retrieval_tools)
             entry_model_decision = self.routing_authority.route(
                 RoutingRequest(
                     role="head_decision",
@@ -3873,11 +4269,15 @@ class AgentChatGateway:
             except EntryRoutingError as exc:
                 result = ChatTurnResult(
                     answer=str(exc),
-                    error=str(exc),
-                    mode="route-error",
+                    error=getattr(exc, "code", "") or str(exc),
+                    mode=(
+                        "route-budget-blocked"
+                        if getattr(exc, "code", "") == "context_budget_blocked"
+                        else "route-error"
+                    ),
                     payload={
                         "route": "unsupported",
-                        "error_code": "entry_route_invalid",
+                        "error_code": getattr(exc, "code", "") or "entry_route_invalid",
                     },
                 )
             else:
@@ -3886,6 +4286,14 @@ class AgentChatGateway:
                     {"decision": entry_decision.to_dict(), "turn_id": turn_id},
                 )
                 state["active_route"] = entry_decision.route
+                if entry_decision.memory_task_id:
+                    offered_task_ids = {
+                        str(item.get("task_id") or "").strip()
+                        for item in memory_task_candidates
+                        if str(item.get("task_id") or "").strip()
+                    }
+                    if entry_decision.memory_task_id in offered_task_ids:
+                        memory_task_binding.bind(entry_decision.memory_task_id)
                 if entry_decision.route == "command":
                     import shlex
 
@@ -3956,8 +4364,12 @@ class AgentChatGateway:
                     except FollowupClassificationError as exc:
                         result = ChatTurnResult(
                             answer=str(exc),
-                            error="followup_classification_invalid",
-                            mode="followup-classification-error",
+                            error=getattr(exc, "code", "") or "followup_classification_invalid",
+                            mode=(
+                                "checkpoint-resume-budget-blocked"
+                                if getattr(exc, "code", "") == "context_budget_blocked"
+                                else "followup-classification-error"
+                            ),
                             payload={"route": "multi_task"},
                         )
                     except LaneCoordinatorError as exc:
@@ -3969,6 +4381,35 @@ class AgentChatGateway:
                             error=getattr(exc, "code", "lane_coordinator_error"),
                             mode="lane-error",
                             payload={"route": "multi_task"},
+                        )
+                    except ModelContextLimitError as exc:
+                        result = ChatTurnResult(
+                            answer=(
+                                f"Gateway execution failed: {exc}. "
+                                "No direct model fallback was executed."
+                            ),
+                            error="context_budget_blocked",
+                            mode="context-budget-blocked",
+                            payload={
+                                "route": "multi_task",
+                                "required": exc.required,
+                                "effective_limit": exc.effective_limit,
+                                "deficit": exc.deficit,
+                            },
+                        )
+                    except ContextBudgetExceeded as exc:
+                        result = ChatTurnResult(
+                            answer=(
+                                f"Gateway execution failed: {exc}. "
+                                "No direct model fallback was executed."
+                            ),
+                            error="context_budget_blocked",
+                            mode="context-budget-blocked",
+                            payload={
+                                "route": "multi_task",
+                                "reason": exc.decision.reason,
+                                "snapshot": asdict(exc.decision.snapshot) if hasattr(exc.decision, "snapshot") else {},
+                            },
                         )
                     return self._finalize_turn_result(
                         result=result,
@@ -4099,10 +4540,10 @@ class AgentChatGateway:
                         ),
                         required_tools=frozenset(route_tools),
                         estimation_components={
-                            "conversation_history": list(state.get("messages") or [])[:-1],
+                            "conversation_history": [],
                             "attachments": list(options.get("attachments") or ()),
                             "required_tools": list(route_tools),
-                            "retrieved_memory": memory_context,
+                            "retrieved_memory": "",
                         },
                         expected_tool_calls=(
                             max(0, int(self.config.agent_max_steps) - 1)
@@ -4200,9 +4641,9 @@ class AgentChatGateway:
                             request_text=text,
                             session_id=session_id,
                             context_components={
-                                "conversation_history": list(state.get("messages") or [])[:-1],
+                                "conversation_history": [],
                                 "attachments": list(options.get("attachments") or ()),
-                                "retrieved_memory": memory_context,
+                                "retrieved_memory": "",
                                 "required_tools": list(route_tools),
                             },
                         )
@@ -4266,8 +4707,13 @@ class AgentChatGateway:
                     if recoverable_task_candidates:
                         followup = FollowupClassifier(followup_model).decide(
                             message=text,
-                            recent_history=list(state.get("history") or []),
+                            recent_history=[],
                             candidates=recoverable_task_candidates,
+                            pointers=turn_pointers,
+                            retrieval_hints=["conversation_context_read"] if conv_avail.has_history else [],
+                            conversation_tool=state.get("_conversation_context_tool"),
+                            turn_retrieval_cache=turn_retrieval_cache,
+                            retrieval_ledger=retrieval_ledger,
                         )
                         turn_record.normalized_intent = followup.category
                         turn_record.routing_decision_id = followup.decision_id
@@ -4276,13 +4722,8 @@ class AgentChatGateway:
                         )
                         turn_record.status = "classified"
                         turn_store.update(turn_record)
-                        if followup.related_task_id:
-                            state["followup_memory_context"] = self._recall_task_capsules(
-                                task_id=followup.related_task_id,
-                                session_id=session_id,
-                                query=text,
-                            )
-                            state["followup_memory_kind"] = "capsule"
+                        state["followup_memory_context"] = ""
+                        state["followup_memory_kind"] = ""
                         if callable(sink):
                             sink(
                                 "followup_classified",
@@ -4295,7 +4736,7 @@ class AgentChatGateway:
                                     "decision_id": followup.decision_id,
                                 },
                             )
-                        if followup.category in {"status_request", "duplicate_message"}:
+                        if followup.category == "status_request":
                             lookup = self._lane_coordinator.get_verified_execution_result(
                                 followup.related_task_id
                             )
@@ -4309,6 +4750,12 @@ class AgentChatGateway:
                                 )
                                 result = ChatTurnResult(
                                     answer=str(ans),
+                                    error=(
+                                        lookup.result.error_metadata.get("reason")
+                                        or (lookup.task.failure_reason if lookup.task else "")
+                                        if lookup.result.supervisor_state == "failed"
+                                        else durable_result.get("error")
+                                    ),
                                     mode=durable_result.get("mode") or "verified-task-status",
                                     changed_files=list(durable_result.get("changed_files") or []),
                                     payload={
@@ -4382,6 +4829,78 @@ class AgentChatGateway:
                                     f"[{lookup.error_code}] {lookup.error_message}"
                                 )
                                 raise CheckpointResumeError(err_msg)
+                        elif followup.category == "duplicate_message":
+                            lookup = self._lane_coordinator.get_verified_execution_result(
+                                followup.related_task_id
+                            )
+                            if (
+                                lookup.status == EscrowLookupStatus.FOUND
+                                and lookup.result is not None
+                                and lookup.result.supervisor_state == LaneTaskState.COMPLETED.value
+                            ):
+                                durable_result = dict(lookup.result.payload.get("chat_result") or {})
+                                ans = (
+                                    durable_result.get("answer")
+                                    or f"Status: {lookup.result.supervisor_state}"
+                                )
+                                result = ChatTurnResult(
+                                    answer=str(ans),
+                                    mode=durable_result.get("mode") or "verified-task-status",
+                                    changed_files=list(durable_result.get("changed_files") or []),
+                                    payload={
+                                        **dict(durable_result.get("payload") or {}),
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "verified_result_reused": True,
+                                        "status": lookup.result.supervisor_state,
+                                        "is_terminal": lookup.is_terminal,
+                                        "is_resumable": lookup.is_resumable,
+                                    },
+                                )
+                                if lookup.acknowledgement is None:
+                                    self._lane_coordinator.execution_supervisor.acknowledge_result(
+                                        lookup.result.result_id,
+                                        consumer_turn_id=turn_id,
+                                        consumer_execution_id=lookup.execution_id,
+                                    )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif lookup.status == EscrowLookupStatus.EXECUTION_STILL_RUNNING:
+                                result = ChatTurnResult(
+                                    answer=f"Task {followup.related_task_id} is currently running.",
+                                    mode="task-status",
+                                    payload={
+                                        "lane_task_id": followup.related_task_id,
+                                        "execution_id": followup.related_task_id,
+                                        "status": "running",
+                                        "is_terminal": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            else:
+                                recovery_candidates = [
+                                    item
+                                    for item in recoverable_task_candidates
+                                    if str(item.get("task_id") or "") == followup.related_task_id
+                                    and not bool(item.get("deadline_exceeded"))
+                                ]
+                                relation_type = "retry"
+                                previous_task_id = followup.related_task_id
                         if followup.category in {"conversation_only", "clarification_answer"}:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
@@ -4481,6 +5000,85 @@ class AgentChatGateway:
                         resume_decision.action == "resume_checkpoint"
                         and not force_new_task_for_dead
                     ):
+                        eligibility = (
+                            self._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+                                resume_decision.task_id,
+                                resume_decision.checkpoint_id,
+                                allow_explicit_retry_seed=True,
+                            )
+                        )
+                        if not eligibility.resumable:
+                            lookup = self._lane_coordinator.get_verified_execution_result(
+                                resume_decision.task_id
+                            )
+                            if (
+                                lookup.status == EscrowLookupStatus.FOUND
+                                and lookup.result is not None
+                                and lookup.is_terminal
+                            ):
+                                durable_result = dict(lookup.result.payload.get("chat_result") or {})
+                                ans = (
+                                    durable_result.get("answer")
+                                    or lookup.result.error_metadata.get("reason")
+                                    or (lookup.task.failure_reason if lookup.task else "")
+                                    or f"Status: {lookup.result.supervisor_state}"
+                                )
+                                result = ChatTurnResult(
+                                    answer=str(ans),
+                                    error=(
+                                        lookup.result.error_metadata.get("reason")
+                                        or (lookup.task.failure_reason if lookup.task else "")
+                                        if lookup.result.supervisor_state == "failed"
+                                        else None
+                                    ),
+                                    mode=durable_result.get("mode") or "verified-task-status",
+                                    changed_files=list(durable_result.get("changed_files") or []),
+                                    payload={
+                                        **dict(durable_result.get("payload") or {}),
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "verified_result_reused": True,
+                                        "status": lookup.result.supervisor_state,
+                                        "is_terminal": lookup.is_terminal,
+                                        "is_resumable": lookup.is_resumable,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            elif eligibility.is_terminal and lookup.task is not None:
+                                result = ChatTurnResult(
+                                    answer=lookup.task.failure_reason or f"Task ended as {lookup.task.state.value}.",
+                                    error=lookup.task.failure_reason if lookup.task.state == ExecutionState.FAILED else None,
+                                    mode=f"lane-{lookup.task.state.value.replace('_', '-')}",
+                                    payload={
+                                        "lane_task_id": lookup.execution_id,
+                                        "execution_id": lookup.execution_id,
+                                        "status": lookup.task.state.value,
+                                        "is_terminal": True,
+                                        "is_resumable": False,
+                                    },
+                                )
+                                return self._finalize_turn_result(
+                                    result=result,
+                                    session_id=session_id,
+                                    conversation_id=conversation_id,
+                                    turn_id=turn_id,
+                                    text=text,
+                                    state=state,
+                                    memory_warning=memory_warning,
+                                )
+                            raise CheckpointResumeError(
+                                f"Model decision selected non-resumable checkpoint for task {resume_decision.task_id}. "
+                                f"Reason: {eligibility.reason} - {eligibility.error_message}",
+                                code="checkpoint_resume_invalid",
+                            )
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
                             task_id=resume_decision.task_id,
@@ -4499,7 +5097,7 @@ class AgentChatGateway:
                             decision=recovery_decision,
                             session_id=session_id,
                         )
-                        checkpoint = (
+                        checkpoint = eligibility.checkpoint or (
                             self._lane_coordinator.execution_supervisor.resume_checkpoint(
                                 resume_decision.task_id
                             )
@@ -4701,16 +5299,48 @@ class AgentChatGateway:
                                 sink=sink,
                                 options=options,
                             )
+                            if result.payload is not None:
+                                result.payload.setdefault("lane_id", lane_id.value)
                             if recovered_task and result.error is None:
                                 result.error = ""
                         except BaseException as exc:
+                            target_state = (
+                                LaneTaskState.BUDGET_EXHAUSTED
+                                if isinstance(exc, (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError))
+                                else LaneTaskState.FAILED
+                            )
                             self._finish_lane(
                                 reservation.execution.task_id,
-                                state=LaneTaskState.FAILED,
+                                state=target_state,
                                 error=str(exc),
                             )
                             raise
                         approval_ids = self._approval_request_ids(result.payload)
+                        status = str(
+                            result.payload.get("status")
+                            or ("completed" if not result.error else "failed")
+                        )
+                        pending_required_work_exists = bool(
+                            result.payload.get("pending_required_work", False)
+                        )
+                        if not pending_required_work_exists:
+                            if result.mode == "remote-awaiting-permission" or approval_ids:
+                                pending_required_work_exists = True
+                            elif status in (
+                                "pass_budget_exhausted",
+                                "needs_continuation",
+                                "blocked",
+                                "budget_exhausted",
+                            ):
+                                pending_required_work_exists = True
+                            else:
+                                pending_required_work_exists = False
+
+                        if result.error or status != "completed":
+                            result.payload.setdefault("goal_satisfied", False)
+                        else:
+                            result.payload.setdefault("goal_satisfied", True)
+
                         if result.mode == "remote-awaiting-permission":
                             self._synchronize_lane_usage(
                                 reservation.execution.task_id
@@ -4744,23 +5374,30 @@ class AgentChatGateway:
                                 ]
                                 if not actual_tools:
                                     result.error = "completion_verification_failed"
-                            self._lane_coordinator.checkpoint(
-                                reservation.execution.task_id,
-                                boundary="before_verification",
-                                resume_payload={
-                                    "mode": result.mode,
-                                    "changed_files": list(result.changed_files),
-                                },
-                                completed_steps=("routing", "execute_route"),
-                                pending_steps=("verify", "final_response"),
+                            if not result.error:
+                                self._lane_coordinator.checkpoint(
+                                    reservation.execution.task_id,
+                                    boundary="before_verification",
+                                    resume_payload={
+                                        "mode": result.mode,
+                                        "changed_files": list(result.changed_files),
+                                        "intermediate_results": dict(result.payload.get("intermediate_results") or {}),
+                                    },
+                                    completed_steps=("routing", "execute_route"),
+                                    pending_steps=("verify", "final_response"),
+                                )
+                            target_state = (
+                                LaneTaskState.FAILED
+                                if result.error
+                                else LaneTaskState.COMPLETED
+                                if (status == "completed" and not pending_required_work_exists)
+                                else LaneTaskState.BUDGET_EXHAUSTED
+                                if status == "budget_exhausted"
+                                else LaneTaskState.RUNNING
                             )
                             finished = self._finish_lane(
                                 reservation.execution.task_id,
-                                state=(
-                                    LaneTaskState.FAILED
-                                    if result.error
-                                    else LaneTaskState.COMPLETED
-                                ),
+                                state=target_state,
                                 changed_files=result.changed_files,
                                 verification_state={
                                     "mode": result.mode,
@@ -4786,11 +5423,10 @@ class AgentChatGateway:
                                         finished = self._lane_coordinator.inspect_task(
                                             reservation.execution.task_id
                                         )
+                                    except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+                                        raise
                                     except Exception as exc:
                                         decision_unavailable = True
-                                        # A pending decision is a durable, safe handoff rather
-                                        # than a failed chat turn. The result remains available
-                                        # for a later validated decision.
                                         result.error = None
                                         result.mode = "lane-budget-decision-pending"
                                         result.answer = (
@@ -4827,32 +5463,28 @@ class AgentChatGateway:
                                             "budget-overrun recovery is scheduled"
                                         )
                                         result.payload["budget_overrun_status"] = "recovery_scheduled"
-                                status = result.payload.get("status")
-                                if status == "completed":
-                                    pending_required_work_exists = False
-                                elif status in ("pass_budget_exhausted", "blocked"):
-                                    pending_required_work_exists = True
-                                else:
-                                    pending_required_work_exists = (
-                                        finished.state is not LaneTaskState.COMPLETED
-                                    )
 
-                                budget_exhausted = reservation.execution.budget.turn_remaining_tokens <= 0
+                                budget_exhausted = (
+                                    status == "budget_exhausted"
+                                    or reservation.execution.budget.is_turn_budget_exhausted
+                                )
 
-                                if status == "completed":
+                                if status == "completed" and not pending_required_work_exists:
                                     pass  # Keep result as is, do not override with budget_exhausted
                                 elif (
-                                    status != "completed"
-                                    and pending_required_work_exists
+                                    pending_required_work_exists
                                     and budget_exhausted
                                 ):
                                     result.error = "lane_budget_exhausted"
                                     result.mode = "lane-budget-exhausted"
+                                    result.payload["status"] = "budget_exhausted"
+                                    result.payload["pending_required_work"] = True
+                                    result.payload["resume_required"] = True
                                     result.answer = (
-                                        "The selected workflow exceeded its reserved execution "
-                                        "budget before its result could be accepted. "
-                                        f"{finished.error or 'No result was accepted.'}"
-                                    )
+                                        "The selected workflow reached its budget limit while work remained pending. "
+                                        "Intermediate results were checkpointed and can be resumed. "
+                                        f"{finished.error or ''}"
+                                    ).strip()
                                 elif status == "blocked" and not result.error:
                                     result.error = "lane_blocked"
                                     result.mode = "lane-blocked"
@@ -4866,6 +5498,8 @@ class AgentChatGateway:
                                         LaneTaskState.COMPLETED,
                                         LaneTaskState.PENDING_BUDGET_DECISION,
                                         LaneTaskState.QUEUED,
+                                        LaneTaskState.RUNNING,
+                                        LaneTaskState.WAITING,
                                     }
                                 ):
                                     result.error = "completion_verification_failed"
@@ -4881,13 +5515,18 @@ class AgentChatGateway:
                                 "lane_task_id": reservation.execution.task_id,
                                 "duplicate": False,
                                 "routing_decision": execution_decision.concise(),
+                                "pending_required_work": pending_required_work_exists,
                             }
                         )
                 except FollowupClassificationError as exc:
                     result = ChatTurnResult(
                         answer=str(exc),
-                        error="followup_classification_invalid",
-                        mode="followup-classification-error",
+                        error=getattr(exc, "code", "") or "followup_classification_invalid",
+                        mode=(
+                            "checkpoint-resume-budget-blocked"
+                            if getattr(exc, "code", "") == "context_budget_blocked"
+                            else "followup-classification-error"
+                        ),
                         payload={"route": entry_decision.route},
                     )
                 except CheckpointResumeError as exc:
@@ -4917,6 +5556,20 @@ class AgentChatGateway:
                             "required": exc.required,
                             "effective_limit": exc.effective_limit,
                             "deficit": exc.deficit,
+                        },
+                    )
+                except ContextBudgetExceeded as exc:
+                    result = ChatTurnResult(
+                        answer=(
+                            f"Gateway execution failed: {exc}. "
+                            "No direct model fallback was executed."
+                        ),
+                        error="context_budget_blocked",
+                        mode="context-budget-blocked",
+                        payload={
+                            "route": entry_decision.route,
+                            "reason": exc.decision.reason,
+                            "snapshot": asdict(exc.decision.snapshot) if hasattr(exc.decision, "snapshot") else {},
                         },
                     )
                 except LaneCoordinatorError as exc:
@@ -5117,6 +5770,11 @@ class AgentChatGateway:
             )
         if write_warning:
             result.warnings.append(write_warning)
+        conv_tokens = int(state.get("conversation_retrieval_tokens", 0) or 0)
+        mem_tokens = int(state.get("memory_retrieval_tokens", 0) or 0)
+        result.payload["history_injected"] = False
+        result.payload.setdefault("conversation_retrieval_tokens", conv_tokens)
+        result.payload.setdefault("memory_retrieval_tokens", mem_tokens)
         record_current(
             "gateway.turn.finished",
             {
@@ -5224,7 +5882,7 @@ class AgentChatGateway:
         sink: Any,
         options: dict[str, Any],
         turn_id: str,
-        user_message_id: str,
+        user_message_id: str = "",
     ) -> ChatTurnResult:
         """Auto-select multi-task recovery or create a fresh compound root.
 
@@ -5317,6 +5975,17 @@ class AgentChatGateway:
             )
         selected_model = ""
         if resume_decision.action == "resume_checkpoint":
+            eligibility = self._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+                recovery_target,
+                resume_decision.checkpoint_id,
+                allow_explicit_retry_seed=True,
+            )
+            if not eligibility.resumable:
+                raise CheckpointResumeError(
+                    f"Multi-task recovery checkpoint is invalid for task {recovery_target}. "
+                    f"Reason: {eligibility.reason} - {eligibility.error_message}",
+                    code="checkpoint_resume_invalid",
+                )
             recovery_decision = RecoveryDecision(
                 decision_id=resume_decision.decision_id,
                 task_id=recovery_target,
@@ -5656,20 +6325,79 @@ class AgentChatGateway:
             self._lane_coordinator.start(root_reservation)
 
         def execute_child(item: Any, child_task_id: str) -> MultiTaskChildResult:
-            child_context = EntryRouteContext(
-                session_id=context.session_id,
-                conversation_id=context.conversation_id,
-                turn_id=f"{context.turn_id}:{item.local_id}",
-                previous_route="",
-                conversation_summary=context.conversation_summary,
-                artifact_evidence=artifact_routing_evidence(
+            child_accounting = self._stack.context_cost_governor.accounting_snapshot(
+                task_id=child_task_id, turn_id=context.turn_id
+            )
+            child_envelope = build_routing_execution_envelope(
+                user_request=item.request,
+                identity=IdentitySessionRelationship(
+                    authenticated_user_id=context.authenticated_user_id,
+                    session_id=context.session_id,
+                    conversation_id=context.conversation_id,
+                    turn_id=f"{context.turn_id}:{item.local_id}",
+                    task_id=child_task_id,
+                    parent_task_id=root_task.task_id,
+                    workspace_id=str(board.store.workspace_id or ""),
+                    repository_id=str(board.store.repository_id or ""),
+                ),
+                execution_state=ExecutionRecoveryState(
+                    active_route="",
+                    lane_id="",
+                    recoverable_task_candidates=(),
+                    all_recovery_candidates=(),
+                ),
+                accounting_snapshot=child_accounting,
+                model_candidates=tuple(
+                    ModelCandidateCapacity(
+                        model_id=p.model_id,
+                        provider=p.provider,
+                        context_window=p.context_window,
+                        max_output_tokens=p.max_output_tokens,
+                        supported_roles=tuple(p.supported_roles),
+                        supported_tools=tuple(p.supported_tools),
+                        available=p.available,
+                        latency_class=p.latency_class.value,
+                        can_patch=p.can_patch,
+                        can_verify=p.can_verify,
+                    )
+                    for p in self.routing_authority.router.profiles
+                ),
+                route_availability=tuple(self._entry_route_registry.snapshot()),
+                capabilities_and_tools=tuple(list_auto_chat_tools()),
+                approval_state=ApprovalState(),
+                artifact_metadata=artifact_routing_evidence(
                     root=self.root,
                     user_prompt=item.request,
                     attachments=options.get("attachments", ()),
                     target_files=options.get("target_files", ()),
                 ),
+                previous_turn_pointers=PreviousTurnPointers(
+                    previous_task_id=root_task.task_id,
+                ),
+                conversation_context_availability=ConversationContextAvailability(
+                    has_history=False,
+                    available_turns=0,
+                    retrieval_tool_available=True,
+                ),
+                memory_availability=MemoryAvailability(
+                    memory_capsules_enabled=context.memory_capsules_enabled,
+                    memory_task_candidates=context.memory_task_candidates,
+                    retrieval_tool_available=True,
+                ),
+            )
+            child_context = EntryRouteContext(
+                session_id=context.session_id,
+                conversation_id=context.conversation_id,
+                turn_id=f"{context.turn_id}:{item.local_id}",
+                previous_route="",
+                conversation_summary="",
+                artifact_evidence=child_envelope.artifact_metadata,
+                memory_task_candidates=context.memory_task_candidates,
+                memory_capsules_enabled=context.memory_capsules_enabled,
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
+                authenticated_user_id=context.authenticated_user_id,
+                envelope=child_envelope,
             )
             try:
                 with self._multi_task_route_lock:
@@ -5686,8 +6414,10 @@ class AgentChatGateway:
                 for dependency_id in child_task.depends_on:
                     dependency = board.get_task(dependency_id)
                     if dependency.result_summary:
+                        bounded_summary = str(dependency.result_summary)[:1000]
+                        trunc_note = f" ... [truncated; ref: {dependency_id}]" if len(str(dependency.result_summary)) > 1000 else ""
                         prerequisite_results.append(
-                            f"{dependency.title}:\n{dependency.result_summary}"
+                            f"[Dependency: {dependency_id}] {dependency.title}:\n{bounded_summary}{trunc_note}"
                         )
                 execution_item = item.model_copy(
                     update={
@@ -5695,7 +6425,7 @@ class AgentChatGateway:
                             item.request
                             if not prerequisite_results
                             else item.request
-                            + "\n\nValidated prerequisite results:\n\n"
+                            + "\n\nValidated prerequisite projections:\n\n"
                             + "\n\n".join(prerequisite_results)
                         )
                     }
@@ -5711,7 +6441,13 @@ class AgentChatGateway:
                     sink=sink,
                     options=dict(options),
                 )
-            except (ModelContextLimitError, LaneBudgetError) as exc:
+            except (ModelContextLimitError, LaneBudgetError, ContextBudgetExceeded) as exc:
+                self._synchronize_lane_usage(child_task_id)
+                self._finish_lane(
+                    child_task_id,
+                    state=LaneTaskState.BUDGET_EXHAUSTED,
+                    error=str(exc),
+                )
                 board.update_status(
                     child_task_id,
                     TaskStatus.BLOCKED,
@@ -5757,32 +6493,67 @@ class AgentChatGateway:
         approvals = [
             request_id for item in results for request_id in item.approval_request_ids
         ]
+        finished_root_state: str = ""
+        finished_root_error: str = ""
         if root_reservation.execution.state == LaneTaskState.CANCELLED:
             overall = "cancelled"
+            finished_root_state = LaneTaskState.CANCELLED.value
         elif statuses <= {"completed", "skipped"}:
             overall = "done"
             finished_root = self._finish_lane(
                 root_reservation.execution.task_id,
                 changed_files=changed_files,
-                verification_state={"children": child_payloads, "status": overall},
+                verification_state={
+                    "children": child_payloads,
+                    "status": overall,
+                    "chat_result": {
+                        "status": "completed",
+                        "route": "multi_task",
+                        "progress": f"{len(results)}/{len(results)} completed",
+                    },
+                },
             )
-            if finished_root.state is not LaneTaskState.COMPLETED:
+            finished_root_state = finished_root.state.value if hasattr(finished_root, "state") else str(finished_root)
+            finished_root_error = str(getattr(finished_root, "error", "") or "")
+            if finished_root.state is LaneTaskState.COMPLETED:
+                overall = "done"
+            elif finished_root.state is LaneTaskState.BUDGET_EXHAUSTED:
+                overall = "budget_exhausted"
+            elif finished_root.state is LaneTaskState.PENDING_BUDGET_DECISION:
+                overall = "budget_decision_pending"
+            elif finished_root.state is LaneTaskState.VERIFYING:
                 overall = "verification_failed"
+            elif finished_root.state is LaneTaskState.BLOCKED:
+                overall = "blocked"
+            elif finished_root.state is LaneTaskState.FAILED:
+                overall = "failed"
+            else:
+                overall = str(finished_root.state.value).lower()
         elif statuses.intersection({"blocked", "awaiting_approval"}):
             overall = "blocked"
             self._lane_coordinator.mark_blocked(
                 root_reservation.execution.task_id,
                 reason="one or more child tasks require a capability, prerequisite, or approval",
             )
+            finished_root_state = LaneTaskState.BLOCKED.value
         else:
             overall = "failed"
-            self._finish_lane(
+            finished_root = self._finish_lane(
                 root_reservation.execution.task_id,
                 state=LaneTaskState.FAILED,
                 changed_files=changed_files,
-                verification_state={"children": child_payloads, "status": overall},
+                verification_state={
+                    "children": child_payloads,
+                    "status": overall,
+                    "chat_result": {
+                        "status": "failed",
+                        "route": "multi_task",
+                    },
+                },
                 error="one or more child tasks failed and no safe continuation remains",
             )
+            finished_root_state = finished_root.state.value if hasattr(finished_root, "state") else str(finished_root)
+            finished_root_error = str(getattr(finished_root, "error", "") or "")
         completed_count = sum(
             item.status in {"completed", "skipped"} for item in results
         )
@@ -5821,6 +6592,8 @@ class AgentChatGateway:
                 "route": "multi_task",
                 "root_task_id": root_task.task_id,
                 "root_lane_task_id": root_reservation.execution.task_id,
+                "root_lane_state": finished_root_state,
+                "root_lane_error": finished_root_error,
                 "overall_status": overall,
                 "progress": f"{completed_count}/{len(results)} completed",
                 "decomposition": plan.model_dump(mode="json"),
@@ -6067,15 +6840,28 @@ class AgentChatGateway:
                 },
                 pending_steps=("execute_route", "verify", "final_response"),
             )
-            result = self._execute_entry_route(
-                decision=decision,
-                context=context,
-                text=item.request,
-                state=state,
-                ask_service=ask_service,
-                sink=sink,
-                options=child_options,
-            )
+            try:
+                result = self._execute_entry_route(
+                    decision=decision,
+                    context=context,
+                    text=item.request,
+                    state=state,
+                    ask_service=ask_service,
+                    sink=sink,
+                    options=child_options,
+                )
+            except BaseException as exc:
+                target_state = (
+                    LaneTaskState.BUDGET_EXHAUSTED
+                    if isinstance(exc, (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError))
+                    else LaneTaskState.FAILED
+                )
+                self._finish_lane(
+                    reservation.execution.task_id,
+                    state=target_state,
+                    error=str(exc),
+                )
+                raise
         approval_ids = self._approval_request_ids(result.payload)
         awaiting = result.mode in {"remote-awaiting-permission"} or bool(approval_ids)
         if awaiting:
@@ -6105,6 +6891,15 @@ class AgentChatGateway:
                 changed_files=result.changed_files,
                 error=str(result.error),
             )
+        elif result.payload.get("goal_satisfied") is False:
+            result.error = "goal_not_satisfied"
+            status = "failed"
+            self._finish_lane(
+                reservation.execution.task_id,
+                state=LaneTaskState.FAILED,
+                changed_files=result.changed_files,
+                error="goal_not_satisfied: Execution did not satisfy required criteria",
+            )
         else:
             if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"}:
                 actual_tools = [
@@ -6119,11 +6914,18 @@ class AgentChatGateway:
                         error="required_tool_missing: Execution required external tool work but no valid tool result was recorded",
                     )
                     status = "failed"
-            if not result.error:
+            if not result.error and result.payload.get("goal_satisfied") is not False:
                 finished = self._finish_lane(
                     reservation.execution.task_id,
                     changed_files=result.changed_files,
-                    verification_state={"mode": result.mode, "status": "completed"},
+                    verification_state={
+                        "mode": result.mode,
+                        "status": "completed",
+                        "chat_result": {
+                            "status": "completed",
+                            "route": decision.route,
+                        },
+                    },
                 )
                 status = (
                     "completed"
@@ -6140,12 +6942,28 @@ class AgentChatGateway:
                 child_task_id,
                 [str(path) for path in result.changed_files],
             )
+        raw_verification = str(result.payload.get("verification_status") or "").strip().lower()
+        if raw_verification in {"passed", "failed", "not_required", "pending"}:
+            verification_status = raw_verification
+        elif raw_verification == "verified":
+            verification_status = "passed"
+        elif raw_verification == "unverified":
+            verification_status = "failed"
+        elif result.error or result.payload.get("goal_satisfied") is False or status == "failed":
+            verification_status = "failed"
+        elif status == "completed":
+            verification_status = "passed"
+        elif status in {"awaiting_approval", "waiting"}:
+            verification_status = "pending"
+        elif status == "blocked":
+            verification_status = "failed"
+        else:
+            verification_status = "not_required"
+
         self._lane_coordinator.taskboard.update_orchestration(
             child_task_id,
             result_summary=result.answer[:4000],
-            verification_status=str(
-                result.payload.get("verification_status") or result.mode
-            ),
+            verification_status=verification_status,
             output_artifacts=artifacts,
             approval_request_ids=approval_ids,
         )
@@ -6157,14 +6975,13 @@ class AgentChatGateway:
             status=status,
             result=result.answer,
             blocker=str(result.error or "") if status != "completed" else "",
-            verification_status=str(
-                result.payload.get("verification_status") or result.mode
-            ),
+            verification_status=verification_status,
             changed_files=list(result.changed_files),
             artifacts=artifacts,
             approval_request_ids=approval_ids,
             payload=dict(result.payload),
         )
+
 
     @staticmethod
     def _approval_request_ids(payload: dict[str, Any]) -> list[str]:
@@ -6201,16 +7018,35 @@ class AgentChatGateway:
             state=state,
             options=options,
         )
+        context_tools = state.get("_context_retrieval_tools")
+        if context_tools is None:
+            conv_tool = state.get("_conversation_context_tool")
+            context_tools = [conv_tool] if conv_tool is not None else []
         ask_conversation = self._chat_service.ask_conversation
         try:
             parameters = inspect.signature(ask_conversation).parameters
         except (TypeError, ValueError):
             parameters = {}
+        kwargs: dict[str, Any] = {}
         if "runtime_self" in parameters or any(
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
-            return ask_conversation(execution_text, runtime_self=runtime_self)
-        return ask_conversation(execution_text)
+            kwargs["runtime_self"] = runtime_self
+        if "context_tools" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            kwargs["context_tools"] = context_tools
+        if "recent_history" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+        ):
+            raw_messages = list(state.get("messages") or [])
+            recent_history = [
+                m for m in raw_messages
+                if m.get("role") in {"user", "assistant"}
+                and str(m.get("content") or "").strip()
+            ]
+            kwargs["recent_history"] = recent_history[-6:]
+        return ask_conversation(execution_text, **kwargs)
 
     def _conversation_runtime_self(
         self,
@@ -6369,11 +7205,16 @@ class AgentChatGateway:
             checkpoint = None
             checkpoint_error = ""
             deadline_exceeded = task.wall_clock_deadline_exceeded(now)
-            if task.checkpoint_id and not deadline_exceeded and not waiting_for_human:
-                try:
-                    checkpoint = supervisor.resume_checkpoint(task.task_id)
-                except ExecutionSupervisorError as exc:
-                    checkpoint_error = redact_text(str(exc))
+            eligibility = supervisor.validate_checkpoint_resume(
+                task,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+                allow_explicit_retry_seed=False,
+            )
+            if eligibility.resumable and not deadline_exceeded and not waiting_for_human:
+                checkpoint = eligibility.checkpoint
+            elif not eligibility.resumable and task.checkpoint_id and not eligibility.is_terminal:
+                checkpoint_error = redact_text(eligibility.error_message or eligibility.reason)
             try:
                 board_task = self._lane_coordinator.taskboard.get_task(
                     execution.taskboard_task_id if execution is not None else task.task_id
@@ -6398,6 +7239,11 @@ class AgentChatGateway:
                 "checkpoint_id": checkpoint.checkpoint_id if checkpoint else "",
                 "checkpoint_available": checkpoint is not None,
                 "checkpoint_error": checkpoint_error,
+                "last_checkpoint_id": task.checkpoint_id or "",
+                "resume_checkpoint_id": checkpoint.checkpoint_id if checkpoint else "",
+                "resume_eligible": eligibility.resumable,
+                "resume_rejection_reason": eligibility.reason if not eligibility.resumable else "",
+                "is_terminal": task.state in TERMINAL_STATES,
                 "normalized_intent": redact_text(task.normalized_intent),
                 "lane": selected_lane.value if isinstance(selected_lane, LaneId) else selected_lane,
                 "session_id": task.session_id,
@@ -6512,11 +7358,7 @@ class AgentChatGateway:
         options: dict[str, Any],
     ) -> ChatTurnResult:
         lane_task_id = str(options.get("_lane_task_id") or "")
-        execution_text = (
-            text
-            if bool(options.get("_isolated_child_prompt"))
-            else _conversation_prompt(state, text)
-        )
+        execution_text = text
         resume_context = options.get("_resume_checkpoint_context")
         if isinstance(resume_context, dict):
             execution_text += (
@@ -6623,6 +7465,8 @@ class AgentChatGateway:
                     state=state,
                     options=options,
                 )
+            except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+                raise
             except Exception as exc:
                 return ChatTurnResult(
                     answer="",
@@ -7104,7 +7948,7 @@ class AgentChatGateway:
                     question=text,
                     root=self.root,
                     required_tool=required_tool,
-                    memory_context=_conversation_prompt(state, text),
+                    memory_context="",
                 )
             except SearchOperationDecisionError as exc:
                 return ChatTurnResult(
@@ -7224,6 +8068,10 @@ class AgentChatGateway:
                     output_format=media.output_format
                     or str(defaults.get("output_format") or "png"),
                     background=media.background,
+                    aspect_ratio=media.aspect_ratio
+                    or str(defaults.get("aspect_ratio") or ""),
+                    resolution=media.resolution
+                    or str(defaults.get("resolution") or ""),
                     reference_artifact_ids=media.reference_artifact_ids,
                 )
                 result = self.media_service.generate_image(
@@ -7284,7 +8132,17 @@ class AgentChatGateway:
                 error=exc.code,
                 mode="route-media-error",
                 decision=decision,
-                payload={"route": "media"},
+                payload={
+                    "route": "media",
+                    "status": "failed",
+                    "error_code": exc.code,
+                    "error_detail": exc.detail,
+                    "pending_required_work": False,
+                    "goal_satisfied": False,
+                    "is_resumable": False,
+                    "terminal_failure": True,
+                    **getattr(exc, "metadata", {}),
+                },
             )
         except ValueError:
             return ChatTurnResult(
@@ -7292,8 +8150,54 @@ class AgentChatGateway:
                 error="media_request_invalid",
                 mode="route-media-error",
                 decision=decision,
-                payload={"route": "media"},
+                payload={
+                    "route": "media",
+                    "status": "failed",
+                    "error_code": "media_request_invalid",
+                    "error_detail": "The model-selected media request contains invalid parameters.",
+                    "pending_required_work": False,
+                    "goal_satisfied": False,
+                    "is_resumable": False,
+                    "terminal_failure": True,
+                },
             )
+
+        # Record media usage in context cost governor if available
+        governor = getattr(getattr(self, "_stack", None), "context_cost_governor", None)
+        if governor is not None and result.usage:
+            governor.record_media_generation(
+                call_id=result.generation_id,
+                cost=result.usage.get("cost"),
+                usage=result.usage,
+                provider=result.provider,
+                model=result.model,
+                media_type=result.media_type.value,
+                turn_id=context.turn_id,
+                task_id=context.turn_id,
+                session_id=context.session_id,
+            )
+
+        sources = [
+            {
+                "type": "media_artifact",
+                "artifact_id": art.artifact_id,
+                "path": art.local_path,
+                "mime_type": art.mime_type,
+                "size_bytes": art.size_bytes,
+                "provider": result.provider,
+                "model": result.model,
+            }
+            for art in result.artifacts
+        ]
+        trace = [
+            {
+                "tool_name": f"media.{result.media_type.value}.generate",
+                "provider": result.provider,
+                "model": result.model,
+                "status": result.status.value,
+                "artifacts": [art.artifact_id for art in result.artifacts],
+            }
+        ]
 
         primary = result.primary_artifact
         if primary is not None:
@@ -7308,11 +8212,23 @@ class AgentChatGateway:
             )
         return ChatTurnResult(
             answer=answer,
+            sources=sources,
+            trace=trace,
             mode=f"route-media-{result.status.value}",
             decision=decision,
             payload={
                 "route": "media",
+                "provider": result.provider,
+                "image_model": result.model,
+                "output_artifacts": [art.local_path for art in result.artifacts],
                 "generation": result.model_dump(mode="json"),
+                "status": result.status.value,
+                "pending_required_work": False,
+                "goal_satisfied": result.status == GenerationStatus.COMPLETED,
+                "is_resumable": False,
+                "verification_status": "passed"
+                if result.status == GenerationStatus.COMPLETED
+                else result.status.value,
             },
         )
 
@@ -7493,16 +8409,22 @@ class AgentChatGateway:
         context: EntryRouteContext,
         query: str,
     ) -> ChatTurnResult:
-        """Read only the exact memory scope authorized by entry routing."""
+        """Read only the exact memory scope authorized by entry routing using authoritative execute_memory_read."""
         memory_service = self._stack.memory_service
         capsules_enabled = bool(
             getattr(getattr(memory_service.config, "capsules", None), "enabled", False)
         )
         if capsules_enabled:
+            _session_fn = getattr(self, "_session", None)
+            state: dict[str, Any] = _session_fn(context.session_id) if callable(_session_fn) else {}
+            turn_cache = state.get("_turn_retrieval_cache")
+            ledger = state.get("_retrieval_ledger")
+            sink = state.get("_turn_event_sink") or getattr(self, "_event_sink", None)
             task_id = str(decision.memory_task_id or "").strip()
             offered_task_ids = {
                 str(item.get("task_id") or "").strip()
                 for item in context.memory_task_candidates
+                if str(item.get("task_id") or "").strip()
             }
             if not task_id or task_id not in offered_task_ids:
                 return ChatTurnResult(
@@ -7513,9 +8435,19 @@ class AgentChatGateway:
                     error="memory_task_id_invalid",
                     mode="route-memory-error",
                     decision=decision,
-                    payload={"route": "memory"},
+                    payload={
+                        "route": "memory",
+                        "memory_record_count": 0,
+                        "memory_lookup_status": "no_match",
+                        "goal_satisfied": False,
+                        "verification_status": "failed",
+                    },
                 )
-            user_id = str(getattr(memory_service, "user_id", "") or "").strip()
+            user_id = str(
+                context.authenticated_user_id
+                or getattr(memory_service, "user_id", "")
+                or ""
+            ).strip()
             if not user_id:
                 return ChatTurnResult(
                     answer=(
@@ -7525,56 +8457,63 @@ class AgentChatGateway:
                     error="memory_principal_unavailable",
                     mode="route-memory-error",
                     decision=decision,
-                    payload={"route": "memory", "memory_task_id": task_id},
+                    payload={
+                        "route": "memory",
+                        "memory_task_id": task_id,
+                        "memory_record_count": 0,
+                        "memory_lookup_status": "no_match",
+                        "goal_satisfied": False,
+                        "verification_status": "failed",
+                    },
                 )
-            from mana_agent.memory import CapsuleReadRequest
-
-            principal = MemoryPrincipal(
-                user_id=user_id,
-                project_id=str(self._stack.repository_id or "") or None,
-                task_id=task_id,
-                agent_id="gateway:memory",
-                capabilities=frozenset({"memory.capsule.read.private"}),
-            )
-            task_context = CapsuleTaskContext(
-                user_id=user_id,
-                organisation_id=None,
-                project_id=str(self._stack.repository_id or "") or None,
-                team_ids=frozenset(),
-                task_id=task_id,
-                agent_id="gateway:memory",
+            raw_res = execute_memory_read(
+                capsule_service=getattr(memory_service, "capsules", None),
+                authenticated_user_id=user_id,
                 session_id=context.session_id,
+                repository_id=str(self._stack.repository_id or ""),
+                current_turn_id=context.turn_id,
+                selected_memory_task_id=task_id,
+                memory_task_candidates=context.memory_task_candidates,
+                query=query,
+                max_capsules=3,
+                max_tokens=int(getattr(self.settings, "mana_memory_capsules_default_max_tokens", 4000) or 4000),
+                governor=getattr(self._stack, "context_cost_governor", None),
+                turn_retrieval_cache=turn_cache,
+                event_sink=sink,
+                retrieval_ledger=ledger,
             )
-            try:
-                projections = memory_service.capsules.query_capsules(
-                    CapsuleReadRequest(
-                        principal=principal,
-                        task_context=task_context,
-                        query=query,
-                        allowed_scopes=frozenset({CapsuleScope.PRIVATE}),
-                        max_capsules=3,
-                        max_tokens=self.settings.mana_memory_capsules_default_max_tokens,
-                    ),
-                    correlation_id=context.turn_id,
+            payload = json.loads(raw_res)
+            if payload.get("error"):
+                error_type = (
+                    "memory_principal_unavailable"
+                    if "authenticated user identity" in payload.get("error", "")
+                    else "memory_task_id_invalid"
                 )
-            except (MemoryError, PermissionError, ValueError) as exc:
                 return ChatTurnResult(
-                    answer=f"Private memory retrieval failed safely: {exc}",
-                    error="memory_retrieval_failed",
+                    answer=payload.get("error", "Memory retrieval failed safely"),
+                    error=error_type,
                     mode="route-memory-error",
                     decision=decision,
-                    payload={"route": "memory", "memory_task_id": task_id},
+                    payload={
+                        "route": "memory",
+                        "memory_task_id": task_id,
+                        "memory_record_count": 0,
+                        "memory_lookup_status": "no_match",
+                        "goal_satisfied": False,
+                        "verification_status": "failed",
+                    },
                 )
+            capsules = payload.get("capsules", [])
             evidence = [
                 redact_secrets(
                     {
-                        "capsule_id": item.capsule_id,
-                        "revision": item.revision,
-                        "summary": item.summary,
-                        "content": item.content,
+                        "capsule_id": item.get("capsule_id"),
+                        "revision": item.get("revision"),
+                        "summary": item.get("summary"),
+                        "content": item.get("content"),
                     }
                 )
-                for item in projections
+                for item in capsules
             ]
             answer = (
                 "No authorized private memory matched the selected task."
@@ -7584,6 +8523,8 @@ class AgentChatGateway:
                     for item in evidence
                 )
             )
+            count = len(evidence)
+            matched = payload.get("goal_satisfied", count > 0)
             return ChatTurnResult(
                 answer=answer,
                 mode="route-memory",
@@ -7591,7 +8532,10 @@ class AgentChatGateway:
                 payload={
                     "route": "memory",
                     "memory_task_id": task_id,
-                    "memory_record_count": len(evidence),
+                    "memory_record_count": count,
+                    "memory_lookup_status": payload.get("status", "matched" if matched else "no_match"),
+                    "goal_satisfied": matched,
+                    "verification_status": "passed" if matched else "failed",
                 },
             )
 
@@ -7604,7 +8548,13 @@ class AgentChatGateway:
                 error="memory_task_id_invalid",
                 mode="route-memory-error",
                 decision=decision,
-                payload={"route": "memory"},
+                payload={
+                    "route": "memory",
+                    "memory_record_count": 0,
+                    "memory_lookup_status": "no_match",
+                    "goal_satisfied": False,
+                    "verification_status": "failed",
+                },
             )
         try:
             records = memory_service.search_blocking(
@@ -7930,6 +8880,8 @@ class AgentChatGateway:
                 flow_id=context.session_id,
                 run_id=context.turn_id,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8150,9 +9102,9 @@ class AgentChatGateway:
             "use browser tools as an API-call fallback. After the workflow decision, for a "
             "natural-language call against an integration, call "
             "api_operations_search first; "
-            "then construct a strict ApiRouteDecision with the same source_decision_id, task intent, "
-            "workflow, selected IDs, confidence, matched terms, missing inputs, risk reason, and "
-            "safe_to_continue. Pass it to preview and execution. Select an operation only from "
+            "then construct a strict ApiRouteDecision with the same source_decision_id, task_intent, "
+            "workflow, integration_id, operation_id, confidence, matched_terms, required_missing_inputs, "
+            "reason, and safe_to_continue. Pass it to preview and execution. Select an operation only from "
             "returned candidates using names, descriptions, tags, "
             "methods, paths, schemas, and risk. If candidates remain materially ambiguous, ask one "
             "focused clarification and do not preview or execute. Ask only for genuinely missing "
@@ -8195,6 +9147,8 @@ class AgentChatGateway:
                 flow_id=context.session_id,
                 run_id=context.turn_id,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8355,6 +9309,8 @@ class AgentChatGateway:
                 run_id=context.turn_id,
                 transactional_parent_task_id=lane_task_id or None,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8599,7 +9555,7 @@ class AgentChatGateway:
                 question=text,
                 index_dir=self._index_dir or default_index_dir(self.root),
                 k=self._resolved_k,
-                max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                max_steps=max(10, int(self.config.agent_max_steps or 10)),
                 timeout_seconds=max(30, self._agent_timeout_seconds),
                 callbacks=callbacks,
                 system_prompt=system_prompt,
@@ -8615,6 +9571,8 @@ class AgentChatGateway:
                 run_id=context.turn_id,
                 transactional_parent_task_id=lane_task_id,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8626,6 +9584,10 @@ class AgentChatGateway:
         answer = str(getattr(response, "answer", response) or "").strip()
         trace = _serialize_tool_traces(response)
         warnings = [str(item) for item in (getattr(response, "warnings", []) or [])]
+        status = getattr(response, "status", "completed")
+        pending_required_work = getattr(response, "pending_required_work", False)
+        stop_reason = getattr(response, "stop_reason", "")
+        intermediate_results = getattr(response, "intermediate_results", {})
         return ChatTurnResult(
             answer=answer,
             sources=list(getattr(response, "sources", []) or []),
@@ -8633,7 +9595,13 @@ class AgentChatGateway:
             decision=decision,
             trace=trace,
             warnings=warnings,
-            payload={"route": "gmail"},
+            payload={
+                "route": "gmail",
+                "status": status,
+                "pending_required_work": pending_required_work,
+                "stop_reason": stop_reason,
+                "intermediate_results": intermediate_results,
+            },
         )
 
     def _execute_mcp_route(
@@ -8698,6 +9666,8 @@ class AgentChatGateway:
                 required_mcp_server=provider_id,
                 transactional_parent_task_id=lane_task_id or None,
             )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer=str(exc),
@@ -8794,6 +9764,10 @@ class AgentChatGateway:
                     "failed_tool": str(failed.get("tool_name") or "mcp"),
                 },
             )
+        status = getattr(response, "status", "completed")
+        pending_required_work = getattr(response, "pending_required_work", False)
+        stop_reason = getattr(response, "stop_reason", "")
+        intermediate_results = getattr(response, "intermediate_results", {})
         return ChatTurnResult(
             answer=str(getattr(response, "answer", response) or "").strip(),
             sources=list(getattr(response, "sources", []) or []),
@@ -8801,7 +9775,14 @@ class AgentChatGateway:
             decision=decision,
             trace=trace,
             warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={"route": "mcp", "provider_id": provider_id},
+            payload={
+                "route": "mcp",
+                "provider_id": provider_id,
+                "status": status,
+                "pending_required_work": pending_required_work,
+                "stop_reason": stop_reason,
+                "intermediate_results": intermediate_results,
+            },
         )
 
     def _execute_computer_route(
@@ -9018,6 +9999,8 @@ class AgentChatGateway:
                             "Transactional action approval required",
                             metadata=approval,
                         )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
         except Exception as exc:
             self._record_computer_route_rejection(
                 context=context,

@@ -534,6 +534,7 @@ def run_dashboard_chat(
             event_sink(event_type, title, **kwargs)
 
     from mana_agent.config.settings import Settings
+    from mana_agent.config.user_config import resolve_local_user_id
     from mana_agent.gateway import AgentChatGateway
 
     settings = Settings()
@@ -552,7 +553,7 @@ def run_dashboard_chat(
             coding_agent=True,
             agent_tools=True,
             session_id=conversation_id,
-            memory_user_id=getpass.getuser(),
+            memory_user_id=resolve_local_user_id(settings),
             event_sink=forwarder,
         )
         _dashboard_gateway_cache()[cache_key] = gw

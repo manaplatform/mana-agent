@@ -729,6 +729,66 @@ def coding_tool_contracts() -> list[ToolContract]:
             safety_rules=["Verification is read-only except normal test caches.", "Missing commands are reported as skipped."],
             examples=[{"input": {"quick": False}}],
         ),
+        ToolContract(
+            name="conversation_context_read",
+            description="Read bounded episodic conversation history for this active authorized session.",
+            input_schema=_schema(
+                {
+                    "query": {"type": ["string", "null"]},
+                    "max_turns": {"type": "integer"},
+                    "max_tokens": {"type": "integer"},
+                    "before_turn_id": {"type": ["string", "null"]},
+                }
+            ),
+            output_schema=_schema(
+                {
+                    "source": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "conversation_id": {"type": "string"},
+                    "turns_returned": {"type": "integer"},
+                    "tokens": {"type": "integer"},
+                    "empty": {"type": "boolean"},
+                    "truncated": {"type": "boolean"},
+                    "turns": {"type": "array"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Session and identity bindings are host-managed and cannot be overridden by the model.",
+                "Returned projections are strictly token-bounded and participate in accounting.",
+            ],
+            examples=[{"input": {"query": "test failures", "max_turns": 3}}],
+        ),
+        ToolContract(
+            name="memory_read",
+            description="Read authorized durable memory capsules for authenticated principal and task context.",
+            input_schema=_schema(
+                {
+                    "query": {"type": "string"},
+                    "max_capsules": {"type": "integer"},
+                    "max_tokens": {"type": "integer"},
+                    "task_id": {"type": ["string", "null"]},
+                    "tags": {"type": ["array", "null"]},
+                }
+            ),
+            output_schema=_schema(
+                {
+                    "source": {"type": "string"},
+                    "capsules_returned": {"type": "integer"},
+                    "tokens": {"type": "integer"},
+                    "empty": {"type": "boolean"},
+                    "truncated": {"type": "boolean"},
+                    "capsules": {"type": "array"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Deny-by-default: requires authenticated user identity.",
+                "Candidate task ID must be offered to the router.",
+                "Cross-user and cross-scope access is strictly prohibited.",
+            ],
+            examples=[{"input": {"query": "coding style preferences", "max_capsules": 3}}],
+        ),
     ]
 
 

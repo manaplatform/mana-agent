@@ -228,6 +228,19 @@ class CheckpointRecord(StrictModel):
     resume_cursor: str = ""
 
 
+class CheckpointResumeEligibility(StrictModel):
+    resumable: bool
+    reason: str = ""
+    error_code: str = ""
+    error_message: str = ""
+    task_id: str = ""
+    checkpoint_id: str = ""
+    boundary: str = ""
+    state: str = ""
+    is_terminal: bool = False
+    checkpoint: CheckpointRecord | None = None
+
+
 class ResultAcknowledgement(StrictModel):
     acknowledgement_id: str = Field(default_factory=lambda: stable_id("ack"))
     result_id: str

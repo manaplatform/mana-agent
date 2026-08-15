@@ -208,6 +208,7 @@ class ManaConfigurationApp(App[bool]):
                 yield Input(value=str(image_media.get("timeout_seconds") or 120), placeholder="Timeout seconds", id="media-image-timeout")
                 yield Input(value=str(image_media.get("max_output_bytes") or 52428800), placeholder="Maximum output bytes", id="media-image-max-bytes")
                 yield Input(value=str((image_media.get("defaults") or {}).get("size") or "1024x1024"), placeholder="Default size", id="media-image-default-size")
+                yield Input(value=str((image_media.get("defaults") or {}).get("aspect_ratio") or "1:1"), placeholder="Default aspect ratio (e.g. 1:1, 16:9)", id="media-image-default-aspect-ratio")
                 yield Input(value=str((image_media.get("defaults") or {}).get("quality") or "auto"), placeholder="Default quality", id="media-image-default-quality")
                 yield Input(value=str((image_media.get("defaults") or {}).get("output_format") or "png"), placeholder="Default format", id="media-image-default-format")
             with TabPane("Voice generation", id="media-voice"):
@@ -394,9 +395,49 @@ class ManaConfigurationApp(App[bool]):
         return levels
 
     @staticmethod
-    def _media_model_options(values: dict[str, Any], default: str) -> list[tuple[str, str]]:
+    def _media_model_options(
+        values: dict[str, Any],
+        default: str,
+        *,
+        provider: str = "",
+        purpose: str = "image",
+    ) -> list[tuple[str, str]]:
+        from mana_agent.config.model_catalog import ModelCapability
+        from mana_agent.config.provider_registry import PROVIDERS
+        from mana_agent.config.user_config import load_model_cache
+
         model = str(values.get("model") or default)
-        return [(f"{model}  · current/manual", model)]
+        options = [(f"{model}  · current/manual", model)]
+        target_provider = provider or str(values.get("provider") or "openai")
+        base_url = str(values.get("base_url") or "").strip()
+        if not base_url:
+            try:
+                base_url = PROVIDERS.get(target_provider).default_base_url
+            except Exception:
+                base_url = ""
+        cached = (
+            load_model_cache(target_provider, base_url)
+            if target_provider and base_url
+            else None
+        )
+        cached_models = cached.models if cached else []
+        for item in cached_models:
+            if isinstance(item, dict):
+                model_id = str(item.get("id") or "").strip()
+                caps = item.get("capabilities") or []
+                if purpose == "image" and ModelCapability.IMAGE_GENERATION.value in caps:
+                    if model_id != model:
+                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+                elif purpose == "voice" and (
+                    ModelCapability.TEXT_TO_SPEECH.value in caps
+                    or ModelCapability.AUDIO_GENERATION.value in caps
+                ):
+                    if model_id != model:
+                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+                elif purpose == "video" and ModelCapability.VIDEO_GENERATION.value in caps:
+                    if model_id != model:
+                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+        return options
 
     def _input_int(self, selector: str, default: int) -> int:
         value = self.query_one(selector, Input).value.strip()
@@ -520,6 +561,7 @@ class ManaConfigurationApp(App[bool]):
             "max_output_bytes": self._input_int("#media-image-max-bytes", 52428800),
             "defaults": {
                 "size": self.query_one("#media-image-default-size", Input).value.strip() or "1024x1024",
+                "aspect_ratio": self.query_one("#media-image-default-aspect-ratio", Input).value.strip() or "1:1",
                 "quality": self.query_one("#media-image-default-quality", Input).value.strip() or "auto",
                 "output_format": self.query_one("#media-image-default-format", Input).value.strip() or "png",
             },

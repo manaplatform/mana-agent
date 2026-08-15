@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
+from mana_agent.execution_supervisor.models import TERMINAL_STATES
 
 # Compact structured JSON is small (reason ≤ 480 chars), but some providers
 # (notably NVIDIA DeepSeek V4 with default thinking/reasoning_effort=high)
@@ -50,7 +52,6 @@ def _checkpoint_resume_failure_reason(exc: BaseException) -> str:
 class CheckpointResumeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decision_id: str = Field(min_length=1)
     action: Literal["resume_checkpoint", "retry_task", "replan_task", "start_fresh", "stop"]
     task_id: str = ""
     checkpoint_id: str = ""
@@ -59,7 +60,15 @@ class CheckpointResumeOutput(BaseModel):
     checkpoint_still_valid: bool
     side_effects_safe_to_repeat: bool
     safe_to_continue: bool
-    reason: str = Field(min_length=1, max_length=480)
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _normalize_reason(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,38 +89,48 @@ CHECKPOINT_RESUME_PROMPT = """You decide whether a new user request may resume o
 Return a decision only, never answer the user.
 
 Chat turns auto-select durable work without requiring /tasks. Use this decision matrix:
-1) same incomplete work with a still-valid checkpoint → resume_checkpoint (continue saved progress)
-2) same work that failed or was interrupted, side effects safe to repeat → retry_task (same task id)
+1) same incomplete work with a still-valid, eligible checkpoint → resume_checkpoint (continue saved progress).
+   Terminal tasks (completed, failed, cancelled, budget_exhausted) cannot be resumed via resume_checkpoint.
+2) same work that failed or was interrupted, side effects safe to repeat → retry_task (same task id,
+   creates a new attempt, leave checkpoint_id empty)
 3) same work whose multi-task/job plan was blocked, reverted, or must restart incomplete steps →
    replan_task (same task id, leave checkpoint_id empty so the job restarts from its first
    incomplete step; completed children may remain complete)
 4) different work, live/fresh data required, or recovery_candidates empty → start_fresh (new task)
 5) same work but no listed candidate is safe → stop (never invent a task id)
 
-Compare the complete current request with every candidate's original normalized intent and progress.
-Select resume_checkpoint only when it is the same work, the saved progress is still applicable, and
-continuing will not substitute stale state for information that must be fetched again. Prices,
-mailboxes and email checks, calendars, news, weather, availability, account state, remote system
-state, search results, and similarly time-sensitive facts normally require start_fresh. Decide this
-semantically from the supplied request and route evidence; do not use keyword matching. Repository
-editing or analysis may resume only when the candidate evidence shows that its checkpoint remains
-valid for the current request. Prefer resume_checkpoint when checkpoint_available is true and the
-saved progress should continue. Select retry_task when it is the same stable work and repeating its
-unfinished actions is safe under the existing task identity—even if a checkpoint is listed—because a
-full restart under that identity is safer or more appropriate than continuing partial progress.
-Select replan_task when the task identity and goal remain the same but its incomplete plan needs a
-model-selected revision before it can safely continue, including blocked multi-task roots and
-reverted compound jobs that should start again from the first incomplete step. Candidates may
-report lane_state blocked/paused/waiting for such jobs. When uncertain, select stop rather than
-guessing.
+The payload provides `entry_route_requires_live_data`. When `entry_route_requires_live_data` is true
+or when live/fresh data is required (including prices, mailboxes and email checks, calendars, live
+web/browser page inspection, weather, availability, account state, remote system state, search
+results, or live external providers), you MUST select `start_fresh` with `fresh_data_required=true`
+and `safe_to_continue=true` (or `stop` if unsafe). You must NEVER select `resume_checkpoint`,
+`retry_task`, or `replan_task` when `entry_route_requires_live_data` is true, even if a listed candidate
+matches the user request, because live external state requires fresh execution under a new task identity.
 
-When incomplete work is the same, does not require fresh data, and is safe to continue, and a
-recoverable candidate is listed, you must select resume_checkpoint, retry_task, or replan_task for
-the applicable candidate; do not select start_fresh. Select start_fresh when the work is different,
-fresh data is required, or recovery_candidates is empty. An empty candidate list means prior
-attempts for this work are not recoverable (including wall-clock deadline-dead tasks); start_fresh
-then creates a new task identity with a fresh deadline. If the work is the same but a listed
-candidate cannot safely resume or repeat, select stop rather than inventing a non-listed task id.
+Compare the complete current request with every candidate's original normalized intent and progress.
+Select resume_checkpoint only when `entry_route_requires_live_data` is false, it is the same work,
+the saved progress is still applicable, and continuing will not substitute stale state for information
+that must be fetched again. Decide this semantically from the supplied request and route evidence; do
+not use keyword matching. Repository editing or analysis may resume only when the candidate evidence
+shows that its checkpoint remains valid for the current request. Prefer resume_checkpoint when
+checkpoint_available is true and the saved progress should continue. Select retry_task when
+`entry_route_requires_live_data` is false, it is the same stable work, and repeating its unfinished
+actions is safe under the existing task identity—even if a checkpoint is listed—because a full restart
+under that identity is safer or more appropriate than continuing partial progress. Select replan_task
+when `entry_route_requires_live_data` is false, the task identity and goal remain the same, but its
+incomplete plan needs a model-selected revision before it can safely continue, including blocked
+multi-task roots and reverted compound jobs that should start again from the first incomplete step.
+Candidates may report lane_state blocked/paused/waiting for such jobs. When uncertain, select stop
+rather than guessing.
+
+When incomplete work is the same, `entry_route_requires_live_data` is false, does not require fresh data,
+and is safe to continue, and a recoverable candidate is listed, you must select resume_checkpoint,
+retry_task, or replan_task for the applicable candidate; do not select start_fresh. Select start_fresh
+when the work is different, `entry_route_requires_live_data` is true, fresh data is required, or
+recovery_candidates is empty. An empty candidate list means prior attempts for this work are not
+recoverable (including wall-clock deadline-dead tasks); start_fresh then creates a new task identity
+with a fresh deadline. If the work is the same but a listed candidate cannot safely resume or repeat,
+select stop rather than inventing a non-listed task id.
 
 Completed results are returned only by the caller after it has already classified the turn as a
 duplicate or status request; this decision boundary must never select or reuse a completed result.
@@ -122,14 +141,37 @@ receives its own task identity and approval.
 
 For resume_checkpoint, copy one exact candidate task_id and checkpoint_id and set same_work,
 checkpoint_still_valid, side_effects_safe_to_repeat, and safe_to_continue true and
-fresh_data_required false. For start_fresh or stop, leave task_id and checkpoint_id empty. For
-retry_task or replan_task, copy an exact non-completed candidate task_id, leave checkpoint_id empty
-(even when the candidate lists a checkpoint—these actions intentionally do not resume that
-checkpoint), set same_work, side_effects_safe_to_repeat, and safe_to_continue true, and set
-fresh_data_required false. Set safe_to_continue true for start_fresh and false for stop. When
-recovery_candidates is empty and the work is the same, start_fresh with same_work true is valid.
+fresh_data_required false. For start_fresh, leave task_id and checkpoint_id empty, set safe_to_continue
+true, and set fresh_data_required true whenever `entry_route_requires_live_data` is true, live/fresh
+data is required, or when `same_work` is true but fresh data is required. When work is different and
+the route does not require live data, fresh_data_required may be false. For stop, leave task_id and
+checkpoint_id empty and set safe_to_continue false. For retry_task or replan_task, copy an exact
+non-completed candidate task_id, leave checkpoint_id empty (even when the candidate lists a
+checkpoint—these actions intentionally do not resume that checkpoint), set same_work,
+side_effects_safe_to_repeat, and safe_to_continue true, set checkpoint_still_valid false, and set
+fresh_data_required false. When recovery_candidates is empty and the work is the same, start_fresh
+with same_work true is valid.
 Return strict JSON matching the supplied schema.
 """
+
+
+from mana_agent.utils.text import extract_model_text
+
+
+def _coerce_checkpoint_output(response: Any) -> CheckpointResumeOutput:
+    if isinstance(response, CheckpointResumeOutput):
+        return response
+    if isinstance(response, dict):
+        return CheckpointResumeOutput.model_validate(response)
+    content = getattr(response, "content", response)
+    text = extract_model_text(content)
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        text = text.removesuffix("```").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start : end + 1]
+    return CheckpointResumeOutput.model_validate_json(text)
 
 
 class CheckpointResumeDecider:
@@ -167,11 +209,9 @@ class CheckpointResumeDecider:
                 response = structured(
                     CheckpointResumeOutput, method="json_schema", strict=True
                 ).invoke(messages, **invoke_kwargs)
-                output = CheckpointResumeOutput.model_validate(response)
             else:
                 response = self.llm.invoke(messages, **invoke_kwargs)
-                content = getattr(response, "content", response)
-                output = CheckpointResumeOutput.model_validate_json(str(content))
+            output = _coerce_checkpoint_output(response)
         except ContextBudgetExceeded as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
@@ -187,7 +227,9 @@ class CheckpointResumeDecider:
             (str(item["task_id"]), str(item["checkpoint_id"]))
             for item in candidates
             if str(item.get("checkpoint_id") or "")
-            and str(item.get("state") or "") != "completed"
+            and str(item.get("state") or "") not in {s.value for s in TERMINAL_STATES}
+            and not bool(item.get("is_terminal"))
+            and bool(item.get("resume_eligible", True))
         }
         # Same-task restart/replan may target any non-completed offered task,
         # including ones that still list a checkpoint. Those actions intentionally
@@ -273,7 +315,9 @@ class CheckpointResumeDecider:
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
                     "Reason: stop cannot also authorize continued execution."
                 )
-        decision = CheckpointResumeDecision(**output.model_dump())
+        fields = output.model_dump()
+        fields["decision_id"] = f"checkpoint:{uuid.uuid4().hex[:12]}"
+        decision = CheckpointResumeDecision(**fields)
         record_current(
             "model.decision",
             {

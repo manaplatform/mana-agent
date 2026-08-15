@@ -1113,6 +1113,46 @@ def test_api_workflow_execution_requires_declared_search_and_preview() -> None:
     )
 
 
+def test_api_workflow_decision_normalizes_string_and_list_inputs() -> None:
+    single_string = _WorkflowDecision(
+        source_decision_id="decision-api",
+        session_id="session-api",
+        task_intent="search operations",
+        required_actions="operation_search",
+        reason="Search is required.",
+        safe_to_continue=True,
+    )
+    assert single_string.required_actions == ("operation_search",)
+
+    from_list = _WorkflowDecision(
+        source_decision_id="decision-api",
+        session_id="session-api",
+        task_intent="search and preview",
+        required_actions=["operation_search", "request_preview"],
+        reason="Search and preview are required.",
+        safe_to_continue=True,
+    )
+    assert from_list.required_actions == ("operation_search", "request_preview")
+
+
+def test_api_route_decision_normalizes_risk_reason_and_tuple_fields() -> None:
+    route = ApiRouteDecision.model_validate(
+        {
+            "source_decision_id": "decision-api",
+            "task_intent": "search operations",
+            "workflow": "operation_search",
+            "confidence": 0.95,
+            "matched_terms": "invoice",
+            "required_missing_inputs": ["verse"],
+            "risk_reason": "Read-only search operation.",
+            "safe_to_continue": True,
+        }
+    )
+    assert route.reason == "Read-only search operation."
+    assert route.matched_terms == ("invoice",)
+    assert route.required_missing_inputs == ("verse",)
+
+
 def test_registry_and_executor_emit_redacted_events(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

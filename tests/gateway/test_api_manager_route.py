@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from mana_agent.analysis.models import ToolInvocationTrace
 from mana_agent.api_manager.runtime_tools import API_MANAGER_TOOL_NAMES
 from mana_agent.gateway.chat_gateway import (
     AgentChatGateway,
     _api_workflow_completion_from_trace,
 )
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
+from mana_agent.gateway.turn_engine import _serialize_tool_traces
 
 
 def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
@@ -568,3 +570,185 @@ def test_api_workflow_rejects_unparseable_non_clipped_evidence() -> None:
 
     assert completion["valid"] is False
     assert completion["missing_actions"] == ["documentation_inspection"]
+
+
+def test_api_workflow_recovers_when_workflow_decision_retried_after_validation_error() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "error",
+                "output_preview": (
+                    "1 validation error for _WorkflowDecision\nrequired_actions\n"
+                    "  Input should be a valid tuple [type=tuple_type, input_value='operation_search', input_type=str]"
+                ),
+            },
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "search available operations",
+                            "required_actions": ["operation_search"],
+                            "reason": "Search is required to discover matching operations.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [
+                            {"operation_id": "lookup_verse", "integration_id": "api_123"}
+                        ],
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["error_code"] == ""
+    assert completion["missing_actions"] == []
+    assert completion["completed_actions"] == ["operation_search"]
+
+
+def test_api_workflow_rejects_when_first_tool_is_not_workflow_decide() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[]}',
+            }
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_decision_missing"
+
+
+def test_api_workflow_rejects_when_workflow_decision_never_succeeds() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "error",
+                "output_preview": "Validation error: invalid field",
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[]}',
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_decision_invalid"
+
+
+def test_api_workflow_accepts_execution_evidence_when_output_preview_is_truncated() -> None:
+    execution_result = {
+        "ok": True,
+        "result": {
+            "integration_id": "api_9de895d68869da96eaf42393",
+            "operation_id": "21dc79663be7391405e98eefd6599f93",
+            "method": "GET",
+            "redacted_url": "https://api.alquran.cloud/v1/search/joined/all/en.sahih",
+            "status_code": 200,
+            "executed": True,
+            "upstream_ok": True,
+            "json_body": {"count": 100, "matches": [{"text": "sample"}] * 100},
+        },
+    }
+
+    # Simulate truncated JSON string in output_preview due to 4000-char clipping
+    truncated_preview = json.dumps(execution_result)[:4000]
+
+    response = SimpleNamespace(
+        trace=[
+            ToolInvocationTrace(
+                tool_name="api_workflow_decide",
+                args_summary="",
+                duration_ms=1.0,
+                status="ok",
+                output_preview=json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "search text and execute API request",
+                            "required_actions": [
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Search, preview, and execution are required.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            ),
+            ToolInvocationTrace(
+                tool_name="api_operations_search",
+                args_summary="",
+                duration_ms=10.0,
+                status="ok",
+                output_preview='{"ok":true,"result":[{"operation_id":"21dc79663be7391405e98eefd6599f93"}]}',
+            ),
+            ToolInvocationTrace(
+                tool_name="api_request_preview",
+                args_summary="",
+                duration_ms=10.0,
+                status="ok",
+                output_preview='{"ok":true,"result":{"risk_level":"read_only"}}',
+            ),
+            ToolInvocationTrace(
+                tool_name="api_request_execute",
+                args_summary="",
+                duration_ms=150.0,
+                status="ok",
+                output_preview=truncated_preview,
+                result=execution_result,
+            ),
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["missing_actions"] == []
+    assert completion["error_code"] == ""
+    assert "request_execution" in completion["completed_actions"]
+    assert completion["execution_evidence"]["status_code"] == 200
+    assert completion["execution_evidence"]["operation_id"] == "21dc79663be7391405e98eefd6599f93"
+
+
+def test_tool_invocation_trace_preserves_structured_result_in_serialization() -> None:
+    trace = ToolInvocationTrace(
+        tool_name="api_request_execute",
+        args_summary="sample",
+        duration_ms=50.0,
+        status="ok",
+        output_preview="clipped preview",
+        result={"ok": True, "result": {"executed": True, "upstream_ok": True, "status_code": 200}},
+    )
+
+    serialized = _serialize_tool_traces(SimpleNamespace(trace=[trace]))
+    assert len(serialized) == 1
+    assert serialized[0]["result"]["ok"] is True
+    assert serialized[0]["result"]["result"]["status_code"] == 200
+
+

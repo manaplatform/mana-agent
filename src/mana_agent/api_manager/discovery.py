@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
 from mana_agent.api_manager.errors import AmbiguousOperationError, RequestValidationError
 from mana_agent.api_manager.models import (
@@ -52,6 +52,27 @@ class ApiRouteDecision(StrictModel):
     reason: str = Field(min_length=1)
     safe_to_continue: bool
     complete: bool = False
+
+    @field_validator("matched_terms", "required_missing_inputs", mode="before")
+    @classmethod
+    def _normalize_tuples(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return (v,) if v else ()
+        if isinstance(v, (list, set)):
+            return tuple(v)
+        return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_reason(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            if "reason" not in values and "risk_reason" in values:
+                values = dict(values)
+                values["reason"] = values.pop("risk_reason")
+            elif "risk_reason" in values:
+                values = dict(values)
+                values.pop("risk_reason", None)
+        return values
 
 
 class ApiOperationDiscovery:

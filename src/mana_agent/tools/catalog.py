@@ -46,6 +46,17 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("automation_enable", "Enable a durable automation.", "automation"),
     ("automation_disable", "Disable a durable automation.", "automation"),
     ("automation_run_now", "Run a persisted automation immediately.", "automation"),
+    # Context retrieval (bounded episodic conversation & durable memory)
+    (
+        "conversation_context_read",
+        "Read bounded episodic conversation history for this active authorized session.",
+        "context",
+    ),
+    (
+        "memory_read",
+        "Read authorized durable memory capsules for authenticated principal and task.",
+        "context",
+    ),
     # Search / research
     (
         "web_search",

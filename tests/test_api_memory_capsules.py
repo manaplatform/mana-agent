@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from mana_agent.api.app import create_app
+from mana_agent.config.user_config import resolve_local_user_id
 from mana_agent.memory import CapsuleScope, CapsuleTaskContext, CapsuleService, MemoryPrincipal
 from mana_agent.workspaces.paths import repository_id_for_path
 
@@ -20,7 +21,7 @@ def test_standalone_api_binds_local_identity_for_user_capsules(
     monkeypatch.delenv("MANA_API_TOKEN", raising=False)
     root = tmp_path / "repo"
     root.mkdir()
-    user_id = getpass.getuser()
+    user_id = resolve_local_user_id()
     project_id = repository_id_for_path(root)
     task_id = f"api-{project_id}"
     principal = MemoryPrincipal(

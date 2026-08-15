@@ -7,6 +7,9 @@ from typing import Any, Callable
 CONTEXT_COST_EVENT_TYPES = frozenset({
     "context.budget", "context.compacted", "context.capabilities_loaded",
     "context.capabilities_unloaded", "cost.updated", "budget.warning", "budget.blocked",
+    "budget.exhausted", "context.forecast", "accounting.forecast",
+    "accounting.reservation", "accounting.revision", "accounting.reconciliation",
+    "accounting.rejection",
 })
 
 

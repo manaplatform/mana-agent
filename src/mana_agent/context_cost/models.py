@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 from datetime import datetime, timezone
 
 
@@ -44,6 +45,21 @@ class ContextManifest:
     reasons: tuple[str, ...]
     compression_references: tuple[str, ...]
     artifact_reference: str = ""
+    current_turn_refs: tuple[str, ...] = ()
+    current_turn_tokens: int = 0
+    conversation_refs: tuple[str, ...] = ()
+    conversation_tokens: int = 0
+    memory_refs: tuple[str, ...] = ()
+    memory_tokens: int = 0
+    tool_refs: tuple[str, ...] = ()
+    tool_tokens: int = 0
+    artifact_refs: tuple[str, ...] = ()
+    artifact_tokens: int = 0
+    dependency_refs: tuple[str, ...] = ()
+    dependency_tokens: int = 0
+    skill_refs: tuple[str, ...] = ()
+    skill_tokens: int = 0
+    component_token_breakdown: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +271,30 @@ class CompressionEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolResultEnvelope:
+    tool_name: str
+    tool_call_id: str
+    status: str
+    artifact_ref: str
+    content_hash: str
+    original_tokens: int
+    projection_tokens: int
+    inline_projection: Any
+    truncated: bool
+    more_available: bool
+    source_refs: tuple[str, ...] = ()
+    content_type: str = "text"
+    replayable: bool = True
+    sensitive: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["type"] = "mana.context.tool_result_envelope"
+        result["compression_envelope"] = "mana.context.compression_envelope"
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class GovernorDecision:
     action: str
     reason: str
@@ -273,8 +313,98 @@ class ContextBudgetExceeded(RuntimeError):
         self.decision = decision
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderCallForecast:
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    safety_margin_tokens: int
+    context_window: int
+    max_output_tokens: int
+    estimated_cost: Decimal | None
+    confidence: str
+    components: Mapping[str, int]
+    assumptions: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "safety_margin_tokens": self.safety_margin_tokens,
+            "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
+            "estimated_cost": None if self.estimated_cost is None else format(self.estimated_cost, "f"),
+            "confidence": self.confidence,
+            "components": dict(self.components),
+            "assumptions": list(self.assumptions),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskExecutionForecast:
+    task_id: str
+    expected_calls: int
+    expected_tool_steps: int
+    forecast_input_tokens: int
+    forecast_output_tokens: int
+    forecast_total_tokens: int
+    forecast_cost: float | None
+    verification_reserve_tokens: int
+    task_budget_tokens: int
+    remaining_task_tokens: int
+    feasible: bool
+    rejection_reason: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "expected_calls": self.expected_calls,
+            "expected_tool_steps": self.expected_tool_steps,
+            "forecast_input_tokens": self.forecast_input_tokens,
+            "forecast_output_tokens": self.forecast_output_tokens,
+            "forecast_total_tokens": self.forecast_total_tokens,
+            "forecast_cost": self.forecast_cost,
+            "verification_reserve_tokens": self.verification_reserve_tokens,
+            "task_budget_tokens": self.task_budget_tokens,
+            "remaining_task_tokens": self.remaining_task_tokens,
+            "feasible": self.feasible,
+            "rejection_reason": self.rejection_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AccountingSnapshot:
+    task_id: str
+    turn_id: str
+    task_budget_tokens: int
+    task_consumed_tokens: int
+    task_reserved_tokens: int
+    task_remaining_tokens: int
+    turn_budget_tokens: int | None
+    turn_consumed_tokens: int
+    turn_remaining_tokens: int | None
+    verification_reserve_tokens: int
+    session_budget_tokens: int | None
+    session_consumed_tokens: int
+    session_remaining_tokens: int | None
+    cost_budget: float | None
+    cost_consumed: float
+    cost_remaining: float | None
+    active_reservations_count: int
+    status: str = "ok"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 __all__ = [
-    "ActiveCapabilitySet", "ArtifactReference", "BudgetReservation", "BudgetSnapshot", "CapabilityManifestEntry",
+    "AccountingSnapshot", "ActiveCapabilitySet", "ArtifactReference", "BudgetReservation", "BudgetSnapshot", "CapabilityManifestEntry",
     "CompressionEnvelope", "ContextBreakdown", "ContextBudget", "ContextBudgetExceeded",
     "ContextManifest", "ContextSegment", "CostLedger", "GovernorDecision", "GovernorMode",
+    "ProviderCallForecast", "TaskExecutionForecast", "ToolResultEnvelope",
 ]
