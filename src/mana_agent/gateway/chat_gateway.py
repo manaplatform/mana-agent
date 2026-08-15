@@ -7241,9 +7241,8 @@ class AgentChatGateway:
             ):
                 continue
             if session_id and task.session_id and task.session_id != session_id:
-                # Prefer same-session rows; workspace-scoped callers pass "".
-                # Cross-session recovery is still available via empty session_id.
-                pass
+                continue
+            
             checkpoint = None
             checkpoint_error = ""
             deadline_exceeded = task.wall_clock_deadline_exceeded(now)
