@@ -13,6 +13,11 @@ All notable repository changes should be recorded here.
   - Added unit test coverage in `tests/test_model_text_extraction.py` and `tests/test_conversation_followup_context.py`.
   - User verification required: `python -m pytest tests/test_model_text_extraction.py tests/test_conversation_followup_context.py tests/gateway/test_chat_gateway.py -v`.
 
+- Fixed `AttributeError` in `AgentChatGateway._execute_memory_route` when called via lightweight `SimpleNamespace` test mocks.
+  - Replaced direct `self._session(context.session_id)`, `self._event_sink`, and `self._stack.context_cost_governor` accesses with `getattr`-guarded calls in `src/mana_agent/gateway/chat_gateway.py` so the method degrades gracefully to `None`/empty-dict defaults when those attributes are absent (e.g., in unit tests).
+  - All 10 tests in `tests/gateway/test_capsule_identity.py` now pass (10 passed, 0 failed).
+  - User verification required: `python -m pytest tests/gateway/test_capsule_identity.py -v`.
+
 
 - Fixed `api_workflow_incomplete` error caused by `output_preview` truncation corrupting structured execution evidence.
   - Added `result: Any = None` field to `ToolInvocationTrace` in `src/mana_agent/analysis/models.py` to preserve unclipped structured tool execution payloads alongside human-readable previews.

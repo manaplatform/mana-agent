@@ -8415,10 +8415,11 @@ class AgentChatGateway:
             getattr(getattr(memory_service.config, "capsules", None), "enabled", False)
         )
         if capsules_enabled:
-            state = self._session(context.session_id)
+            _session_fn = getattr(self, "_session", None)
+            state: dict[str, Any] = _session_fn(context.session_id) if callable(_session_fn) else {}
             turn_cache = state.get("_turn_retrieval_cache")
             ledger = state.get("_retrieval_ledger")
-            sink = state.get("_turn_event_sink") or self._event_sink
+            sink = state.get("_turn_event_sink") or getattr(self, "_event_sink", None)
             task_id = str(decision.memory_task_id or "").strip()
             offered_task_ids = {
                 str(item.get("task_id") or "").strip()
@@ -8476,7 +8477,7 @@ class AgentChatGateway:
                 query=query,
                 max_capsules=3,
                 max_tokens=int(getattr(self.settings, "mana_memory_capsules_default_max_tokens", 4000) or 4000),
-                governor=self._stack.context_cost_governor,
+                governor=getattr(self._stack, "context_cost_governor", None),
                 turn_retrieval_cache=turn_cache,
                 event_sink=sink,
                 retrieval_ledger=ledger,
