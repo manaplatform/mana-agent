@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-15
 
+- Updated `ChatGateway` follow-up lifecycle handling to preserve completed-task lineage, keep recovery candidates terminal-safe, replay canonical requests for retry/resume, provide bounded classifier dialogue, and expose runtime revision metadata.
+  - User verification required: `python -m pytest tests/gateway/test_followup_classifier.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_followup_retry_lifecycle.py -v`
+
+## 2026-08-15
+
 - Implemented reasoning/thinking block filtering and enhanced conversational follow-up context recall.
   - Added centralized `extract_model_text` helper in `src/mana_agent/utils/text.py` to discard internal `reasoning`, `thought`, and `thinking` metadata blocks from model responses instead of leaking stringified dictionaries.
   - Updated `QnAChain` in `src/mana_agent/multi_agent/runtime/qna_chain.py` to use `extract_model_text` and accept/inject `recent_history` dialogue turns into conversation prompt messages.

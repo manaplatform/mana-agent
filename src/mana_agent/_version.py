@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -47,3 +48,14 @@ def get_version() -> str:
         return version(_DIST_NAME)
     except Exception:
         return "dev"
+
+
+@lru_cache(maxsize=1)
+def get_runtime_git_sha() -> str:
+    """Return build-provided source revision metadata without invoking git."""
+    return str(
+        os.environ.get("MANA_RUNTIME_GIT_SHA")
+        or os.environ.get("BUILD_GIT_SHA")
+        or os.environ.get("GIT_COMMIT_SHA")
+        or ""
+    ).strip()

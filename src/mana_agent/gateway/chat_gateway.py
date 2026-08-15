@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from mana_agent.config.settings import Settings, mana_home
+from mana_agent._version import get_runtime_git_sha, get_version
 from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
@@ -4686,11 +4687,12 @@ class AgentChatGateway:
                     )
                     # Status / follow-up classification may still see deadline-dead
                     # tasks. Resume and retry candidates never include them.
-                    recoverable_task_candidates = [
-                        item
-                        for item in all_recovery_candidates
-                        if str(item.get("state") or "")
-                        != LaneTaskState.COMPLETED.value
+                    # Completed tasks remain conversational parents, but are
+                    # never eligible for retry or checkpoint recovery.
+                    followup_candidates = [
+                        item for item in all_recovery_candidates
+                        if not str(item.get("session_id") or "")
+                        or str(item.get("session_id") or "") == session_id
                     ]
                     relation_type = "independent"
                     parent_task_id: str | None = None
@@ -4704,11 +4706,21 @@ class AgentChatGateway:
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
-                    if recoverable_task_candidates:
+                    if followup_candidates:
+                        raw_followup_history = [
+                            m for m in list(state.get("messages") or [])
+                            if str(m.get("turn_id") or "") != turn_id
+                            and m.get("role") in {"user", "assistant"}
+                            and str(m.get("content") or "").strip()
+                        ]
+                        recent_followup_history = [
+                            (str(m.get("role") or ""), str(m.get("content") or ""))
+                            for m in raw_followup_history[-8:]
+                        ]
                         followup = FollowupClassifier(followup_model).decide(
                             message=text,
-                            recent_history=[],
-                            candidates=recoverable_task_candidates,
+                            recent_history=recent_followup_history,
+                            candidates=followup_candidates,
                             pointers=turn_pointers,
                             retrieval_hints=["conversation_context_read"] if conv_avail.has_history else [],
                             conversation_tool=state.get("_conversation_context_tool"),
@@ -4895,7 +4907,7 @@ class AgentChatGateway:
                             else:
                                 recovery_candidates = [
                                     item
-                                    for item in recoverable_task_candidates
+                                    for item in recovery_candidates
                                     if str(item.get("task_id") or "") == followup.related_task_id
                                     and not bool(item.get("deadline_exceeded"))
                                 ]
@@ -4938,7 +4950,7 @@ class AgentChatGateway:
                         elif followup.category in {"retry_request", "resume_request"}:
                             recovery_candidates = [
                                 item
-                                for item in recoverable_task_candidates
+                                for item in recovery_candidates
                                 if str(item.get("task_id") or "") == followup.related_task_id
                                 and not bool(item.get("deadline_exceeded"))
                             ]
@@ -4971,6 +4983,11 @@ class AgentChatGateway:
                         )
                     recovered_task = False
                     recovery_target_id = str(resume_decision.task_id or "")
+                    if resume_decision.action in {"retry_task", "resume_checkpoint"}:
+                        options["_canonical_execution_text"] = self._canonical_task_request(
+                            recovery_target_id,
+                            session_id,
+                        )
                     # Deterministic recovery gate: a wall-clock-dead task cannot be
                     # requeued. Create a new task with a fresh deadline instead.
                     force_new_task_for_dead = bool(
@@ -5293,7 +5310,7 @@ class AgentChatGateway:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
                                 context=route_context,
-                                text=text,
+                                text=options.get("_canonical_execution_text", text),
                                 state=state,
                                 ask_service=ask_service,
                                 sink=sink,
@@ -5667,6 +5684,8 @@ class AgentChatGateway:
                 )
                 result.payload["execution_report"] = {
                     "execution_id": supervised.task_id,
+                    "runtime_version": get_version(),
+                    "runtime_git_sha": get_runtime_git_sha(),
                     "root_task_id": supervised.root_task_id,
                     "attempt_id": supervised.attempt_id,
                     "attempt_generation": supervised.attempt_generation,
@@ -7125,6 +7144,29 @@ class AgentChatGateway:
         if task is None:
             return False
         return task.wall_clock_deadline_exceeded()
+
+    def _canonical_task_request(self, task_id: str, session_id: str) -> str:
+        """Load the exact user request that created a durable task."""
+        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
+        trigger_turn_id = str(getattr(task, "trigger_turn_id", "") or "") if task else ""
+        if task is None or not trigger_turn_id:
+            raise CheckpointResumeError(
+                f"Canonical request recovery failed for task {task_id}: trigger turn linkage is missing.",
+                code="canonical_request_unavailable",
+            )
+        messages = self._history_store.list(session_id, limit=5000)
+        matches = [
+            message for message in messages
+            if message.turn_id == trigger_turn_id
+            and message.role == "user"
+            and message.content.strip()
+        ]
+        if len(matches) != 1:
+            raise CheckpointResumeError(
+                f"Canonical request recovery failed for task {task_id}: expected one linked user message.",
+                code="canonical_request_unavailable",
+            )
+        return matches[0].content
 
     def _recovery_candidates(
         self,
