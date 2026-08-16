@@ -263,6 +263,15 @@
         status: "decided",
         decision: text(metadata.decision),
       });
+    } else if (type === "turn.resume_requested") {
+      const reqId = text(metadata.approval_request_id) || permissionRequestId;
+      if (reqId) {
+        const previous = state.permissionRequests.get(reqId) || { requestId: reqId };
+        state.permissionRequests.set(reqId, {
+          ...previous,
+          status: "resuming",
+        });
+      }
     }
     if (type === "message.accepted" || type === "turn.started" && metaOf(event).role === "user") {
       applyAcceptedMessage(state, event);
@@ -270,6 +279,16 @@
       applyTool(state, event);
     } else if (type === "assistant.started" || type === "assistant.delta" || type === "turn.finished") {
       applyAssistant(state, event);
+      if (type === "turn.finished") {
+        const reqId = text(metadata.approval_request_id);
+        if (reqId && state.permissionRequests.has(reqId)) {
+          const previous = state.permissionRequests.get(reqId);
+          state.permissionRequests.set(reqId, {
+            ...previous,
+            status: "completed",
+          });
+        }
+      }
     }
     const activityKey = text(event.event_id || event.id || `sequence-${sequence}`);
     if (!type.startsWith("tool.") && type !== "assistant.delta" && type !== "assistant.started" && type !== "message.accepted") {
@@ -429,9 +448,16 @@
             addText(node, "div", serverApproval ? "Server action approval required" : apiApproval ? "API request approval required" : transactionalApproval ? "Transactional action approval required" : "Computer permission required");
             addText(node, "div", request.preview || metadata.preview || event.title, "logs");
             addText(node, "div", `Scope: ${request.scope || metadata.permission_scope || ""}`, "meta");
-            if (request.status === "decided") {
-              addText(node, "div", `Decision: ${request.decision || "completed"}`, "permission-state");
+            if (request.status === "completed" || request.status === "approved" || request.status === "denied" || request.status === "decided") {
+              const badgeText = request.status === "completed"
+                ? "Completed · Resumed"
+                : request.status === "approved"
+                ? "Approved · Executed"
+                : `Decision: ${request.decision || request.status}`;
+              addText(node, "div", badgeText, "permission-state");
               if (request.result) addText(node, "div", request.result, "logs");
+            } else if (request.status === "resuming" || permissionBusy.has(authorityId)) {
+              addText(node, "div", "Approving & Resuming...", "permission-state");
             } else {
               const actions = document.createElement("div");
               actions.className = "permission-actions";
@@ -466,12 +492,12 @@
                     );
                     const payload = await response.json();
                     if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
-                    const resultMessage = text(payload.result && payload.result.message);
+                    const resultMessage = text(payload.answer || (payload.result && (payload.result.answer || payload.result.message)));
                     if (payload.assistant_message) applyMessage(state, payload.assistant_message);
                     state.permissionRequests.set(authorityId, {
                       ...request,
                       requestId: authorityId,
-                      status: "decided",
+                      status: payload.status || (payload.approved ? "completed" : "denied"),
                       decision,
                       result: resultMessage,
                     });

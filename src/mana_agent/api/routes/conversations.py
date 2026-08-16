@@ -500,6 +500,23 @@ def decide_api_approval_in_chat(
         )
     except (LookupError, PermissionError, RuntimeError, ValueError) as exc:
         raise ManaApiError(409, str(exc)) from exc
+    approved = (
+        bool(result.get("approved"))
+        if isinstance(result, dict)
+        else (payload.decision == "approve")
+    )
+    executed = bool(result.get("executed")) if isinstance(result, dict) else False
+    upstream_ok = (
+        bool(result.get("upstream_ok"))
+        if isinstance(result, dict)
+        else False
+    )
+    receipt_id = str(
+        result.get("result_receipt_id")
+        or result.get("receipt_id")
+        or ""
+    ) if isinstance(result, dict) else ""
+
     status_code = int(
         (((result.get("result") or {}).get("result") or {}).get("status_code") or 0)
         if isinstance(result, dict)
@@ -509,10 +526,12 @@ def decide_api_approval_in_chat(
         "cancelled"
         if payload.decision != "approve"
         else "failed"
-        if status_code >= 400
+        if (status_code >= 400 or not upstream_ok)
         else "success"
     )
-    completion_summary = str(result.get("message") or "").strip()
+    completion_summary = str(
+        result.get("answer") or result.get("message") or ""
+    ).strip()
     if not completion_summary:
         raise ManaApiError(
             409,
@@ -528,6 +547,7 @@ def decide_api_approval_in_chat(
             "approval_request_id": approval_request_id,
             "api_approval": True,
             "status": str(result.get("status") or ""),
+            "result_receipt_id": receipt_id,
         },
     )
     hub = get_execution_event_hub()
@@ -545,27 +565,23 @@ def decide_api_approval_in_chat(
             "permission_request_id": approval_request_id,
             "decision": payload.decision,
             "api_approval": True,
-        },
-    )
-    hub.emit(
-        "turn.finished",
-        title="API approval summary",
-        conversation_id=conversation_id,
-        execution_id=approval_request_id,
-        repository_id=service.repository_id,
-        message=completion_summary,
-        status=status,
-        metadata={
-            "message_id": assistant_message.message_id,
-            "content": completion_summary,
-            "approval_request_id": approval_request_id,
-            "api_approval": True,
+            "result_receipt_id": receipt_id,
         },
     )
     return {
         "ok": True,
         "decision": payload.decision,
+        "approved": approved,
+        "executed": executed,
+        "upstream_ok": upstream_ok,
+        "resume": (
+            result.get("resume")
+            or ("completed" if (approved and executed and upstream_ok) else "not_resumed")
+        ),
+        "approval_request_id": approval_request_id,
+        "result_receipt_id": receipt_id,
         "result": result,
+        "answer": completion_summary,
         "assistant_message": assistant_message.to_dict(),
     }
 

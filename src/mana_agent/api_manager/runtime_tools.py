@@ -21,10 +21,21 @@ _SERVICES: dict[str, ApiManagerService] = {}
 _SERVICES_LOCK = threading.RLock()
 
 
+class ApiToolExecutionContext(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    session_id: str = "default-session"
+    conversation_id: str = ""
+    turn_id: str = ""
+    execution_id: str = ""
+    lane_task_id: str = ""
+    checkpoint_id: str = ""
+    source_decision_id: str = ""
+
+
 class _Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    source_decision_id: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
+    source_decision_id: str = Field(default="", min_length=0)
+    session_id: str = Field(default="", min_length=0)
 
 
 class _WorkflowDecision(_Decision):
@@ -205,9 +216,42 @@ def build_api_manager_langchain_tools(
     root: str | Path,
     *,
     service: ApiManagerService | None = None,
+    context: ApiToolExecutionContext | None = None,
 ) -> list[Any]:
     resolved_root = str(Path(root).expanduser().resolve())
     manager = service or _service_for_root(resolved_root)
+    bound_context = (
+        context.model_copy(deep=True)
+        if context is not None
+        else ApiToolExecutionContext()
+    )
+
+    def _resolve_identities(values: dict[str, Any]) -> tuple[str, str]:
+        raw_session_id = str(values.get("session_id") or "").strip()
+        raw_decision_id = str(values.get("source_decision_id") or "").strip()
+
+        authoritative_session_id = bound_context.session_id or "default-session"
+        if raw_session_id and raw_session_id != authoritative_session_id:
+            raise PermissionError(
+                f"Model-provided session_id {raw_session_id!r} does not match host-bound session {authoritative_session_id!r}."
+            )
+
+        authoritative_decision_id = (
+            bound_context.source_decision_id
+            or bound_context.turn_id
+            or bound_context.execution_id
+            or raw_decision_id
+            or "api-turn-decision"
+        )
+        if (
+            raw_decision_id
+            and bound_context.source_decision_id
+            and raw_decision_id != bound_context.source_decision_id
+        ):
+            raise PermissionError(
+                f"Model-provided source_decision_id {raw_decision_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+            )
+        return authoritative_session_id, authoritative_decision_id
 
     def encode(operation: Any, *, session_id: str, source_decision_id: str) -> str:
         return _json(
@@ -218,75 +262,185 @@ def build_api_manager_langchain_tools(
         )
 
     def import_docs(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
         request = _Import(**values)
         return _json(
             lambda: manager.import_documentation(
                 name=request.name,
-                source_decision_id=request.source_decision_id,
+                source_decision_id=source_decision_id,
                 text=request.text,
                 path=request.path,
                 url=request.url,
                 documentation_ref=request.documentation_ref,
-                session_id=request.session_id,
+                session_id=session_id,
                 semantic_definition=request.semantic_definition,
                 save=request.save,
                 ephemeral=request.ephemeral,
                 refresh_integration_id=request.refresh_integration_id,
             ),
             root=resolved_root,
-            session_id=request.session_id,
-            source_decision_id=request.source_decision_id,
+            session_id=session_id,
+            source_decision_id=source_decision_id,
         )
 
     def import_semantic_docs(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
         request = _SemanticImport(**values)
         return _json(
             lambda: manager.import_documentation(
                 name=request.name,
-                source_decision_id=request.source_decision_id,
+                source_decision_id=source_decision_id,
                 text=request.text,
                 text_reference=request.documentation_reference,
-                session_id=request.session_id,
+                session_id=session_id,
                 semantic_definition=request.semantic_definition,
                 save=request.save,
                 ephemeral=request.ephemeral,
                 refresh_integration_id=request.refresh_integration_id,
             ),
             root=resolved_root,
-            session_id=request.session_id,
-            source_decision_id=request.source_decision_id,
+            session_id=session_id,
+            source_decision_id=source_decision_id,
         )
 
     def preview(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
         request = _Request(**values)
-        if request.routing_decision.source_decision_id != request.source_decision_id:
+        if (
+            request.routing_decision.source_decision_id
+            and request.routing_decision.source_decision_id != source_decision_id
+            and not bound_context.source_decision_id
+        ):
             raise ValueError("Routing decision ID does not match the tool decision ID.")
         return _json(
             lambda: manager.preview_request(
-                session_id=request.session_id,
-                source_decision_id=request.source_decision_id,
+                session_id=session_id,
+                source_decision_id=source_decision_id,
                 routing_decision=request.routing_decision,
+                context=bound_context,
                 **request.request_kwargs(),
             ),
             root=resolved_root,
-            session_id=request.session_id,
-            source_decision_id=request.source_decision_id,
+            session_id=session_id,
+            source_decision_id=source_decision_id,
         )
 
     def execute(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
         request = _Execute(**values)
-        if request.routing_decision.source_decision_id != request.source_decision_id:
+        if (
+            request.routing_decision.source_decision_id
+            and request.routing_decision.source_decision_id != source_decision_id
+            and not bound_context.source_decision_id
+        ):
             raise ValueError("Routing decision ID does not match the tool decision ID.")
         return _json(
             lambda: manager.execute_request(
                 approval_reference=request.approval_reference,
-                session_id=request.session_id,
+                session_id=session_id,
                 routing_decision=request.routing_decision,
+                context=bound_context,
                 **request.request_kwargs(),
             ),
             root=resolved_root,
-            session_id=request.session_id,
-            source_decision_id=request.source_decision_id,
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def workflow_decide(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        decision_obj = _WorkflowDecision(**values)
+        return encode(
+            lambda: decision_obj.model_dump(mode="json"),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def inspect_docs(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        req = _Inspect(**values)
+        return encode(
+            lambda: manager.inspect_documentation(
+                text=req.text, path=req.path, url=req.url, session_id=session_id
+            ),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def list_integrations(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        req = _List(**values)
+        return encode(
+            lambda: manager.list_integrations(include_disabled=req.include_disabled),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def get_integration(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        req = _IntegrationId(**values)
+        return encode(
+            lambda: manager.get_integration(req.integration_id),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def update_integration(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        req = _Update(**values)
+        return encode(
+            lambda: manager.update_integration(
+                req.integration_id,
+                name=req.name,
+                description=req.description,
+                enabled=req.enabled,
+                authentication=req.authentication,
+            ),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def delete_integration(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        req = _Delete(**values)
+        return encode(
+            lambda: manager.registry.delete(req.integration_id, explicit=req.explicit),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+
+    def search_operations(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
+        req = _Search(**values)
+        return encode(
+            lambda: [
+                item.model_dump(mode="json")
+                for item in manager.discovery.search(req.query, limit=req.limit)
+            ],
+            session_id=session_id,
+            source_decision_id=source_decision_id,
         )
 
     return [
@@ -297,11 +451,7 @@ def build_api_manager_langchain_tools(
                 "API-route tool call; completion is validated against its required_actions."
             ),
             args_schema=_WorkflowDecision,
-            func=lambda **values: encode(
-                lambda: _WorkflowDecision(**values).model_dump(mode="json"),
-                session_id=str(values["session_id"]),
-                source_decision_id=str(values["source_decision_id"]),
-            ),
+            func=workflow_decide,
         ),
         StructuredTool.from_function(
             name="api_docs_inspect",
@@ -311,11 +461,7 @@ def build_api_manager_langchain_tools(
                 "and never infers, imports, or executes an operation."
             ),
             args_schema=_Inspect,
-            func=lambda source_decision_id, session_id, text="", path="", url="": encode(
-                lambda: manager.inspect_documentation(text=text, path=path, url=url, session_id=session_id),
-                session_id=session_id,
-                source_decision_id=source_decision_id,
-            ),
+            func=inspect_docs,
         ),
         StructuredTool.from_function(
             name="api_docs_import",
@@ -346,48 +492,26 @@ def build_api_manager_langchain_tools(
             name="api_integrations_list",
             description="List saved API integration metadata. Does not expose credentials.",
             args_schema=_List,
-            func=lambda source_decision_id, session_id, include_disabled=True: encode(
-                lambda: manager.list_integrations(include_disabled=include_disabled),
-                session_id=session_id,
-                source_decision_id=source_decision_id,
-            ),
+            func=list_integrations,
         ),
         StructuredTool.from_function(
             name="api_integration_get",
             description="Inspect one saved normalized API integration without credential values.",
             args_schema=_IntegrationId,
-            func=lambda integration_id, source_decision_id, session_id: encode(
-                lambda: manager.get_integration(integration_id),
-                session_id=session_id,
-                source_decision_id=source_decision_id,
-            ),
+            func=get_integration,
         ),
         StructuredTool.from_function(
             name="api_integration_update",
             description="Update only explicit mutable integration metadata fields.",
             args_schema=_Update,
-            func=lambda integration_id, source_decision_id, session_id, name=None, description=None, enabled=None, authentication=None: encode(
-                lambda: manager.update_integration(
-                    integration_id,
-                    name=name,
-                    description=description,
-                    enabled=enabled,
-                    authentication=authentication,
-                ),
-                session_id=session_id,
-                source_decision_id=source_decision_id,
-            ),
+            func=update_integration,
             metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
             name="api_integration_delete",
             description="Delete one saved integration only with explicit delete intent.",
             args_schema=_Delete,
-            func=lambda integration_id, explicit, source_decision_id, session_id: encode(
-                lambda: manager.registry.delete(integration_id, explicit=explicit),
-                session_id=session_id,
-                source_decision_id=source_decision_id,
-            ),
+            func=delete_integration,
             metadata={"transactional_adapter": "api_integration"},
         ),
         StructuredTool.from_function(
@@ -397,14 +521,7 @@ def build_api_manager_langchain_tools(
                 "a structured model decision must select an operation before preview or execution."
             ),
             args_schema=_Search,
-            func=lambda query, limit, source_decision_id, session_id: encode(
-                lambda: [
-                    item.model_dump(mode="json")
-                    for item in manager.discovery.search(query, limit=limit)
-                ],
-                session_id=session_id,
-                source_decision_id=source_decision_id,
-            ),
+            func=search_operations,
         ),
         StructuredTool.from_function(
             name="api_request_preview",

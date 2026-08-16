@@ -253,6 +253,35 @@ def test_why_retrieves_previous_turn_before_followup_classification() -> None:
     assert second_payload["retrieved_context"][0]["turns"][0]["content"] == "I recommend OAuth2 with PKCE."
 
 
+def test_classifier_receives_bounded_dialogue_history() -> None:
+    model = _MultiTurnStructuredModel([
+        {
+            "category": "followup_task",
+            "related_task_id": "task_1",
+            "safe_to_continue": True,
+            "reason": "the current turn continues the offered task",
+        }
+    ])
+    classifier = FollowupClassifier(model)
+    classifier.decide(
+        message="why?",
+        recent_history=[
+            ("user", "question 1"),
+            ("assistant", "answer 1"),
+            ("user", "question 2"),
+            ("assistant", "answer 2"),
+        ],
+        candidates=[{"task_id": "task_1", "state": "completed"}],
+    )
+    payload = json.loads(model.invocations[0][1].content)
+    assert payload["recent_history"] == [
+        ["user", "question 1"],
+        ["assistant", "answer 1"],
+        ["user", "question 2"],
+        ["assistant", "answer 2"],
+    ]
+
+
 def test_context_budget_blocked_followup_classification() -> None:
     from mana_agent.context_cost.models import (
         BudgetSnapshot,

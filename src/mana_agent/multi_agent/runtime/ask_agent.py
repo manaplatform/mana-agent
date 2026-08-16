@@ -1905,8 +1905,18 @@ class AskAgent:
             canvas_tools = build_canvas_langchain_tools(self.project_root)
         from mana_agent.media.runtime_tools import build_media_langchain_tools
         media_tools = build_media_langchain_tools(self.project_root)
-        from mana_agent.api_manager.runtime_tools import build_api_manager_langchain_tools
-        api_manager_tools = build_api_manager_langchain_tools(self.project_root)
+        from mana_agent.api_manager.runtime_tools import (
+            ApiToolExecutionContext,
+            build_api_manager_langchain_tools,
+        )
+        api_context = ApiToolExecutionContext(
+            session_id=str(flow_id or getattr(self, "session_id", "default-session") or "default-session"),
+            conversation_id=str(getattr(self, "conversation_id", "") or flow_id or "default-session"),
+            turn_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
+            execution_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
+            source_decision_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
+        )
+        api_manager_tools = build_api_manager_langchain_tools(self.project_root, context=api_context)
 
         context_tools = []
         if hasattr(self, "_context_retrieval_tools") and self._context_retrieval_tools:

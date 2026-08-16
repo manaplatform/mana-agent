@@ -110,6 +110,21 @@ class _PendingApproval:
     preview: RequestPreview
     expires_at: datetime
     approved: bool = False
+    executed: bool = False
+    execution_result: Any = None
+    receipt_id: str = ""
+    permission_request_id: str = ""
+    session_id: str = ""
+    conversation_id: str = ""
+    turn_id: str = ""
+    execution_id: str = ""
+    lane_task_id: str = ""
+    checkpoint_id: str = ""
+    source_decision_id: str = ""
+    task_intent: str = ""
+    request_fingerprint: str = ""
+    state: str = "waiting_approval"
+    continuation_outcome: dict[str, Any] | None = None
 
 
 class PendingApiApprovalBroker:
@@ -118,6 +133,8 @@ class PendingApiApprovalBroker:
     def __init__(self, *, ttl_seconds: int = 180) -> None:
         self.ttl_seconds = max(30, int(ttl_seconds))
         self._pending: dict[str, _PendingApproval] = {}
+        self._receipts: dict[str, _PendingApproval] = {}
+        self._receipts_by_fingerprint: dict[str, _PendingApproval] = {}
         self._lock = threading.RLock()
 
     def authorize(
@@ -129,16 +146,24 @@ class PendingApiApprovalBroker:
         if not request.risk_level.mutating and not preview.approval_required:
             return
         now = datetime.now(timezone.utc)
+        fingerprint = _request_fingerprint(request)
         with self._lock:
             self._expire(now)
             pending = self._pending.get(approval_reference)
             if (
                 pending
-                and pending.approved
-                and _request_fingerprint(pending.request)
-                == _request_fingerprint(request)
+                and (
+                    pending.approved
+                    or pending.state
+                    in {
+                        "approved_execution_pending",
+                        "executed_resume_pending",
+                        "resumed",
+                        "completed",
+                    }
+                )
+                and _request_fingerprint(pending.request) == fingerprint
             ):
-                self._pending.pop(approval_reference, None)
                 return
         details = self.prepare(request, preview)
         raise PermissionRequiredError(
@@ -150,26 +175,58 @@ class PendingApiApprovalBroker:
         self,
         request: BuiltApiRequest,
         preview: RequestPreview,
+        *,
+        session_id: str = "",
+        conversation_id: str = "",
+        turn_id: str = "",
+        execution_id: str = "",
+        lane_task_id: str = "",
+        checkpoint_id: str = "",
+        source_decision_id: str = "",
+        task_intent: str = "",
     ) -> dict[str, Any]:
         """Create or reuse the exact approval required by a redacted preview.
 
-        Preview preparation never permits a request to execute.  It only records
+        Preview preparation never permits a request to execute. It only records
         the session-bound approval that a trusted local client may later resolve.
         """
         if not request.risk_level.mutating and not preview.approval_required:
             return {}
+        bound_session = session_id or request.session_id or conversation_id or "default-session"
+        bound_conversation = conversation_id or bound_session
+        if request.session_id and request.session_id != bound_session:
+            raise PermissionError(
+                f"Model-provided session_id {request.session_id!r} does not match host-bound session {bound_session!r}."
+            )
+        request = request.model_copy(update={"session_id": bound_session})
+
         now = datetime.now(timezone.utc)
         fingerprint = _request_fingerprint(request)
         with self._lock:
             self._expire(now)
             for request_id, pending in self._pending.items():
-                if _request_fingerprint(pending.request) == fingerprint:
+                if (
+                    pending.request_fingerprint == fingerprint
+                    and pending.session_id == bound_session
+                    and pending.state != "denied"
+                ):
                     return self._details(request_id, pending)
             request_id = f"api_approval_{uuid.uuid4().hex}"
             pending = _PendingApproval(
                 request=request.model_copy(deep=True),
                 preview=preview.model_copy(deep=True),
                 expires_at=now + timedelta(seconds=self.ttl_seconds),
+                permission_request_id=request_id,
+                session_id=bound_session,
+                conversation_id=bound_conversation,
+                turn_id=turn_id or execution_id or source_decision_id,
+                execution_id=execution_id or turn_id or source_decision_id,
+                lane_task_id=lane_task_id,
+                checkpoint_id=checkpoint_id,
+                source_decision_id=source_decision_id or turn_id or execution_id,
+                task_intent=task_intent or request.routing_task_intent,
+                request_fingerprint=fingerprint,
+                state="waiting_approval",
             )
             self._pending[request_id] = pending
             return self._details(request_id, pending)
@@ -183,12 +240,27 @@ class PendingApiApprovalBroker:
             "permission_request_id": request_id,
             "permission_scope": "api.request.execute",
             "preview": pending.preview.model_dump(mode="json"),
-            "session_id": pending.request.session_id,
+            "session_id": pending.session_id,
+            "conversation_id": pending.conversation_id,
+            "turn_id": pending.turn_id,
+            "execution_id": pending.execution_id,
+            "lane_task_id": pending.lane_task_id,
+            "checkpoint_id": pending.checkpoint_id,
+            "source_decision_id": pending.source_decision_id,
+            "task_intent": pending.task_intent,
+            "request_fingerprint": pending.request_fingerprint,
+            "state": pending.state,
             "api_approval": True,
             "expires_at": pending.expires_at.isoformat(),
         }
 
-    def approve(self, request_id: str, *, session_id: str, client_type: str) -> tuple[BuiltApiRequest, RequestPreview]:
+    def approve(
+        self,
+        request_id: str,
+        *,
+        session_id: str,
+        client_type: str,
+    ) -> tuple[BuiltApiRequest, RequestPreview]:
         if client_type not in {"local_cli", "tui", "dashboard"}:
             raise PermissionError("API approvals must come from a trusted local client.")
         now = datetime.now(timezone.utc)
@@ -197,10 +269,63 @@ class PendingApiApprovalBroker:
             pending = self._pending.get(request_id)
             if pending is None:
                 raise LookupError("No API request is waiting for that approval.")
-            if pending.request.session_id != session_id:
+            if pending.session_id != session_id and pending.conversation_id != session_id:
                 raise PermissionError("The API approval belongs to a different session.")
+            if pending.state in {"executed_resume_pending", "resumed", "completed"}:
+                return pending.request.model_copy(deep=True), pending.preview.model_copy(deep=True)
             pending.approved = True
+            pending.state = "approved_execution_pending"
             return pending.request.model_copy(deep=True), pending.preview.model_copy(deep=True)
+
+    def record_execution(self, request_id: str, result: Any) -> str:
+        with self._lock:
+            pending = self._pending.get(request_id)
+            receipt_id = (
+                pending.receipt_id
+                if pending and pending.receipt_id
+                else f"rcpt_{uuid.uuid4().hex}"
+            )
+            if pending is not None:
+                pending.executed = True
+                pending.receipt_id = receipt_id
+                pending.execution_result = result
+                upstream_ok = (
+                    getattr(result, "upstream_ok", True)
+                    if not isinstance(result, dict)
+                    else result.get("upstream_ok", True)
+                )
+                pending.state = "executed_resume_pending" if upstream_ok else "failed"
+                self._receipts[receipt_id] = pending
+                self._receipts_by_fingerprint[pending.request_fingerprint] = pending
+            return receipt_id
+
+    def record_resumed(self, request_id: str) -> None:
+        with self._lock:
+            pending = self._pending.get(request_id)
+            if pending is not None:
+                pending.state = "resumed"
+
+    def record_completed(self, request_id: str, outcome: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            pending = self._pending.get(request_id)
+            if pending is not None:
+                pending.state = "completed"
+                if outcome is not None:
+                    pending.continuation_outcome = outcome
+
+    def record_failed(self, request_id: str) -> None:
+        with self._lock:
+            pending = self._pending.get(request_id)
+            if pending is not None:
+                pending.state = "failed"
+
+    def get_pending(self, request_id: str) -> _PendingApproval | None:
+        with self._lock:
+            return self._pending.get(request_id)
+
+    def get_receipt(self, receipt_id: str) -> _PendingApproval | None:
+        with self._lock:
+            return self._receipts.get(receipt_id)
 
     def deny(self, request_id: str, *, session_id: str, client_type: str) -> None:
         if client_type not in {"local_cli", "tui", "dashboard"}:
@@ -209,12 +334,17 @@ class PendingApiApprovalBroker:
             pending = self._pending.get(request_id)
             if pending is None:
                 raise LookupError("No API request is waiting for that approval.")
-            if pending.request.session_id != session_id:
+            if pending.session_id != session_id and pending.conversation_id != session_id:
                 raise PermissionError("The API approval belongs to a different session.")
-            self._pending.pop(request_id, None)
+            pending.approved = False
+            pending.state = "denied"
 
     def _expire(self, now: datetime) -> None:
-        expired = [key for key, value in self._pending.items() if value.expires_at <= now]
+        expired = [
+            key
+            for key, value in self._pending.items()
+            if value.expires_at <= now and value.state == "waiting_approval"
+        ]
         for key in expired:
             self._pending.pop(key, None)
 

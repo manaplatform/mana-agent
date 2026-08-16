@@ -544,23 +544,21 @@ def test_request_preview_prepares_http_approval_and_records_inbox_notice(
     assert inbox.requests[0].request_type.value == "notice"
     assert inbox.requests[0].permission_request_id == details["permission_request_id"]
     waiting_events = [payload for event_type, payload in events if event_type == "api.waiting_approval"]
-    assert waiting_events == [{
-        key: details[key]
-        for key in (
-            "permission_request_id",
-            "permission_scope",
-            "preview",
-            "session_id",
-            "api_approval",
-            "expires_at",
-            "inbox_item_id",
-        )
-    } | {
-        "integration_id": integration.integration_id,
-        "operation_id": "getContact",
-        "method": "GET",
-        "redacted_host_path": "api.acme.example/v1/contacts/123",
-    }]
+    assert len(waiting_events) == 1
+    for key in (
+        "permission_request_id",
+        "permission_scope",
+        "preview",
+        "session_id",
+        "api_approval",
+        "expires_at",
+        "inbox_item_id",
+    ):
+        assert waiting_events[0][key] == details[key]
+    assert waiting_events[0]["integration_id"] == integration.integration_id
+    assert waiting_events[0]["operation_id"] == "getContact"
+    assert waiting_events[0]["method"] == "GET"
+    assert waiting_events[0]["redacted_host_path"] == "api.acme.example/v1/contacts/123"
     approved = service.decide_approval(
         details["permission_request_id"],
         session_id="preview-http-session",
@@ -1307,3 +1305,206 @@ def test_semantic_import_uses_a_durable_api_integration_action() -> None:
     assert action.target_resources == ["api-integration://name/457ab83da43936a7bf8cb905"]
     assert policy.outcome is PolicyOutcome.ALLOW
     assert verification.complete is True
+
+
+def test_api_tool_execution_context_binds_session_authoritatively(tmp_path: Path) -> None:
+    from mana_agent.api_manager.runtime_tools import ApiToolExecutionContext
+
+    context = ApiToolExecutionContext(
+        session_id="host-session-123",
+        conversation_id="conv-456",
+        turn_id="turn-789",
+        execution_id="turn-789",
+        source_decision_id="turn-789:decision",
+    )
+    tools = build_api_manager_langchain_tools(tmp_path, context=context)
+    tool_map = {t.name: t for t in tools}
+
+    # Calling api_workflow_decide without passing session_id uses host session
+    raw = tool_map["api_workflow_decide"].invoke({
+        "task_intent": "inspect documentation",
+        "required_actions": ["documentation_inspection"],
+        "reason": "Inspecting docs.",
+        "safe_to_continue": True,
+    })
+    res = json.loads(raw)
+    assert res["ok"] is True
+    assert res["result"]["session_id"] == "host-session-123"
+    assert res["result"]["source_decision_id"] == "turn-789:decision"
+
+
+def test_api_tool_execution_context_rejects_session_mismatch(tmp_path: Path) -> None:
+    from mana_agent.api_manager.runtime_tools import ApiToolExecutionContext
+
+    context = ApiToolExecutionContext(
+        session_id="host-session-123",
+        source_decision_id="turn-789:decision",
+    )
+    tools = build_api_manager_langchain_tools(tmp_path, context=context)
+    tool_map = {t.name: t for t in tools}
+
+    with pytest.raises(PermissionError) as exc_info:
+        tool_map["api_workflow_decide"].invoke({
+            "session_id": "malicious-session-override",
+            "source_decision_id": "turn-789:decision",
+            "task_intent": "inspect documentation",
+            "required_actions": ["documentation_inspection"],
+            "reason": "Inspecting docs.",
+            "safe_to_continue": True,
+        })
+    assert "does not match host-bound session" in str(exc_info.value)
+
+
+def test_pending_api_approval_retains_turn_provenance_and_rejects_cross_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    broker = PendingApiApprovalBroker()
+    transport = _Transport(
+        [
+            _RawResponse(200, {"content-type": "application/json"}, b'{"updated":true}'),
+        ]
+    )
+    registry = ApiIntegrationRegistry(tmp_path / "integrations")
+    executor = ApiExecutor(transport=transport, approval_broker=broker)
+    service = ApiManagerService(tmp_path, registry=registry, executor=executor)
+    imported = service.import_documentation(
+        name="Acme CRM",
+        text=json.dumps(OPENAPI),
+        source_decision_id="import-decision",
+    )
+    integration_id = imported["integration"]["integration_id"]
+    service.update_integration(
+        integration_id,
+        authentication=[AuthenticationConfig()],
+    )
+    patch_operation = next(
+        item
+        for item in registry.get(integration_id).operations
+        if item.method is HttpMethod.PATCH
+    )
+    update_route = ApiRouteDecision(
+        source_decision_id="turn-1:update-decision",
+        task_intent="update contact email to new@example.com",
+        workflow="request_execution",
+        integration_id=integration_id,
+        operation_id=patch_operation.operation_id,
+        confidence=0.99,
+        matched_terms=("update", "contact"),
+        reason="Exact update operation.",
+        safe_to_continue=True,
+    )
+    from mana_agent.api_manager.runtime_tools import ApiToolExecutionContext
+    ctx = ApiToolExecutionContext(
+        session_id="session-user-turn-1",
+        conversation_id="conv-user-1",
+        turn_id="turn-1",
+        execution_id="exec-1",
+        task_intent="update contact email to new@example.com",
+    )
+    preview = service.preview_request(
+        routing_decision=update_route,
+        integration_id=integration_id,
+        operation_id=patch_operation.operation_id,
+        path_parameters={"contact_id": "123"},
+        body={"email": "new@example.com"},
+        context=ctx,
+    )
+    assert preview["permission_required"] is True
+    request_id = preview["permission_request_id"]
+    assert preview["session_id"] == "session-user-turn-1"
+    assert preview["conversation_id"] == "conv-user-1"
+    assert preview["turn_id"] == "turn-1"
+
+    # Cross-session rejection
+    with pytest.raises(PermissionError) as exc_info:
+        service.decide_approval(
+            request_id,
+            session_id="attacker-session-2",
+            approve=True,
+            client_type="tui",
+        )
+    assert "belongs to a different session" in str(exc_info.value)
+
+    # Approved execution with receipt and idempotency
+    approved = service.decide_approval(
+        request_id,
+        session_id="session-user-turn-1",
+        approve=True,
+        client_type="tui",
+    )
+    assert approved["approved"] is True
+    assert approved["executed"] is True
+    assert approved["upstream_ok"] is True
+    assert approved["receipt_id"] != ""
+    assert approved["provenance"]["session_id"] == "session-user-turn-1"
+    assert approved["provenance"]["conversation_id"] == "conv-user-1"
+
+    # Duplicate approval is idempotent and does not make another HTTP request
+    approved_duplicate = service.decide_approval(
+        request_id,
+        session_id="session-user-turn-1",
+        approve=True,
+        client_type="tui",
+    )
+    assert approved_duplicate["receipt_id"] == approved["receipt_id"]
+    assert approved_duplicate["executed"] is True
+
+
+def test_api_approval_denial_does_not_execute_http(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    broker = PendingApiApprovalBroker()
+    transport = _Transport([])
+    registry = ApiIntegrationRegistry(tmp_path / "integrations")
+    executor = ApiExecutor(transport=transport, approval_broker=broker)
+    service = ApiManagerService(tmp_path, registry=registry, executor=executor)
+    imported = service.import_documentation(
+        name="Acme CRM",
+        text=json.dumps(OPENAPI),
+        source_decision_id="import-decision",
+    )
+    integration_id = imported["integration"]["integration_id"]
+    service.update_integration(
+        integration_id,
+        authentication=[AuthenticationConfig()],
+    )
+    patch_operation = next(
+        item
+        for item in registry.get(integration_id).operations
+        if item.method is HttpMethod.PATCH
+    )
+    update_route = ApiRouteDecision(
+        source_decision_id="turn-1:update-decision",
+        task_intent="update contact email to new@example.com",
+        workflow="request_execution",
+        integration_id=integration_id,
+        operation_id=patch_operation.operation_id,
+        confidence=0.99,
+        matched_terms=("update", "contact"),
+        reason="Exact update operation.",
+        safe_to_continue=True,
+    )
+    preview = service.preview_request(
+        routing_decision=update_route,
+        integration_id=integration_id,
+        operation_id=patch_operation.operation_id,
+        path_parameters={"contact_id": "123"},
+        body={"email": "new@example.com"},
+        session_id="session-1",
+    )
+    request_id = preview["permission_request_id"]
+    denied = service.decide_approval(
+        request_id,
+        session_id="session-1",
+        approve=False,
+        client_type="tui",
+    )
+    assert denied["approved"] is False
+    assert denied["executed"] is False
+    assert denied["status"] == "denied"
+
+

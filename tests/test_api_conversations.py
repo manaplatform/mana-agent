@@ -200,7 +200,12 @@ def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
         )
         return {
             "status": "completed",
+            "approved": True,
+            "executed": True,
+            "upstream_ok": True,
+            "resume": "completed",
             "approval_request_id": approval_request_id,
+            "result_receipt_id": "rcpt_test_123",
             "result": {
                 "result": {
                     "status_code": 200,
@@ -208,6 +213,7 @@ def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
                     "upstream_ok": True,
                 }
             },
+            "answer": "Approved API request executed.",
             "message": "Approved API request executed.",
         }
 
@@ -221,7 +227,10 @@ def test_dashboard_api_approval_endpoint_resumes_cached_exact_request(
     )
 
     assert response.status_code == 200
-    assert response.json()["result"]["result"]["result"]["executed"] is True
+    assert response.json()["approved"] is True
+    assert response.json()["executed"] is True
+    assert response.json()["resume"] == "completed"
+    assert response.json()["result_receipt_id"] == "rcpt_test_123"
     assert response.json()["assistant_message"]["content"] == "Approved API request executed."
     assert calls[0]["conversation_id"] == conversation_id
     assert calls[0]["approval_request_id"] == "api_approval_1"

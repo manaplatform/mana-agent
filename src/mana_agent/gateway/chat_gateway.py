@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from mana_agent.config.settings import Settings, mana_home
+from mana_agent._version import get_runtime_git_sha, get_version
 from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
@@ -1982,7 +1983,8 @@ class AgentChatGateway:
         """Approve and execute one exact session-bound API request.
 
         Gateway completion is reported only when the controlled runtime confirms
-        both execution and upstream success.
+        both execution and upstream success. Resumes the blocked task continuation
+        so the model fulfills the original user intent.
         """
         from mana_agent.api_manager.events import api_event_scope
         from mana_agent.api_manager.runtime_tools import api_manager_service
@@ -2020,7 +2022,7 @@ class AgentChatGateway:
             else {}
         )
 
-        upstream_ok = execution.get("upstream_ok") is True
+        upstream_ok = result.get("upstream_ok") is True or execution.get("upstream_ok") is True
 
         raw_status_code = execution.get("status_code")
         try:
@@ -2051,6 +2053,33 @@ class AgentChatGateway:
                     "Completion was not recorded."
                 ),
             }
+
+        if callable(self._event_sink):
+            self._event_sink(
+                "api.approval_decided",
+                "API request approved",
+                conversation_id=session_id,
+                execution_id=approval_request_id,
+                status="success" if upstream_ok else "failed",
+                metadata={
+                    "permission_request_id": approval_request_id,
+                    "decision": "approve",
+                    "api_approval": True,
+                },
+            )
+            self._event_sink(
+                "api.call.started",
+                "API call started",
+                conversation_id=session_id,
+                execution_id=approval_request_id,
+            )
+            self._event_sink(
+                "api.call.completed" if upstream_ok else "api.call.failed",
+                "API call completed" if upstream_ok else "API call failed",
+                conversation_id=session_id,
+                execution_id=approval_request_id,
+                status_code=status_code,
+            )
 
         # An executed HTTP request is not the same thing as a successful API
         # operation. HTTP/upstream failure must remain a failed workflow result.
@@ -2083,21 +2112,193 @@ class AgentChatGateway:
                 "message": message,
             }
 
-        # Successful completion requires all three:
-        #
-        # approved == True
-        # executed == True
-        # upstream_ok == True
-        return {
-            "status": "completed",
-            "approval_request_id": approval_request_id,
-            "result": result,
-            "execution_evidence": execution,
-            "message": self._api_approval_completion_message(
-                execution,
-                status_code,
-            ),
+        return self._resume_api_continuation(
+            approval_request_id,
+            session_id=session_id,
+            decision_result=result,
+            client_type=client_type,
+        )
+
+    def _resume_api_continuation(
+        self,
+        approval_request_id: str,
+        *,
+        session_id: str,
+        decision_result: dict[str, Any],
+        client_type: str = "tui",
+    ) -> dict[str, Any]:
+        from mana_agent.api_manager.runtime_tools import api_manager_service
+        from mana_agent.config.settings import default_index_dir
+
+        service = api_manager_service(self.root)
+        pending = service.approvals.get_pending(approval_request_id)
+        raw_execution = decision_result.get("result")
+        execution = dict(raw_execution) if isinstance(raw_execution, dict) else {}
+        status_code = int(execution.get("status_code") or 0)
+        task_intent = getattr(pending, "task_intent", "") if pending else "API request continuation"
+        execution_id = getattr(pending, "execution_id", "") if pending else approval_request_id
+        lane_task_id = getattr(pending, "lane_task_id", "") if pending else ""
+
+        if (
+            pending
+            and pending.state == "completed"
+            and (
+                getattr(pending, "continuation_outcome", None) is not None
+                or (
+                    isinstance(pending.execution_result, dict)
+                    and "outcome" in pending.execution_result
+                )
+            )
+        ):
+            return getattr(pending, "continuation_outcome", None) or pending.execution_result["outcome"]
+
+        service.approvals.record_resumed(approval_request_id)
+
+        if callable(self._event_sink):
+            self._event_sink(
+                "turn.resume_requested",
+                "API workflow continuation resumed",
+                conversation_id=session_id,
+                execution_id=execution_id or approval_request_id,
+                metadata={
+                    "approval_request_id": approval_request_id,
+                    "session_id": session_id,
+                    "execution_id": execution_id or approval_request_id,
+                },
+            )
+
+        if lane_task_id:
+            try:
+                self._lane_coordinator.transition(
+                    lane_task_id,
+                    LaneTaskState.RUNNING,
+                    reason="API request approved by the user; resuming model continuation",
+                )
+            except Exception:
+                pass
+
+        ask_agent = None
+        if hasattr(self, "_stack") and self._stack and hasattr(self._stack, "ask_service"):
+            ask_agent = getattr(self._stack.ask_service, "ask_agent", None)
+        if ask_agent is None:
+            try:
+                from mana_agent.services.ask_service import AskService
+                ask_agent = AskService(self.root).ask_agent
+            except Exception:
+                ask_agent = None
+
+        final_answer = ""
+        if ask_agent is not None and callable(getattr(ask_agent, "run", None)):
+            continuation_prompt = (
+                f"The user's original request was:\n{task_intent}\n\n"
+                f"The approved API request has executed successfully through the controlled runtime with HTTP status {status_code}.\n"
+                f"Validated API Execution Evidence:\n"
+                f"{json.dumps(execution, ensure_ascii=False, indent=2, sort_keys=True, default=str)}\n\n"
+                "Based on the validated API execution evidence above, complete the user's original request now. "
+                "Provide the full requested final response (including any analysis, summary, translations, or formatting requested by the user)."
+            )
+            try:
+                response = ask_agent.run(
+                    question=continuation_prompt,
+                    index_dir=self._index_dir or default_index_dir(self.root),
+                    k=self._resolved_k,
+                    max_steps=max(16, int(self.config.agent_max_steps or 6)),
+                    timeout_seconds=max(30, self._agent_timeout_seconds),
+                    flow_id=session_id,
+                    run_id=execution_id or approval_request_id,
+                    system_prompt=(
+                        "You are Mana-Agent. An approved API request has executed successfully. "
+                        "The validated API result evidence is provided in the prompt. "
+                        "Analyze and synthesize the results to fulfill the user's request. "
+                        "Do not call external tools again unless explicitly needed. "
+                        "Deliver the clear, complete, and helpful final response."
+                    ),
+                )
+                final_answer = str(getattr(response, "answer", response) or "").strip()
+            except Exception as exc:
+                logger.warning("API continuation model step failed: %s", exc, exc_info=True)
+
+        if not final_answer:
+            final_answer = self._api_approval_completion_message(execution, status_code)
+
+        msg_id = f"msg_{uuid.uuid4().hex[:16]}"
+        assistant_msg = {
+            "role": "assistant",
+            "content": final_answer,
+            "message_id": msg_id,
+            "execution_id": execution_id or approval_request_id,
+            "metadata": {
+                "approval_request_id": approval_request_id,
+                "api_approval": True,
+                "resumed": True,
+            },
         }
+
+        try:
+            self._append_session_message(
+                session_id,
+                role="assistant",
+                content=final_answer,
+                turn_id=execution_id or approval_request_id,
+                message_id=msg_id,
+                metadata={
+                    "approval_request_id": approval_request_id,
+                    "api_approval": True,
+                    "resumed": True,
+                },
+            )
+        except Exception:
+            pass
+
+        if callable(self._event_sink):
+            self._event_sink(
+                "turn.finished",
+                "API workflow completed",
+                message=final_answer,
+                conversation_id=session_id,
+                execution_id=execution_id or approval_request_id,
+                status="success",
+                metadata={
+                    "message_id": msg_id,
+                    "content": final_answer,
+                    "approval_request_id": approval_request_id,
+                    "api_approval": True,
+                    "resumed": True,
+                },
+            )
+
+        if lane_task_id:
+            try:
+                self._finish_lane(
+                    lane_task_id,
+                    state=LaneTaskState.COMPLETED,
+                    result={"answer": final_answer},
+                )
+            except Exception:
+                pass
+
+        receipt_id = (
+            decision_result.get("receipt_id")
+            or decision_result.get("result_receipt_id")
+            or (pending.receipt_id if pending else "")
+            or ""
+        )
+        outcome = {
+            "status": "completed",
+            "approved": True,
+            "executed": True,
+            "upstream_ok": True,
+            "resume": "completed",
+            "execution_id": execution_id or approval_request_id,
+            "approval_request_id": approval_request_id,
+            "result_receipt_id": receipt_id,
+            "result": execution,
+            "answer": final_answer,
+            "message": final_answer,
+            "assistant_message": assistant_msg,
+        }
+        service.approvals.record_completed(approval_request_id, outcome=outcome)
+        return outcome
     @staticmethod
     def _api_approval_completion_message(
         execution: dict[str, Any],
@@ -2275,6 +2476,19 @@ class AgentChatGateway:
                 session_id=session_id,
                 approve=False,
                 client_type=client_type,
+            )
+        if callable(self._event_sink):
+            self._event_sink(
+                "api.approval_decided",
+                "API request denied",
+                conversation_id=session_id,
+                execution_id=approval_request_id,
+                status="cancelled",
+                metadata={
+                    "permission_request_id": approval_request_id,
+                    "decision": "deny",
+                    "api_approval": True,
+                },
             )
         return {
             "status": "denied",
@@ -4686,11 +4900,12 @@ class AgentChatGateway:
                     )
                     # Status / follow-up classification may still see deadline-dead
                     # tasks. Resume and retry candidates never include them.
-                    recoverable_task_candidates = [
-                        item
-                        for item in all_recovery_candidates
-                        if str(item.get("state") or "")
-                        != LaneTaskState.COMPLETED.value
+                    # Completed tasks remain conversational parents, but are
+                    # never eligible for retry or checkpoint recovery.
+                    followup_candidates = [
+                        item for item in all_recovery_candidates
+                        if not str(item.get("session_id") or "")
+                        or str(item.get("session_id") or "") == session_id
                     ]
                     relation_type = "independent"
                     parent_task_id: str | None = None
@@ -4704,11 +4919,21 @@ class AgentChatGateway:
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
-                    if recoverable_task_candidates:
+                    if followup_candidates:
+                        raw_followup_history = [
+                            m for m in list(state.get("messages") or [])
+                            if str(m.get("turn_id") or "") != turn_id
+                            and m.get("role") in {"user", "assistant"}
+                            and str(m.get("content") or "").strip()
+                        ]
+                        recent_followup_history = [
+                            (str(m.get("role") or ""), str(m.get("content") or ""))
+                            for m in raw_followup_history[-8:]
+                        ]
                         followup = FollowupClassifier(followup_model).decide(
                             message=text,
-                            recent_history=[],
-                            candidates=recoverable_task_candidates,
+                            recent_history=recent_followup_history,
+                            candidates=followup_candidates,
                             pointers=turn_pointers,
                             retrieval_hints=["conversation_context_read"] if conv_avail.has_history else [],
                             conversation_tool=state.get("_conversation_context_tool"),
@@ -4895,7 +5120,7 @@ class AgentChatGateway:
                             else:
                                 recovery_candidates = [
                                     item
-                                    for item in recoverable_task_candidates
+                                    for item in recovery_candidates
                                     if str(item.get("task_id") or "") == followup.related_task_id
                                     and not bool(item.get("deadline_exceeded"))
                                 ]
@@ -4938,7 +5163,7 @@ class AgentChatGateway:
                         elif followup.category in {"retry_request", "resume_request"}:
                             recovery_candidates = [
                                 item
-                                for item in recoverable_task_candidates
+                                for item in recovery_candidates
                                 if str(item.get("task_id") or "") == followup.related_task_id
                                 and not bool(item.get("deadline_exceeded"))
                             ]
@@ -4971,6 +5196,11 @@ class AgentChatGateway:
                         )
                     recovered_task = False
                     recovery_target_id = str(resume_decision.task_id or "")
+                    if resume_decision.action in {"retry_task", "resume_checkpoint"}:
+                        options["_canonical_execution_text"] = self._canonical_task_request(
+                            recovery_target_id,
+                            session_id,
+                        )
                     # Deterministic recovery gate: a wall-clock-dead task cannot be
                     # requeued. Create a new task with a fresh deadline instead.
                     force_new_task_for_dead = bool(
@@ -5293,7 +5523,7 @@ class AgentChatGateway:
                             result = self._execute_entry_route(
                                 decision=entry_decision,
                                 context=route_context,
-                                text=text,
+                                text=options.get("_canonical_execution_text", text),
                                 state=state,
                                 ask_service=ask_service,
                                 sink=sink,
@@ -5667,6 +5897,8 @@ class AgentChatGateway:
                 )
                 result.payload["execution_report"] = {
                     "execution_id": supervised.task_id,
+                    "runtime_version": get_version(),
+                    "runtime_git_sha": get_runtime_git_sha(),
                     "root_task_id": supervised.root_task_id,
                     "attempt_id": supervised.attempt_id,
                     "attempt_generation": supervised.attempt_generation,
@@ -7126,6 +7358,50 @@ class AgentChatGateway:
             return False
         return task.wall_clock_deadline_exceeded()
 
+    def _canonical_task_request(self, task_id: str, session_id: str) -> str:
+        """Load the exact user request that created a durable task."""
+        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
+        if task is None:
+            raise CheckpointResumeError(
+                f"Canonical request recovery failed for task {task_id}: task not found.",
+                code="canonical_request_unavailable",
+            )
+        trigger_turn_id = str(getattr(task, "trigger_turn_id", "") or "") if task else ""
+        if not trigger_turn_id:
+            intent = str(
+                getattr(task, "normalized_intent", "")
+                or getattr(task, "goal", "")
+                or getattr(task, "title", "")
+                or ""
+            ).strip()
+            if intent:
+                return intent
+            raise CheckpointResumeError(
+                f"Canonical request recovery failed for task {task_id}: trigger turn linkage is missing.",
+                code="canonical_request_unavailable",
+            )
+        messages = self._history_store.list(session_id, limit=5000)
+        matches = [
+            message for message in messages
+            if message.turn_id == trigger_turn_id
+            and message.role == "user"
+            and message.content.strip()
+        ]
+        if len(matches) != 1:
+            intent = str(
+                getattr(task, "normalized_intent", "")
+                or getattr(task, "goal", "")
+                or getattr(task, "title", "")
+                or ""
+            ).strip()
+            if intent:
+                return intent
+            raise CheckpointResumeError(
+                f"Canonical request recovery failed for task {task_id}: expected one linked user message.",
+                code="canonical_request_unavailable",
+            )
+        return matches[0].content
+
     def _recovery_candidates(
         self,
         *,
@@ -7198,10 +7474,7 @@ class AgentChatGateway:
                 or task.repository_id != repository_id
             ):
                 continue
-            if session_id and task.session_id and task.session_id != session_id:
-                # Prefer same-session rows; workspace-scoped callers pass "".
-                # Cross-session recovery is still available via empty session_id.
-                pass
+            
             checkpoint = None
             checkpoint_error = ""
             deadline_exceeded = task.wall_clock_deadline_exceeded(now)
@@ -7526,6 +7799,7 @@ class AgentChatGateway:
                 ask_service=ask_service,
                 callbacks=options.get("callbacks"),
                 read_only=bool(options.get("protocol_read_only")),
+                lane_task_id=lane_task_id,
             )
 
         if decision.route == "canvas":
@@ -8958,6 +9232,7 @@ class AgentChatGateway:
         ask_service: Any,
         callbacks: Any,
         read_only: bool = False,
+        lane_task_id: str = "",
     ) -> ChatTurnResult:
         """Execute the model-selected narrow API Manager workflow."""
         ask_agent = getattr(ask_service, "ask_agent", None)
@@ -9166,6 +9441,15 @@ class AgentChatGateway:
             and missing_actions.issubset({"request_execution"})
             and "request_execution" in required_actions
         )
+        if lane_task_id and waiting_for_execution_approval:
+            try:
+                self._lane_coordinator.transition(
+                    lane_task_id,
+                    LaneTaskState.WAITING,
+                    reason="API request waiting for trusted local approval",
+                )
+            except Exception:
+                pass
         if callable(self._event_sink):
             for permission in permission_requests:
                 preview = permission.get("preview") or {}
