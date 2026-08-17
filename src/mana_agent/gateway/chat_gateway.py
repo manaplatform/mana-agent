@@ -5893,8 +5893,11 @@ class AgentChatGateway:
                                 changed_files=result.changed_files,
                                 verification_state={
                                     "mode": result.mode,
+                                    "status": status,
                                     "error": result.error,
                                     "chat_result": {
+                                        "status": status,
+                                        "route": str(result.payload.get("route") or ""),
                                         "answer": result.answer,
                                         "changed_files": list(result.changed_files),
                                         "payload": dict(result.payload),
@@ -7415,9 +7418,13 @@ class AgentChatGateway:
                     verification_state={
                         "mode": result.mode,
                         "status": "completed",
+                        "error": result.error,
                         "chat_result": {
                             "status": "completed",
-                            "route": decision.route,
+                            "route": str(result.payload.get("route") or ""),
+                            "answer": result.answer,
+                            "changed_files": list(result.changed_files),
+                            "payload": dict(result.payload),
                         },
                     },
                 )
