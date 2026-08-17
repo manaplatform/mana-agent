@@ -175,6 +175,8 @@ class ApiManagerService:
         path: str = "",
         url: str = "",
         session_id: str = "",
+        offset: int = 0,
+        limit: int = 2000,
     ) -> dict[str, Any]:
         """Read one authorized documentation source without inferring API semantics."""
         if sum(bool(item) for item in (text, path, url)) != 1:
@@ -209,14 +211,24 @@ class ApiManagerService:
             content_type=content_type,
         )
 
-        preview = raw_text[:2000]
-        truncated = len(raw_text) > 2000
+        bounded_offset = max(0, int(offset))
+        bounded_limit = max(1, min(int(limit), 16_000))
+
+        preview = raw_text[
+            bounded_offset : bounded_offset + bounded_limit
+        ]
+        next_offset = bounded_offset + len(preview)
+        truncated = next_offset < len(raw_text)
+
         return {
             "reference": reference,
             "documentation_ref": artifact.artifact_id,
             "content_type": content_type,
             "bytes": len(payload),
             "text": preview,
+            "offset": bounded_offset,
+            "limit": bounded_limit,
+            "next_offset": next_offset if truncated else None,
             "truncated": truncated,
             "more_available": truncated,
         }

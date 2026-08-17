@@ -398,6 +398,9 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             "missing_actions": [],
             "unexpected_actions": [],
             "execution_evidence": {},
+            "waived_actions": [],
+            "terminal_outcome": "",
+            "terminal_evidence": {},
         }
 
     def payload(trace: dict[str, Any]) -> dict[str, Any]:
@@ -456,8 +459,12 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                     decision_index = idx
                     break
 
-        elif tool_name in _API_WORKFLOW_EVIDENCE:
-            # An operational API tool ran before the validated workflow decision.
+        elif (
+            tool_name in _API_WORKFLOW_EVIDENCE
+            or tool_name == "api_workflow_terminal"
+        ):
+            # An operational/terminal API tool ran before the validated
+            # workflow decision.
             break
 
     if (
@@ -477,6 +484,9 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             "missing_actions": [],
             "unexpected_actions": [],
             "execution_evidence": {},
+            "waived_actions": [],
+            "terminal_outcome": "",
+            "terminal_evidence": {},
         }
 
     required = [
@@ -488,16 +498,163 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     completed: set[str] = set()
     execution_evidence: dict[str, Any] = {}
 
+    # Tracks contiguous api_docs_inspect evidence by immutable artifact ref.
+    inspection_progress: dict[str, dict[str, Any]] = {}
+
+    terminal_attempted = False
+    terminal_valid = False
+    terminal_evidence: dict[str, Any] = {}
+    terminal_failure_reason = ""
+
     for trace in traces[decision_index + 1:]:
         tool_name = str(trace.get("tool_name") or "")
-        action = _API_WORKFLOW_EVIDENCE.get(tool_name)
-
-        if not action:
-            continue
 
         result = payload(trace)
         trace_succeeded = str(trace.get("status") or "").lower() == "ok"
         result_succeeded = result.get("ok") is True
+
+        # --------------------------------------------------------------
+        # Track complete contiguous api_docs_inspect evidence.
+        #
+        # A successful api_docs_inspect result is not sufficient when
+        # truncated=true. Completion requires:
+        #
+        #   offset=0
+        #       -> contiguous next_offset pages
+        #       -> final truncated=false
+        #
+        # All pages must use the same documentation_ref.
+        # --------------------------------------------------------------
+        if (
+            tool_name == "api_docs_inspect"
+            and trace_succeeded
+            and result_succeeded
+            and isinstance(result.get("result"), dict)
+        ):
+            inspected = result["result"]
+
+            documentation_ref = str(
+                inspected.get("documentation_ref") or ""
+            ).strip()
+
+            if documentation_ref:
+                try:
+                    offset = max(
+                        0,
+                        int(inspected.get("offset") or 0),
+                    )
+                except (TypeError, ValueError):
+                    offset = -1
+
+                text_value = str(inspected.get("text") or "")
+
+                observed_end = (
+                    offset + len(text_value)
+                    if offset >= 0
+                    else -1
+                )
+
+                progress = inspection_progress.setdefault(
+                    documentation_ref,
+                    {
+                        "next_offset": 0,
+                        "complete": False,
+                    },
+                )
+
+                if (
+                    not progress["complete"]
+                    and offset == progress["next_offset"]
+                ):
+                    truncated = bool(
+                        inspected.get("truncated", False)
+                    )
+
+                    if truncated:
+                        next_offset = inspected.get("next_offset")
+
+                        if (
+                            isinstance(next_offset, int)
+                            and next_offset == observed_end
+                            and next_offset > offset
+                        ):
+                            progress["next_offset"] = next_offset
+
+                    else:
+                        progress["next_offset"] = observed_end
+                        progress["complete"] = True
+                        completed.add("documentation_inspection")
+
+        # --------------------------------------------------------------
+        # Evidence-backed terminal outcome.
+        #
+        # This never becomes valid merely because import/search failed.
+        # It requires a completely consumed api_docs_inspect artifact.
+        # --------------------------------------------------------------
+        if tool_name == "api_workflow_terminal":
+            terminal_attempted = True
+
+            if (
+                trace_succeeded
+                and result_succeeded
+                and isinstance(result.get("result"), dict)
+            ):
+                terminal = result["result"]
+
+                outcome = str(
+                    terminal.get("outcome") or ""
+                ).strip()
+
+                documentation_ref = str(
+                    terminal.get("documentation_ref") or ""
+                ).strip()
+
+                progress = inspection_progress.get(
+                    documentation_ref
+                )
+
+                if outcome != "unsupported_documentation":
+                    terminal_failure_reason = (
+                        "Unsupported API workflow terminal outcome."
+                    )
+
+                elif (
+                    not progress
+                    or progress.get("complete") is not True
+                ):
+                    terminal_failure_reason = (
+                        "Terminal unsupported_documentation requires "
+                        "complete contiguous documentation inspection."
+                    )
+
+                elif "documentation_inspection" not in required:
+                    terminal_failure_reason = (
+                        "Terminal unsupported_documentation requires "
+                        "documentation_inspection in the workflow decision."
+                    )
+
+                else:
+                    terminal_valid = True
+                    terminal_evidence = {
+                        "outcome": outcome,
+                        "documentation_ref": documentation_ref,
+                        "reason": str(
+                            terminal.get("reason") or ""
+                        ),
+                    }
+
+            else:
+                terminal_failure_reason = (
+                    "API workflow terminal declaration did not return "
+                    "successful structured evidence."
+                )
+
+            continue
+
+        action = _API_WORKFLOW_EVIDENCE.get(tool_name)
+
+        if not action:
+            continue
 
         raw_result = raw_payload(trace)
 
@@ -518,7 +675,11 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         # - a textual model claim
         # --------------------------------------------------------------
         if action == "request_execution":
-            executed = result.get("result") if isinstance(result.get("result"), dict) else result
+            executed = (
+                result.get("result")
+                if isinstance(result.get("result"), dict)
+                else result
+            )
 
             if not isinstance(executed, dict):
                 continue
@@ -563,8 +724,6 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                 preview_result = result.get("result")
 
                 if isinstance(preview_result, dict):
-                    # Both ordinary preview and approval-required preview
-                    # are successful completion of the preview action.
                     completed.add(action)
                     continue
 
@@ -576,24 +735,91 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                     result["details"].get("permission_scope") or ""
                 ) == "api.request.execute"
                 and str(
-                    result["details"].get("permission_request_id") or ""
+                    result["details"].get(
+                        "permission_request_id"
+                    )
+                    or ""
                 ).strip()
             ):
                 completed.add(action)
                 continue
 
         # --------------------------------------------------------------
-        # Non-execution lifecycle steps may use normal safe_result()
-        # evidence. A clipped successful trace is acceptable here because
-        # these actions do not prove an external side effect occurred.
+        # api_docs_inspect completion is handled exclusively by the
+        # contiguous pagination logic above.
+        #
+        # In particular:
+        #
+        #   api_docs_inspect + truncated=true
+        #
+        # MUST NOT complete documentation_inspection.
+        #
+        # browser_inspect still uses the legacy generic successful
+        # evidence behavior below.
+        # --------------------------------------------------------------
+        if (
+            action == "documentation_inspection"
+            and tool_name == "api_docs_inspect"
+        ):
+            continue
+
+        # --------------------------------------------------------------
+        # Ordinary non-execution lifecycle evidence.
         # --------------------------------------------------------------
         if result_succeeded or clipped_success_evidence:
             completed.add(action)
+
+    # ------------------------------------------------------------------
+    # Terminal waiver processing.
+    # ------------------------------------------------------------------
+    waived: list[str] = []
+
+    if terminal_valid:
+        # unsupported_documentation cannot coexist with successful
+        # downstream lifecycle work.
+        conflicting_actions = sorted(
+            completed
+            & {
+                "integration_import",
+                "integration_configuration",
+                "operation_search",
+                "request_preview",
+                "request_execution",
+            }
+        )
+
+        if conflicting_actions:
+            terminal_valid = False
+            terminal_failure_reason = (
+                "unsupported_documentation contradicts already completed "
+                "downstream actions: "
+                + ", ".join(conflicting_actions)
+                + "."
+            )
+
+        else:
+            waivable_actions = {
+                "integration_import",
+                "integration_configuration",
+                "operation_search",
+                "request_preview",
+                "request_execution",
+            }
+
+            waived = [
+                action
+                for action in required
+                if (
+                    action in waivable_actions
+                    and action not in completed
+                )
+            ]
 
     missing = [
         action
         for action in required
         if action not in completed
+        and action not in waived
     ]
 
     unexpected = sorted(
@@ -602,7 +828,18 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         if action not in required
     )
 
-    if unexpected:
+    if terminal_attempted and not terminal_valid:
+        error_code = "api_workflow_terminal_invalid"
+        message = (
+            "API workflow terminal evidence is invalid"
+            + (
+                f": {terminal_failure_reason}"
+                if terminal_failure_reason
+                else "."
+            )
+        )
+
+    elif unexpected:
         error_code = "api_workflow_action_not_selected"
         message = (
             "API tools executed actions absent from the workflow decision: "
@@ -620,20 +857,45 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
 
     else:
         error_code = ""
-        message = "API workflow completion evidence is valid."
+
+        message = (
+            "API workflow terminated with evidence-backed "
+            "unsupported documentation."
+            if terminal_valid
+            else "API workflow completion evidence is valid."
+        )
 
     return {
-        "valid": not missing and not unexpected,
+        "valid": (
+            not missing
+            and not unexpected
+            and not (
+                terminal_attempted
+                and not terminal_valid
+            )
+        ),
         "error_code": error_code,
         "message": message,
-        "task_intent": str(decision.get("task_intent") or ""),
+        "task_intent": str(
+            decision.get("task_intent") or ""
+        ),
         "required_actions": required,
         "completed_actions": sorted(completed),
+        "waived_actions": waived,
         "missing_actions": missing,
         "unexpected_actions": unexpected,
         "execution_evidence": execution_evidence,
+        "terminal_outcome": (
+            terminal_evidence.get("outcome", "")
+            if terminal_valid
+            else ""
+        ),
+        "terminal_evidence": (
+            terminal_evidence
+            if terminal_valid
+            else {}
+        ),
     }
-
 class _RoutePreflightComplete(RuntimeError):
     """Internal control flow for a truthful pre-dispatch capability response."""
 
@@ -5631,8 +5893,11 @@ class AgentChatGateway:
                                 changed_files=result.changed_files,
                                 verification_state={
                                     "mode": result.mode,
+                                    "status": status,
                                     "error": result.error,
                                     "chat_result": {
+                                        "status": status,
+                                        "route": str(result.payload.get("route") or ""),
                                         "answer": result.answer,
                                         "changed_files": list(result.changed_files),
                                         "payload": dict(result.payload),
@@ -7153,9 +7418,13 @@ class AgentChatGateway:
                     verification_state={
                         "mode": result.mode,
                         "status": "completed",
+                        "error": result.error,
                         "chat_result": {
                             "status": "completed",
-                            "route": decision.route,
+                            "route": str(result.payload.get("route") or ""),
+                            "answer": result.answer,
+                            "changed_files": list(result.changed_files),
+                            "payload": dict(result.payload),
                         },
                     },
                 )
@@ -9355,7 +9624,10 @@ class AgentChatGateway:
             "not continue to preview or execution until the declared import succeeds. If no "
             "matching operation "
             "exists, call api_docs_inspect on the authorized source, derive a cited strict semantic "
-            "definition only from its returned evidence, call api_docs_import_semantic with "
+            "If api_docs_inspect returns truncated=true or more_available=true, treat the "
+            "documentation evidence as incomplete. Continue inspection of the same source "
+            "using next_offset before concluding that an API specification, endpoint, "
+            "operation, parameter, authentication method, or other capability is absent. "
             "save=true, then "
             "search the newly saved operations and continue to preview and execution. Pass the "
             "exact reference returned by documentation inspection, or the current inspected page "
@@ -9402,6 +9674,14 @@ class AgentChatGateway:
             "request bodies, or unrestricted URL-fetch/request behavior. After request execution, "
             "read the returned result and report its HTTP status and requested response fields. If "
             "the result contains status_code or response content, never claim that evidence is absent."
+            "If complete contiguous api_docs_inspect evidence reaches truncated=false "
+            "and that fully inspected source still provides no documented API definition "
+            "that can be safely imported, call api_workflow_terminal with outcome="
+            "'unsupported_documentation', the exact documentation_ref, and an evidence-based "
+            "reason. Never call api_workflow_terminal while truncated=true or more_available=true. "
+            "Never use a model summary, absence from a partial preview, or an import failure by "
+            "itself as terminal evidence. After a valid unsupported_documentation terminal, do "
+            "not attempt the remaining import, search, preview, or execution actions. "
         )
         try:
             response = ask_agent.run(

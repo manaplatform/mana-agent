@@ -390,6 +390,39 @@ def test_documentation_inspection_returns_complete_authorized_evidence(
     assert evidence["truncated"] is False
     assert evidence["text"].startswith("GET /{ip}")
 
+def test_documentation_inspection_can_continue_after_truncation(
+    tmp_path: Path,
+) -> None:
+    service = ApiManagerService(
+        tmp_path,
+        registry=ApiIntegrationRegistry(tmp_path / "integrations"),
+    )
+
+    documentation = ("A" * 2000) + "GET /search?q={query} returns matching objects."
+
+    first = service.inspect_documentation(
+        text=documentation,
+        limit=2000,
+    )
+
+    assert first["truncated"] is True
+    assert first["more_available"] is True
+    assert first["offset"] == 0
+    assert first["next_offset"] == 2000
+    assert "GET /search" not in first["text"]
+
+    second = service.inspect_documentation(
+        text=documentation,
+        offset=first["next_offset"],
+        limit=2000,
+    )
+
+    assert "GET /search" in second["text"]
+    assert second["offset"] == 2000
+    assert second["truncated"] is False
+    assert second["more_available"] is False
+    assert second["next_offset"] is None
+
 
 def test_read_only_http_request_requires_exact_ui_approval(
     tmp_path: Path,
