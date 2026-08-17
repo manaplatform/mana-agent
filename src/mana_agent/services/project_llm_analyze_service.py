@@ -69,6 +69,7 @@ class AnalyzeEvidence:
     project_name: str
     root_path: str
     depth: str
+    language: str = "en"
     languages: list[str] = field(default_factory=list)
     frameworks: list[str] = field(default_factory=list)
     package_managers: list[str] = field(default_factory=list)
@@ -94,6 +95,7 @@ class AnalyzeEvidence:
             "project_name": self.project_name,
             "root_path": self.root_path,
             "depth": self.depth,
+            "language": self.language,
             "languages": self.languages,
             "frameworks": self.frameworks,
             "package_managers": self.package_managers,
@@ -169,7 +171,7 @@ def _trim(text: Any, limit: int = 280) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
-def build_evidence(report: dict[str, Any], *, depth: str = "normal") -> AnalyzeEvidence:
+def build_evidence(report: dict[str, Any], *, depth: str = "normal", language: str = "en") -> AnalyzeEvidence:
     """Compact the deterministic analyze report into bounded LLM evidence."""
     inventory = report.get("inventory", {}) or {}
     dependencies = report.get("dependencies", {}) or {}
@@ -259,6 +261,7 @@ def build_evidence(report: dict[str, Any], *, depth: str = "normal") -> AnalyzeE
         project_name=str(inventory.get("project_name") or Path(report.get("root_path", ".")).name),
         root_path=str(report.get("root_path", "")),
         depth=depth,
+        language=language,
         languages=inventory.get("detected_languages", []) or [],
         frameworks=inventory.get("detected_frameworks", []) or [],
         package_managers=inventory.get("package_managers", []) or [],
@@ -366,6 +369,7 @@ class LLMAnalyzer:
         inputs = {
             "project_name": evidence.project_name,
             "depth": evidence.depth,
+            "language": evidence.language,
             "evidence_json": evidence_json,
         }
         attempts = max(1, int(self.config.max_retries))

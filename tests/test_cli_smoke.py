@@ -90,6 +90,7 @@ def test_analyze_command_is_public() -> None:
 
     assert result.exit_code == 0
     assert "--depth" in result.stdout
+    assert "--language" in result.stdout
     assert "--max-files" in result.stdout
 
 

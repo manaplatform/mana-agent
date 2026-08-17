@@ -78,6 +78,7 @@ def test_analyze_uses_injected_llm_and_saves_output(tmp_path: Path) -> None:
 
     # Called with compact evidence.
     assert isinstance(seen["evidence"], AnalyzeEvidence)
+    assert seen["evidence"].language == "en"
     assert result.errors == []
 
     # LLM output saved into the artifacts.
@@ -97,6 +98,24 @@ def test_analyze_uses_injected_llm_and_saves_output(tmp_path: Path) -> None:
     assert (out_dir / "evidence.json").exists()
     assert (out_dir / "llm_summary.md").exists()
     assert "fake-model" in (out_dir / "llm_summary.md").read_text(encoding="utf-8")
+
+
+def test_analyze_passes_persian_language_to_llm_evidence(tmp_path: Path) -> None:
+    repo = _sample_repo(tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_analyzer(evidence: AnalyzeEvidence, depth: str, root: Path) -> LLMAnalyzeResult:
+        seen["language"] = evidence.language
+        return _fake_llm_result()
+
+    ProjectAnalyzeService().run(
+        repo,
+        repo / ".mana" / "analyze",
+        options=ProjectAnalyzeOptions(language="fa"),
+        llm_analyzer=fake_analyzer,
+    )
+
+    assert seen["language"] == "fa"
 
 
 def test_analyze_llm_failure_falls_back_without_crashing(tmp_path: Path) -> None:

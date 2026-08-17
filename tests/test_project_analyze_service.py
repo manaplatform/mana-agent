@@ -73,6 +73,20 @@ def test_project_analyze_writes_required_artifacts_and_valid_json(tmp_path: Path
         json.loads((out_dir / name).read_text(encoding="utf-8"))
 
 
+def test_project_analyze_records_selected_language_in_report_and_evidence(tmp_path: Path) -> None:
+    repo = _sample_repo(tmp_path)
+    result = ProjectAnalyzeService().run(
+        repo,
+        repo / ".mana" / "analyze",
+        options=ProjectAnalyzeOptions(language="fa"),
+    )
+
+    assert result.report["analysis_language"] == "fa"
+    assert result.report["llm_analysis"]["available"] is False
+    evidence = json.loads((repo / ".mana" / "analyze" / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["language"] == "fa"
+
+
 def test_project_analyze_inventory_ignores_noise_and_classifies_files(tmp_path: Path) -> None:
     repo = _sample_repo(tmp_path)
     result = ProjectAnalyzeService().run(repo, repo / ".mana" / "analyze", options=ProjectAnalyzeOptions(max_file_size_kb=1))

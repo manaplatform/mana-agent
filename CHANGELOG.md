@@ -4010,3 +4010,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Preserved informational conversation lane metadata and limited strict follow-up classification to routing models that expose the required structured-output contract; generic recovery still excludes completed tasks.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py -q`.
+## 2026-08-18
+
+- Added English/Persian language selection to repository analysis across the CLI, dashboard, API request, LLM prompt, and generated evidence metadata.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_project_analyze_service.py tests/test_cli_smoke.py -q`.

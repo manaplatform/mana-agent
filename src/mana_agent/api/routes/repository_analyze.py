@@ -33,6 +33,7 @@ def _require_mutation_token(authorization: str | None) -> None:
 
 class RepositoryAnalyzeRequest(BaseModel):
     depth: Literal["quick", "normal", "full"] = "normal"
+    language: Literal["en", "fa"] = "en"
     with_llm: bool = True
     conversation_id: str = ""
     root: str | None = None
@@ -100,6 +101,7 @@ def start_repository_analyze(
             "repository_id": resolved_id,
             "root": str(root),
             "depth": payload.depth,
+            "language": payload.language,
             "with_llm": payload.with_llm,
             "conversation_id": payload.conversation_id,
         },
@@ -138,7 +140,7 @@ def start_repository_analyze(
         result = ProjectAnalyzeService().run(
             root,
             artifact_dir,
-            options=ProjectAnalyzeOptions(depth=payload.depth, output_format="both"),
+            options=ProjectAnalyzeOptions(depth=payload.depth, language=payload.language, output_format="both"),
             llm_analyzer=llm_analyzer,
         )
         artifacts = list(getattr(result, "artifacts", {}) or {})

@@ -837,12 +837,15 @@ Schema:
 PROJECT_ANALYZE_HUMAN_TEMPLATE = """
 Repository: {project_name}
 Analysis depth: {depth}
+Output language: {language} (use Persian when `fa`, otherwise English)
 
 Structured evidence JSON:
 {evidence_json}
 
 Generate the analysis JSON object now.
 Use only the evidence above.
+Write every human-readable field in the requested output language. Keep file paths,
+commands, identifiers, and JSON keys unchanged.
 """.strip()
 
 
