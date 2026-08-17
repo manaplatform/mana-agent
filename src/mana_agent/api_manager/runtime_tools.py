@@ -97,6 +97,14 @@ class _WorkflowDecision(_Decision):
         return self
 
 
+class _WorkflowTerminal(_Decision):
+    outcome: Literal["unsupported_documentation"]
+    documentation_ref: str = Field(
+        min_length=71,
+        max_length=71,
+        pattern=r"^sha256:[a-f0-9]{64}$",
+    )
+    reason: str = Field(min_length=1)
 class _Import(_Decision):
     name: str = Field(min_length=1, max_length=160)
     text: str = Field(default="", max_length=10 * 1024 * 1024)
@@ -214,6 +222,9 @@ def _json(
         return json.dumps(safe_result(operation), ensure_ascii=False, default=str)
 
 
+
+
+
 def build_api_manager_langchain_tools(
     root: str | Path,
     *,
@@ -262,6 +273,7 @@ def build_api_manager_langchain_tools(
             session_id=session_id,
             source_decision_id=source_decision_id,
         )
+        
 
     def import_docs(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
@@ -367,7 +379,20 @@ def build_api_manager_langchain_tools(
             session_id=session_id,
             source_decision_id=source_decision_id,
         )
+        
+    def workflow_terminal(**values: Any) -> str:
+        session_id, source_decision_id = _resolve_identities(values)
+        values["session_id"] = session_id
+        values["source_decision_id"] = source_decision_id
 
+        terminal = _WorkflowTerminal(**values)
+
+        return encode(
+            lambda: terminal.model_dump(mode="json"),
+            session_id=session_id,
+            source_decision_id=source_decision_id,
+        )
+        
     def inspect_docs(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
         values["session_id"] = session_id
@@ -459,6 +484,19 @@ def build_api_manager_langchain_tools(
             ),
             args_schema=_WorkflowDecision,
             func=workflow_decide,
+        ),
+        StructuredTool.from_function(
+            name="api_workflow_terminal",
+            description=(
+                "Record an evidence-backed terminal API workflow outcome when complete "
+                "documentation inspection proves that no usable API definition can be "
+                "safely imported or executed. Use only after api_docs_inspect has fully "
+                "consumed the inspected documentation and truncated=false. "
+                "Supply the exact documentation_ref returned by that inspection. "
+                "This tool never imports, previews, or executes an API request."
+            ),
+            args_schema=_WorkflowTerminal,
+            func=workflow_terminal,
         ),
         StructuredTool.from_function(
             name="api_docs_inspect",
@@ -564,6 +602,7 @@ def build_api_manager_langchain_tools(
 
 API_MANAGER_TOOL_NAMES = (
     "api_workflow_decide",
+    "api_workflow_terminal",
     "api_docs_inspect",
     "api_docs_import",
     "api_docs_import_semantic",

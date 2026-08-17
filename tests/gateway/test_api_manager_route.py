@@ -867,3 +867,211 @@ def test_api_approval_resumes_continuation_and_completes_model_intent(tmp_path: 
 
 
 
+
+def test_api_workflow_accepts_unsupported_terminal_after_complete_inspection() -> None:
+    documentation_ref = "sha256:" + ("a" * 64)
+
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect, import, and call API",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": (
+                                "The supplied documentation must be inspected "
+                                "before attempting the API lifecycle."
+                            ),
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "reference": "https://example.test/docs",
+                            "documentation_ref": documentation_ref,
+                            "content_type": "text/html",
+                            "bytes": 2040,
+                            "text": "A" * 2000,
+                            "offset": 0,
+                            "limit": 2000,
+                            "next_offset": 2000,
+                            "truncated": True,
+                            "more_available": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "reference": "https://example.test/docs",
+                            "documentation_ref": documentation_ref,
+                            "content_type": "text/html",
+                            "bytes": 2040,
+                            "text": "No usable API definition is documented.",
+                            "offset": 2000,
+                            "limit": 2000,
+                            "next_offset": None,
+                            "truncated": False,
+                            "more_available": False,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_workflow_terminal",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "outcome": "unsupported_documentation",
+                            "documentation_ref": documentation_ref,
+                            "reason": (
+                                "The complete inspected source contains no "
+                                "usable API definition that can be safely imported."
+                            ),
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["error_code"] == ""
+
+    assert completion["completed_actions"] == [
+        "documentation_inspection"
+    ]
+
+    assert completion["waived_actions"] == [
+        "integration_import",
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    ]
+
+    assert completion["missing_actions"] == []
+    assert completion["unexpected_actions"] == []
+
+    assert completion["terminal_outcome"] == "unsupported_documentation"
+    assert completion["terminal_evidence"]["documentation_ref"] == documentation_ref
+    assert (
+        completion["terminal_evidence"]["outcome"]
+        == "unsupported_documentation"
+    )
+    
+def test_api_workflow_rejects_unsupported_terminal_before_complete_inspection() -> None:
+    documentation_ref = "sha256:" + ("b" * 64)
+
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect, import, and call API",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": (
+                                "The supplied documentation must be inspected "
+                                "before attempting the API lifecycle."
+                            ),
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "reference": "https://example.test/docs",
+                            "documentation_ref": documentation_ref,
+                            "content_type": "text/html",
+                            "bytes": 8000,
+                            "text": "A" * 2000,
+                            "offset": 0,
+                            "limit": 2000,
+                            "next_offset": 2000,
+                            "truncated": True,
+                            "more_available": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_workflow_terminal",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "outcome": "unsupported_documentation",
+                            "documentation_ref": documentation_ref,
+                            "reason": "No API definition was found in the preview.",
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_terminal_invalid"
+
+    assert (
+        "complete contiguous documentation inspection"
+        in completion["message"]
+    )
+
+    assert completion["completed_actions"] == []
+    assert completion["waived_actions"] == []
+
+    assert completion["missing_actions"] == [
+        "documentation_inspection",
+        "integration_import",
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    ]
+
+    assert completion["terminal_outcome"] == ""
+    assert completion["terminal_evidence"] == {}
