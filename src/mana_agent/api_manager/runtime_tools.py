@@ -133,8 +133,10 @@ class _Inspect(_Decision):
     text: str = Field(default="", max_length=10 * 1024 * 1024)
     path: str = ""
     url: str = ""
-
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=2000, ge=1, le=16_000)
     @model_validator(mode="after")
+    
     def exactly_one_source(self) -> "_Inspect":
         if sum(bool(item) for item in (self.text, self.path, self.url)) != 1:
             raise ValueError("Select exactly one of text, path, or url.")
@@ -373,7 +375,12 @@ def build_api_manager_langchain_tools(
         req = _Inspect(**values)
         return encode(
             lambda: manager.inspect_documentation(
-                text=req.text, path=req.path, url=req.url, session_id=session_id
+                text=req.text,
+                path=req.path,
+                url=req.url,
+                session_id=session_id,
+                offset=req.offset,
+                limit=req.limit,
             ),
             session_id=session_id,
             source_decision_id=source_decision_id,
@@ -458,7 +465,11 @@ def build_api_manager_langchain_tools(
             description=(
                 "Read one authorized API documentation URL, workspace file, or pasted text source "
                 "through the API network/file policy. Returns source evidence and documentation_ref "
-                "and never infers, imports, or executes an operation."
+                "and never infers, imports, or executes an operation. "
+                "If truncated=true or more_available=true, the inspection is incomplete. "
+                "Continue reading the same source using next_offset as offset before concluding "
+                "that an API specification, endpoint, operation, parameter, or authentication "
+                "detail is absent."
             ),
             args_schema=_Inspect,
             func=inspect_docs,
