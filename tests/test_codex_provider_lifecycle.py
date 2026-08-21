@@ -9,6 +9,7 @@ from mana_agent.integrations.codex.provider import (
     CodexCredentialStore,
     CodexExecutionMode,
     CodexExecutionError,
+    CodexExecutionMetadata,
     CodexExecutionState,
     CodexUsage,
     CodexUsageProvider,
@@ -132,6 +133,31 @@ def test_execution_persists_routing_reason_and_accounting_record(tmp_path):
     assert '"reason": ["API resource selected"]' in routing
 
 
+def test_codex_metadata_serializes_stable_lifecycle_values():
+    metadata = CodexExecutionMetadata(
+        "execution-1",
+        "codex",
+        CodexExecutionMode.SUBSCRIPTION,
+        CodexExecutionState.FALLBACK_SELECTED,
+        "codex/subscription",
+        fallback_path=({"from": "subscription", "to": "api", "reason": "quota exhausted"},),
+        routing_reason=("quota exhausted", "API resource selected"),
+        decision_id="decision-1",
+    )
+
+    assert metadata.as_dict() == {
+        "execution_id": "execution-1",
+        "provider": "codex",
+        "mode": "subscription",
+        "state": "FALLBACK_SELECTED",
+        "selected_resource": "codex/subscription",
+        "accounting_reference": "",
+        "fallback_path": [{"from": "subscription", "to": "api", "reason": "quota exhausted"}],
+        "failure_reason": "",
+        "fallback_failure_reason": "",
+        "routing_reason": ["quota exhausted", "API resource selected"],
+        "decision_id": "decision-1",
+    }
 def test_subscription_execution_records_identity_quota_and_reset_cycle(tmp_path):
     class Backend:
         async def execute(self, task, workspace):

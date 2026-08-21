@@ -83,7 +83,17 @@ def _provider_metadata(value: Any) -> dict[str, Any]:
         value = asdict(value)
     if not isinstance(value, dict):
         raise TypeError("provider_metadata must be a mapping or serializable model")
-    return dict(value)
+
+    def normalize(item: Any) -> Any:
+        if hasattr(item, "value") and not isinstance(item, (str, bytes, dict, list, tuple)):
+            return normalize(item.value)
+        if isinstance(item, dict):
+            return {str(key): normalize(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [normalize(child) for child in item]
+        return item
+
+    return normalize(value)
 
 
 class ExecutionSupervisor:
@@ -560,6 +570,7 @@ class ExecutionSupervisor:
                         result_kind=result_kind,
                         payload=result_payload,
                         error_metadata=err_meta,
+                        provider_metadata=_provider_metadata(task.provider_metadata),
                         created_at=self.clock(),
                         completed_at=self.clock(),
                     )
@@ -646,18 +657,22 @@ class ExecutionSupervisor:
                 if state in TERMINAL_STATES:
                     existing_result.completed_at = existing_result.completed_at or self.clock()
                 changed = True
-            if provider_metadata is not None:
+            metadata_to_merge = provider_metadata if provider_metadata is not None else task.provider_metadata
+            if metadata_to_merge:
                 merged_provider_metadata = {
                     **existing_result.provider_metadata,
-                    **_provider_metadata(provider_metadata),
+                    **_provider_metadata(metadata_to_merge),
                 }
                 if merged_provider_metadata != existing_result.provider_metadata:
                     existing_result.provider_metadata = merged_provider_metadata
                     changed = True
-            if error_metadata is not None:
+            effective_error_metadata = error_metadata
+            if effective_error_metadata is None and task.provider_metadata.get("state") == "AUTH_REQUIRED":
+                effective_error_metadata = {"state": "AUTH_REQUIRED", "action": "reauthenticate"}
+            if effective_error_metadata is not None:
                 merged_error_metadata = {
                     **existing_result.error_metadata,
-                    **error_metadata,
+                    **effective_error_metadata,
                 }
                 if merged_error_metadata != existing_result.error_metadata:
                     existing_result.error_metadata = merged_error_metadata
@@ -710,6 +725,9 @@ class ExecutionSupervisor:
             "recovery_reason": task.recovery_reason,
             "is_resumable": is_resumable,
         }
+        normalized_provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
+        if normalized_provider_metadata.get("state") == "AUTH_REQUIRED":
+            err_meta = {"state": "AUTH_REQUIRED", "action": "reauthenticate", **err_meta}
         result = EscrowResult(
             task_id=task.task_id,
             execution_id=task.task_id,
@@ -736,7 +754,7 @@ class ExecutionSupervisor:
             result_kind=result_kind,
             payload=result_payload,
             error_metadata=err_meta,
-            provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
+            provider_metadata=normalized_provider_metadata,
             created_at=self.clock(),
             completed_at=self.clock() if state in TERMINAL_STATES else None,
         )
@@ -749,6 +767,26 @@ class ExecutionSupervisor:
         self.store.save_result(result)
         self._emit("result_stored", task, result_id=result.result_id, status=status.value)
         return result
+
+    def persist_provider_metadata(
+        self,
+        task_id: str,
+        provider_metadata: dict[str, Any] | Any,
+    ) -> TaskRecord:
+        """Persist provider lifecycle evidence before terminal publication.
+
+        Providers remain unaware of supervisor storage. This method lets an
+        execution adapter record failure metadata while the task is still
+        running, so a later failure or restart cannot discard the evidence.
+        """
+        incoming = _provider_metadata(provider_metadata)
+
+        def update(task: TaskRecord) -> None:
+            task.provider_metadata = {**task.provider_metadata, **incoming}
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, update)
+        return task
 
 
     def queue(self, task_id: str) -> TaskRecord:

@@ -152,6 +152,40 @@ def test_codex_auth_failure_is_durable_and_actionable(runtime):
     assert restored.error_metadata["action"] == "reauthenticate"
 
 
+def test_codex_failed_fallback_preserves_both_failures_in_escrow(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, runtime_provider="codex")
+    metadata = {
+        "execution_id": task.task_id,
+        "provider": "codex",
+        "mode": "subscription",
+        "state": "RESOURCE_UNAVAILABLE",
+        "selected_resource": "codex/subscription",
+        "failure_reason": "subscription quota exhausted",
+        "fallback_failure_reason": "API resource unavailable",
+        "fallback_path": [
+            {"from": "subscription", "to": "api", "reason": "quota exhausted"},
+            {"from": "api", "to": "", "reason": "API resource unavailable"},
+        ],
+        "accounting_reference": "codex-accounting:execution-1",
+        "decision_id": "codex-decision:execution-1",
+    }
+    supervisor.persist_provider_metadata(task.task_id, metadata)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="API resource unavailable")
+    result = supervisor.record_terminal_result(
+        task.task_id,
+        state=ExecutionState.FAILED,
+        reason="API resource unavailable",
+    )
+
+    restarted = ExecutionSupervisor(supervisor.config, startup_recovery=False)
+    restored = restarted.store.get_result(result.result_id)
+    assert restored.provider_metadata["failure_reason"] == "subscription quota exhausted"
+    assert restored.provider_metadata["fallback_failure_reason"] == "API resource unavailable"
+    assert len(restored.provider_metadata["fallback_path"]) == 2
+    assert restored.provider_metadata["accounting_reference"] == "codex-accounting:execution-1"
+
+
 def decision(task_id, **changes):
     options = {
         "decision_id": "decision_recovery",

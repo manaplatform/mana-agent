@@ -1112,7 +1112,13 @@ class LaneCoordinator:
         actual_cost: float | None = None,
         verification_state: Mapping[str, Any] | None = None,
         error: str = "",
+        provider_metadata: Mapping[str, Any] | Any | None = None,
     ) -> LaneExecution:
+        effective_provider_metadata = provider_metadata
+        if effective_provider_metadata is None and isinstance(verification_state, Mapping):
+            # Coding adapters expose provider evidence under this typed result
+            # field; only that explicit field is promoted to supervisor escrow.
+            effective_provider_metadata = verification_state.get("codex_metadata")
         with self._condition:
             execution = self._executions[task_id]
             execution.changed_files = self.canonical_paths(changed_files)
@@ -1153,6 +1159,8 @@ class LaneCoordinator:
                     parent.budget.actual_cost_known = False
                 parent.updated_at = _iso()
             execution.verification_state.update(dict(verification_state or {}))
+            if effective_provider_metadata is not None:
+                self.execution_supervisor.persist_provider_metadata(task_id, effective_provider_metadata)
             execution.error = error
             execution.updated_at = execution.last_heartbeat = _iso()
             accounted_input_tokens = execution.budget.consumed_input_tokens
@@ -1231,6 +1239,7 @@ class LaneCoordinator:
                     },
                     token_usage=accounted_input_tokens + accounted_output_tokens,
                     actual_cost=(accounted_actual_cost if execution.budget.actual_cost_known else None),
+                    provider_metadata=effective_provider_metadata,
                 )
             except CompletionVerificationError as exc:
                 execution.error = str(exc)
@@ -1303,6 +1312,13 @@ class LaneCoordinator:
                     reason=error or "canonical execution budget exhausted",
                 )
         else:
+            if effective_provider_metadata is not None:
+                self.execution_supervisor.record_terminal_result(
+                    task_id,
+                    state=ExecutionState.FAILED,
+                    reason=error or f"lane execution ended as {state.value}",
+                    provider_metadata=effective_provider_metadata,
+                )
             supervised = self.execution_supervisor.store.get_task(task_id)
             if supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
                 self.execution_supervisor.transition(

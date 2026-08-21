@@ -4054,3 +4054,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Integrated Codex execution metadata with durable supervisor tasks, checkpoints, and result escrow, including provider state, selected resource, routing evidence, fallback history, accounting reference, and decision ID.
   - User verification required: `PYTHONPATH=src python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py -q`.
+## 2026-08-21
+
+- Integrated Codex lifecycle metadata with durable execution tasks, checkpoints, failure results, and escrow lookup, including fallback failure evidence and reauthentication guidance.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py`

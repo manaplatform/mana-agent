@@ -386,6 +386,23 @@ class CodexExecutionMetadata:
     failure_reason: str = ""
     routing_reason: tuple[str, ...] = ()
     decision_id: str = ""
+    fallback_failure_reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the stable, secret-free supervisor evidence envelope."""
+        return {
+            "execution_id": self.execution_id,
+            "provider": self.provider,
+            "mode": self.mode.value,
+            "state": self.state.value,
+            "selected_resource": self.selected_resource,
+            "accounting_reference": self.accounting_reference,
+            "fallback_path": [dict(item) for item in self.fallback_path],
+            "failure_reason": self.failure_reason,
+            "fallback_failure_reason": self.fallback_failure_reason,
+            "routing_reason": list(self.routing_reason),
+            "decision_id": self.decision_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +516,7 @@ class CodexProvider:
                     {"from": self.fallback_provider.mode.value, "to": "", "reason": str(exc)},
                 ),
                 failure_reason=failure.reason,
+                fallback_failure_reason=str(exc),
             )
             raise CodexExecutionError(
                 failure.reason, kind=failure.kind, state=failure.state,
@@ -506,7 +524,7 @@ class CodexProvider:
             ) from exc
         completed_metadata = getattr(result, "codex_metadata", None)
         _attach_codex_metadata(result, CodexExecutionMetadata(
-            task.task_id, "codex", self.fallback_provider.mode, CodexExecutionState.COMPLETED,
+            task.task_id, "codex", self.fallback_provider.mode, CodexExecutionState.FALLBACK_SELECTED,
             f"codex/{self.fallback_provider.mode.value}",
             accounting_reference=getattr(completed_metadata, "accounting_reference", ""),
             fallback_path=({"from": self.mode.value, "to": self.fallback_provider.mode.value, "reason": failure.reason},),
