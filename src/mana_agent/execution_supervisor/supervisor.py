@@ -102,6 +102,7 @@ class ExecutionSupervisor:
         verifier: ArtifactVerifier | None = None,
         event_sink: EventSink | None = None,
         clock: Clock = utc_now,
+        startup_recovery: bool | None = None,
     ) -> None:
         self.config = config or ExecutionSupervisorConfig()
         self.store = store or LocalExecutionStore(self.config.root)
@@ -111,7 +112,11 @@ class ExecutionSupervisor:
         self.clock = clock
         self._last_live_heartbeat: dict[str, datetime] = {}
         self.startup_recovery_summary: RecoverySummary | None = None
-        if self.config.startup_recovery:
+        if (
+            self.config.startup_recovery
+            if startup_recovery is None
+            else startup_recovery
+        ):
             self.reconnect_tree()
             self.startup_recovery_summary = self.recover()
 
