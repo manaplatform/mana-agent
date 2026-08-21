@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from mana_agent.config.settings import mana_home
+from mana_agent.model_routing.models import RoutingResourceScore
 
 
 class CodexExecutionMode(str, Enum):
@@ -31,6 +32,10 @@ class CodexAuthenticationStatus(str, Enum):
     INVALID = "invalid"
     REVOKED = "revoked"
     MISSING = "missing"
+
+
+class CodexIdentityError(RuntimeError):
+    """Normalized error from the Luna identity boundary."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +168,13 @@ class CodexAuthenticationService:
         except (OSError, RuntimeError, ValueError):
             return CodexAccountStatus(CodexAuthenticationStatus.EXPIRED, credential.account_identity, credential.expires_at, "expired", "refresh failed")
 
+    def recover_session(self) -> CodexAccountStatus:
+        """Attempt one explicit Luna refresh and preserve AUTH_REQUIRED semantics."""
+        status = self.refresh_if_needed()
+        if status.status is CodexAuthenticationStatus.EXPIRED:
+            return CodexAccountStatus(CodexAuthenticationStatus.EXPIRED, status.account_identity, status.expires_at, status.refresh_state, "subscription session requires authentication")
+        return status
+
     def logout(self) -> CodexAccountStatus:
         credential = self.store.load(CredentialKind.SUBSCRIPTION)
         if credential is not None and self.identity is not None:
@@ -194,6 +206,16 @@ class CodexUsage:
     @property
     def available(self) -> bool:
         return self.capacity_status == "known" and self.authenticated and (self.expires_at is None or self.expires_at > time.time()) and (self.quota_remaining is None or self.quota_remaining > 0)
+
+    @property
+    def quota_health(self) -> float:
+        if self.capacity_status != "known":
+            return 0.0
+        if self.mode is CodexExecutionMode.API:
+            return 1.0 if self.authenticated else 0.0
+        if self.quota_capacity in (None, 0):
+            return 0.0
+        return max(0.0, min(1.0, float(self.quota_remaining or 0.0) / self.quota_capacity))
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self) | {"mode": self.mode.value, "available": self.available}
@@ -281,9 +303,17 @@ class CodexAccountingStore:
 
 
 @dataclass(frozen=True, slots=True)
+class CodexFallbackDecision:
+    selected_provider: str
+    selected_mode: CodexExecutionMode
+    reason: str
+    attempted_modes: tuple[CodexExecutionMode, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CodexPolicy:
     allowed_tasks: Mapping[CodexExecutionMode, frozenset[str]] = field(default_factory=lambda: {
-        CodexExecutionMode.API: frozenset({"automation", "background_jobs", "ci"}),
+        CodexExecutionMode.API: frozenset({"automation", "background_jobs", "ci", "coding", "refactor", "review"}),
         CodexExecutionMode.SUBSCRIPTION: frozenset({"coding", "refactor", "review"}),
     })
 
@@ -306,12 +336,13 @@ class CodexProvider:
 
     name = "codex"
 
-    def __init__(self, backend: Any, *, mode: CodexExecutionMode, credentials: CodexCredentialStore | None = None, usage: CodexUsageStore | None = None, usage_provider: CodexUsageProvider | None = None) -> None:
+    def __init__(self, backend: Any, *, mode: CodexExecutionMode, credentials: CodexCredentialStore | None = None, usage: CodexUsageStore | None = None, usage_provider: CodexUsageProvider | None = None, accounting: CodexAccountingStore | None = None) -> None:
         self.backend = backend
         self.mode = mode
         self.credentials = credentials or CodexCredentialStore()
         self.usage = usage or CodexUsageStore()
         self.usage_provider = usage_provider
+        self.accounting = accounting or CodexAccountingStore()
 
     @property
     def credential(self) -> CodexCredential | None:
@@ -328,6 +359,20 @@ class CodexProvider:
         value = self.resource_usage
         return bool(value and value.available)
 
+    async def execute(self, task: Any, workspace: Any) -> Any:
+        result = await self.backend.execute(task, workspace)
+        usage = result.token_usage or {}
+        self.accounting.record(CodexAccountingRecord(
+            "codex", self.mode, task.task_id,
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            usd_cost=(float(usage.get("usd_cost", self.resource_usage.estimated_cost_usd if self.resource_usage else 0.0)) if self.mode is CodexExecutionMode.API else None),
+            quota_consumed=(float(usage.get("quota_consumed", self.resource_usage.quota_consumed if self.resource_usage else 0.0) or 0) if self.mode is CodexExecutionMode.SUBSCRIPTION else 0.0),
+            account_identity=self.credential.account_identity if self.credential else "",
+            reset_at=self.resource_usage.reset_at if self.resource_usage else None,
+        ))
+        return result
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self.backend, name)
 
@@ -343,19 +388,55 @@ def choose_codex_mode(usages: Mapping[CodexExecutionMode, CodexUsage], task_type
     raise RuntimeError("No authenticated Codex resource satisfies the task policy and quota")
 
 
+def choose_codex_resource(usages: Mapping[CodexExecutionMode, CodexUsage], task_type: str, policy: CodexPolicy = CodexPolicy()) -> CodexFallbackDecision:
+    """Choose Codex's best resource and retain why fallback occurred."""
+    subscription = usages.get(CodexExecutionMode.SUBSCRIPTION)
+    if subscription is not None and policy.allows(CodexExecutionMode.SUBSCRIPTION, task_type) and not subscription.authenticated:
+        raise CodexIdentityError("Codex subscription authentication is required")
+    candidates = [
+        (usage.quota_health + (0.35 if mode is CodexExecutionMode.SUBSCRIPTION and task_type in {"coding", "refactor", "review"} else 0.0), mode, usage)
+        for mode, usage in usages.items()
+        if policy.allows(mode, task_type)
+    ]
+    candidates.sort(key=lambda item: (-item[0], item[1].value))
+    attempted: list[CodexExecutionMode] = []
+    for _score, mode, usage in candidates:
+        attempted.append(mode)
+        if usage.available:
+            reason = "subscription quota healthy" if mode is CodexExecutionMode.SUBSCRIPTION else "API resource available"
+            if attempted and attempted[0] is not mode:
+                reason = f"{mode.value} selected after {attempted[0].value} resource unavailable"
+            return CodexFallbackDecision("codex", mode, reason, tuple(attempted))
+    if any(usage.authenticated is False for usage in usages.values()):
+        raise CodexIdentityError("Codex resource authentication is required")
+    raise RuntimeError("No authenticated Codex resource satisfies the task policy and quota")
+
+
+def codex_resource_score(provider: CodexProvider, task_type: str, policy: CodexPolicy = CodexPolicy()) -> RoutingResourceScore:
+    usage = provider.resource_usage
+    if not policy.allows(provider.mode, task_type):
+        return RoutingResourceScore(False, reason=f"Codex {provider.mode.value} mode is disallowed for task type {task_type!r}")
+    if usage is None:
+        return RoutingResourceScore(False, resource_confidence=0.0, reason="Codex capacity is unknown")
+    auth = 1.0 if usage.authenticated else 0.0
+    reason = "Codex authentication is required" if not usage.authenticated else f"Codex {provider.mode.value} capacity is {usage.capacity_status}"
+    return RoutingResourceScore(usage.available, usage.quota_health, usage.quota_health, auth, reason)
+
+
 def codex_resource_availability(provider: CodexProvider, task_type: str, policy: CodexPolicy = CodexPolicy()) -> tuple[bool, str]:
     """Adapter for ModelRouter's resource gate."""
     if not policy.allows(provider.mode, task_type):
         return False, f"Codex {provider.mode.value} mode is disallowed for task type {task_type!r}"
-    if not provider.available:
-        return False, f"Codex {provider.mode.value} authentication or quota is unavailable"
+    score = codex_resource_score(provider, task_type, policy)
+    if not score.available:
+        return False, score.reason
     return True, ""
 
 
 __all__ = [
-    "CodexAccountStatus", "CodexAccountingRecord", "CodexAccountingStore", "CodexAuthenticationService",
+    "CodexAccountStatus", "CodexAccountingRecord", "CodexAccountingStore", "CodexAuthenticationService", "CodexFallbackDecision", "CodexIdentityError",
     "CodexAuthenticationStatus", "CodexCredential", "CodexCredentialStore", "CodexExecutionMode",
     "CodexIdentityClient", "CodexPolicy", "CodexProvider", "CodexUsage", "CodexUsageClient",
-    "CodexUsageProvider", "CodexUsageStore", "CredentialKind", "choose_codex_mode",
-    "codex_resource_availability",
+    "CodexUsageProvider", "CodexUsageStore", "CredentialKind", "choose_codex_mode", "choose_codex_resource",
+    "codex_resource_availability", "codex_resource_score",
 ]

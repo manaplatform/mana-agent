@@ -47,7 +47,7 @@ def _credential_status(value):
 
 
 def _usage_status(value):
-    return {"capacity_status": "unknown", "available": False} if value is None else value.as_dict()
+    return {"capacity_status": "unknown", "available": False, "capacity_score": 0.0} if value is None else value.as_dict() | {"capacity_score": round(value.quota_health, 3)}
 
 
 @codex_app.command("auth")

@@ -21,6 +21,7 @@ from mana_agent.model_routing.models import (
     RoutingOutcome,
     RoutingPolicy,
     RoutingRequest,
+    RoutingResourceScore,
     RoutingMode,
     RiskLevel,
     level_value,
@@ -49,13 +50,14 @@ _LATENCY = {LatencyClass.INTERACTIVE: 0, LatencyClass.STANDARD: 1, LatencyClass.
 class ModelRouter:
     """Deterministic scoring policy; provider execution intentionally lives elsewhere."""
 
-    def __init__(self, profiles: Iterable[ModelProfile], *, history: RoutingHistory | None = None, policy: RoutingPolicy | None = None, resource_availability: Callable[[ModelProfile, RoutingRequest], tuple[bool, str]] | None = None) -> None:
+    def __init__(self, profiles: Iterable[ModelProfile], *, history: RoutingHistory | None = None, policy: RoutingPolicy | None = None, resource_availability: Callable[[ModelProfile, RoutingRequest], tuple[bool, str]] | None = None, resource_scoring: Callable[[ModelProfile, RoutingRequest], RoutingResourceScore] | None = None) -> None:
         self.profiles = tuple(sorted(profiles, key=lambda item: item.key))
         if len({item.key for item in self.profiles}) != len(self.profiles):
             raise ValueError("model profile registry contains duplicate provider/model IDs")
         self.history = history or InMemoryRoutingHistory()
         self.policy = policy or RoutingPolicy()
         self.resource_availability = resource_availability
+        self.resource_scoring = resource_scoring
         self.accounting = ModelTokenAccountingService(
             ModelTokenProfileResolver(self.profiles, unknown_policy="require_metadata")
         )
@@ -163,6 +165,10 @@ class ModelRouter:
             available, reason = self.resource_availability(profile, request)
             if not available:
                 reasons.append(reason or "provider resource is unavailable")
+        if self.resource_scoring is not None:
+            resource = self.resource_scoring(profile, request)
+            if not resource.available:
+                reasons.append(resource.reason or "provider resource is unavailable")
         if request.role not in profile.supported_roles and "*" not in profile.supported_roles:
             reasons.append(f"role {request.role!r} is unsupported")
         missing_tools = request.required_tools - profile.supported_tools
@@ -230,6 +236,7 @@ class ModelRouter:
             cost_score = 1.0 / (1.0 + max(0.0, unit_cost))
         latency_score = 1.0 - (_LATENCY[profile.latency_class] * 0.25)
         capability = 1.0
+        resource = self.resource_scoring(profile, request) if self.resource_scoring is not None else RoutingResourceScore(True, 1.0, 1.0, 1.0)
         weights = self.policy.weights
         score = sum((
             weights.get("capability", 0.0) * capability,
@@ -238,6 +245,9 @@ class ModelRouter:
             weights.get("language", 0.0) * language,
             weights.get("cost", 0.0) * (1.4 - demand) * cost_score,
             weights.get("latency", 0.0) * latency_score,
+            weights.get("provider_capacity", 0.0) * resource.provider_capacity,
+            weights.get("quota_health", 0.0) * resource.quota_health,
+            weights.get("resource_confidence", 0.0) * resource.resource_confidence,
         ))
         penalty = self._recent_failure_penalty(profile)
         score = max(0.0, score - penalty)
@@ -247,6 +257,7 @@ class ModelRouter:
             f"quality evidence={quality:.3f}, historical reliability={historical:.3f}",
             f"repository language fit={language:.3f}",
             f"estimated cost={'unknown' if estimated_cost is None else f'{estimated_cost:.6f}'}, latency={profile.latency_class.value}",
+            f"provider capacity={resource.provider_capacity:.3f}, quota health={resource.quota_health:.3f}, resource confidence={resource.resource_confidence:.3f}",
         )
         estimated_input, estimated_output = self._estimated_tokens(profile, request)
         return _Scored(

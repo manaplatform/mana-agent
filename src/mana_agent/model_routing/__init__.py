@@ -17,6 +17,7 @@ from mana_agent.model_routing.models import (
     RoutingOutcome,
     RoutingPolicy,
     RoutingRequest,
+    RoutingResourceScore,
 )
 from mana_agent.model_routing.router import ModelRouter
 
@@ -42,4 +43,5 @@ __all__ = [
     "RoutingOutcome",
     "RoutingPolicy",
     "RoutingRequest",
+    "RoutingResourceScore",
 ]

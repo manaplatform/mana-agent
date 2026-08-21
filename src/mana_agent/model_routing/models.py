@@ -237,6 +237,23 @@ class ModelProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutingResourceScore:
+    """Provider-owned resource evidence used by deterministic routing."""
+
+    available: bool
+    provider_capacity: float = 0.0
+    quota_health: float = 0.0
+    resource_confidence: float = 0.0
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        for name in ("provider_capacity", "quota_health", "resource_confidence"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+
+
+@dataclass(frozen=True, slots=True)
 class RoutingRequest:
     role: str
     task_description: str
@@ -437,6 +454,9 @@ class RoutingPolicy:
         "language": 0.10,
         "cost": 0.15,
         "latency": 0.10,
+        "provider_capacity": 0.08,
+        "quota_health": 0.08,
+        "resource_confidence": 0.04,
     })
 
     def __post_init__(self) -> None:

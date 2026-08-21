@@ -60,6 +60,20 @@ def test_expired_subscription_refreshes_and_invalid_session_is_not_available(tmp
     assert not invalid.available
 
 
+def test_refresh_failure_preserves_expired_auth_required_state(tmp_path, monkeypatch):
+    monkeypatch.setattr("mana_agent.integrations.codex.provider.time.time", lambda: 1500)
+    store = CodexCredentialStore(tmp_path)
+    store.save(CodexCredential(CredentialKind.SUBSCRIPTION, "ref", "acct", expires_at=1000, authenticated=True))
+
+    class FailingIdentity(Identity):
+        def refresh(self, credential):
+            raise RuntimeError("session revoked by Luna")
+
+    status = CodexAuthenticationService(store, FailingIdentity()).recover_session()
+    assert status.status is CodexAuthenticationStatus.EXPIRED
+    assert "authentication" in status.reason
+
+
 def test_usage_provider_normalizes_api_and_subscription_without_mixing_billing(tmp_path):
     credentials = CodexCredential(CredentialKind.API, "ref", authenticated=True)
     api = CodexUsageProvider(UsageClient({"total_tokens": 12, "estimated_cost_usd": 0.03}), store=CodexUsageStore(tmp_path), clock=lambda: 10)

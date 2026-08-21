@@ -4022,3 +4022,6 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Extended the existing Codex dual-mode provider with Luna identity lifecycle states, injectable subscription authentication, TTL-aware provider usage normalization, explicit unknown capacity handling, quota-aware subscription/API selection, separated resource accounting records, and richer `codex status` output.
   - User verification required: `python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py tests/test_codex_runtime.py -v`.
+
+- Added typed Codex capacity evidence to model routing, explicit resource fallback reasons, execution-lifecycle accounting, Luna session recovery status, and capacity scores in `codex status`.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py tests/test_model_routing.py tests/test_codex_runtime.py -v`.
