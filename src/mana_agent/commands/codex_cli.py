@@ -11,7 +11,7 @@ from mana_agent.config.settings import Settings
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.health import check_codex_health
 from mana_agent.integrations.codex.provider import (
-    CodexCredential, CodexCredentialStore, CodexExecutionMode, CodexUsageStore, CredentialKind,
+    CodexAuthenticationService, CodexCredential, CodexCredentialStore, CodexExecutionMode, CodexUsageStore, CredentialKind,
 )
 
 codex_app = typer.Typer(help="Inspect the optional Codex coding backend.", no_args_is_help=True)
@@ -32,19 +32,22 @@ def codex_status(
     payload = report.model_dump(mode="json")
     store = CodexCredentialStore()
     usage = CodexUsageStore()
-    payload["api"] = {"credential": _credential_status(store.load(CredentialKind.API)), "usage": _usage_status(usage.load(CodexExecutionMode.API))}
-    payload["subscription"] = {"credential": _credential_status(store.load(CredentialKind.SUBSCRIPTION)), "usage": _usage_status(usage.load(CodexExecutionMode.SUBSCRIPTION))}
+    api_usage = usage.load(CodexExecutionMode.API)
+    subscription_usage = usage.load(CodexExecutionMode.SUBSCRIPTION)
+    payload["api"] = {"status": _credential_status(store.load(CredentialKind.API)), "usage": _usage_status(api_usage), "cost": api_usage.estimated_cost_usd if api_usage else None}
+    subscription_status = CodexAuthenticationService(store).status()
+    payload["subscription"] = {"account": subscription_status.account_identity, "authenticated": subscription_status.authenticated, "status": subscription_status.status.value, "quota_remaining": subscription_usage.quota_remaining if subscription_usage else None, "reset_at": subscription_usage.reset_at if subscription_usage else None, "usage": _usage_status(subscription_usage)}
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _credential_status(value):
     if value is None:
         return {"authenticated": False}
-    return {"authenticated": value.authenticated and not value.expired, "account_identity": value.account_identity, "expires_at": value.expires_at, "refresh_state": value.refresh_state}
+    return {"authenticated": value.authenticated and not value.expired, "account_identity": value.account_identity, "expires_at": value.expires_at, "refresh_state": value.refresh_state, "status": "expired" if value.expired else "authenticated" if value.authenticated else "invalid"}
 
 
 def _usage_status(value):
-    return None if value is None else value.as_dict()
+    return {"capacity_status": "unknown", "available": False} if value is None else value.as_dict()
 
 
 @codex_app.command("auth")
@@ -59,8 +62,11 @@ def codex_auth(
     except ValueError as exc:
         raise typer.BadParameter("mode must be api or subscription") from exc
     kind = CredentialKind.API if execution_mode is CodexExecutionMode.API else CredentialKind.SUBSCRIPTION
-    CodexCredentialStore().save(CodexCredential(kind, reference.strip(), account_identity=account.strip(), authenticated=True))
-    typer.echo(f"Registered {execution_mode.value} Codex credential reference {reference.strip()}.")
+    normalized_reference = reference.strip()
+    if not normalized_reference.startswith(("env://", "mana-secret://")):
+        raise typer.BadParameter("reference must be env://<name> or mana-secret://<id>; raw secrets are not accepted")
+    CodexCredentialStore().save(CodexCredential(kind, normalized_reference, account_identity=account.strip(), authenticated=True))
+    typer.echo(f"Registered {execution_mode.value} Codex credential reference {normalized_reference}.")
 
 
 @codex_app.command("doctor")

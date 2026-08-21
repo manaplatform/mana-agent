@@ -4018,3 +4018,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Added Codex dual-auth resource metadata for API and subscription execution modes, secure credential references, usage caches, quota-aware mode selection, and `codex auth`/`codex status` reporting.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_runtime.py -q`.
+## 2026-08-21
+
+- Extended the existing Codex dual-mode provider with Luna identity lifecycle states, injectable subscription authentication, TTL-aware provider usage normalization, explicit unknown capacity handling, quota-aware subscription/API selection, separated resource accounting records, and richer `codex status` output.
+  - User verification required: `python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py tests/test_codex_runtime.py -v`.
