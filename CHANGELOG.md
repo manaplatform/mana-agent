@@ -12,6 +12,8 @@ All notable repository changes should be recorded here.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py -v`.
 - Preserved late terminal-result provider and error metadata when the terminal transition had already created escrow, keeping Codex authentication failures durable and actionable.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py -v`.
+- Restored retry decision lineage propagation through `GatewayRoutingAuthority.route()`, allowing the validated retry path to persist its prior decision ID and failure reason.
+  - User verification required: `python -m pytest tests/gateway/test_routing_authority.py -v`.
 - Hardened the Codex dual-auth lifecycle across resource selection, execution recovery, usage-cache expiry, and accounting.
   - Added classified AUTH_REQUIRED, RESOURCE_UNAVAILABLE, QUOTA_EXHAUSTED, FALLBACK_SELECTED, and COMPLETED states; bounded subscription-to-API fallback preserves the original failure reason and exposes selected resource, fallback path, and accounting reference on results.
   - Linked successful execution accounting to the execution ID for API token/cost records and subscription identity/quota records, and prevented unknown or stale usage from being treated as available capacity.

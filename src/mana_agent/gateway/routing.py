@@ -99,8 +99,14 @@ class GatewayRoutingAuthority:
             self._spirit_by_task[request.task_id] = base_self.ref()
         return base_self
 
-    def route(self, request: RoutingRequest) -> RoutingDecision:
-        """Route and persist one model-backed invocation without fallback."""
+    def route(
+        self,
+        request: RoutingRequest,
+        *,
+        fallback_of_decision_id: str = "",
+        fallback_reason: str = "",
+    ) -> RoutingDecision:
+        """Route and persist one model-backed invocation with explicit retry lineage."""
 
         invocation_id = request.request_id or f"route_req_{uuid.uuid4().hex}"
         budgets = (
@@ -131,7 +137,11 @@ class GatewayRoutingAuthority:
             **spirit_diag,
         )
         try:
-            decision = self.router.route(enriched)
+            decision = self.router.route(
+                enriched,
+                fallback_of_decision_id=fallback_of_decision_id,
+                fallback_reason=fallback_reason,
+            )
             if not decision.decision_id or decision.request_id != invocation_id:
                 raise GatewayRoutingError("Router returned an invalid decision identity. No model action was executed.")
             if self.context_cost_governor is not None:
