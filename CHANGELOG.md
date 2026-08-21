@@ -4028,6 +4028,11 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_project_analyze_service.py tests/test_cli_smoke.py -q`.
 ## 2026-08-21
 
+- Added lane-scheduler diagnostics for queued tasks, including queue position,
+  capacity blockers, lane occupancy, worker-slot availability, QueueManager job
+  visibility, and the queued → scheduled → assigned → running lifecycle.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_lane_coordinator.py -q`.
+
 - Added Codex dual-auth resource metadata for API and subscription execution modes, secure credential references, usage caches, quota-aware mode selection, and `codex auth`/`codex status` reporting.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_runtime.py -q`.
 ## 2026-08-21
@@ -4037,3 +4042,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Added typed Codex capacity evidence to model routing, explicit resource fallback reasons, execution-lifecycle accounting, Luna session recovery status, and capacity scores in `codex status`.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py tests/test_model_routing.py tests/test_codex_runtime.py -v`.
+## 2026-08-21
+
+- Integrated Codex execution metadata with durable supervisor tasks, checkpoints, and result escrow, including provider state, selected resource, routing evidence, fallback history, accounting reference, and decision ID.
+  - User verification required: `PYTHONPATH=src python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py -q`.

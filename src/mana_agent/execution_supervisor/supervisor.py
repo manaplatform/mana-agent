@@ -70,6 +70,20 @@ def _token_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _provider_metadata(value: Any) -> dict[str, Any]:
+    """Convert provider evidence to a JSON-safe envelope."""
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    elif hasattr(value, "__dataclass_fields__"):
+        from dataclasses import asdict
+        value = asdict(value)
+    if not isinstance(value, dict):
+        raise TypeError("provider_metadata must be a mapping or serializable model")
+    return dict(value)
+
+
 class ExecutionSupervisor:
     """Coordinates durable task state without selecting models, tools, or agents.
 
@@ -593,6 +607,7 @@ class ExecutionSupervisor:
         payload: dict[str, Any] | None = None,
         is_resumable: bool = False,
         error_metadata: dict[str, Any] | None = None,
+        provider_metadata: dict[str, Any] | Any | None = None,
     ) -> EscrowResult:
         """Persist a terminal outcome or resumable wait in durable result escrow."""
         task = self.store.get_task(task_id)
@@ -673,6 +688,7 @@ class ExecutionSupervisor:
             result_kind=result_kind,
             payload=result_payload,
             error_metadata=err_meta,
+            provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
             created_at=self.clock(),
             completed_at=self.clock() if state in TERMINAL_STATES else None,
         )
@@ -914,6 +930,7 @@ class ExecutionSupervisor:
         external_action_receipts: Iterable[str] = (),
         resume_cursor: str = "",
         capsule_revisions: dict[str, int] | None = None,
+        provider_metadata: dict[str, Any] | Any | None = None,
     ) -> CheckpointRecord:
         original_state = self.store.get_task(task_id).state
         if original_state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
@@ -958,7 +975,9 @@ class ExecutionSupervisor:
                 idempotency_records=list(idempotency_records),
                 external_action_receipts=list(external_action_receipts),
                 resume_cursor=resume_cursor,
+                provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
             )
+            task.provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
             task.checkpoint_id = checkpoint.checkpoint_id
             task.checkpoint_count += 1
             validate_transition(task.state, original_state)
@@ -1250,6 +1269,7 @@ class ExecutionSupervisor:
         token_usage: int = 0,
         actual_cost: float | None = None,
         capsule_revisions: dict[str, int] | None = None,
+        provider_metadata: dict[str, Any] | Any | None = None,
     ) -> TaskRecord:
         current = self.store.get_task(task_id)
         projected_tokens = current.token_usage + max(0, token_usage)
@@ -1317,8 +1337,10 @@ class ExecutionSupervisor:
                 supervisor_state=target_state.value,
                 verification_status=VerificationStatus.PENDING,
                 result_kind="chat_result",
+                provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
                 created_at=self.clock(),
             )
+            task.provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
             task.result_id = result.result_id
             task_had_usage = task.token_usage > 0
             task.token_usage += max(0, token_usage)

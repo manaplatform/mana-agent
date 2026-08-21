@@ -3856,13 +3856,32 @@ class AgentChatGateway:
         ]
 
     def inspect_task(self, task_id: str) -> dict[str, Any]:
-        task = self._lane_coordinator.inspect_task(task_id)
+        diagnostics = self._lane_coordinator.scheduling_diagnostics(task_id)
+        try:
+            task = self._lane_coordinator.inspect_task(task_id)
+        except LaneCoordinatorError:
+            taskboard_task = self._lane_coordinator.taskboard.tasks.get(task_id)
+            if taskboard_task is None:
+                raise
+            return {
+                "task_id": task_id,
+                "taskboard_status": taskboard_task.status.value,
+                "owning_lane": taskboard_task.owning_lane,
+                "queue_job_ids": list(taskboard_task.queue_job_ids),
+                "executed_by_worker_agent_id": taskboard_task.executed_by_worker_agent_id,
+                "scheduling_diagnostics": diagnostics,
+                "children": [],
+            }
         children = [
             self._task_surface(item)
             for item in self._lane_coordinator.executions
             if item.parent_task_id == task_id
         ]
-        return {**self._task_surface(task), "children": children}
+        return {
+            **self._task_surface(task),
+            "scheduling_diagnostics": diagnostics,
+            "children": children,
+        }
 
     def _task_surface(self, execution: Any) -> dict[str, Any]:
         payload = asdict(execution)

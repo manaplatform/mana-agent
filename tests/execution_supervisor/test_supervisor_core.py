@@ -40,6 +40,11 @@ from mana_agent.execution_supervisor.models import (
 )
 from mana_agent.execution_supervisor.store import LocalExecutionStore
 from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+from mana_agent.integrations.codex.provider import (
+    CodexExecutionMetadata,
+    CodexExecutionMode,
+    CodexExecutionState,
+)
 
 
 class FakeClock:
@@ -82,6 +87,69 @@ def running(supervisor, task):
     leased, token = supervisor.acquire_lease(task.task_id, owner="worker-a")
     supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
     return leased.attempt_id, token
+
+
+def test_codex_metadata_is_durable_in_task_checkpoint_and_result(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, runtime_provider="codex")
+    attempt_id, token = running(supervisor, task)
+    metadata = CodexExecutionMetadata(
+        task.task_id,
+        "codex",
+        CodexExecutionMode.SUBSCRIPTION,
+        CodexExecutionState.COMPLETED,
+        "codex/subscription",
+        accounting_reference=f"codex-accounting:{task.task_id}",
+        routing_reason=("coding task", "quota healthy"),
+        decision_id=f"codex-decision:{task.task_id}",
+    )
+
+    checkpoint = supervisor.checkpoint(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        resume_payload={"cursor": 1},
+        provider_metadata=metadata,
+    )
+    result_task = supervisor.submit_result(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        payload={"answer": "ok"},
+        provider_metadata=metadata,
+    )
+
+    restarted = ExecutionSupervisor(supervisor.config, clock=clock)
+    assert restarted.store.get_task(task.task_id).provider_metadata["selected_resource"] == "codex/subscription"
+    assert restarted.store.get_checkpoint(checkpoint.checkpoint_id).provider_metadata["accounting_reference"] == f"codex-accounting:{task.task_id}"
+    escrow = restarted.store.get_result(result_task.result_id)
+    assert escrow.provider_metadata["decision_id"] == f"codex-decision:{task.task_id}"
+
+
+def test_codex_auth_failure_is_durable_and_actionable(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, runtime_provider="codex")
+    metadata = {
+        "execution_id": task.task_id,
+        "provider": "codex",
+        "mode": "subscription",
+        "state": "AUTH_REQUIRED",
+        "selected_resource": "codex/subscription",
+        "failure_reason": "subscription expired",
+    }
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="subscription expired")
+    result = supervisor.record_terminal_result(
+        task.task_id,
+        state=ExecutionState.FAILED,
+        reason="subscription expired",
+        provider_metadata=metadata,
+        error_metadata={"state": "AUTH_REQUIRED", "action": "reauthenticate"},
+    )
+
+    restarted = ExecutionSupervisor(supervisor.config, startup_recovery=False)
+    restored = restarted.store.get_result(result.result_id)
+    assert restored.provider_metadata["state"] == "AUTH_REQUIRED"
+    assert restored.error_metadata["action"] == "reauthenticate"
 
 
 def decision(task_id, **changes):

@@ -226,6 +226,7 @@ class CheckpointRecord(StrictModel):
     idempotency_records: list[str] = Field(default_factory=list)
     external_action_receipts: list[str] = Field(default_factory=list)
     resume_cursor: str = ""
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CheckpointResumeEligibility(StrictModel):
@@ -451,6 +452,7 @@ class TaskRecord(StrictModel):
     previous_task_id: str = ""
     delegated_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
     waiting_inbox_item_id: str = ""
     waiting_reason: Literal[
         "",

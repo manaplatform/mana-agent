@@ -736,7 +736,13 @@ class LaneCoordinator:
             self._wait_sequence += 1
             waiter = {
                 "waiter_id": f"wait_{uuid.uuid4().hex}",
+                # A multi-task child has a TaskBoard identity before capacity
+                # becomes available. Preserve that identity on the transient
+                # waiter so callers can explain why that task has not yet
+                # materialized a lane execution, lease, or QueueManager job.
+                "task_id": str(taskboard_task_id or ""),
                 "lane_id": lane_id.value,
+                "model": model,
                 "priority": selected_priority.value,
                 "sequence": self._wait_sequence,
                 "created_at": _iso(),
@@ -1837,6 +1843,151 @@ class LaneCoordinator:
         except KeyError as exc:
             raise LaneCoordinatorError(f"Unknown gateway task: {task_id}") from exc
 
+    def scheduling_diagnostics(self, task_id: str) -> dict[str, Any]:
+        """Return a read-only explanation of one task's scheduler state.
+
+        A task can exist on the TaskBoard while its caller is blocked in
+        ``reserve``.  Before this diagnostic existed, that pre-reservation
+        interval had neither a lane execution nor a worker/queue-job identity,
+        making it indistinguishable from a stalled QueueManager job.
+        """
+        with self._condition:
+            execution = self._executions.get(task_id)
+            waiter = next(
+                (
+                    item
+                    for item in self._waiters
+                    if str(item.get("task_id") or "") == task_id
+                ),
+                None,
+            )
+            task = self.taskboard.tasks.get(task_id)
+            lane_value = (
+                execution.owning_lane.value
+                if execution is not None
+                else str((waiter or {}).get("lane_id") or getattr(task, "owning_lane", ""))
+            )
+            try:
+                lane_id = LaneId(lane_value)
+            except ValueError:
+                lane_id = None
+            model = (
+                execution.model
+                if execution is not None
+                else str((waiter or {}).get("model") or "")
+            )
+            active = self._active_capacity_executions()
+            ordered_waiters = self._ordered_waiters_locked()
+            queue_position = (
+                next(
+                    (
+                        index
+                        for index, item in enumerate(ordered_waiters, start=1)
+                        if item.get("waiter_id") == (waiter or {}).get("waiter_id")
+                    ),
+                    None,
+                )
+                if waiter is not None
+                else None
+            )
+            lane_active = [item for item in active if lane_id is not None and item.owning_lane == lane_id]
+            global_blocked = len(active) >= self.global_worker_limit
+            lane_blocked = bool(lane_id and len(lane_active) >= self.contracts[lane_id].max_concurrent_jobs)
+            provider_limit = self.provider_limits.get(model)
+            provider_active = [item for item in active if model and item.model == model]
+            provider_blocked = bool(provider_limit is not None and len(provider_active) >= provider_limit)
+            blockers = (
+                active
+                if global_blocked
+                else lane_active
+                if lane_blocked
+                else provider_active
+                if provider_blocked
+                else []
+            )
+            lifecycle = {
+                "transition_order": ["queued", "scheduled", "assigned", "running"],
+                "queued": bool(waiter is not None or (execution and execution.state is LaneTaskState.QUEUED)),
+                "scheduled": execution is not None,
+                "assigned": bool(
+                    (execution and execution.worker_id)
+                    or getattr(
+                        self.execution_supervisor.store.get_task_or_none(task_id),
+                        "assigned_worker",
+                        "",
+                    )
+                ),
+                "running": bool(execution and execution.state is LaneTaskState.RUNNING),
+            }
+            if waiter is not None:
+                state = "waiting_for_capacity"
+                reason = "capacity"
+            elif execution is None:
+                state = "not_registered_with_lane_scheduler"
+                reason = "no_lane_execution_or_capacity_waiter"
+            elif execution.state is LaneTaskState.QUEUED:
+                state = "scheduled_waiting_for_start"
+                reason = "lane_start_not_called"
+            elif execution.worker_id:
+                state = "assigned" if execution.state is not LaneTaskState.RUNNING else "running"
+                reason = ""
+            else:
+                state = execution.state.value
+                reason = ""
+            contract = self.contracts[lane_id] if lane_id is not None else None
+            return {
+                "scheduler_state": state,
+                "scheduler_reason": reason,
+                "queue_position": queue_position,
+                "blocking_task_ids": [item.task_id for item in blockers if item.task_id != task_id],
+                "owning_lane": {
+                    "id": lane_id.value if lane_id is not None else "",
+                    "active_jobs": len(lane_active),
+                    "max_concurrent_jobs": contract.max_concurrent_jobs if contract else None,
+                    "queued_waiters": sum(
+                        1
+                        for item in self._waiters
+                        if lane_id is not None and item.get("lane_id") == lane_id.value
+                    ),
+                },
+                "worker_availability": {
+                    "global_limit": self.global_worker_limit,
+                    "global_active": len(active),
+                    "global_available_slots": max(0, self.global_worker_limit - len(active)),
+                    "lane_available_slots": (
+                        max(0, contract.max_concurrent_jobs - len(lane_active))
+                        if contract
+                        else None
+                    ),
+                    "provider_limit": provider_limit,
+                    "provider_active": len(provider_active),
+                    "provider_available_slots": (
+                        max(0, provider_limit - len(provider_active))
+                        if provider_limit is not None
+                        else None
+                    ),
+                    "assigned_worker_id": (
+                        execution.worker_id
+                        if execution is not None
+                        else getattr(
+                            self.execution_supervisor.store.get_task_or_none(task_id),
+                            "assigned_worker",
+                            "",
+                        )
+                    ),
+                },
+                "queue_manager": {
+                    "queue_job_ids": list(getattr(task, "queue_job_ids", [])),
+                    "executed_by_worker_agent_id": getattr(task, "executed_by_worker_agent_id", None),
+                    "reason_no_queue_job": (
+                        "no QueueManager tool-work request was created; lane and tool-worker lifecycles are separate"
+                        if not getattr(task, "queue_job_ids", [])
+                        else ""
+                    ),
+                },
+                "lifecycle": lifecycle,
+            }
+
     _RETRYABLE_LANE_STATES = frozenset(
         {
             LaneTaskState.FAILED,
@@ -2416,7 +2567,17 @@ class LaneCoordinator:
             self.emit("lock.expired", task_id=lease.task_id, lane_id=None, lock_id=lease.lease_id)
 
     def _assert_capacity(self, contract: LaneContract, model: str, *, exclude_task_id: str = "") -> None:
-        active = [
+        active = self._active_capacity_executions(exclude_task_id=exclude_task_id)
+        if len(active) >= self.global_worker_limit:
+            raise LaneCapacityError("global gateway worker limit reached")
+        if sum(item.owning_lane == contract.lane_id for item in active) >= contract.max_concurrent_jobs:
+            raise LaneCapacityError(f"lane {contract.lane_id.value} concurrency limit reached")
+        if model and model in self.provider_limits and sum(item.model == model for item in active) >= self.provider_limits[model]:
+            raise LaneCapacityError(f"model/provider concurrency limit reached for {model}")
+
+    def _active_capacity_executions(self, *, exclude_task_id: str = "") -> list[LaneExecution]:
+        """Return the executions that currently consume scheduler capacity."""
+        return [
             item
             for item in self._executions.values()
             if item.task_id != exclude_task_id
@@ -2431,14 +2592,8 @@ class LaneCoordinator:
             # must not occupy a worker, lane, or provider execution slot.
             and item.state != LaneTaskState.VERIFYING
         ]
-        if len(active) >= self.global_worker_limit:
-            raise LaneCapacityError("global gateway worker limit reached")
-        if sum(item.owning_lane == contract.lane_id for item in active) >= contract.max_concurrent_jobs:
-            raise LaneCapacityError(f"lane {contract.lane_id.value} concurrency limit reached")
-        if model and model in self.provider_limits and sum(item.model == model for item in active) >= self.provider_limits[model]:
-            raise LaneCapacityError(f"model/provider concurrency limit reached for {model}")
 
-    def _next_waiter_id(self) -> str:
+    def _ordered_waiters_locked(self) -> list[dict[str, Any]]:
         now = _now()
 
         def score(item: dict[str, Any]) -> tuple[int, int]:
@@ -2447,7 +2602,11 @@ class LaneCoordinator:
             age_promotions = max(0, int((now - created).total_seconds() // 30))
             return (max(0, PRIORITY_ORDER[priority] - age_promotions), int(item["sequence"]))
 
-        return str(min(self._waiters, key=score)["waiter_id"]) if self._waiters else ""
+        return sorted(self._waiters, key=score)
+
+    def _next_waiter_id(self) -> str:
+        ordered = self._ordered_waiters_locked()
+        return str(ordered[0]["waiter_id"]) if ordered else ""
 
     def is_turn_budget_exhausted(self, task_id: str) -> bool:
         with self._condition:

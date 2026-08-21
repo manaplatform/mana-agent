@@ -367,10 +367,11 @@ class CodexFallbackDecision:
 class CodexExecutionError(RuntimeError):
     """A classified failure that can be evaluated by the Codex recovery policy."""
 
-    def __init__(self, message: str, *, kind: CodexFailureKind, state: CodexExecutionState) -> None:
+    def __init__(self, message: str, *, kind: CodexFailureKind, state: CodexExecutionState, metadata: "CodexExecutionMetadata | None" = None) -> None:
         super().__init__(message)
         self.kind = kind
         self.state = state
+        self.metadata = metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +384,8 @@ class CodexExecutionMetadata:
     accounting_reference: str = ""
     fallback_path: tuple[dict[str, str], ...] = ()
     failure_reason: str = ""
+    routing_reason: tuple[str, ...] = ()
+    decision_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,7 +474,13 @@ class CodexProvider:
 
     async def _execute_fallback(self, task: Any, workspace: Any, failure: _CodexFailure) -> Any:
         if self.fallback_provider is None:
-            raise CodexExecutionError(failure.reason, kind=failure.kind, state=failure.state)
+            raise CodexExecutionError(
+                failure.reason, kind=failure.kind, state=failure.state,
+                metadata=CodexExecutionMetadata(
+                    task.task_id, "codex", self.mode, failure.state,
+                    f"codex/{self.mode.value}", failure_reason=failure.reason,
+                ),
+            )
         fallback_decision = CodexFallbackDecision(
             "codex", self.fallback_provider.mode, failure.reason,
             (self.mode, self.fallback_provider.mode),
@@ -482,14 +491,28 @@ class CodexProvider:
         try:
             result = await self.fallback_provider.execute(task, workspace)
         except Exception as exc:
-            raise CodexExecutionError(failure.reason, kind=failure.kind, state=failure.state) from exc
+            fallback_metadata = CodexExecutionMetadata(
+                task.task_id, "codex", self.mode, failure.state,
+                f"codex/{self.mode.value}",
+                fallback_path=(
+                    {"from": self.mode.value, "to": self.fallback_provider.mode.value, "reason": failure.reason},
+                    {"from": self.fallback_provider.mode.value, "to": "", "reason": str(exc)},
+                ),
+                failure_reason=failure.reason,
+            )
+            raise CodexExecutionError(
+                failure.reason, kind=failure.kind, state=failure.state,
+                metadata=fallback_metadata,
+            ) from exc
         completed_metadata = getattr(result, "codex_metadata", None)
         _attach_codex_metadata(result, CodexExecutionMetadata(
             task.task_id, "codex", self.fallback_provider.mode, CodexExecutionState.COMPLETED,
             f"codex/{self.fallback_provider.mode.value}",
             accounting_reference=getattr(completed_metadata, "accounting_reference", ""),
-            fallback_path=({"provider": "codex", "mode": self.mode.value, "reason": failure.reason},),
+            fallback_path=({"from": self.mode.value, "to": self.fallback_provider.mode.value, "reason": failure.reason},),
             failure_reason=failure.reason,
+            routing_reason=tuple(fallback_decision.reasons),
+            decision_id=f"codex-decision:{task.task_id}",
         ))
         return result
 
@@ -502,6 +525,10 @@ class CodexProvider:
                     "Codex subscription authentication is required",
                     kind=CodexFailureKind.AUTHENTICATION,
                     state=CodexExecutionState.AUTH_REQUIRED,
+                    metadata=CodexExecutionMetadata(
+                        task.task_id, "codex", self.mode, CodexExecutionState.AUTH_REQUIRED,
+                        f"codex/{self.mode.value}", failure_reason="Codex subscription authentication is required",
+                    ),
                 )
             if usage_before is not None and usage_before.quota_remaining is not None and usage_before.quota_remaining <= 0:
                 failure = _CodexFailure(CodexFailureKind.QUOTA, CodexExecutionState.QUOTA_EXHAUSTED, "subscription quota exhausted")
@@ -526,7 +553,13 @@ class CodexProvider:
         except Exception as exc:
             failure = classify_codex_failure(exc, usage_before or self.resource_usage)
             if self.fallback_provider is None or self.mode is CodexExecutionMode.API:
-                raise CodexExecutionError(str(exc), kind=failure.kind, state=failure.state) from exc
+                raise CodexExecutionError(
+                    str(exc), kind=failure.kind, state=failure.state,
+                    metadata=CodexExecutionMetadata(
+                        task.task_id, "codex", self.mode, failure.state,
+                        f"codex/{self.mode.value}", failure_reason=str(exc),
+                    ),
+                ) from exc
             return await self._execute_fallback(task, workspace, failure)
         usage = result.token_usage or {}
         resource_usage = self.resource_usage
@@ -542,10 +575,13 @@ class CodexProvider:
             reset_at=resource_usage.reset_at if resource_usage else None,
             routing_reason=decision.reasons or (decision.reason,),
             accounting_reference=accounting_reference,
+            decision_id=f"codex-decision:{task.task_id}",
         ))
         _attach_codex_metadata(result, CodexExecutionMetadata(
             task.task_id, "codex", self.mode, CodexExecutionState.COMPLETED,
             f"codex/{self.mode.value}", accounting_reference=accounting_reference,
+            routing_reason=tuple(decision.reasons),
+            decision_id=f"codex-decision:{task.task_id}",
         ))
         return result
 
