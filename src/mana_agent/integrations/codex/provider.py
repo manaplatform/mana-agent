@@ -21,6 +21,24 @@ class CodexExecutionMode(str, Enum):
     SUBSCRIPTION = "subscription"
 
 
+class CodexExecutionState(str, Enum):
+    """Provider lifecycle states exposed to the execution supervisor."""
+
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    RESOURCE_UNAVAILABLE = "RESOURCE_UNAVAILABLE"
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+    FALLBACK_SELECTED = "FALLBACK_SELECTED"
+    COMPLETED = "COMPLETED"
+
+
+class CodexFailureKind(str, Enum):
+    AUTHENTICATION = "authentication"
+    QUOTA = "quota"
+    USAGE_UNAVAILABLE = "usage_unavailable"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    UNKNOWN = "unknown"
+
+
 class CredentialKind(str, Enum):
     API = "codex_api"
     SUBSCRIPTION = "codex_subscription"
@@ -231,12 +249,13 @@ class CodexUsageStore:
         self.path.write_text(json.dumps({"schema_version": 1, "usage": usage.as_dict()}, sort_keys=True), encoding="utf-8")
         self.path.chmod(0o600)
 
-    def load(self, mode: CodexExecutionMode) -> CodexUsage | None:
+    def load(self, mode: CodexExecutionMode, *, now: float | None = None) -> CodexUsage | None:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8")).get("usage", {})
             if raw.get("mode") != mode.value:
                 return None
-            if raw.get("cache_expires_at") is not None and float(raw["cache_expires_at"]) <= time.time():
+            current_time = time.time() if now is None else now
+            if raw.get("cache_expires_at") is not None and float(raw["cache_expires_at"]) <= current_time:
                 return None
             values = {key: value for key, value in raw.items() if key in CodexUsage.__dataclass_fields__}
             values["mode"] = CodexExecutionMode(values["mode"])
@@ -258,7 +277,7 @@ class CodexUsageProvider:
         if credential is None or not credential.authenticated or credential.expired:
             return CodexUsage(mode, False, account_identity=credential.account_identity if credential else "", capacity_status="unknown")
         if not force_refresh:
-            cached = self.store.load(mode)
+            cached = self.store.load(mode, now=self.clock())
             if cached is not None:
                 return cached
         try:
@@ -288,10 +307,13 @@ class CodexAccountingRecord:
     output_tokens: int = 0
     usd_cost: float | None = None
     quota_consumed: float = 0.0
+    quota_remaining: float | None = None
     account_identity: str = ""
     reset_at: float | None = None
     decision_id: str = ""
     routing_reason: tuple[str, ...] = ()
+    accounting_reference: str = ""
+    fallback_reason: str = ""
 
 
 class CodexAccountingStore:
@@ -301,7 +323,8 @@ class CodexAccountingStore:
     def record(self, record: CodexAccountingRecord) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(asdict(record) | {"mode": record.mode.value}, sort_keys=True) + "\n")
+            payload = asdict(record) | {"mode": record.mode.value, "cost_usd": record.usd_cost}
+            stream.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 class CodexRoutingDecisionStore:
@@ -323,6 +346,10 @@ class CodexFallbackDecision:
     reason: str
     attempted_modes: tuple[CodexExecutionMode, ...] = ()
     reasons: tuple[str, ...] = ()
+    original_provider: str = "codex"
+    original_mode: CodexExecutionMode | None = None
+    fallback_provider: str = ""
+    fallback_mode: CodexExecutionMode | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -330,7 +357,64 @@ class CodexFallbackDecision:
             "mode": self.selected_mode.value,
             "reason": list(self.reasons) or [self.reason],
             "attempted_modes": [mode.value for mode in self.attempted_modes],
+            "original_provider": self.original_provider,
+            "original_mode": (self.original_mode or self.selected_mode).value,
+            "fallback_provider": self.fallback_provider,
+            "fallback_mode": self.fallback_mode.value if self.fallback_mode else "",
         }
+
+
+class CodexExecutionError(RuntimeError):
+    """A classified failure that can be evaluated by the Codex recovery policy."""
+
+    def __init__(self, message: str, *, kind: CodexFailureKind, state: CodexExecutionState) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.state = state
+
+
+@dataclass(frozen=True, slots=True)
+class CodexExecutionMetadata:
+    execution_id: str
+    provider: str
+    mode: CodexExecutionMode
+    state: CodexExecutionState
+    selected_resource: str
+    accounting_reference: str = ""
+    fallback_path: tuple[dict[str, str], ...] = ()
+    failure_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexFailure:
+    kind: CodexFailureKind
+    state: CodexExecutionState
+    reason: str
+
+
+def classify_codex_failure(error: BaseException, usage: CodexUsage | None) -> _CodexFailure:
+    """Map provider failures to finite, auditable recovery categories."""
+    message = str(error).strip() or "Codex provider failed"
+    lowered = message.casefold()
+    if usage is not None and usage.quota_remaining is not None and usage.quota_remaining <= 0:
+        return _CodexFailure(CodexFailureKind.QUOTA, CodexExecutionState.QUOTA_EXHAUSTED, "subscription quota exhausted")
+    if any(marker in lowered for marker in ("auth", "credential", "session", "token", "unauthorized", "forbidden")):
+        return _CodexFailure(CodexFailureKind.AUTHENTICATION, CodexExecutionState.AUTH_REQUIRED, message)
+    if usage is not None and usage.capacity_status == "unknown":
+        return _CodexFailure(CodexFailureKind.USAGE_UNAVAILABLE, CodexExecutionState.RESOURCE_UNAVAILABLE, "subscription usage unavailable")
+    if any(marker in lowered for marker in ("unavailable", "timeout", "connection", "service", "provider")):
+        return _CodexFailure(CodexFailureKind.PROVIDER_UNAVAILABLE, CodexExecutionState.RESOURCE_UNAVAILABLE, message)
+    return _CodexFailure(CodexFailureKind.UNKNOWN, CodexExecutionState.RESOURCE_UNAVAILABLE, message)
+
+
+def _attach_codex_metadata(result: Any, metadata: CodexExecutionMetadata) -> None:
+    """Attach lifecycle metadata without changing the backend result contract."""
+    try:
+        setattr(result, "codex_metadata", metadata)
+    except (AttributeError, TypeError):
+        # Immutable backend result objects retain their normal return contract;
+        # accounting has already been persisted before this point.
+        return
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,7 +443,7 @@ class CodexProvider:
 
     name = "codex"
 
-    def __init__(self, backend: Any, *, mode: CodexExecutionMode, credentials: CodexCredentialStore | None = None, usage: CodexUsageStore | None = None, usage_provider: CodexUsageProvider | None = None, accounting: CodexAccountingStore | None = None, routing: CodexRoutingDecisionStore | None = None, routing_decision: CodexFallbackDecision | None = None) -> None:
+    def __init__(self, backend: Any, *, mode: CodexExecutionMode, credentials: CodexCredentialStore | None = None, usage: CodexUsageStore | None = None, usage_provider: CodexUsageProvider | None = None, accounting: CodexAccountingStore | None = None, routing: CodexRoutingDecisionStore | None = None, routing_decision: CodexFallbackDecision | None = None, fallback_provider: "CodexProvider | None" = None) -> None:
         self.backend = backend
         self.mode = mode
         self.credentials = credentials or CodexCredentialStore()
@@ -368,6 +452,7 @@ class CodexProvider:
         self.accounting = accounting or CodexAccountingStore()
         self.routing = routing or CodexRoutingDecisionStore()
         self.routing_decision = routing_decision
+        self.fallback_provider = fallback_provider
 
     @property
     def credential(self) -> CodexCredential | None:
@@ -384,7 +469,48 @@ class CodexProvider:
         value = self.resource_usage
         return bool(value and value.available)
 
+    async def _execute_fallback(self, task: Any, workspace: Any, failure: _CodexFailure) -> Any:
+        if self.fallback_provider is None:
+            raise CodexExecutionError(failure.reason, kind=failure.kind, state=failure.state)
+        fallback_decision = CodexFallbackDecision(
+            "codex", self.fallback_provider.mode, failure.reason,
+            (self.mode, self.fallback_provider.mode),
+            (failure.reason, f"{self.fallback_provider.mode.value} resource selected"),
+            original_mode=self.mode, fallback_provider="codex", fallback_mode=self.fallback_provider.mode,
+        )
+        self.routing.record(fallback_decision)
+        try:
+            result = await self.fallback_provider.execute(task, workspace)
+        except Exception as exc:
+            raise CodexExecutionError(failure.reason, kind=failure.kind, state=failure.state) from exc
+        completed_metadata = getattr(result, "codex_metadata", None)
+        _attach_codex_metadata(result, CodexExecutionMetadata(
+            task.task_id, "codex", self.fallback_provider.mode, CodexExecutionState.COMPLETED,
+            f"codex/{self.fallback_provider.mode.value}",
+            accounting_reference=getattr(completed_metadata, "accounting_reference", ""),
+            fallback_path=({"provider": "codex", "mode": self.mode.value, "reason": failure.reason},),
+            failure_reason=failure.reason,
+        ))
+        return result
+
     async def execute(self, task: Any, workspace: Any) -> Any:
+        usage_before = self.resource_usage
+        if self.mode is CodexExecutionMode.SUBSCRIPTION:
+            credential = self.credential
+            if credential is None or not credential.authenticated or credential.expired:
+                raise CodexExecutionError(
+                    "Codex subscription authentication is required",
+                    kind=CodexFailureKind.AUTHENTICATION,
+                    state=CodexExecutionState.AUTH_REQUIRED,
+                )
+            if usage_before is not None and usage_before.quota_remaining is not None and usage_before.quota_remaining <= 0:
+                failure = _CodexFailure(CodexFailureKind.QUOTA, CodexExecutionState.QUOTA_EXHAUSTED, "subscription quota exhausted")
+                return await self._execute_fallback(task, workspace, failure)
+            if usage_before is not None and usage_before.capacity_status == "unknown":
+                return await self._execute_fallback(task, workspace, _CodexFailure(
+                    CodexFailureKind.USAGE_UNAVAILABLE, CodexExecutionState.RESOURCE_UNAVAILABLE,
+                    "subscription usage unavailable",
+                ))
         decision = self.routing_decision or CodexFallbackDecision(
             "codex",
             self.mode,
@@ -395,17 +521,31 @@ class CodexProvider:
             else ("API resource selected",),
         )
         self.routing.record(decision)
-        result = await self.backend.execute(task, workspace)
+        try:
+            result = await self.backend.execute(task, workspace)
+        except Exception as exc:
+            failure = classify_codex_failure(exc, usage_before or self.resource_usage)
+            if self.fallback_provider is None or self.mode is CodexExecutionMode.API:
+                raise CodexExecutionError(str(exc), kind=failure.kind, state=failure.state) from exc
+            return await self._execute_fallback(task, workspace, failure)
         usage = result.token_usage or {}
+        resource_usage = self.resource_usage
+        accounting_reference = f"codex-accounting:{task.task_id}"
         self.accounting.record(CodexAccountingRecord(
             "codex", self.mode, task.task_id,
             input_tokens=int(usage.get("input_tokens", 0) or 0),
             output_tokens=int(usage.get("output_tokens", 0) or 0),
-            usd_cost=(float(usage.get("usd_cost", self.resource_usage.estimated_cost_usd if self.resource_usage else 0.0)) if self.mode is CodexExecutionMode.API else None),
-            quota_consumed=(float(usage.get("quota_consumed", self.resource_usage.quota_consumed if self.resource_usage else 0.0) or 0) if self.mode is CodexExecutionMode.SUBSCRIPTION else 0.0),
+            usd_cost=(float(usage.get("usd_cost", resource_usage.estimated_cost_usd if resource_usage else 0.0)) if self.mode is CodexExecutionMode.API else None),
+            quota_consumed=(float(usage.get("quota_consumed", resource_usage.quota_consumed if resource_usage else 0.0) or 0) if self.mode is CodexExecutionMode.SUBSCRIPTION else 0.0),
+            quota_remaining=(resource_usage.quota_remaining if self.mode is CodexExecutionMode.SUBSCRIPTION and resource_usage else None),
             account_identity=self.credential.account_identity if self.credential else "",
-            reset_at=self.resource_usage.reset_at if self.resource_usage else None,
+            reset_at=resource_usage.reset_at if resource_usage else None,
             routing_reason=decision.reasons or (decision.reason,),
+            accounting_reference=accounting_reference,
+        ))
+        _attach_codex_metadata(result, CodexExecutionMetadata(
+            task.task_id, "codex", self.mode, CodexExecutionState.COMPLETED,
+            f"codex/{self.mode.value}", accounting_reference=accounting_reference,
         ))
         return result
 
@@ -468,7 +608,14 @@ def codex_resource_score(provider: CodexProvider, task_type: str, policy: CodexP
     if usage is None:
         return RoutingResourceScore(False, resource_confidence=0.0, reason="Codex capacity is unknown")
     auth = 1.0 if usage.authenticated else 0.0
-    reason = "Codex authentication is required" if not usage.authenticated else f"Codex {provider.mode.value} capacity is {usage.capacity_status}"
+    if not usage.authenticated:
+        reason = "Codex authentication is required"
+    elif provider.mode is CodexExecutionMode.SUBSCRIPTION and usage.available:
+        reason = "Selected Codex Subscription: coding capability matched; authenticated account; quota healthy; higher resource score"
+    elif provider.mode is CodexExecutionMode.API and usage.available:
+        reason = "Selected Codex API: API resource available"
+    else:
+        reason = f"Codex {provider.mode.value} capacity is {usage.capacity_status}"
     return RoutingResourceScore(usage.available, usage.quota_health, usage.quota_health, auth, reason)
 
 
@@ -483,8 +630,8 @@ def codex_resource_availability(provider: CodexProvider, task_type: str, policy:
 
 
 __all__ = [
-    "CodexAccountStatus", "CodexAccountingRecord", "CodexAccountingStore", "CodexAuthenticationService", "CodexFallbackDecision", "CodexIdentityError", "CodexRoutingDecisionStore",
-    "CodexAuthenticationStatus", "CodexCredential", "CodexCredentialStore", "CodexExecutionMode",
+    "CodexAccountStatus", "CodexAccountingRecord", "CodexAccountingStore", "CodexAuthenticationService", "CodexExecutionError", "CodexExecutionMetadata", "CodexExecutionMode", "CodexExecutionState", "CodexFailureKind", "CodexFallbackDecision", "CodexIdentityError", "CodexRoutingDecisionStore",
+    "CodexAuthenticationStatus", "CodexCredential", "CodexCredentialStore",
     "CodexIdentityClient", "CodexPolicy", "CodexProvider", "CodexUsage", "CodexUsageClient",
     "CodexUsageProvider", "CodexUsageStore", "CredentialKind", "choose_codex_mode", "choose_codex_resource",
     "codex_resource_availability", "codex_resource_score",

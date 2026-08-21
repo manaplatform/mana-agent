@@ -8,6 +8,8 @@ from mana_agent.integrations.codex.provider import (
     CodexCredential,
     CodexCredentialStore,
     CodexExecutionMode,
+    CodexExecutionError,
+    CodexExecutionState,
     CodexUsage,
     CodexUsageProvider,
     CodexUsageStore,
@@ -173,3 +175,66 @@ def test_subscription_execution_records_identity_quota_and_reset_cycle(tmp_path)
     assert '"quota_consumed": 2.0' in accounting
     assert '"reset_at": 1234' in accounting
     assert '"routing_reason": ["coding task", "subscription authenticated", "quota healthy"]' in accounting
+
+
+def test_authenticated_subscription_with_healthy_quota_completes_with_resource_metadata(tmp_path):
+    class Backend:
+        async def execute(self, task, workspace):
+            return type("Result", (), {"token_usage": {"quota_consumed": 2}})()
+
+    credentials = CodexCredentialStore(tmp_path / "credentials")
+    credentials.save(CodexCredential(CredentialKind.SUBSCRIPTION, "ref", "acct", authenticated=True))
+    usage = CodexUsageStore(tmp_path / "usage")
+    usage.save(CodexUsage(CodexExecutionMode.SUBSCRIPTION, True, "acct", quota_consumed=2, quota_remaining=8, quota_capacity=10))
+    provider = CodexProvider(Backend(), mode=CodexExecutionMode.SUBSCRIPTION, credentials=credentials, usage=usage, accounting=CodexAccountingStore(tmp_path / "accounting"))
+
+    import asyncio
+    result = asyncio.run(provider.execute(type("Task", (), {"task_id": "healthy-subscription"})(), object()))
+
+    assert result.codex_metadata.state is CodexExecutionState.COMPLETED
+    assert result.codex_metadata.selected_resource == "codex/subscription"
+    assert result.codex_metadata.accounting_reference == "codex-accounting:healthy-subscription"
+
+
+def test_exhausted_subscription_falls_back_to_api_once_with_original_reason(tmp_path):
+    class Backend:
+        async def execute(self, task, workspace):
+            return type("Result", (), {"token_usage": {"input_tokens": 1, "output_tokens": 1}})()
+
+    credentials = CodexCredentialStore(tmp_path / "credentials")
+    credentials.save(CodexCredential(CredentialKind.SUBSCRIPTION, "ref", "acct", authenticated=True))
+    usage = CodexUsageStore(tmp_path / "usage")
+    usage.save(CodexUsage(CodexExecutionMode.SUBSCRIPTION, True, "acct", quota_remaining=0, quota_capacity=10))
+    api = CodexProvider(Backend(), mode=CodexExecutionMode.API, credentials=CodexCredentialStore(tmp_path / "api-credentials"), accounting=CodexAccountingStore(tmp_path / "api-accounting"))
+    provider = CodexProvider(Backend(), mode=CodexExecutionMode.SUBSCRIPTION, credentials=credentials, usage=usage, routing=CodexRoutingDecisionStore(tmp_path / "routing"), fallback_provider=api)
+
+    import asyncio
+    result = asyncio.run(provider.execute(type("Task", (), {"task_id": "quota-fallback"})(), object()))
+
+    assert result.codex_metadata.state is CodexExecutionState.FALLBACK_SELECTED
+    assert result.codex_metadata.mode is CodexExecutionMode.API
+    assert result.codex_metadata.fallback_path[0]["reason"] == "subscription quota exhausted"
+
+
+def test_expired_subscription_stops_with_auth_required(tmp_path, monkeypatch):
+    monkeypatch.setattr("mana_agent.integrations.codex.provider.time.time", lambda: 2000)
+    credentials = CodexCredentialStore(tmp_path / "credentials")
+    credentials.save(CodexCredential(CredentialKind.SUBSCRIPTION, "ref", "acct", expires_at=1000, authenticated=True))
+    provider = CodexProvider(object(), mode=CodexExecutionMode.SUBSCRIPTION, credentials=credentials)
+
+    import asyncio
+    try:
+        asyncio.run(provider.execute(type("Task", (), {"task_id": "expired-subscription"})(), object()))
+    except CodexExecutionError as exc:
+        assert exc.state is CodexExecutionState.AUTH_REQUIRED
+    else:
+        raise AssertionError("expired subscription must require authentication")
+
+
+def test_usage_provider_unavailability_is_unknown_capacity_and_does_not_claim_unlimited(tmp_path):
+    provider = CodexUsageProvider(UsageClient(RuntimeError("usage endpoint unavailable")), store=CodexUsageStore(tmp_path))
+    usage = provider.current(CodexCredential(CredentialKind.SUBSCRIPTION, "ref", "acct", authenticated=True), CodexExecutionMode.SUBSCRIPTION)
+
+    assert usage.capacity_status == "unknown"
+    assert not usage.available
+    assert usage.quota_health == 0

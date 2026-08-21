@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-21
 
+- Hardened the Codex dual-auth lifecycle across resource selection, execution recovery, usage-cache expiry, and accounting.
+  - Added classified AUTH_REQUIRED, RESOURCE_UNAVAILABLE, QUOTA_EXHAUSTED, FALLBACK_SELECTED, and COMPLETED states; bounded subscription-to-API fallback preserves the original failure reason and exposes selected resource, fallback path, and accounting reference on results.
+  - Linked successful execution accounting to the execution ID for API token/cost records and subscription identity/quota records, and prevented unknown or stale usage from being treated as available capacity.
+  - Added focused lifecycle scenarios for healthy subscription execution, quota fallback, expired authentication, unavailable usage, accounting linkage, and one-hop recovery.
+  - User verification required: `python -m pytest tests/test_codex_provider_lifecycle.py -v`.
 - Updated model routing to evaluate provider resource evidence once per candidate, expose the selected `RoutingResourceScore`, and persist retry/fallback decision lineage through routing outcomes and the decision journal.
   - User verification required: `python -m pytest tests/test_model_routing.py tests/gateway/test_routing_authority.py -v`.
 - Completed Codex resource selection evidence and execution accounting: selected mode reasons are persisted alongside API cost or subscription quota/reset data.

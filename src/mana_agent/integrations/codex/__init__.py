@@ -12,7 +12,7 @@ from mana_agent.integrations.codex.responses_bridge import (
 from mana_agent.integrations.codex.runtime_config import CodexRuntimeConfig, CodexRuntimeConfigBuilder
 from mana_agent.integrations.codex.runtime_environment import CodexRuntimeContext, CodexRuntimeEnvironment
 from mana_agent.integrations.codex.provider import (
-    CodexCredential, CodexCredentialStore, CodexExecutionMode, CodexIdentityError, CodexPolicy, CodexProvider,
+    CodexCredential, CodexCredentialStore, CodexExecutionError, CodexExecutionMetadata, CodexExecutionMode, CodexExecutionState, CodexFailureKind, CodexIdentityError, CodexPolicy, CodexProvider,
     CodexRoutingDecisionStore,
     CodexUsage, CodexUsageStore, CredentialKind, choose_codex_mode, choose_codex_resource,
     codex_resource_availability, codex_resource_score,
@@ -30,7 +30,11 @@ __all__ = [
     "CodexRuntimeEnvironment",
     "CodexCredential",
     "CodexCredentialStore",
+    "CodexExecutionError",
+    "CodexExecutionMetadata",
     "CodexExecutionMode",
+    "CodexExecutionState",
+    "CodexFailureKind",
     "CodexIdentityError",
     "CodexPolicy",
     "CodexProvider",
