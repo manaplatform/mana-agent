@@ -52,7 +52,14 @@ def _checkpoint_resume_failure_reason(exc: BaseException) -> str:
 class CheckpointResumeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["resume_checkpoint", "retry_task", "replan_task", "start_fresh", "stop"]
+    action: Literal[
+        "resume_checkpoint",
+        "retry_task",
+        "replan_task",
+        "start_fresh",
+        "stop",
+        "human_review_required",
+    ]
     task_id: str = ""
     checkpoint_id: str = ""
     same_work: bool
@@ -74,7 +81,14 @@ class CheckpointResumeOutput(BaseModel):
 @dataclass(frozen=True, slots=True)
 class CheckpointResumeDecision:
     decision_id: str
-    action: Literal["resume_checkpoint", "retry_task", "replan_task", "start_fresh", "stop"]
+    action: Literal[
+        "resume_checkpoint",
+        "retry_task",
+        "replan_task",
+        "start_fresh",
+        "stop",
+        "human_review_required",
+    ]
     task_id: str
     checkpoint_id: str
     same_work: bool
@@ -83,6 +97,17 @@ class CheckpointResumeDecision:
     side_effects_safe_to_repeat: bool
     safe_to_continue: bool
     reason: str
+
+    @property
+    def recovery_response(self) -> dict[str, str]:
+        """Machine-readable handoff for a recovery blocked by safety policy."""
+        if self.action != "human_review_required":
+            raise ValueError("only a human-review decision has a blocked recovery response")
+        return {
+            "status": "blocked",
+            "reason": "AMBIGUOUS_LOST_LEASE",
+            "action": "human_review_required",
+        }
 
 
 CHECKPOINT_RESUME_PROMPT = """You decide whether a new user request may resume one durable checkpoint.
@@ -98,6 +123,10 @@ Chat turns auto-select durable work without requiring /tasks. Use this decision 
    incomplete step; completed children may remain complete)
 4) different work, live/fresh data required, or recovery_candidates empty → start_fresh (new task)
 5) same work but no listed candidate is safe → stop (never invent a task id)
+6) a candidate with `recovery_review_required=true` has an ambiguous lost lease. Select
+   `human_review_required`, copy its exact task_id, leave checkpoint_id empty, set same_work=true,
+   checkpoint_still_valid=false, side_effects_safe_to_repeat=false, safe_to_continue=false, and
+   fresh_data_required=false. Never resume, retry, replan, or start a duplicate execution for it.
 
 The payload provides `entry_route_requires_live_data`. When `entry_route_requires_live_data` is true
 or when live/fresh data is required (including prices, mailboxes and email checks, calendars, live
@@ -237,7 +266,7 @@ class CheckpointResumeDecider:
         retryable_task_ids = {
             str(item["task_id"])
             for item in candidates
-            if str(item.get("state") or "") != "completed"
+            if str(item.get("state") or "") not in {"completed", "recovery_review_required"}
         }
         if output.action == "resume_checkpoint":
             if (output.task_id, output.checkpoint_id) not in candidate_pairs:
@@ -279,6 +308,29 @@ class CheckpointResumeDecider:
                 raise CheckpointResumeError(
                     "Model decision failed: checkpoint_resume. No task was resumed or started. "
                     "Reason: same-task retry or replan safety fields are inconsistent."
+                )
+        elif output.action == "human_review_required":
+            review_task_ids = {
+                str(item["task_id"])
+                for item in candidates
+                if bool(item.get("recovery_review_required"))
+            }
+            if output.task_id not in review_task_ids or output.checkpoint_id:
+                raise CheckpointResumeError(
+                    "Model decision failed: checkpoint_resume. No task was resumed or started. "
+                    "Reason: human review must select one offered ambiguous lost-lease task "
+                    "without a checkpoint."
+                )
+            if (
+                not output.same_work
+                or output.checkpoint_still_valid
+                or output.side_effects_safe_to_repeat
+                or output.safe_to_continue
+                or output.fresh_data_required
+            ):
+                raise CheckpointResumeError(
+                    "Model decision failed: checkpoint_resume. No task was resumed or started. "
+                    "Reason: human-review safety fields are inconsistent."
                 )
         else:
             if output.task_id or output.checkpoint_id:

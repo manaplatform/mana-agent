@@ -36,12 +36,19 @@ class ExecutionState(str, Enum):
     FAILED = "failed"
     BUDGET_EXHAUSTED = "budget_exhausted"
     PENDING_BUDGET_DECISION = "pending_budget_decision"
+    RECOVERY_REVIEW_REQUIRED = "recovery_review_required"
     COMPLETED_PENDING_VERIFICATION = "completed_pending_verification"
     COMPLETED = "completed"
 
 
 TERMINAL_STATES = frozenset(
-    {ExecutionState.CANCELLED, ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED, ExecutionState.COMPLETED}
+    {
+        ExecutionState.CANCELLED,
+        ExecutionState.FAILED,
+        ExecutionState.BUDGET_EXHAUSTED,
+        ExecutionState.RECOVERY_REVIEW_REQUIRED,
+        ExecutionState.COMPLETED,
+    }
 )
 
 
@@ -363,8 +370,40 @@ class ExecutionEvent(StrictModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class RecoveryInterventionReason(str, Enum):
+    AMBIGUOUS_LOST_LEASE = "AMBIGUOUS_LOST_LEASE"
+
+
+class RecoveryInterventionRecord(StrictModel):
+    """Durable evidence for recovery that is blocked pending human review."""
+
+    intervention_id: str = Field(default_factory=lambda: stable_id("recovery_intervention"))
+    task_id: str
+    execution_id: str
+    attempt_id: str = ""
+    execution_state: Literal["interrupted"] = "interrupted"
+    status: Literal["blocked"] = "blocked"
+    reason: RecoveryInterventionReason
+    action: Literal["human_review_required"] = "human_review_required"
+    last_lease_owner: str = ""
+    lease_expiry: datetime | None = None
+    terminal_state: ExecutionState = ExecutionState.RECOVERY_REVIEW_REQUIRED
+    external_side_effects_possible: bool
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def normalize_timestamps(self) -> "RecoveryInterventionRecord":
+        if self.terminal_state not in TERMINAL_STATES:
+            raise ValueError("terminal_state must be terminal")
+        if self.lease_expiry is not None:
+            if self.lease_expiry.tzinfo is None or self.lease_expiry.utcoffset() is None:
+                raise ValueError("lease_expiry must be timezone-aware")
+            object.__setattr__(self, "lease_expiry", self.lease_expiry.astimezone(timezone.utc))
+        return self
+
+
 class TaskRecord(StrictModel):
-    schema_version: int = Field(default=7, ge=1)
+    schema_version: int = Field(default=8, ge=1)
     state_version: int = Field(default=0, ge=0)
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
@@ -465,6 +504,7 @@ class TaskRecord(StrictModel):
     human_inputs: list[dict[str, Any]] = Field(default_factory=list)
     human_resume_claim_ids: list[str] = Field(default_factory=list)
     human_wait_started_at: datetime | None = None
+    recovery_intervention_id: str = ""
 
     def wall_clock_deadline_exceeded(self, now: datetime | None = None) -> bool:
         """Return True when the absolute wall-clock deadline has already elapsed.
@@ -484,8 +524,8 @@ class TaskRecord(StrictModel):
 
     @model_validator(mode="after")
     def normalize_root(self) -> "TaskRecord":
-        if self.schema_version < 7:
-            object.__setattr__(self, "schema_version", 7)
+        if self.schema_version < 8:
+            object.__setattr__(self, "schema_version", 8)
         provenance_defaults = {
             "side_effect_classification": "legacy_or_unspecified",
             "completion_contract": (
@@ -621,6 +661,7 @@ class RecoverySummary(StrictModel):
     recovered: list[str] = Field(default_factory=list)
     retry_scheduled: list[str] = Field(default_factory=list)
     intervention_required: list[str] = Field(default_factory=list)
+    intervention_records: list[RecoveryInterventionRecord] = Field(default_factory=list)
     unchanged: list[str] = Field(default_factory=list)
 
 

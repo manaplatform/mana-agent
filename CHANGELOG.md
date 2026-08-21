@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-21
 
+- Added durable ambiguous-lost-lease recovery handling for checkpointed tasks.
+  - Terminalized unsafe lease-loss recovery as `recovery_review_required`, persisted intervention evidence (task/execution/attempt IDs, last lease owner and expiry, terminal state, and external-side-effect risk), and surfaced the structured blocked response `AMBIGUOUS_LOST_LEASE` / `human_review_required` instead of silently dropping recovery.
+  - Added supervisor and checkpoint-decision coverage confirming no duplicate execution is created and human review is required.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_checkpoint_resume.py -v`.
 - Hardened the Codex dual-auth lifecycle across resource selection, execution recovery, usage-cache expiry, and accounting.
   - Added classified AUTH_REQUIRED, RESOURCE_UNAVAILABLE, QUOTA_EXHAUSTED, FALLBACK_SELECTED, and COMPLETED states; bounded subscription-to-API fallback preserves the original failure reason and exposes selected resource, fallback path, and accounting reference on results.
   - Linked successful execution accounting to the execution ID for API token/cost records and subscription identity/quota records, and prevented unknown or stale usage from being treated as available capacity.

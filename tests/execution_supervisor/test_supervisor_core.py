@@ -287,20 +287,44 @@ def test_restart_during_cancellation_finishes_cooperatively(runtime):
     assert recovered.cancellation_status.value == "completed"
 
 
-def test_unknown_lease_loss_requires_intervention(runtime):
+def test_ambiguous_lost_lease_creates_durable_review_intervention_without_retry(runtime):
     supervisor, clock, tmp_path = runtime
     task = create(
         supervisor,
         tmp_path,
         side_effect_classification=SideEffectClassification.UNKNOWN,
     )
-    running(supervisor, task)
+    attempt_id, _token = running(supervisor, task)
     clock.advance(11)
-    summary = supervisor.recover()
-    failed = supervisor.store.get_task(task.task_id)
-    assert task.task_id in summary.intervention_required
-    assert failed.state == ExecutionState.FAILED
-    assert "may already have occurred" in failed.failure_reason
+    first = supervisor.recover()
+    blocked = supervisor.store.get_task(task.task_id)
+    interventions = supervisor.store.recovery_interventions_for_task(task.task_id)
+
+    assert task.task_id in first.intervention_required
+    assert blocked.state == ExecutionState.RECOVERY_REVIEW_REQUIRED
+    assert blocked.attempt_ids == [attempt_id]  # no duplicate execution was created
+    assert len(interventions) == 1
+    intervention = interventions[0]
+    assert intervention.task_id == task.task_id
+    assert intervention.execution_id == task.task_id
+    assert intervention.attempt_id == attempt_id
+    assert intervention.execution_state == "interrupted"
+    assert intervention.last_lease_owner == "worker-a"
+    assert intervention.lease_expiry == clock() - timedelta(seconds=1)
+    assert intervention.terminal_state == ExecutionState.RECOVERY_REVIEW_REQUIRED
+    assert intervention.external_side_effects_possible is True
+    assert {
+        "status": "blocked",
+        "reason": "AMBIGUOUS_LOST_LEASE",
+        "action": "human_review_required",
+    }.items() <= intervention.model_dump(mode="json").items()
+    assert first.intervention_records == [intervention]
+
+    second = supervisor.recover()
+    assert supervisor.store.get_task(task.task_id).attempt_ids == [attempt_id]
+    assert supervisor.store.recovery_interventions_for_task(task.task_id) == [intervention]
+    assert task.task_id not in second.retry_scheduled
+    assert second.intervention_records == [intervention]
 
 
 def test_checkpoint_and_durable_result_escrow_survive_restart(runtime):
@@ -479,7 +503,7 @@ def test_create_child_refuses_deadline_dead_parent(runtime):
 def test_task_creation_records_provenance_and_ambiguous_actions_block_retry(runtime):
     supervisor, _clock, tmp_path = runtime
     task = create(supervisor, tmp_path)
-    assert task.schema_version == 7
+    assert task.schema_version == 8
     assert task.completion_contract
     assert task.field_provenance["actual_cost"] == "pending_runtime_accounting"
 
@@ -508,7 +532,7 @@ def test_legacy_task_records_upgrade_to_metadata_provenance_schema() -> None:
         }
     )
 
-    assert legacy.schema_version == 7
+    assert legacy.schema_version == 8
     assert legacy.field_provenance["actual_cost"] == "pending_runtime_accounting"
 
 

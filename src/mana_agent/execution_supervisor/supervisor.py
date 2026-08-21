@@ -44,6 +44,8 @@ from mana_agent.execution_supervisor.models import (
     ParentProgress,
     RecoveryAction,
     RecoveryDecision,
+    RecoveryInterventionReason,
+    RecoveryInterventionRecord,
     RecoverySummary,
     ResultAcknowledgement,
     RetryBudget,
@@ -486,13 +488,21 @@ class ExecutionSupervisor:
                 if target != ExecutionState.COMPLETED and not task.result_id:
                     result_kind = (
                         "terminal_failure"
-                        if target in {ExecutionState.FAILED, ExecutionState.CANCELLED, ExecutionState.BUDGET_EXHAUSTED}
+                        if target in {
+                            ExecutionState.FAILED,
+                            ExecutionState.CANCELLED,
+                            ExecutionState.BUDGET_EXHAUSTED,
+                            ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                        }
                         else "chat_result"
                     )
                     status = EscrowStatus.AVAILABLE
                     verification_status = (
                         VerificationStatus.FAILED
-                        if target == ExecutionState.FAILED
+                        if target in {
+                            ExecutionState.FAILED,
+                            ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                        }
                         else VerificationStatus.NOT_SUPPORTED
                     )
                     result_payload = {
@@ -558,7 +568,11 @@ class ExecutionSupervisor:
                 task.waiting_inbox_item_id = ""
                 task.waiting_reason = ""
                 task.human_wait_started_at = None
-            if reason and target in {ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}:
+            if reason and target in {
+                ExecutionState.FAILED,
+                ExecutionState.BUDGET_EXHAUSTED,
+                ExecutionState.RECOVERY_REVIEW_REQUIRED,
+            }:
                 task.failure_reason = reason
             if recovery_reason:
                 task.recovery_reason = recovery_reason
@@ -585,6 +599,7 @@ class ExecutionSupervisor:
             ExecutionState.CANCELLED: "task_cancelled",
             ExecutionState.FAILED: "task_failed",
             ExecutionState.BUDGET_EXHAUSTED: "task_budget_exhausted",
+            ExecutionState.RECOVERY_REVIEW_REQUIRED: "recovery_review_required",
             ExecutionState.COMPLETED: "task_completed",
         }.get(target, f"task_{target.value}")
         if target in TERMINAL_STATES and task.attempt_id:
@@ -592,7 +607,7 @@ class ExecutionSupervisor:
             if attempt is not None:
                 attempt.state = target.value
                 attempt.finished_at = task.finished_at
-                if target == ExecutionState.FAILED:
+                if target in {ExecutionState.FAILED, ExecutionState.RECOVERY_REVIEW_REQUIRED}:
                     attempt.failure_reason = reason
                 self.store.save_attempt(attempt)
         self._emit(event_name, task, previous_state=prior.value if prior else "", reason=reason or recovery_reason)
@@ -629,14 +644,23 @@ class ExecutionSupervisor:
 
         result_kind = (
             "terminal_failure"
-            if state in {ExecutionState.FAILED, ExecutionState.CANCELLED, ExecutionState.BUDGET_EXHAUSTED}
+            if state in {
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+                ExecutionState.BUDGET_EXHAUSTED,
+                ExecutionState.RECOVERY_REVIEW_REQUIRED,
+            }
             else ("resumable_wait" if is_resumable else "chat_result")
         )
         status = EscrowStatus.AVAILABLE
         verification_status = (
             VerificationStatus.PASSED
             if state == ExecutionState.COMPLETED
-            else (VerificationStatus.FAILED if state == ExecutionState.FAILED else VerificationStatus.NOT_SUPPORTED)
+            else (
+                VerificationStatus.FAILED
+                if state in {ExecutionState.FAILED, ExecutionState.RECOVERY_REVIEW_REQUIRED}
+                else VerificationStatus.NOT_SUPPORTED
+            )
         )
         result_payload = payload or {
             "status": state.value,
@@ -1809,6 +1833,7 @@ class ExecutionSupervisor:
                     ExecutionState.FAILED.value,
                     ExecutionState.CANCELLED.value,
                     ExecutionState.BUDGET_EXHAUSTED.value,
+                    ExecutionState.RECOVERY_REVIEW_REQUIRED.value,
                 }
                 or (task is not None and task.state in TERMINAL_STATES)
             )
@@ -2474,13 +2499,93 @@ class ExecutionSupervisor:
         self._emit("replan_completed" if current.state == ExecutionState.REPLANNING else "retry_started", task)
         return task
 
+    def _require_ambiguous_lease_review(
+        self, task: TaskRecord, *, now: datetime
+    ) -> RecoveryInterventionRecord:
+        """Persist lost-lease evidence before terminalizing uncertain work.
+
+        This deliberately records the intervention before clearing the lease from
+        the task. A restart between those writes can re-use the same record and
+        still terminalize the task without creating a second execution.
+        """
+        existing = next(
+            (
+                item
+                for item in self.store.recovery_interventions_for_task(task.task_id)
+                if item.attempt_id == task.attempt_id
+                and item.reason is RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE
+            ),
+            None,
+        )
+        intervention = existing or RecoveryInterventionRecord(
+            task_id=task.task_id,
+            execution_id=task.task_id,
+            attempt_id=task.attempt_id,
+            reason=RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE,
+            last_lease_owner=task.lease_owner,
+            lease_expiry=task.lease_expires_at,
+            external_side_effects_possible=(
+                task.side_effect_classification is not SideEffectClassification.READ_ONLY
+            ),
+            created_at=now,
+        )
+        if existing is None:
+            self.store.save_recovery_intervention(intervention)
+
+        if task.recovery_intervention_id != intervention.intervention_id:
+            def link(current: TaskRecord) -> None:
+                current.recovery_intervention_id = intervention.intervention_id
+                current.updated_at = now
+
+            task, _ = self.store.update_task(task.task_id, link)
+
+        if task.state is not ExecutionState.RECOVERY_REVIEW_REQUIRED:
+            task = self.transition(
+                task.task_id,
+                ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                reason=(
+                    "ambiguous lost lease; external side effects may have occurred; "
+                    "human review is required"
+                ),
+                recovery_reason="automatic recovery refused after ambiguous lost lease",
+            )
+        self._emit(
+            "recovery_intervention_required",
+            task,
+            intervention_id=intervention.intervention_id,
+            status=intervention.status,
+            reason=intervention.reason.value,
+            action=intervention.action,
+            execution_id=intervention.execution_id,
+            execution_state=intervention.execution_state,
+            last_lease_owner=intervention.last_lease_owner,
+            lease_expiry=intervention.lease_expiry,
+            terminal_state=intervention.terminal_state.value,
+            external_side_effects_possible=intervention.external_side_effects_possible,
+        )
+        return intervention
+
     def recover(self) -> RecoverySummary:
         """Recover expired work deterministically; safe to invoke repeatedly."""
         summary = RecoverySummary()
         now = self.clock()
-        for initial in self.store.list_tasks(incomplete_only=True):
+        incomplete_tasks = self.store.list_tasks(incomplete_only=True)
+        review_required_tasks = [
+            task
+            for task in self.store.list_tasks()
+            if task.state is ExecutionState.RECOVERY_REVIEW_REQUIRED
+        ]
+        for initial in [*incomplete_tasks, *review_required_tasks]:
             summary.scanned += 1
             task = self.store.get_task(initial.task_id)
+            if task.state is ExecutionState.RECOVERY_REVIEW_REQUIRED:
+                intervention = self.store.get_recovery_intervention(
+                    task.recovery_intervention_id
+                )
+                summary.intervention_required.append(task.task_id)
+                if intervention is not None:
+                    summary.intervention_records.append(intervention)
+                continue
             checkpoints = self.store.checkpoints_for_task(task.task_id)
             if checkpoints:
                 latest = checkpoints[-1]
@@ -2576,21 +2681,9 @@ class ExecutionSupervisor:
                 reason="active lease expired during execution",
             )
             if decision is None:
-                def fail(current: TaskRecord) -> None:
-                    validate_transition(current.state, ExecutionState.FAILED)
-                    current.state = ExecutionState.FAILED
-                    current.finished_at = current.updated_at = now
-                    current.failure_reason = (
-                        f"ambiguous {current.side_effect_classification.value} execution lost its lease; "
-                        "manual review is required because the external action may already have occurred"
-                    )
-                    current.recovery_reason = "automatic retry refused by side-effect policy"
-                    current.lease_owner = ""
-                    current.lease_token = ""
-                    current.lease_expires_at = None
-                task, _ = self.store.update_task(task.task_id, fail)
-                self._emit("task_failed", task, reason=task.failure_reason)
+                intervention = self._require_ambiguous_lease_review(task, now=now)
                 summary.intervention_required.append(task.task_id)
+                summary.intervention_records.append(intervention)
                 continue
             try:
                 task = self.retry(task.task_id, decision)
@@ -2619,7 +2712,10 @@ class ExecutionSupervisor:
         task = self.store.get_task(task_id)
         children = [self.store.get_task(child) for child in task.child_task_ids]
         completed = sum(child.state == ExecutionState.COMPLETED for child in children)
-        failed = sum(child.state == ExecutionState.FAILED for child in children)
+        failed = sum(
+            child.state in {ExecutionState.FAILED, ExecutionState.RECOVERY_REVIEW_REQUIRED}
+            for child in children
+        )
         cancelled = sum(child.state == ExecutionState.CANCELLED for child in children)
         active_rows = [child for child in children if child.state not in TERMINAL_STATES]
         child_by_id = {child.task_id: child for child in children}

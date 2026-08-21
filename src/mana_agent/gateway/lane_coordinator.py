@@ -2013,6 +2013,7 @@ class LaneCoordinator:
             SupervisorState.FAILED: LaneTaskState.FAILED,
             SupervisorState.CANCELLED: LaneTaskState.CANCELLED,
             SupervisorState.BUDGET_EXHAUSTED: LaneTaskState.BUDGET_EXHAUSTED,
+            SupervisorState.RECOVERY_REVIEW_REQUIRED: LaneTaskState.BLOCKED,
             SupervisorState.COMPLETED: LaneTaskState.COMPLETED,
             SupervisorState.RETRY_SCHEDULED: LaneTaskState.QUEUED,
             SupervisorState.REPLANNING: LaneTaskState.QUEUED,
@@ -2515,6 +2516,12 @@ class LaneCoordinator:
             elif supervised.state == SupervisorState.BUDGET_EXHAUSTED:
                 execution.state = LaneTaskState.BUDGET_EXHAUSTED
                 execution.error = supervised.failure_reason or "execution budget exhausted"
+            elif supervised.state == SupervisorState.RECOVERY_REVIEW_REQUIRED:
+                execution.state = LaneTaskState.BLOCKED
+                execution.error = (
+                    supervised.failure_reason
+                    or "Recovery is blocked pending human review of an ambiguous lost lease."
+                )
         self.lock_manager.recover_stale()
         interrupted_task_ids: list[str] = []
         with self._condition:
