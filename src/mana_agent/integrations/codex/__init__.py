@@ -13,6 +13,7 @@ from mana_agent.integrations.codex.runtime_config import CodexRuntimeConfig, Cod
 from mana_agent.integrations.codex.runtime_environment import CodexRuntimeContext, CodexRuntimeEnvironment
 from mana_agent.integrations.codex.provider import (
     CodexCredential, CodexCredentialStore, CodexExecutionMode, CodexIdentityError, CodexPolicy, CodexProvider,
+    CodexRoutingDecisionStore,
     CodexUsage, CodexUsageStore, CredentialKind, choose_codex_mode, choose_codex_resource,
     codex_resource_availability, codex_resource_score,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "CodexIdentityError",
     "CodexPolicy",
     "CodexProvider",
+    "CodexRoutingDecisionStore",
     "CodexUsage",
     "CodexUsageStore",
     "CredentialKind",

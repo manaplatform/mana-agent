@@ -290,6 +290,8 @@ class CodexAccountingRecord:
     quota_consumed: float = 0.0
     account_identity: str = ""
     reset_at: float | None = None
+    decision_id: str = ""
+    routing_reason: tuple[str, ...] = ()
 
 
 class CodexAccountingStore:
@@ -302,12 +304,33 @@ class CodexAccountingStore:
             stream.write(json.dumps(asdict(record) | {"mode": record.mode.value}, sort_keys=True) + "\n")
 
 
+class CodexRoutingDecisionStore:
+    """Append-only, non-secret evidence for Codex resource selection."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.path = (root or mana_home() / "usage").resolve() / "codex-routing.jsonl"
+
+    def record(self, decision: "CodexFallbackDecision") -> None:
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(decision.as_dict(), sort_keys=True) + "\n")
+
+
 @dataclass(frozen=True, slots=True)
 class CodexFallbackDecision:
     selected_provider: str
     selected_mode: CodexExecutionMode
     reason: str
     attempted_modes: tuple[CodexExecutionMode, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.selected_provider,
+            "mode": self.selected_mode.value,
+            "reason": list(self.reasons) or [self.reason],
+            "attempted_modes": [mode.value for mode in self.attempted_modes],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,13 +359,15 @@ class CodexProvider:
 
     name = "codex"
 
-    def __init__(self, backend: Any, *, mode: CodexExecutionMode, credentials: CodexCredentialStore | None = None, usage: CodexUsageStore | None = None, usage_provider: CodexUsageProvider | None = None, accounting: CodexAccountingStore | None = None) -> None:
+    def __init__(self, backend: Any, *, mode: CodexExecutionMode, credentials: CodexCredentialStore | None = None, usage: CodexUsageStore | None = None, usage_provider: CodexUsageProvider | None = None, accounting: CodexAccountingStore | None = None, routing: CodexRoutingDecisionStore | None = None, routing_decision: CodexFallbackDecision | None = None) -> None:
         self.backend = backend
         self.mode = mode
         self.credentials = credentials or CodexCredentialStore()
         self.usage = usage or CodexUsageStore()
         self.usage_provider = usage_provider
         self.accounting = accounting or CodexAccountingStore()
+        self.routing = routing or CodexRoutingDecisionStore()
+        self.routing_decision = routing_decision
 
     @property
     def credential(self) -> CodexCredential | None:
@@ -360,6 +385,16 @@ class CodexProvider:
         return bool(value and value.available)
 
     async def execute(self, task: Any, workspace: Any) -> Any:
+        decision = self.routing_decision or CodexFallbackDecision(
+            "codex",
+            self.mode,
+            "subscription quota healthy" if self.mode is CodexExecutionMode.SUBSCRIPTION else "API resource available",
+            (self.mode,),
+            ("coding task", "subscription authenticated", "quota healthy")
+            if self.mode is CodexExecutionMode.SUBSCRIPTION
+            else ("API resource selected",),
+        )
+        self.routing.record(decision)
         result = await self.backend.execute(task, workspace)
         usage = result.token_usage or {}
         self.accounting.record(CodexAccountingRecord(
@@ -370,6 +405,7 @@ class CodexProvider:
             quota_consumed=(float(usage.get("quota_consumed", self.resource_usage.quota_consumed if self.resource_usage else 0.0) or 0) if self.mode is CodexExecutionMode.SUBSCRIPTION else 0.0),
             account_identity=self.credential.account_identity if self.credential else "",
             reset_at=self.resource_usage.reset_at if self.resource_usage else None,
+            routing_reason=decision.reasons or (decision.reason,),
         ))
         return result
 
@@ -400,13 +436,26 @@ def choose_codex_resource(usages: Mapping[CodexExecutionMode, CodexUsage], task_
     ]
     candidates.sort(key=lambda item: (-item[0], item[1].value))
     attempted: list[CodexExecutionMode] = []
+    subscription_unavailable = subscription is not None and not subscription.available
     for _score, mode, usage in candidates:
         attempted.append(mode)
         if usage.available:
-            reason = "subscription quota healthy" if mode is CodexExecutionMode.SUBSCRIPTION else "API resource available"
-            if attempted and attempted[0] is not mode:
-                reason = f"{mode.value} selected after {attempted[0].value} resource unavailable"
-            return CodexFallbackDecision("codex", mode, reason, tuple(attempted))
+            selected_reasons = (
+                ("coding task", "subscription authenticated", "quota healthy")
+                if mode is CodexExecutionMode.SUBSCRIPTION
+                else ("API resource selected",)
+            )
+            if mode is CodexExecutionMode.API and subscription_unavailable:
+                unavailable_reason = (
+                    "subscription quota exhausted"
+                    if subscription is not None and subscription.quota_remaining is not None and subscription.quota_remaining <= 0
+                    else "subscription capacity unknown"
+                )
+                selected_reasons = (
+                    f"{unavailable_reason} (resource unavailable)",
+                    "API resource selected",
+                )
+            return CodexFallbackDecision("codex", mode, "; ".join(selected_reasons), tuple(attempted), selected_reasons)
     if any(usage.authenticated is False for usage in usages.values()):
         raise CodexIdentityError("Codex resource authentication is required")
     raise RuntimeError("No authenticated Codex resource satisfies the task policy and quota")
@@ -434,7 +483,7 @@ def codex_resource_availability(provider: CodexProvider, task_type: str, policy:
 
 
 __all__ = [
-    "CodexAccountStatus", "CodexAccountingRecord", "CodexAccountingStore", "CodexAuthenticationService", "CodexFallbackDecision", "CodexIdentityError",
+    "CodexAccountStatus", "CodexAccountingRecord", "CodexAccountingStore", "CodexAuthenticationService", "CodexFallbackDecision", "CodexIdentityError", "CodexRoutingDecisionStore",
     "CodexAuthenticationStatus", "CodexCredential", "CodexCredentialStore", "CodexExecutionMode",
     "CodexIdentityClient", "CodexPolicy", "CodexProvider", "CodexUsage", "CodexUsageClient",
     "CodexUsageProvider", "CodexUsageStore", "CredentialKind", "choose_codex_mode", "choose_codex_resource",

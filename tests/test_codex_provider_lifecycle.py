@@ -11,6 +11,8 @@ from mana_agent.integrations.codex.provider import (
     CodexUsage,
     CodexUsageProvider,
     CodexUsageStore,
+    CodexProvider,
+    CodexRoutingDecisionStore,
     CredentialKind,
     choose_codex_mode,
 )
@@ -99,3 +101,75 @@ def test_accounting_keeps_api_cost_and_subscription_quota_separate(tmp_path):
     store.record(CodexAccountingRecord("codex", CodexExecutionMode.SUBSCRIPTION, "sub-1", quota_consumed=5, account_identity="acct"))
     rows = (tmp_path / "codex-accounting.jsonl").read_text().splitlines()
     assert '"usd_cost": 0.02' in rows[0] and '"quota_consumed": 5' in rows[1]
+
+
+def test_execution_persists_routing_reason_and_accounting_record(tmp_path):
+    class Backend:
+        async def execute(self, task, workspace):
+            return type("Result", (), {"token_usage": {"input_tokens": 4, "output_tokens": 6, "usd_cost": 0.03}})()
+
+    provider = CodexProvider(
+        Backend(),
+        mode=CodexExecutionMode.API,
+        credentials=CodexCredentialStore(tmp_path / "credentials"),
+        usage=CodexUsageStore(tmp_path / "usage"),
+        accounting=CodexAccountingStore(tmp_path / "accounting"),
+        routing=CodexRoutingDecisionStore(tmp_path / "routing"),
+    )
+
+    import asyncio
+    task = type("Task", (), {"task_id": "execution-1"})()
+    result = asyncio.run(provider.execute(task, object()))
+
+    assert result.token_usage["output_tokens"] == 6
+    accounting = (tmp_path / "accounting" / "codex-accounting.jsonl").read_text()
+    routing = (tmp_path / "routing" / "codex-routing.jsonl").read_text()
+    assert '"execution_id": "execution-1"' in accounting
+    assert '"usd_cost": 0.03' in accounting
+    assert '"routing_reason": ["API resource selected"]' in accounting
+    assert '"reason": ["API resource selected"]' in routing
+
+
+def test_subscription_execution_records_identity_quota_and_reset_cycle(tmp_path):
+    class Backend:
+        async def execute(self, task, workspace):
+            return type("Result", (), {"token_usage": {"quota_consumed": 2}})()
+
+    credentials = CodexCredentialStore(tmp_path / "credentials")
+    credentials.save(
+        CodexCredential(
+            CredentialKind.SUBSCRIPTION,
+            "subscription-ref",
+            account_identity="acct-1",
+            authenticated=True,
+        )
+    )
+    usage = CodexUsageStore(tmp_path / "usage")
+    usage.save(
+        CodexUsage(
+            CodexExecutionMode.SUBSCRIPTION,
+            True,
+            account_identity="acct-1",
+            quota_consumed=3,
+            quota_remaining=7,
+            quota_capacity=10,
+            reset_at=1234,
+        )
+    )
+    provider = CodexProvider(
+        Backend(),
+        mode=CodexExecutionMode.SUBSCRIPTION,
+        credentials=credentials,
+        usage=usage,
+        accounting=CodexAccountingStore(tmp_path / "accounting"),
+        routing=CodexRoutingDecisionStore(tmp_path / "routing"),
+    )
+
+    import asyncio
+    asyncio.run(provider.execute(type("Task", (), {"task_id": "subscription-execution"})(), object()))
+
+    accounting = (tmp_path / "accounting" / "codex-accounting.jsonl").read_text()
+    assert '"account_identity": "acct-1"' in accounting
+    assert '"quota_consumed": 2.0' in accounting
+    assert '"reset_at": 1234' in accounting
+    assert '"routing_reason": ["coding task", "subscription authenticated", "quota healthy"]' in accounting

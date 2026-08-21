@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-21
+
+- Updated model routing to evaluate provider resource evidence once per candidate, expose the selected `RoutingResourceScore`, and persist retry/fallback decision lineage through routing outcomes and the decision journal.
+  - User verification required: `python -m pytest tests/test_model_routing.py tests/gateway/test_routing_authority.py -v`.
+- Completed Codex resource selection evidence and execution accounting: selected mode reasons are persisted alongside API cost or subscription quota/reset data.
+  - User verification required: `python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py -v`.
+
 ## 2026-08-16
 
 - Fixed permission request reducer status transitions in `src/mana_agent/dashboard/components/live_chat.js`.

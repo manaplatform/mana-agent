@@ -354,6 +354,9 @@ class RoutingDecision:
     applicable_limits: dict[str, Any] = field(default_factory=dict)
     deadline_seconds: int | None = None
     orchestration_reasons: tuple[str, ...] = ()
+    resource_score: RoutingResourceScore = field(default_factory=lambda: RoutingResourceScore(True, 1.0, 1.0, 1.0))
+    fallback_of_decision_id: str = ""
+    fallback_reason: str = ""
 
     def concise(self) -> dict[str, Any]:
         return {
@@ -379,6 +382,9 @@ class RoutingDecision:
             "multi_agent_execution_permitted": self.multi_agent_execution_permitted,
             "verifier_model": self.verifier_model,
             "reasons": list(self.selection_reasons),
+            "resource_score": asdict(self.resource_score),
+            "fallback_of_decision_id": self.fallback_of_decision_id,
+            "fallback_reason": self.fallback_reason,
         }
 
 
@@ -418,6 +424,10 @@ class RoutingOutcome:
     accepted: bool | None = None
     competition_result: str = "not_run"
     failure_kind: str = ""
+    decision_id: str = ""
+    request_id: str = ""
+    task_id: str = ""
+    fallback_of_decision_id: str = ""
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def safe_dict(self) -> dict[str, Any]:

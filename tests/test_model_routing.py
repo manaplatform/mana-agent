@@ -14,6 +14,7 @@ from mana_agent.model_routing.history import InMemoryRoutingHistory, JsonlRoutin
 from mana_agent.model_routing.models import (
     Complexity, LatencyClass, ModelProfile, RepositoryMetadata, RiskLevel,
     RoutingBudgets, RoutingFailure, RoutingOutcome, RoutingRequest,
+    RoutingResourceScore,
     provider_request_overrides_from_configuration,
 )
 from mana_agent.model_routing.profiles import configured_profiles, profiles_from_legacy_configuration
@@ -55,6 +56,30 @@ def test_routine_task_chooses_cheaper_qualified_model_and_high_risk_chooses_stro
     router = ModelRouter([CHEAP, STRONG])
     assert router.route(request()).selected_model == "cheap"
     assert router.route(request(complexity=Complexity.CRITICAL, risk=RiskLevel.CRITICAL, task_type="coding")).selected_model == "strong"
+
+
+def test_resource_score_is_consumed_once_and_persisted_on_decision() -> None:
+    calls: list[str] = []
+
+    def resources(model: ModelProfile, _request: RoutingRequest) -> RoutingResourceScore:
+        calls.append(model.model_id)
+        return RoutingResourceScore(
+            available=True,
+            provider_capacity=1.0 if model.model_id == "cheap" else 0.0,
+            quota_health=1.0,
+            resource_confidence=1.0,
+        )
+
+    policy = replace(ModelRouter([CHEAP, STRONG]).policy, weights={
+        "capability": 0.0, "quality": 0.0, "history": 0.0, "language": 0.0,
+        "cost": 0.0, "latency": 0.0, "provider_capacity": 1.0,
+        "quota_health": 0.0, "resource_confidence": 0.0,
+    })
+    decision = ModelRouter([CHEAP, STRONG], policy=policy, resource_scoring=resources).route(request())
+
+    assert decision.selected_model == "cheap"
+    assert decision.resource_score.provider_capacity == 1.0
+    assert calls == ["cheap", "strong"]
 
 
 def test_repository_language_changes_ranking() -> None:

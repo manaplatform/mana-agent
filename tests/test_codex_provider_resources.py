@@ -34,6 +34,10 @@ def test_resource_decision_retains_explicit_api_fallback_reason():
     decision = choose_codex_resource({CodexExecutionMode.SUBSCRIPTION: exhausted, CodexExecutionMode.API: api}, "coding")
     assert decision.selected_mode is CodexExecutionMode.API
     assert "unavailable" in decision.reason
+    assert decision.reasons == (
+        "subscription quota exhausted (resource unavailable)",
+        "API resource selected",
+    )
 
 
 def test_healthy_subscription_is_preferred_for_coding_even_when_api_is_available():
@@ -51,3 +55,13 @@ def test_expired_subscription_requires_authentication_instead_of_silent_api_swit
         assert "authentication" in str(exc)
     else:
         raise AssertionError("expired subscription must not silently switch to API")
+
+
+def test_unknown_subscription_capacity_does_not_assume_unlimited_quota():
+    api = CodexUsage(CodexExecutionMode.API, True, estimated_cost_usd=0.02)
+    unknown = CodexUsage(CodexExecutionMode.SUBSCRIPTION, True, capacity_status="unknown")
+    decision = choose_codex_resource(
+        {CodexExecutionMode.SUBSCRIPTION: unknown, CodexExecutionMode.API: api}, "coding"
+    )
+    assert decision.selected_mode is CodexExecutionMode.API
+    assert "capacity unknown" in decision.reason
