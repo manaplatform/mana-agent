@@ -536,6 +536,8 @@ class Settings(BaseSettings):
     )
     mana_codex_model: str | None = Field(default=None, alias="MANA_CODEX_MODEL")
     mana_codex_bin: str = Field(default="codex", alias="MANA_CODEX_BIN")
+    mana_codex_execution_mode: str = Field(default="api", alias="MANA_CODEX_EXECUTION_MODE")
+    mana_codex_credential_reference: str = Field(default="", alias="MANA_CODEX_CREDENTIAL_REFERENCE")
     # full = all auto-chat tools; coding = repository/edit/verify/document/git only
     # (SWE-bench and other isolated coding runs).
     mana_auto_chat_tool_surface: str = Field(

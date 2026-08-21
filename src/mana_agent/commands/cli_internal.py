@@ -66,6 +66,7 @@ from .output import build_output_sink, get_shared_console
 from .workspace_cli import impact_command, repo_app, search_command, session_app, workspace_app
 from .worktree_cli import worktree_app
 from .codex_cli import codex_app
+from .auth_cli import auth_app
 from .github_app_cli import github_app
 from .email_cli import connector_app
 from .protocols_cli import a2a_app, acp_app
@@ -99,6 +100,7 @@ app.add_typer(connectors_app, name="connectors")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(worktree_app, name="worktree")
 app.add_typer(codex_app, name="codex")
+app.add_typer(auth_app, name="auth")
 app.add_typer(github_app, name="github-app")
 app.add_typer(repo_app, name="repo")
 app.add_typer(repo_app, name="repository")

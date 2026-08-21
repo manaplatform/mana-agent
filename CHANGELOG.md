@@ -4014,3 +4014,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Added English/Persian language selection to repository analysis across the CLI, dashboard, API request, LLM prompt, and generated evidence metadata.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_project_analyze_service.py tests/test_cli_smoke.py -q`.
+## 2026-08-21
+
+- Added Codex dual-auth resource metadata for API and subscription execution modes, secure credential references, usage caches, quota-aware mode selection, and `codex auth`/`codex status` reporting.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_runtime.py -q`.

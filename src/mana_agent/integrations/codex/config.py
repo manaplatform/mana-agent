@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mana_agent.config.inference_provider import resolve_inference_connection
 from mana_agent.config.provider_registry import CodexTransport
+from mana_agent.integrations.codex.provider import CodexExecutionMode
 
 
 class CodexSettings(BaseModel):
@@ -37,6 +38,8 @@ class CodexSettings(BaseModel):
     request_max_retries: int = Field(default=4, ge=0)
     stream_max_retries: int = Field(default=5, ge=0)
     stream_idle_timeout_ms: int = Field(default=300_000, ge=1)
+    execution_mode: CodexExecutionMode = CodexExecutionMode.API
+    credential_reference: str = ""
 
     @classmethod
     def from_mana_settings(
@@ -64,6 +67,8 @@ class CodexSettings(BaseModel):
             query_params=connection.query_params,
             supports_responses_api=connection.supports_responses_api,
             codex_transport=connection.codex_transport,
+            execution_mode=CodexExecutionMode(str(getattr(settings, "mana_codex_execution_mode", "api") or "api")),
+            credential_reference=str(getattr(settings, "mana_codex_credential_reference", "") or ""),
         )
 
     @field_validator("approval_policy")

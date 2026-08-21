@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from typing import Iterable
+from typing import Callable, Iterable
 
 from mana_agent.context_cost.accounting import ModelContextLimitError, ModelTokenAccountingService, TokenEstimationRequest
 from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver, UnknownModelProfileError
@@ -49,12 +49,13 @@ _LATENCY = {LatencyClass.INTERACTIVE: 0, LatencyClass.STANDARD: 1, LatencyClass.
 class ModelRouter:
     """Deterministic scoring policy; provider execution intentionally lives elsewhere."""
 
-    def __init__(self, profiles: Iterable[ModelProfile], *, history: RoutingHistory | None = None, policy: RoutingPolicy | None = None) -> None:
+    def __init__(self, profiles: Iterable[ModelProfile], *, history: RoutingHistory | None = None, policy: RoutingPolicy | None = None, resource_availability: Callable[[ModelProfile, RoutingRequest], tuple[bool, str]] | None = None) -> None:
         self.profiles = tuple(sorted(profiles, key=lambda item: item.key))
         if len({item.key for item in self.profiles}) != len(self.profiles):
             raise ValueError("model profile registry contains duplicate provider/model IDs")
         self.history = history or InMemoryRoutingHistory()
         self.policy = policy or RoutingPolicy()
+        self.resource_availability = resource_availability
         self.accounting = ModelTokenAccountingService(
             ModelTokenProfileResolver(self.profiles, unknown_policy="require_metadata")
         )
@@ -158,6 +159,10 @@ class ModelRouter:
         reasons: list[str] = []
         if not profile.available:
             reasons.append("model is unavailable")
+        if self.resource_availability is not None:
+            available, reason = self.resource_availability(profile, request)
+            if not available:
+                reasons.append(reason or "provider resource is unavailable")
         if request.role not in profile.supported_roles and "*" not in profile.supported_roles:
             reasons.append(f"role {request.role!r} is unsupported")
         missing_tools = request.required_tools - profile.supported_tools

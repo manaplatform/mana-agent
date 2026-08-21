@@ -164,6 +164,7 @@ class CodexCodingBackend:
                 model=self.settings.model or "",
                 payload={
                     "provider": self.settings.provider,
+                    "execution_mode": getattr(self.settings.execution_mode, "value", str(self.settings.execution_mode)),
                     "transport": transport_value or (
                         "codex_responses_bridge"
                         if not self.settings.supports_responses_api

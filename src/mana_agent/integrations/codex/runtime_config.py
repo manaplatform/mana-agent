@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from mana_agent.config.provider_registry import CodexTransport
 from mana_agent.integrations.codex.config import CodexSettings
+from mana_agent.integrations.codex.provider import CodexExecutionMode
 from mana_agent.integrations.codex.exceptions import CodexConfigurationError
 from mana_agent.integrations.codex.responses_bridge import (
     BridgeUpstreamConfig,
@@ -71,6 +72,7 @@ class CodexRuntimeConfig:
     model_context_window: int | None = None
     model_auto_compact_token_limit: int | None = None
     supports_tool_calls: bool | None = None
+    execution_mode: CodexExecutionMode = CodexExecutionMode.API
 
     @property
     def credential_fingerprint(self) -> str:
@@ -114,7 +116,7 @@ class CodexRuntimeConfig:
         lines = [
             f"model = {_toml_string(self.model)}",
             f"model_provider = {_toml_string(RUNTIME_PROVIDER_ID)}",
-            'forced_login_method = "api"',
+            f'forced_login_method = {_toml_string(self.execution_mode.value)}',
             f"approval_policy = {_toml_string(self.approval_policy)}",
             f"sandbox_mode = {_toml_string(self.sandbox_mode)}",
         ]
@@ -289,6 +291,7 @@ class CodexRuntimeConfigBuilder:
             model_context_window=context_window,
             model_auto_compact_token_limit=auto_compact,
             supports_tool_calls=supports_tools,
+            execution_mode=settings.execution_mode,
         )
 
 
