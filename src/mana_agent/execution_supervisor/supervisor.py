@@ -637,6 +637,7 @@ class ExecutionSupervisor:
             else self.store.get_result_by_execution_id(task.task_id)
         )
         if existing_result is not None:
+            changed = False
             if (
                 existing_result.supervisor_state != state.value
                 and existing_result.status != EscrowStatus.ACKNOWLEDGED
@@ -644,6 +645,24 @@ class ExecutionSupervisor:
                 existing_result.supervisor_state = state.value
                 if state in TERMINAL_STATES:
                     existing_result.completed_at = existing_result.completed_at or self.clock()
+                changed = True
+            if provider_metadata is not None:
+                merged_provider_metadata = {
+                    **existing_result.provider_metadata,
+                    **_provider_metadata(provider_metadata),
+                }
+                if merged_provider_metadata != existing_result.provider_metadata:
+                    existing_result.provider_metadata = merged_provider_metadata
+                    changed = True
+            if error_metadata is not None:
+                merged_error_metadata = {
+                    **existing_result.error_metadata,
+                    **error_metadata,
+                }
+                if merged_error_metadata != existing_result.error_metadata:
+                    existing_result.error_metadata = merged_error_metadata
+                    changed = True
+            if changed:
                 self.store.save_result(existing_result)
             return existing_result
 

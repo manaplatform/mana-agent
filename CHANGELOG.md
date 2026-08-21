@@ -10,6 +10,8 @@ All notable repository changes should be recorded here.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_checkpoint_resume.py -v`.
 - Restored the explicit `ExecutionSupervisor(..., startup_recovery=False)` constructor override used by durable-result inspection tests while preserving the configured default when omitted.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py -v`.
+- Preserved late terminal-result provider and error metadata when the terminal transition had already created escrow, keeping Codex authentication failures durable and actionable.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py -v`.
 - Hardened the Codex dual-auth lifecycle across resource selection, execution recovery, usage-cache expiry, and accounting.
   - Added classified AUTH_REQUIRED, RESOURCE_UNAVAILABLE, QUOTA_EXHAUSTED, FALLBACK_SELECTED, and COMPLETED states; bounded subscription-to-API fallback preserves the original failure reason and exposes selected resource, fallback path, and accounting reference on results.
   - Linked successful execution accounting to the execution ID for API token/cost records and subscription identity/quota records, and prevented unknown or stale usage from being treated as available capacity.
