@@ -237,6 +237,23 @@ class ModelProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutingResourceScore:
+    """Provider-owned resource evidence used by deterministic routing."""
+
+    available: bool
+    provider_capacity: float = 0.0
+    quota_health: float = 0.0
+    resource_confidence: float = 0.0
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        for name in ("provider_capacity", "quota_health", "resource_confidence"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+
+
+@dataclass(frozen=True, slots=True)
 class RoutingRequest:
     role: str
     task_description: str
@@ -337,6 +354,9 @@ class RoutingDecision:
     applicable_limits: dict[str, Any] = field(default_factory=dict)
     deadline_seconds: int | None = None
     orchestration_reasons: tuple[str, ...] = ()
+    resource_score: RoutingResourceScore = field(default_factory=lambda: RoutingResourceScore(True, 1.0, 1.0, 1.0))
+    fallback_of_decision_id: str = ""
+    fallback_reason: str = ""
 
     def concise(self) -> dict[str, Any]:
         return {
@@ -362,6 +382,9 @@ class RoutingDecision:
             "multi_agent_execution_permitted": self.multi_agent_execution_permitted,
             "verifier_model": self.verifier_model,
             "reasons": list(self.selection_reasons),
+            "resource_score": asdict(self.resource_score),
+            "fallback_of_decision_id": self.fallback_of_decision_id,
+            "fallback_reason": self.fallback_reason,
         }
 
 
@@ -401,6 +424,10 @@ class RoutingOutcome:
     accepted: bool | None = None
     competition_result: str = "not_run"
     failure_kind: str = ""
+    decision_id: str = ""
+    request_id: str = ""
+    task_id: str = ""
+    fallback_of_decision_id: str = ""
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def safe_dict(self) -> dict[str, Any]:
@@ -437,6 +464,9 @@ class RoutingPolicy:
         "language": 0.10,
         "cost": 0.15,
         "latency": 0.10,
+        "provider_capacity": 0.08,
+        "quota_health": 0.08,
+        "resource_confidence": 0.04,
     })
 
     def __post_init__(self) -> None:

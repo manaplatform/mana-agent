@@ -622,6 +622,79 @@ def test_lane_capacity_waits_in_queue_until_capacity_is_released(tmp_path: Path,
     assert result and result[0].execution.state == LaneTaskState.QUEUED
 
 
+def test_scheduler_diagnostics_explain_capacity_wait_before_lane_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    waiting = threading.Event()
+
+    def sink(event_type: str, title: str, **kwargs) -> None:
+        _ = title
+        if event_type == "lane.queued" and (kwargs.get("metadata") or {}).get("reason") == "capacity":
+            waiting.set()
+
+    coordinator = LaneCoordinator(
+        root,
+        contracts={"coding": {"max_concurrent_jobs": 1, "timeout_seconds": 5}},
+        event_sink=sink,
+    )
+    first = _reserve(coordinator, LaneId.CODING, intent="first")
+    coordinator.start(first)
+    queued_task = coordinator.taskboard.create_task(
+        title="Queued coding task",
+        user_request="second",
+    )
+    result: list[LaneReservation] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            coordinator.reserve(
+                normalized_intent="second",
+                lane_id=LaneId.CODING,
+                session_id="session-2",
+                workspace_id=coordinator.taskboard.store.workspace_id,
+                repository_id=coordinator.taskboard.store.repository_id,
+                requested_input_tokens=100,
+                requested_output_tokens=200,
+                taskboard_task_id=queued_task.task_id,
+            )
+        )
+    )
+    worker.start()
+    assert waiting.wait(timeout=2)
+
+    diagnostics = coordinator.scheduling_diagnostics(queued_task.task_id)
+
+    assert diagnostics["scheduler_state"] == "waiting_for_capacity"
+    assert diagnostics["queue_position"] == 1
+    assert diagnostics["blocking_task_ids"] == [first.execution.task_id]
+    assert diagnostics["owning_lane"] == {
+        "id": "coding",
+        "active_jobs": 1,
+        "max_concurrent_jobs": 1,
+        "queued_waiters": 1,
+    }
+    assert diagnostics["worker_availability"]["lane_available_slots"] == 0
+    assert diagnostics["queue_manager"]["queue_job_ids"] == []
+    assert diagnostics["queue_manager"]["executed_by_worker_agent_id"] is None
+    assert diagnostics["lifecycle"]["transition_order"] == [
+        "queued",
+        "scheduled",
+        "assigned",
+        "running",
+    ]
+    assert diagnostics["lifecycle"]["queued"] is True
+    assert diagnostics["lifecycle"]["scheduled"] is False
+    assert diagnostics["lifecycle"]["assigned"] is False
+    assert diagnostics["lifecycle"]["running"] is False
+
+    coordinator.finish(first.execution.task_id)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
 def test_unleased_queued_record_does_not_consume_lane_capacity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1525,4 +1598,3 @@ def test_replan_and_retry_on_verifying_and_pending_budget_states(
         session_id="session-test",
     )
     assert retry_res.execution.task_id == task2_id
-

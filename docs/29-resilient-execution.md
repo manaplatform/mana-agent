@@ -23,7 +23,7 @@ identity, while each retry or reassignment receives a new attempt ID.
 Non-terminal states are `created`, `queued`, `leased`, `running`,
 `checkpointing`, `waiting`, `retry_scheduled`, `replanning`, `cancelling`, and
 `completed_pending_verification`. Terminal states are `cancelled`, `failed`,
-`budget_exhausted`, and `completed`. Every transition is validated and compare-and-set persisted.
+`budget_exhausted`, `recovery_review_required`, and `completed`. Every transition is validated and compare-and-set persisted.
 An invalid transition emits an immutable `invalid_transition` event and raises
 a typed error without executing another action.
 
@@ -114,6 +114,20 @@ non-live work whose actions are safe to repeat and no irreversible side effect
 was recorded. Unapproved unknown retries and non-idempotent ambiguous work fail
 for intervention. The error warns when the external action may already have
 occurred.
+
+An expired lease after execution begins is treated as ambiguous whenever the
+runtime cannot safely repeat the work. The task transitions to the terminal
+`recovery_review_required` state and writes a durable intervention record before
+its lease evidence is cleared. That record preserves `task_id`, `execution_id`,
+attempt ID, interrupted execution state, last lease owner and expiry, terminal state, and whether external
+side effects are possible. Checkpoint recovery exposes it as:
+
+```json
+{"status":"blocked","reason":"AMBIGUOUS_LOST_LEASE","action":"human_review_required"}
+```
+
+It never resumes, retries, replans, or starts a duplicate execution for that
+record; a human must reconcile the external outcome first.
 
 Infrastructure, model, tool, verification, lease-loss, and replan budgets are
 tracked separately. Backoff is exponential with deterministic jitter and a

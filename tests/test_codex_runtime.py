@@ -39,7 +39,7 @@ def _settings(**updates: object) -> CodexSettings:
 
 
 def test_codex_cli_exposes_only_read_only_operational_commands() -> None:
-    assert {command.name for command in codex_app.registered_commands} == {"status", "doctor"}
+    assert {command.name for command in codex_app.registered_commands} == {"status", "doctor", "auth"}
 
 
 def test_runtime_config_maps_provider_without_persisting_secret() -> None:

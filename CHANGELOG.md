@@ -2,6 +2,28 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-21
+
+- Added durable ambiguous-lost-lease recovery handling for checkpointed tasks.
+  - Terminalized unsafe lease-loss recovery as `recovery_review_required`, persisted intervention evidence (task/execution/attempt IDs, last lease owner and expiry, terminal state, and external-side-effect risk), and surfaced the structured blocked response `AMBIGUOUS_LOST_LEASE` / `human_review_required` instead of silently dropping recovery.
+  - Added supervisor and checkpoint-decision coverage confirming no duplicate execution is created and human review is required.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_checkpoint_resume.py -v`.
+- Restored the explicit `ExecutionSupervisor(..., startup_recovery=False)` constructor override used by durable-result inspection tests while preserving the configured default when omitted.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py -v`.
+- Preserved late terminal-result provider and error metadata when the terminal transition had already created escrow, keeping Codex authentication failures durable and actionable.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py -v`.
+- Restored retry decision lineage propagation through `GatewayRoutingAuthority.route()`, allowing the validated retry path to persist its prior decision ID and failure reason.
+  - User verification required: `python -m pytest tests/gateway/test_routing_authority.py -v`.
+- Hardened the Codex dual-auth lifecycle across resource selection, execution recovery, usage-cache expiry, and accounting.
+  - Added classified AUTH_REQUIRED, RESOURCE_UNAVAILABLE, QUOTA_EXHAUSTED, FALLBACK_SELECTED, and COMPLETED states; bounded subscription-to-API fallback preserves the original failure reason and exposes selected resource, fallback path, and accounting reference on results.
+  - Linked successful execution accounting to the execution ID for API token/cost records and subscription identity/quota records, and prevented unknown or stale usage from being treated as available capacity.
+  - Added focused lifecycle scenarios for healthy subscription execution, quota fallback, expired authentication, unavailable usage, accounting linkage, and one-hop recovery.
+  - User verification required: `python -m pytest tests/test_codex_provider_lifecycle.py -v`.
+- Updated model routing to evaluate provider resource evidence once per candidate, expose the selected `RoutingResourceScore`, and persist retry/fallback decision lineage through routing outcomes and the decision journal.
+  - User verification required: `python -m pytest tests/test_model_routing.py tests/gateway/test_routing_authority.py -v`.
+- Completed Codex resource selection evidence and execution accounting: selected mode reasons are persisted alongside API cost or subscription quota/reset data.
+  - User verification required: `python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py -v`.
+
 ## 2026-08-16
 
 - Fixed permission request reducer status transitions in `src/mana_agent/dashboard/components/live_chat.js`.
@@ -4010,3 +4032,31 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Preserved informational conversation lane metadata and limited strict follow-up classification to routing models that expose the required structured-output contract; generic recovery still excludes completed tasks.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py -q`.
+## 2026-08-18
+
+- Added English/Persian language selection to repository analysis across the CLI, dashboard, API request, LLM prompt, and generated evidence metadata.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_project_analyze_service.py tests/test_cli_smoke.py -q`.
+## 2026-08-21
+
+- Added lane-scheduler diagnostics for queued tasks, including queue position,
+  capacity blockers, lane occupancy, worker-slot availability, QueueManager job
+  visibility, and the queued → scheduled → assigned → running lifecycle.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/gateway/test_lane_coordinator.py -q`.
+
+- Added Codex dual-auth resource metadata for API and subscription execution modes, secure credential references, usage caches, quota-aware mode selection, and `codex auth`/`codex status` reporting.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_runtime.py -q`.
+## 2026-08-21
+
+- Extended the existing Codex dual-mode provider with Luna identity lifecycle states, injectable subscription authentication, TTL-aware provider usage normalization, explicit unknown capacity handling, quota-aware subscription/API selection, separated resource accounting records, and richer `codex status` output.
+  - User verification required: `python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py tests/test_codex_runtime.py -v`.
+
+- Added typed Codex capacity evidence to model routing, explicit resource fallback reasons, execution-lifecycle accounting, Luna session recovery status, and capacity scores in `codex status`.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_provider_resources.py tests/test_codex_provider_lifecycle.py tests/test_model_routing.py tests/test_codex_runtime.py -v`.
+## 2026-08-21
+
+- Integrated Codex execution metadata with durable supervisor tasks, checkpoints, and result escrow, including provider state, selected resource, routing evidence, fallback history, accounting reference, and decision ID.
+  - User verification required: `PYTHONPATH=src python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py -q`.
+## 2026-08-21
+
+- Integrated Codex lifecycle metadata with durable execution tasks, checkpoints, failure results, and escrow lookup, including fallback failure evidence and reauthentication guidance.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py`

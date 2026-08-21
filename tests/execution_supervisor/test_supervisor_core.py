@@ -40,6 +40,11 @@ from mana_agent.execution_supervisor.models import (
 )
 from mana_agent.execution_supervisor.store import LocalExecutionStore
 from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+from mana_agent.integrations.codex.provider import (
+    CodexExecutionMetadata,
+    CodexExecutionMode,
+    CodexExecutionState,
+)
 
 
 class FakeClock:
@@ -82,6 +87,103 @@ def running(supervisor, task):
     leased, token = supervisor.acquire_lease(task.task_id, owner="worker-a")
     supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
     return leased.attempt_id, token
+
+
+def test_codex_metadata_is_durable_in_task_checkpoint_and_result(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, runtime_provider="codex")
+    attempt_id, token = running(supervisor, task)
+    metadata = CodexExecutionMetadata(
+        task.task_id,
+        "codex",
+        CodexExecutionMode.SUBSCRIPTION,
+        CodexExecutionState.COMPLETED,
+        "codex/subscription",
+        accounting_reference=f"codex-accounting:{task.task_id}",
+        routing_reason=("coding task", "quota healthy"),
+        decision_id=f"codex-decision:{task.task_id}",
+    )
+
+    checkpoint = supervisor.checkpoint(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        resume_payload={"cursor": 1},
+        provider_metadata=metadata,
+    )
+    result_task = supervisor.submit_result(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        payload={"answer": "ok"},
+        provider_metadata=metadata,
+    )
+
+    restarted = ExecutionSupervisor(supervisor.config, clock=clock)
+    assert restarted.store.get_task(task.task_id).provider_metadata["selected_resource"] == "codex/subscription"
+    assert restarted.store.get_checkpoint(checkpoint.checkpoint_id).provider_metadata["accounting_reference"] == f"codex-accounting:{task.task_id}"
+    escrow = restarted.store.get_result(result_task.result_id)
+    assert escrow.provider_metadata["decision_id"] == f"codex-decision:{task.task_id}"
+
+
+def test_codex_auth_failure_is_durable_and_actionable(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, runtime_provider="codex")
+    metadata = {
+        "execution_id": task.task_id,
+        "provider": "codex",
+        "mode": "subscription",
+        "state": "AUTH_REQUIRED",
+        "selected_resource": "codex/subscription",
+        "failure_reason": "subscription expired",
+    }
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="subscription expired")
+    result = supervisor.record_terminal_result(
+        task.task_id,
+        state=ExecutionState.FAILED,
+        reason="subscription expired",
+        provider_metadata=metadata,
+        error_metadata={"state": "AUTH_REQUIRED", "action": "reauthenticate"},
+    )
+
+    restarted = ExecutionSupervisor(supervisor.config, startup_recovery=False)
+    restored = restarted.store.get_result(result.result_id)
+    assert restored.provider_metadata["state"] == "AUTH_REQUIRED"
+    assert restored.error_metadata["action"] == "reauthenticate"
+
+
+def test_codex_failed_fallback_preserves_both_failures_in_escrow(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, runtime_provider="codex")
+    metadata = {
+        "execution_id": task.task_id,
+        "provider": "codex",
+        "mode": "subscription",
+        "state": "RESOURCE_UNAVAILABLE",
+        "selected_resource": "codex/subscription",
+        "failure_reason": "subscription quota exhausted",
+        "fallback_failure_reason": "API resource unavailable",
+        "fallback_path": [
+            {"from": "subscription", "to": "api", "reason": "quota exhausted"},
+            {"from": "api", "to": "", "reason": "API resource unavailable"},
+        ],
+        "accounting_reference": "codex-accounting:execution-1",
+        "decision_id": "codex-decision:execution-1",
+    }
+    supervisor.persist_provider_metadata(task.task_id, metadata)
+    supervisor.transition(task.task_id, ExecutionState.FAILED, reason="API resource unavailable")
+    result = supervisor.record_terminal_result(
+        task.task_id,
+        state=ExecutionState.FAILED,
+        reason="API resource unavailable",
+    )
+
+    restarted = ExecutionSupervisor(supervisor.config, startup_recovery=False)
+    restored = restarted.store.get_result(result.result_id)
+    assert restored.provider_metadata["failure_reason"] == "subscription quota exhausted"
+    assert restored.provider_metadata["fallback_failure_reason"] == "API resource unavailable"
+    assert len(restored.provider_metadata["fallback_path"]) == 2
+    assert restored.provider_metadata["accounting_reference"] == "codex-accounting:execution-1"
 
 
 def decision(task_id, **changes):
@@ -219,20 +321,44 @@ def test_restart_during_cancellation_finishes_cooperatively(runtime):
     assert recovered.cancellation_status.value == "completed"
 
 
-def test_unknown_lease_loss_requires_intervention(runtime):
+def test_ambiguous_lost_lease_creates_durable_review_intervention_without_retry(runtime):
     supervisor, clock, tmp_path = runtime
     task = create(
         supervisor,
         tmp_path,
         side_effect_classification=SideEffectClassification.UNKNOWN,
     )
-    running(supervisor, task)
+    attempt_id, _token = running(supervisor, task)
     clock.advance(11)
-    summary = supervisor.recover()
-    failed = supervisor.store.get_task(task.task_id)
-    assert task.task_id in summary.intervention_required
-    assert failed.state == ExecutionState.FAILED
-    assert "may already have occurred" in failed.failure_reason
+    first = supervisor.recover()
+    blocked = supervisor.store.get_task(task.task_id)
+    interventions = supervisor.store.recovery_interventions_for_task(task.task_id)
+
+    assert task.task_id in first.intervention_required
+    assert blocked.state == ExecutionState.RECOVERY_REVIEW_REQUIRED
+    assert blocked.attempt_ids == [attempt_id]  # no duplicate execution was created
+    assert len(interventions) == 1
+    intervention = interventions[0]
+    assert intervention.task_id == task.task_id
+    assert intervention.execution_id == task.task_id
+    assert intervention.attempt_id == attempt_id
+    assert intervention.execution_state == "interrupted"
+    assert intervention.last_lease_owner == "worker-a"
+    assert intervention.lease_expiry == clock() - timedelta(seconds=1)
+    assert intervention.terminal_state == ExecutionState.RECOVERY_REVIEW_REQUIRED
+    assert intervention.external_side_effects_possible is True
+    assert {
+        "status": "blocked",
+        "reason": "AMBIGUOUS_LOST_LEASE",
+        "action": "human_review_required",
+    }.items() <= intervention.model_dump(mode="json").items()
+    assert first.intervention_records == [intervention]
+
+    second = supervisor.recover()
+    assert supervisor.store.get_task(task.task_id).attempt_ids == [attempt_id]
+    assert supervisor.store.recovery_interventions_for_task(task.task_id) == [intervention]
+    assert task.task_id not in second.retry_scheduled
+    assert second.intervention_records == [intervention]
 
 
 def test_checkpoint_and_durable_result_escrow_survive_restart(runtime):
@@ -411,7 +537,7 @@ def test_create_child_refuses_deadline_dead_parent(runtime):
 def test_task_creation_records_provenance_and_ambiguous_actions_block_retry(runtime):
     supervisor, _clock, tmp_path = runtime
     task = create(supervisor, tmp_path)
-    assert task.schema_version == 7
+    assert task.schema_version == 8
     assert task.completion_contract
     assert task.field_provenance["actual_cost"] == "pending_runtime_accounting"
 
@@ -440,7 +566,7 @@ def test_legacy_task_records_upgrade_to_metadata_provenance_schema() -> None:
         }
     )
 
-    assert legacy.schema_version == 7
+    assert legacy.schema_version == 8
     assert legacy.field_provenance["actual_cost"] == "pending_runtime_accounting"
 
 

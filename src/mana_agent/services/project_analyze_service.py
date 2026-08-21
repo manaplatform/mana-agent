@@ -178,6 +178,7 @@ GENERIC_FOLDER_ROLES: dict[str, str] = {
 @dataclass(slots=True)
 class ProjectAnalyzeOptions:
     depth: str = "normal"
+    language: str = "en"
     output_format: str = "both"
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
@@ -251,6 +252,8 @@ class ProjectAnalyzeService:
         llm_analyzer: LLMAnalyzerFn | None = None,
     ) -> ProjectAnalyzeResult:
         options = options or ProjectAnalyzeOptions()
+        if options.language not in {"en", "fa"}:
+            raise ValueError("language must be 'en' or 'fa'")
         root = Path(root_dir).resolve()
         if root.is_file():
             root = root.parent
@@ -267,7 +270,8 @@ class ProjectAnalyzeService:
         report = self.build_report(root, inventory, dependencies, entrypoints, symbols, architecture, risks, recommendations)
 
         # Layer 2: compact evidence -> LLM analysis (with deterministic fallback).
-        evidence = build_evidence(report, depth=options.depth)
+        evidence = build_evidence(report, depth=options.depth, language=options.language)
+        report["analysis_language"] = options.language
         llm_result = self._run_llm_analysis(evidence, options.depth, root, llm_analyzer)
         report["llm_analysis"] = llm_result.to_dict()
 

@@ -31,6 +31,7 @@ from mana_agent.execution_supervisor.models import (
     CheckpointRecord,
     EscrowResult,
     ExecutionEvent,
+    RecoveryInterventionRecord,
     ResultAcknowledgement,
     TaskRecord,
 )
@@ -91,6 +92,9 @@ class ExecutionStore(Protocol):
         self, task_id: str, updater: Callable[[TaskRecord], EscrowResult]
     ) -> tuple[TaskRecord, EscrowResult]: ...
     def save_attempt(self, attempt: AttemptRecord) -> None: ...
+    def save_recovery_intervention(self, intervention: RecoveryInterventionRecord) -> None: ...
+    def get_recovery_intervention(self, intervention_id: str) -> RecoveryInterventionRecord | None: ...
+    def recovery_interventions_for_task(self, task_id: str) -> list[RecoveryInterventionRecord]: ...
     def save_action(self, action: ActionRecord) -> None: ...
     def get_action(self, action_id: str) -> ActionRecord | None: ...
     def actions_for_task(self, task_id: str) -> list[ActionRecord]: ...
@@ -140,6 +144,7 @@ class LocalExecutionStore:
     _DIRECTORIES = (
         "tasks",
         "attempts",
+        "recovery_interventions",
         "actions",
         "checkpoints",
         "results",
@@ -331,6 +336,43 @@ class LocalExecutionStore:
                 self.root / "attempts" / f"{attempt.attempt_id}.json",
                 attempt.model_dump(mode="json"),
             )
+
+    def save_recovery_intervention(self, intervention: RecoveryInterventionRecord) -> None:
+        with self.locked():
+            self._atomic_write(
+                self.root / "recovery_interventions" / f"{intervention.intervention_id}.json",
+                intervention.model_dump(mode="json"),
+            )
+
+    def get_recovery_intervention(
+        self, intervention_id: str
+    ) -> RecoveryInterventionRecord | None:
+        if not intervention_id:
+            return None
+        path = self.root / "recovery_interventions" / f"{intervention_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            return RecoveryInterventionRecord.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (ValueError, OSError):
+            return None
+
+    def recovery_interventions_for_task(
+        self, task_id: str
+    ) -> list[RecoveryInterventionRecord]:
+        rows: list[RecoveryInterventionRecord] = []
+        for path in (self.root / "recovery_interventions").glob("*.json"):
+            try:
+                item = RecoveryInterventionRecord.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+            except (ValueError, OSError):
+                continue
+            if item.task_id == task_id:
+                rows.append(item)
+        return sorted(rows, key=lambda item: (item.created_at, item.intervention_id))
 
     def save_action(self, action: ActionRecord) -> None:
         with self.locked():

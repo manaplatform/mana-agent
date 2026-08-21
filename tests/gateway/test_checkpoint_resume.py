@@ -562,6 +562,51 @@ def test_terminal_failed_task_can_be_retried_with_new_attempt() -> None:
     assert decision.checkpoint_id == ""
 
 
+def test_ambiguous_lost_lease_requires_structured_human_review() -> None:
+    review_candidate = candidate()
+    review_candidate.update(
+        {
+            "state": "recovery_review_required",
+            "is_terminal": True,
+            "resume_eligible": False,
+            "recovery_review_required": True,
+            "recovery_intervention": {
+                "status": "blocked",
+                "reason": "AMBIGUOUS_LOST_LEASE",
+                "action": "human_review_required",
+            },
+        }
+    )
+    decider = CheckpointResumeDecider(
+        StructuredDecisionModel(
+            {
+                "action": "human_review_required",
+                "task_id": "task_existing",
+                "checkpoint_id": "",
+                "same_work": True,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": False,
+                "safe_to_continue": False,
+                "reason": "the prior task has an ambiguous lost lease",
+            }
+        )
+    )
+
+    decision = decider.decide(
+        current_request="continue the repository refactor",
+        route="coding",
+        requires_live_data=False,
+        candidates=[review_candidate],
+    )
+
+    assert decision.recovery_response == {
+        "status": "blocked",
+        "reason": "AMBIGUOUS_LOST_LEASE",
+        "action": "human_review_required",
+    }
+
+
 def test_checkpoint_resume_accepts_long_reason_without_string_length_error() -> None:
     long_reason = "This is an extensive reasoning explanation. " * 30  # ~1320 chars
     decider = CheckpointResumeDecider(
@@ -653,5 +698,4 @@ def test_multi_task_live_data_route_starts_fresh_when_candidates_exist() -> None
     assert decision.same_work is True
     assert decision.task_id == ""
     assert decision.checkpoint_id == ""
-
 

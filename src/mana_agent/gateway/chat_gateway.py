@@ -3856,13 +3856,32 @@ class AgentChatGateway:
         ]
 
     def inspect_task(self, task_id: str) -> dict[str, Any]:
-        task = self._lane_coordinator.inspect_task(task_id)
+        diagnostics = self._lane_coordinator.scheduling_diagnostics(task_id)
+        try:
+            task = self._lane_coordinator.inspect_task(task_id)
+        except LaneCoordinatorError:
+            taskboard_task = self._lane_coordinator.taskboard.tasks.get(task_id)
+            if taskboard_task is None:
+                raise
+            return {
+                "task_id": task_id,
+                "taskboard_status": taskboard_task.status.value,
+                "owning_lane": taskboard_task.owning_lane,
+                "queue_job_ids": list(taskboard_task.queue_job_ids),
+                "executed_by_worker_agent_id": taskboard_task.executed_by_worker_agent_id,
+                "scheduling_diagnostics": diagnostics,
+                "children": [],
+            }
         children = [
             self._task_surface(item)
             for item in self._lane_coordinator.executions
             if item.parent_task_id == task_id
         ]
-        return {**self._task_surface(task), "children": children}
+        return {
+            **self._task_surface(task),
+            "scheduling_diagnostics": diagnostics,
+            "children": children,
+        }
 
     def _task_surface(self, execution: Any) -> dict[str, Any]:
         payload = asdict(execution)
@@ -5240,7 +5259,10 @@ class AgentChatGateway:
                                     error=(
                                         lookup.result.error_metadata.get("reason")
                                         or (lookup.task.failure_reason if lookup.task else "")
-                                        if lookup.result.supervisor_state == "failed"
+                                        if lookup.result.supervisor_state in {
+                                            "failed",
+                                            "recovery_review_required",
+                                        }
                                         else durable_result.get("error")
                                     ),
                                     mode=durable_result.get("mode") or "verified-task-status",
@@ -5456,6 +5478,44 @@ class AgentChatGateway:
                             "Model decision stopped checkpoint recovery. No task was resumed or "
                             f"started. Reason: {resume_decision.reason}"
                         )
+                    if resume_decision.action == "human_review_required":
+                        intervention = (
+                            self._lane_coordinator.execution_supervisor.store.get_recovery_intervention(
+                                self._lane_coordinator.execution_supervisor.store.get_task(
+                                    resume_decision.task_id
+                                ).recovery_intervention_id
+                            )
+                        )
+                        result = ChatTurnResult(
+                            answer=(
+                                "Recovery is blocked because the prior execution lost its lease "
+                                "after work began. Human review is required before any external "
+                                "action can be resumed or repeated."
+                            ),
+                            error="AMBIGUOUS_LOST_LEASE",
+                            mode="recovery-review-required",
+                            payload={
+                                **resume_decision.recovery_response,
+                                "task_id": resume_decision.task_id,
+                                "execution_id": (
+                                    intervention.execution_id
+                                    if intervention is not None
+                                    else resume_decision.task_id
+                                ),
+                                "intervention_id": (
+                                    intervention.intervention_id if intervention is not None else ""
+                                ),
+                            },
+                        )
+                        return self._finalize_turn_result(
+                            result=result,
+                            session_id=session_id,
+                            conversation_id=conversation_id,
+                            turn_id=turn_id,
+                            text=text,
+                            state=state,
+                            memory_warning=memory_warning,
+                        )
                     recovered_task = False
                     recovery_target_id = str(resume_decision.task_id or "")
                     if resume_decision.action in {"retry_task", "resume_checkpoint"}:
@@ -5520,7 +5580,10 @@ class AgentChatGateway:
                                     error=(
                                         lookup.result.error_metadata.get("reason")
                                         or (lookup.task.failure_reason if lookup.task else "")
-                                        if lookup.result.supervisor_state == "failed"
+                                        if lookup.result.supervisor_state in {
+                                            "failed",
+                                            "recovery_review_required",
+                                        }
                                         else None
                                     ),
                                     mode=durable_result.get("mode") or "verified-task-status",
@@ -5547,7 +5610,15 @@ class AgentChatGateway:
                             elif eligibility.is_terminal and lookup.task is not None:
                                 result = ChatTurnResult(
                                     answer=lookup.task.failure_reason or f"Task ended as {lookup.task.state.value}.",
-                                    error=lookup.task.failure_reason if lookup.task.state == ExecutionState.FAILED else None,
+                                    error=(
+                                        lookup.task.failure_reason
+                                        if lookup.task.state
+                                        in {
+                                            ExecutionState.FAILED,
+                                            ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                                        }
+                                        else None
+                                    ),
                                     mode=f"lane-{lookup.task.state.value.replace('_', '-')}",
                                     payload={
                                         "lane_task_id": lookup.execution_id,
@@ -7697,6 +7768,7 @@ class AgentChatGateway:
         recoverable_supervisor_states = {
             ExecutionState.FAILED,
             ExecutionState.BUDGET_EXHAUSTED,
+            ExecutionState.RECOVERY_REVIEW_REQUIRED,
             ExecutionState.COMPLETED,
             ExecutionState.WAITING,
             ExecutionState.PENDING_BUDGET_DECISION,
@@ -7728,6 +7800,9 @@ class AgentChatGateway:
                 else str(task.assigned_agent).removeprefix("lane:")
             )
             waiting_for_human = bool(getattr(task, "waiting_inbox_item_id", "") or "")
+            intervention = supervisor.store.get_recovery_intervention(
+                task.recovery_intervention_id
+            )
             lane_state = execution.state if execution is not None else None
             supervisor_recoverable = task.state in recoverable_supervisor_states
             lane_recoverable = (
@@ -7786,6 +7861,13 @@ class AgentChatGateway:
                 "resume_eligible": eligibility.resumable,
                 "resume_rejection_reason": eligibility.reason if not eligibility.resumable else "",
                 "is_terminal": task.state in TERMINAL_STATES,
+                "recovery_review_required": (
+                    task.state is ExecutionState.RECOVERY_REVIEW_REQUIRED
+                    and intervention is not None
+                ),
+                "recovery_intervention": (
+                    intervention.model_dump(mode="json") if intervention is not None else {}
+                ),
                 "normalized_intent": redact_text(task.normalized_intent),
                 "lane": selected_lane.value if isinstance(selected_lane, LaneId) else selected_lane,
                 "session_id": task.session_id,
@@ -7862,6 +7944,8 @@ class AgentChatGateway:
                         "state": execution.state.value,
                         "lane_state": execution.state.value,
                         "waiting_for_human": False,
+                        "recovery_review_required": False,
+                        "recovery_intervention": {},
                         "entry_route": "",
                         "task_type": execution.task_type,
                         "child_task_ids": [],

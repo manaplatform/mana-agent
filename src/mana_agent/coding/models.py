@@ -161,6 +161,9 @@ class CodingTaskResult(BaseModel):
     token_usage: dict[str, int] | None = None
     thread_id: str = ""
     turn_id: str = ""
+    # Provider-owned lifecycle evidence is forwarded unchanged to the
+    # execution supervisor and durable result escrow.
+    codex_metadata: Any | None = None
 
 
 class CodingBackendDecision(BaseModel):

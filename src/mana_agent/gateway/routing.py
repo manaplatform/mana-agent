@@ -99,8 +99,14 @@ class GatewayRoutingAuthority:
             self._spirit_by_task[request.task_id] = base_self.ref()
         return base_self
 
-    def route(self, request: RoutingRequest) -> RoutingDecision:
-        """Route and persist one model-backed invocation without fallback."""
+    def route(
+        self,
+        request: RoutingRequest,
+        *,
+        fallback_of_decision_id: str = "",
+        fallback_reason: str = "",
+    ) -> RoutingDecision:
+        """Route and persist one model-backed invocation with explicit retry lineage."""
 
         invocation_id = request.request_id or f"route_req_{uuid.uuid4().hex}"
         budgets = (
@@ -131,7 +137,11 @@ class GatewayRoutingAuthority:
             **spirit_diag,
         )
         try:
-            decision = self.router.route(enriched)
+            decision = self.router.route(
+                enriched,
+                fallback_of_decision_id=fallback_of_decision_id,
+                fallback_reason=fallback_reason,
+            )
             if not decision.decision_id or decision.request_id != invocation_id:
                 raise GatewayRoutingError("Router returned an invalid decision identity. No model action was executed.")
             if self.context_cost_governor is not None:
@@ -215,6 +225,10 @@ class GatewayRoutingAuthority:
             accepted=False,
             retry_count=1,
             failure_kind=str(failure_kind or "provider_error"),
+            decision_id=previous_decision.decision_id,
+            request_id=previous_decision.request_id,
+            task_id=previous_decision.task_id or request.task_id,
+            fallback_of_decision_id=previous_decision.decision_id,
         ))
         self._emit(
             "routing.retry_requested",
@@ -226,7 +240,7 @@ class GatewayRoutingAuthority:
             request,
             request_id="",
             previous_verification_failed=verification_failed,
-        ))
+        ), fallback_of_decision_id=previous_decision.decision_id, fallback_reason=str(failure_kind or "provider_error"))
 
     def latest(self, *, session_id: str = "", task_id: str = "") -> dict[str, Any] | None:
         rows = self.history_rows(limit=200)

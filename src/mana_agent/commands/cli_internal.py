@@ -66,6 +66,7 @@ from .output import build_output_sink, get_shared_console
 from .workspace_cli import impact_command, repo_app, search_command, session_app, workspace_app
 from .worktree_cli import worktree_app
 from .codex_cli import codex_app
+from .auth_cli import auth_app
 from .github_app_cli import github_app
 from .email_cli import connector_app
 from .protocols_cli import a2a_app, acp_app
@@ -99,6 +100,7 @@ app.add_typer(connectors_app, name="connectors")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(worktree_app, name="worktree")
 app.add_typer(codex_app, name="codex")
+app.add_typer(auth_app, name="auth")
 app.add_typer(github_app, name="github-app")
 app.add_typer(repo_app, name="repo")
 app.add_typer(repo_app, name="repository")
@@ -530,6 +532,7 @@ def analyze_command(
     path_or_task: str = typer.Argument(".", help="Repository path or analysis focus."),
     repo: str | None = typer.Option(None, "--repo", "--root-dir", help="Repository root to analyze."),
     model: str | None = typer.Option(None, "--model", help="Model override for LLM analysis."),
+    language: str = typer.Option("en", "--language", case_sensitive=False, help="Analysis language: en (English) or fa (Persian)."),
     focus: str | None = typer.Option(None, "--focus", help="Focus area for the Markdown report."),
     depth: str = typer.Option("normal", "--depth", help="Analysis depth: quick, normal, or full."),
     output_format: str = typer.Option("both", "--format", help="Output format: md, json, or both."),
@@ -544,6 +547,9 @@ def analyze_command(
     _ = model
     if depth not in {"quick", "normal", "full"}:
         raise typer.BadParameter("depth must be quick, normal, or full")
+    language = language.lower()
+    if language not in {"en", "fa"}:
+        raise typer.BadParameter("language must be en or fa")
     normalized_format = {"markdown": "md"}.get(output_format, output_format)
     if normalized_format not in {"md", "json", "both"}:
         raise typer.BadParameter("format must be md, json, or both")
@@ -575,6 +581,7 @@ def analyze_command(
         out_dir,
         options=ProjectAnalyzeOptions(
             depth=depth,
+            language=language,
             output_format=normalized_format,
             include=_split_csv(include),
             exclude=_split_csv(exclude),

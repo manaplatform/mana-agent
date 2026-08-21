@@ -786,6 +786,11 @@ class CodexCodingAgentShim:
             "trace": [event.model_dump(mode="json") for event in events],
             "actions_taken": [event.model_dump(mode="json") for event in events],
             "token_usage": result.token_usage,
+            "codex_metadata": (
+                result.codex_metadata.as_dict()
+                if hasattr(result.codex_metadata, "as_dict")
+                else result.codex_metadata
+            ),
         }
 
 

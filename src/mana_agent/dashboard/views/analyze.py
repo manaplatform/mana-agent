@@ -21,7 +21,7 @@ from mana_agent.ui.streamlit_helpers import (
 from mana_agent.workspaces.paths import repository_analysis_dir
 
 
-def _run_analyze_job(root: Path, job_id: str, *, depth: str, with_llm: bool) -> None:
+def _run_analyze_job(root: Path, job_id: str, *, depth: str, language: str, with_llm: bool) -> None:
     from mana_agent.services.project_analyze_service import (
         ProjectAnalyzeOptions,
         ProjectAnalyzeService,
@@ -55,7 +55,7 @@ def _run_analyze_job(root: Path, job_id: str, *, depth: str, with_llm: bool) -> 
         result = ProjectAnalyzeService().run(
             root,
             artifact_dir,
-            options=ProjectAnalyzeOptions(depth=depth, output_format="both"),
+            options=ProjectAnalyzeOptions(depth=depth, language=language, output_format="both"),
             llm_analyzer=llm_analyzer,
         )
         artifacts = list(getattr(result, "artifacts", {}) or {})
@@ -103,7 +103,8 @@ def render(root: Path | None = None) -> None:
 
     c1, c2 = st.columns(2)
     depth = c1.selectbox("Depth", ["quick", "normal", "full"], index=1)
-    with_llm = c2.checkbox("Include LLM narrative when configured", value=True)
+    language = c2.selectbox("Analysis language", ["en", "fa"], format_func=lambda value: "English" if value == "en" else "فارسی", index=0)
+    with_llm = st.checkbox("Include LLM narrative when configured", value=True)
 
     job_id = st.session_state.get("analyze_job_id")
     if st.button("Start analysis", type="primary"):
@@ -114,6 +115,7 @@ def render(root: Path | None = None) -> None:
                 "repository_id": repo_id,
                 "root": str(root),
                 "depth": depth,
+                "language": language,
                 "with_llm": with_llm,
             },
         )
@@ -121,7 +123,7 @@ def render(root: Path | None = None) -> None:
         thread = threading.Thread(
             target=_run_analyze_job,
             args=(root, job["job_id"]),
-            kwargs={"depth": depth, "with_llm": with_llm},
+            kwargs={"depth": depth, "language": language, "with_llm": with_llm},
             daemon=True,
         )
         thread.start()

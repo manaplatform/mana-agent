@@ -157,7 +157,15 @@ def test_retry_records_failure_and_creates_a_new_decision(
     assert second.decision_id != first.decision_id
     assert second.request_id != first.request_id
     assert second.selected_model == "second"
+    assert second.fallback_of_decision_id == first.decision_id
+    assert second.fallback_reason == "timeout"
     assert len(authority.history_rows()) == 2
+    assert authority.history._outcomes[-1].decision_id == first.decision_id
+    assert authority.history._outcomes[-1].fallback_of_decision_id == first.decision_id
+    assert authority.history._outcomes[-1].task_id == "retry-task"
+    persisted_outcomes = (tmp_path / "home" / "routing" / "outcomes.jsonl").read_text()
+    assert first.decision_id in persisted_outcomes
+    assert '"fallback_of_decision_id":"' + first.decision_id + '"' in persisted_outcomes
 
 
 def test_live_task_control_validates_transitions_and_releases_locks(

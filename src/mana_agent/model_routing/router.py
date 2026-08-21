@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from typing import Iterable
+from typing import Callable, Iterable
 
 from mana_agent.context_cost.accounting import ModelContextLimitError, ModelTokenAccountingService, TokenEstimationRequest
 from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver, UnknownModelProfileError
@@ -21,6 +21,7 @@ from mana_agent.model_routing.models import (
     RoutingOutcome,
     RoutingPolicy,
     RoutingRequest,
+    RoutingResourceScore,
     RoutingMode,
     RiskLevel,
     level_value,
@@ -40,6 +41,7 @@ class _Scored:
     estimate_components: dict[str, int]
     estimate_assumptions: tuple[str, ...]
     reasons: tuple[str, ...]
+    resource: RoutingResourceScore
 
 
 _FAILURES = {"provider_error", "authentication", "rate_limit", "invalid_tool_call", "unsupported_parameter", "malformed_output", "verification_failure", "timeout"}
@@ -49,12 +51,14 @@ _LATENCY = {LatencyClass.INTERACTIVE: 0, LatencyClass.STANDARD: 1, LatencyClass.
 class ModelRouter:
     """Deterministic scoring policy; provider execution intentionally lives elsewhere."""
 
-    def __init__(self, profiles: Iterable[ModelProfile], *, history: RoutingHistory | None = None, policy: RoutingPolicy | None = None) -> None:
+    def __init__(self, profiles: Iterable[ModelProfile], *, history: RoutingHistory | None = None, policy: RoutingPolicy | None = None, resource_availability: Callable[[ModelProfile, RoutingRequest], tuple[bool, str]] | None = None, resource_scoring: Callable[[ModelProfile, RoutingRequest], RoutingResourceScore] | None = None) -> None:
         self.profiles = tuple(sorted(profiles, key=lambda item: item.key))
         if len({item.key for item in self.profiles}) != len(self.profiles):
             raise ValueError("model profile registry contains duplicate provider/model IDs")
         self.history = history or InMemoryRoutingHistory()
         self.policy = policy or RoutingPolicy()
+        self.resource_availability = resource_availability
+        self.resource_scoring = resource_scoring
         self.accounting = ModelTokenAccountingService(
             ModelTokenProfileResolver(self.profiles, unknown_policy="require_metadata")
         )
@@ -64,17 +68,18 @@ class ModelRouter:
             raise ValueError("routing outcome references an unregistered provider/model")
         self.history.record(outcome)
 
-    def route(self, request: RoutingRequest) -> RoutingDecision:
+    def route(self, request: RoutingRequest, *, fallback_of_decision_id: str = "", fallback_reason: str = "") -> RoutingDecision:
         if not self.policy.enabled:
             raise RoutingFailure("Adaptive model routing is disabled. No fallback action was executed.")
         scored: list[_Scored] = []
         rejected: list[CandidateRejection] = []
         for profile in self.profiles:
-            reasons = self._reject(profile, request)
+            resource = self._resource_score(profile, request)
+            reasons = self._reject(profile, request, resource)
             if reasons:
                 rejected.append(CandidateRejection(profile.key, tuple(reasons)))
                 continue
-            item = self._score(profile, request)
+            item = self._score(profile, request, resource)
             if item.confidence < self.policy.minimum_confidence:
                 rejected.append(CandidateRejection(profile.key, (f"confidence {item.confidence:.3f} is below {self.policy.minimum_confidence:.3f}",)))
                 continue
@@ -147,6 +152,9 @@ class ModelRouter:
             },
             deadline_seconds=self.policy.task_timeout_seconds,
             orchestration_reasons=tuple((*multi_agent_reasons, *competition_reasons)),
+            resource_score=winner.resource,
+            fallback_of_decision_id=fallback_of_decision_id,
+            fallback_reason=fallback_reason,
         )
 
     @staticmethod
@@ -154,10 +162,19 @@ class ModelRouter:
         payload = json.dumps(asdict(value) if hasattr(value, "__dataclass_fields__") else value, sort_keys=True, default=str, separators=(",", ":"))
         return f"{prefix}_{hashlib.sha256(payload.encode()).hexdigest()[:20]}"
 
-    def _reject(self, profile: ModelProfile, request: RoutingRequest) -> list[str]:
+    def _resource_score(self, profile: ModelProfile, request: RoutingRequest) -> RoutingResourceScore:
+        return self.resource_scoring(profile, request) if self.resource_scoring is not None else RoutingResourceScore(True, 1.0, 1.0, 1.0)
+
+    def _reject(self, profile: ModelProfile, request: RoutingRequest, resource: RoutingResourceScore) -> list[str]:
         reasons: list[str] = []
         if not profile.available:
             reasons.append("model is unavailable")
+        if self.resource_availability is not None:
+            available, reason = self.resource_availability(profile, request)
+            if not available:
+                reasons.append(reason or "provider resource is unavailable")
+        if not resource.available:
+            reasons.append(resource.reason or "provider resource is unavailable")
         if request.role not in profile.supported_roles and "*" not in profile.supported_roles:
             reasons.append(f"role {request.role!r} is unsupported")
         missing_tools = request.required_tools - profile.supported_tools
@@ -195,7 +212,7 @@ class ModelRouter:
                 reasons.append(f"estimated tokens {total_tokens} exceed task limit {request.budgets.task_token_limit}")
         return reasons
 
-    def _score(self, profile: ModelProfile, request: RoutingRequest) -> _Scored:
+    def _score(self, profile: ModelProfile, request: RoutingRequest, resource: RoutingResourceScore | None = None) -> _Scored:
         history = self._similar_history(profile, request)
         successes = [item for item in history if item.accepted is not None]
         success_rate = sum(bool(item.accepted) for item in successes) / len(successes) if successes else profile.reliability_score
@@ -225,6 +242,7 @@ class ModelRouter:
             cost_score = 1.0 / (1.0 + max(0.0, unit_cost))
         latency_score = 1.0 - (_LATENCY[profile.latency_class] * 0.25)
         capability = 1.0
+        resource = resource or self._resource_score(profile, request)
         weights = self.policy.weights
         score = sum((
             weights.get("capability", 0.0) * capability,
@@ -233,6 +251,9 @@ class ModelRouter:
             weights.get("language", 0.0) * language,
             weights.get("cost", 0.0) * (1.4 - demand) * cost_score,
             weights.get("latency", 0.0) * latency_score,
+            weights.get("provider_capacity", 0.0) * resource.provider_capacity,
+            weights.get("quota_health", 0.0) * resource.quota_health,
+            weights.get("resource_confidence", 0.0) * resource.resource_confidence,
         ))
         penalty = self._recent_failure_penalty(profile)
         score = max(0.0, score - penalty)
@@ -242,11 +263,12 @@ class ModelRouter:
             f"quality evidence={quality:.3f}, historical reliability={historical:.3f}",
             f"repository language fit={language:.3f}",
             f"estimated cost={'unknown' if estimated_cost is None else f'{estimated_cost:.6f}'}, latency={profile.latency_class.value}",
+            f"provider capacity={resource.provider_capacity:.3f}, quota health={resource.quota_health:.3f}, resource confidence={resource.resource_confidence:.3f}",
         )
         estimated_input, estimated_output = self._estimated_tokens(profile, request)
         return _Scored(
             profile, score, confidence, estimated_input, estimated_output, estimated_cost,
-            estimate.confidence, dict(estimate.components), estimate.assumptions, reasons,
+            estimate.confidence, dict(estimate.components), estimate.assumptions, reasons, resource,
         )
 
     def _estimated_tokens(self, profile: ModelProfile, request: RoutingRequest) -> tuple[int, int]:

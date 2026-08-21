@@ -44,6 +44,8 @@ from mana_agent.execution_supervisor.models import (
     ParentProgress,
     RecoveryAction,
     RecoveryDecision,
+    RecoveryInterventionReason,
+    RecoveryInterventionRecord,
     RecoverySummary,
     ResultAcknowledgement,
     RetryBudget,
@@ -70,6 +72,30 @@ def _token_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _provider_metadata(value: Any) -> dict[str, Any]:
+    """Convert provider evidence to a JSON-safe envelope."""
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    elif hasattr(value, "__dataclass_fields__"):
+        from dataclasses import asdict
+        value = asdict(value)
+    if not isinstance(value, dict):
+        raise TypeError("provider_metadata must be a mapping or serializable model")
+
+    def normalize(item: Any) -> Any:
+        if hasattr(item, "value") and not isinstance(item, (str, bytes, dict, list, tuple)):
+            return normalize(item.value)
+        if isinstance(item, dict):
+            return {str(key): normalize(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [normalize(child) for child in item]
+        return item
+
+    return normalize(value)
+
+
 class ExecutionSupervisor:
     """Coordinates durable task state without selecting models, tools, or agents.
 
@@ -86,6 +112,7 @@ class ExecutionSupervisor:
         verifier: ArtifactVerifier | None = None,
         event_sink: EventSink | None = None,
         clock: Clock = utc_now,
+        startup_recovery: bool | None = None,
     ) -> None:
         self.config = config or ExecutionSupervisorConfig()
         self.store = store or LocalExecutionStore(self.config.root)
@@ -95,7 +122,11 @@ class ExecutionSupervisor:
         self.clock = clock
         self._last_live_heartbeat: dict[str, datetime] = {}
         self.startup_recovery_summary: RecoverySummary | None = None
-        if self.config.startup_recovery:
+        if (
+            self.config.startup_recovery
+            if startup_recovery is None
+            else startup_recovery
+        ):
             self.reconnect_tree()
             self.startup_recovery_summary = self.recover()
 
@@ -472,13 +503,21 @@ class ExecutionSupervisor:
                 if target != ExecutionState.COMPLETED and not task.result_id:
                     result_kind = (
                         "terminal_failure"
-                        if target in {ExecutionState.FAILED, ExecutionState.CANCELLED, ExecutionState.BUDGET_EXHAUSTED}
+                        if target in {
+                            ExecutionState.FAILED,
+                            ExecutionState.CANCELLED,
+                            ExecutionState.BUDGET_EXHAUSTED,
+                            ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                        }
                         else "chat_result"
                     )
                     status = EscrowStatus.AVAILABLE
                     verification_status = (
                         VerificationStatus.FAILED
-                        if target == ExecutionState.FAILED
+                        if target in {
+                            ExecutionState.FAILED,
+                            ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                        }
                         else VerificationStatus.NOT_SUPPORTED
                     )
                     result_payload = {
@@ -531,6 +570,7 @@ class ExecutionSupervisor:
                         result_kind=result_kind,
                         payload=result_payload,
                         error_metadata=err_meta,
+                        provider_metadata=_provider_metadata(task.provider_metadata),
                         created_at=self.clock(),
                         completed_at=self.clock(),
                     )
@@ -544,7 +584,11 @@ class ExecutionSupervisor:
                 task.waiting_inbox_item_id = ""
                 task.waiting_reason = ""
                 task.human_wait_started_at = None
-            if reason and target in {ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED}:
+            if reason and target in {
+                ExecutionState.FAILED,
+                ExecutionState.BUDGET_EXHAUSTED,
+                ExecutionState.RECOVERY_REVIEW_REQUIRED,
+            }:
                 task.failure_reason = reason
             if recovery_reason:
                 task.recovery_reason = recovery_reason
@@ -571,6 +615,7 @@ class ExecutionSupervisor:
             ExecutionState.CANCELLED: "task_cancelled",
             ExecutionState.FAILED: "task_failed",
             ExecutionState.BUDGET_EXHAUSTED: "task_budget_exhausted",
+            ExecutionState.RECOVERY_REVIEW_REQUIRED: "recovery_review_required",
             ExecutionState.COMPLETED: "task_completed",
         }.get(target, f"task_{target.value}")
         if target in TERMINAL_STATES and task.attempt_id:
@@ -578,7 +623,7 @@ class ExecutionSupervisor:
             if attempt is not None:
                 attempt.state = target.value
                 attempt.finished_at = task.finished_at
-                if target == ExecutionState.FAILED:
+                if target in {ExecutionState.FAILED, ExecutionState.RECOVERY_REVIEW_REQUIRED}:
                     attempt.failure_reason = reason
                 self.store.save_attempt(attempt)
         self._emit(event_name, task, previous_state=prior.value if prior else "", reason=reason or recovery_reason)
@@ -593,6 +638,7 @@ class ExecutionSupervisor:
         payload: dict[str, Any] | None = None,
         is_resumable: bool = False,
         error_metadata: dict[str, Any] | None = None,
+        provider_metadata: dict[str, Any] | Any | None = None,
     ) -> EscrowResult:
         """Persist a terminal outcome or resumable wait in durable result escrow."""
         task = self.store.get_task(task_id)
@@ -602,6 +648,7 @@ class ExecutionSupervisor:
             else self.store.get_result_by_execution_id(task.task_id)
         )
         if existing_result is not None:
+            changed = False
             if (
                 existing_result.supervisor_state != state.value
                 and existing_result.status != EscrowStatus.ACKNOWLEDGED
@@ -609,19 +656,50 @@ class ExecutionSupervisor:
                 existing_result.supervisor_state = state.value
                 if state in TERMINAL_STATES:
                     existing_result.completed_at = existing_result.completed_at or self.clock()
+                changed = True
+            metadata_to_merge = provider_metadata if provider_metadata is not None else task.provider_metadata
+            if metadata_to_merge:
+                merged_provider_metadata = {
+                    **existing_result.provider_metadata,
+                    **_provider_metadata(metadata_to_merge),
+                }
+                if merged_provider_metadata != existing_result.provider_metadata:
+                    existing_result.provider_metadata = merged_provider_metadata
+                    changed = True
+            effective_error_metadata = error_metadata
+            if effective_error_metadata is None and task.provider_metadata.get("state") == "AUTH_REQUIRED":
+                effective_error_metadata = {"state": "AUTH_REQUIRED", "action": "reauthenticate"}
+            if effective_error_metadata is not None:
+                merged_error_metadata = {
+                    **existing_result.error_metadata,
+                    **effective_error_metadata,
+                }
+                if merged_error_metadata != existing_result.error_metadata:
+                    existing_result.error_metadata = merged_error_metadata
+                    changed = True
+            if changed:
                 self.store.save_result(existing_result)
             return existing_result
 
         result_kind = (
             "terminal_failure"
-            if state in {ExecutionState.FAILED, ExecutionState.CANCELLED, ExecutionState.BUDGET_EXHAUSTED}
+            if state in {
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+                ExecutionState.BUDGET_EXHAUSTED,
+                ExecutionState.RECOVERY_REVIEW_REQUIRED,
+            }
             else ("resumable_wait" if is_resumable else "chat_result")
         )
         status = EscrowStatus.AVAILABLE
         verification_status = (
             VerificationStatus.PASSED
             if state == ExecutionState.COMPLETED
-            else (VerificationStatus.FAILED if state == ExecutionState.FAILED else VerificationStatus.NOT_SUPPORTED)
+            else (
+                VerificationStatus.FAILED
+                if state in {ExecutionState.FAILED, ExecutionState.RECOVERY_REVIEW_REQUIRED}
+                else VerificationStatus.NOT_SUPPORTED
+            )
         )
         result_payload = payload or {
             "status": state.value,
@@ -647,6 +725,9 @@ class ExecutionSupervisor:
             "recovery_reason": task.recovery_reason,
             "is_resumable": is_resumable,
         }
+        normalized_provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
+        if normalized_provider_metadata.get("state") == "AUTH_REQUIRED":
+            err_meta = {"state": "AUTH_REQUIRED", "action": "reauthenticate", **err_meta}
         result = EscrowResult(
             task_id=task.task_id,
             execution_id=task.task_id,
@@ -673,6 +754,7 @@ class ExecutionSupervisor:
             result_kind=result_kind,
             payload=result_payload,
             error_metadata=err_meta,
+            provider_metadata=normalized_provider_metadata,
             created_at=self.clock(),
             completed_at=self.clock() if state in TERMINAL_STATES else None,
         )
@@ -685,6 +767,26 @@ class ExecutionSupervisor:
         self.store.save_result(result)
         self._emit("result_stored", task, result_id=result.result_id, status=status.value)
         return result
+
+    def persist_provider_metadata(
+        self,
+        task_id: str,
+        provider_metadata: dict[str, Any] | Any,
+    ) -> TaskRecord:
+        """Persist provider lifecycle evidence before terminal publication.
+
+        Providers remain unaware of supervisor storage. This method lets an
+        execution adapter record failure metadata while the task is still
+        running, so a later failure or restart cannot discard the evidence.
+        """
+        incoming = _provider_metadata(provider_metadata)
+
+        def update(task: TaskRecord) -> None:
+            task.provider_metadata = {**task.provider_metadata, **incoming}
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, update)
+        return task
 
 
     def queue(self, task_id: str) -> TaskRecord:
@@ -914,6 +1016,7 @@ class ExecutionSupervisor:
         external_action_receipts: Iterable[str] = (),
         resume_cursor: str = "",
         capsule_revisions: dict[str, int] | None = None,
+        provider_metadata: dict[str, Any] | Any | None = None,
     ) -> CheckpointRecord:
         original_state = self.store.get_task(task_id).state
         if original_state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
@@ -958,7 +1061,9 @@ class ExecutionSupervisor:
                 idempotency_records=list(idempotency_records),
                 external_action_receipts=list(external_action_receipts),
                 resume_cursor=resume_cursor,
+                provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
             )
+            task.provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
             task.checkpoint_id = checkpoint.checkpoint_id
             task.checkpoint_count += 1
             validate_transition(task.state, original_state)
@@ -1250,6 +1355,7 @@ class ExecutionSupervisor:
         token_usage: int = 0,
         actual_cost: float | None = None,
         capsule_revisions: dict[str, int] | None = None,
+        provider_metadata: dict[str, Any] | Any | None = None,
     ) -> TaskRecord:
         current = self.store.get_task(task_id)
         projected_tokens = current.token_usage + max(0, token_usage)
@@ -1317,8 +1423,10 @@ class ExecutionSupervisor:
                 supervisor_state=target_state.value,
                 verification_status=VerificationStatus.PENDING,
                 result_kind="chat_result",
+                provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
                 created_at=self.clock(),
             )
+            task.provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
             task.result_id = result.result_id
             task_had_usage = task.token_usage > 0
             task.token_usage += max(0, token_usage)
@@ -1787,6 +1895,7 @@ class ExecutionSupervisor:
                     ExecutionState.FAILED.value,
                     ExecutionState.CANCELLED.value,
                     ExecutionState.BUDGET_EXHAUSTED.value,
+                    ExecutionState.RECOVERY_REVIEW_REQUIRED.value,
                 }
                 or (task is not None and task.state in TERMINAL_STATES)
             )
@@ -2452,13 +2561,93 @@ class ExecutionSupervisor:
         self._emit("replan_completed" if current.state == ExecutionState.REPLANNING else "retry_started", task)
         return task
 
+    def _require_ambiguous_lease_review(
+        self, task: TaskRecord, *, now: datetime
+    ) -> RecoveryInterventionRecord:
+        """Persist lost-lease evidence before terminalizing uncertain work.
+
+        This deliberately records the intervention before clearing the lease from
+        the task. A restart between those writes can re-use the same record and
+        still terminalize the task without creating a second execution.
+        """
+        existing = next(
+            (
+                item
+                for item in self.store.recovery_interventions_for_task(task.task_id)
+                if item.attempt_id == task.attempt_id
+                and item.reason is RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE
+            ),
+            None,
+        )
+        intervention = existing or RecoveryInterventionRecord(
+            task_id=task.task_id,
+            execution_id=task.task_id,
+            attempt_id=task.attempt_id,
+            reason=RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE,
+            last_lease_owner=task.lease_owner,
+            lease_expiry=task.lease_expires_at,
+            external_side_effects_possible=(
+                task.side_effect_classification is not SideEffectClassification.READ_ONLY
+            ),
+            created_at=now,
+        )
+        if existing is None:
+            self.store.save_recovery_intervention(intervention)
+
+        if task.recovery_intervention_id != intervention.intervention_id:
+            def link(current: TaskRecord) -> None:
+                current.recovery_intervention_id = intervention.intervention_id
+                current.updated_at = now
+
+            task, _ = self.store.update_task(task.task_id, link)
+
+        if task.state is not ExecutionState.RECOVERY_REVIEW_REQUIRED:
+            task = self.transition(
+                task.task_id,
+                ExecutionState.RECOVERY_REVIEW_REQUIRED,
+                reason=(
+                    "ambiguous lost lease; external side effects may have occurred; "
+                    "human review is required"
+                ),
+                recovery_reason="automatic recovery refused after ambiguous lost lease",
+            )
+        self._emit(
+            "recovery_intervention_required",
+            task,
+            intervention_id=intervention.intervention_id,
+            status=intervention.status,
+            reason=intervention.reason.value,
+            action=intervention.action,
+            execution_id=intervention.execution_id,
+            execution_state=intervention.execution_state,
+            last_lease_owner=intervention.last_lease_owner,
+            lease_expiry=intervention.lease_expiry,
+            terminal_state=intervention.terminal_state.value,
+            external_side_effects_possible=intervention.external_side_effects_possible,
+        )
+        return intervention
+
     def recover(self) -> RecoverySummary:
         """Recover expired work deterministically; safe to invoke repeatedly."""
         summary = RecoverySummary()
         now = self.clock()
-        for initial in self.store.list_tasks(incomplete_only=True):
+        incomplete_tasks = self.store.list_tasks(incomplete_only=True)
+        review_required_tasks = [
+            task
+            for task in self.store.list_tasks()
+            if task.state is ExecutionState.RECOVERY_REVIEW_REQUIRED
+        ]
+        for initial in [*incomplete_tasks, *review_required_tasks]:
             summary.scanned += 1
             task = self.store.get_task(initial.task_id)
+            if task.state is ExecutionState.RECOVERY_REVIEW_REQUIRED:
+                intervention = self.store.get_recovery_intervention(
+                    task.recovery_intervention_id
+                )
+                summary.intervention_required.append(task.task_id)
+                if intervention is not None:
+                    summary.intervention_records.append(intervention)
+                continue
             checkpoints = self.store.checkpoints_for_task(task.task_id)
             if checkpoints:
                 latest = checkpoints[-1]
@@ -2554,21 +2743,9 @@ class ExecutionSupervisor:
                 reason="active lease expired during execution",
             )
             if decision is None:
-                def fail(current: TaskRecord) -> None:
-                    validate_transition(current.state, ExecutionState.FAILED)
-                    current.state = ExecutionState.FAILED
-                    current.finished_at = current.updated_at = now
-                    current.failure_reason = (
-                        f"ambiguous {current.side_effect_classification.value} execution lost its lease; "
-                        "manual review is required because the external action may already have occurred"
-                    )
-                    current.recovery_reason = "automatic retry refused by side-effect policy"
-                    current.lease_owner = ""
-                    current.lease_token = ""
-                    current.lease_expires_at = None
-                task, _ = self.store.update_task(task.task_id, fail)
-                self._emit("task_failed", task, reason=task.failure_reason)
+                intervention = self._require_ambiguous_lease_review(task, now=now)
                 summary.intervention_required.append(task.task_id)
+                summary.intervention_records.append(intervention)
                 continue
             try:
                 task = self.retry(task.task_id, decision)
@@ -2597,7 +2774,10 @@ class ExecutionSupervisor:
         task = self.store.get_task(task_id)
         children = [self.store.get_task(child) for child in task.child_task_ids]
         completed = sum(child.state == ExecutionState.COMPLETED for child in children)
-        failed = sum(child.state == ExecutionState.FAILED for child in children)
+        failed = sum(
+            child.state in {ExecutionState.FAILED, ExecutionState.RECOVERY_REVIEW_REQUIRED}
+            for child in children
+        )
         cancelled = sum(child.state == ExecutionState.CANCELLED for child in children)
         active_rows = [child for child in children if child.state not in TERMINAL_STATES]
         child_by_id = {child.task_id: child for child in children}
