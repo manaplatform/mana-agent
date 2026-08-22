@@ -15,6 +15,7 @@ from mana_agent.config import user_config
 from mana_agent.multi_agent import MainAgent
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
+from mana_agent.multi_agent.agents.planner_agent import PlannerAgent
 from mana_agent.multi_agent.communication.decision_room import DecisionRoom
 from mana_agent.multi_agent.communication.message_bus import MessageBus
 from mana_agent.multi_agent.core.errors import AgentRegistryError, InvalidTaskTransition, ToolPermissionError
@@ -247,9 +248,66 @@ def test_feature_completion_allows_verified_runtime_path(tmp_path):
     board.record_integration_evidence(
         task.task_id,
         ["CLI entrypoint", "router", "Capability implementation", "observable result"],
+        source_references=["src/cli.py:10", "src/router.py:20"],
+        observable_result="Capability was selected and callable.",
+        verification_source="verification-1",
     )
     board.update_status(task.task_id, TaskStatus.VERIFYING)
     board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_integration_evidence_requires_provenance_and_observable_result(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Capability", user_request="add capability")
+    with pytest.raises(ValueError, match="source references"):
+        board.record_integration_evidence(
+            task.task_id,
+            ["entrypoint", "router", "provider", "result"],
+            observable_result="selected",
+        )
+
+
+def test_planner_assigns_one_wiring_child_to_coding_and_reuses_it(tmp_path):
+    board = TaskBoard(tmp_path)
+    registry = AgentRegistry()
+    planner_node = registry.find_by_role(AgentRole.PLANNER)
+    coding_node = registry.find_by_role(AgentRole.CODING)
+    planner = PlannerAgent(
+        agent_id=planner_node.agent_id,
+        role=AgentRole.PLANNER,
+        parent_agent_id=planner_node.parent_agent_id,
+        capabilities=planner_node.capabilities,
+        mailbox=MessageBus(tmp_path),
+        taskboard=board,
+        message_bus=MessageBus(tmp_path),
+        registry=registry,
+    )
+    task = board.create_task(title="Capability", user_request="add capability")
+    planner.plan(task.task_id, task.user_request, "coding")
+    planner.plan(task.task_id, task.user_request, "coding")
+    wiring = [board.get_task(item) for item in task.required_wiring_task_ids]
+    assert len(wiring) == 1
+    assert wiring[0].owner_agent_id == coding_node.agent_id
+
+
+def test_planner_does_not_create_wiring_child_for_read_only_route(tmp_path):
+    board = TaskBoard(tmp_path)
+    registry = AgentRegistry()
+    planner_node = registry.find_by_role(AgentRole.PLANNER)
+    planner = PlannerAgent(
+        agent_id=planner_node.agent_id,
+        role=AgentRole.PLANNER,
+        parent_agent_id=planner_node.parent_agent_id,
+        capabilities=planner_node.capabilities,
+        mailbox=MessageBus(tmp_path),
+        taskboard=board,
+        message_bus=MessageBus(tmp_path),
+        registry=registry,
+    )
+    task = board.create_task(title="Docs", user_request="inspect documentation")
+    result = planner.plan(task.task_id, task.user_request, "repo_search")
+    assert result.wiring_required is False
+    assert task.required_wiring_task_ids == []
 
 
 def test_pure_internal_task_can_complete_without_wiring(tmp_path):

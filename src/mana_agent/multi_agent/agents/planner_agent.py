@@ -33,11 +33,11 @@ class PlannerAgent(BaseAgent):
             configuration_targets=["Configuration that enables or selects the capability."],
             export_targets=["Public exports required by the production import path."],
             integration_verification=["Reviewer traces a production entrypoint to the implementation and records the observable result."],
-            wiring_required=route_name in {"coding", "tool", "high_risk_tool"},
+            wiring_required=route_name == "coding",
             wiring_reason=(
                 "The routed task may change runtime behavior; construction, registration, and reachability must be verified."
-                if route_name in {"coding", "tool", "high_risk_tool"}
-                else "The routed task is not an implementation route with a runtime capability."
+                if route_name == "coding"
+                else "The selected route does not introduce or change a runtime capability; no wiring child is required."
             ),
         )
         task = self.taskboard.get_task(task_id)
@@ -51,19 +51,33 @@ class PlannerAgent(BaseAgent):
         ):
             setattr(task, name, getattr(result, name))
         if result.wiring_required:
-            child = self.taskboard.create_child_task(
-                task_id,
-                title="Wire capability into the production runtime and verify reachability",
-                user_request="Implement and verify the planner integration contract for this capability.",
-                owner_agent_id=self.agent_id,
-                acceptance_criteria=list(result.integration_verification),
-                plan=[
-                    "Discover upstream callers and downstream integration points.",
-                    "Implement missing production wiring.",
-                    "Record runtime reachability evidence.",
-                ],
-                integration_role="wiring",
+            existing = next(
+                (
+                    self.taskboard.get_task(child_id)
+                    for child_id in task.required_wiring_task_ids
+                    if child_id in self.taskboard.tasks
+                    and self.taskboard.get_task(child_id).integration_role == "wiring"
+                ),
+                None,
             )
+            if existing is None:
+                coding = next(
+                    node for node in self.registry.agents.values()
+                    if node.role.value == "coding"
+                )
+                self.taskboard.create_child_task(
+                    task_id,
+                    title="Wire capability into the production runtime and verify reachability",
+                    user_request="Implement and verify the planner integration contract for this capability.",
+                    owner_agent_id=coding.agent_id,
+                    acceptance_criteria=list(result.integration_verification),
+                    plan=[
+                        "Discover concrete callers, construction points, registries, and runtime entrypoints.",
+                        "Implement missing production wiring through the CodingAgent queue path.",
+                        "Verify and record provenance-backed runtime reachability evidence.",
+                    ],
+                    integration_role="wiring",
+                )
         for assumption in result.assumptions:
             self.taskboard.add_assumption(task_id, assumption)
         return result

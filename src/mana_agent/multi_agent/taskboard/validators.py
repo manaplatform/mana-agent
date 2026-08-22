@@ -41,6 +41,13 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
                 raise InvalidTaskTransition(
                     "INCOMPLETE_FEATURE_WIRING: runtime reachability evidence is absent"
                 )
+            if not task.integration_evidence_records or not all(
+                record.get("source_references") and record.get("observable_result")
+                for record in task.integration_evidence_records
+            ):
+                raise InvalidTaskTransition(
+                    "INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent"
+                )
         evidence = dict(task.supervisor_verification_evidence or {})
         if not task.supervisor_execution_id:
             raise InvalidTaskTransition(

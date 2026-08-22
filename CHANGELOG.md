@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-22
+
+- Wired planned integration children into MainAgent's CodingAgent/QueueManager lifecycle, added concrete repository impact discovery, duplicate-safe specialist ownership, and provenance-backed runtime evidence validation.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/gateway/test_multi_task_orchestration.py -v`.
+
 ## 2026-08-21
 
 - Added durable ambiguous-lost-lease recovery handling for checkpointed tasks.

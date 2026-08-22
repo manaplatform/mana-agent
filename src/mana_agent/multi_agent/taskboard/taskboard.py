@@ -317,19 +317,46 @@ class TaskBoard:
         self._record("task.updated", {"task_id": task_id, "status": status.value, "reason": reason})
         self.save()
 
-    def record_integration_evidence(self, task_id: str, path: list[str], *, summary: str = "") -> None:
+    def record_integration_evidence(
+        self,
+        task_id: str,
+        path: list[str],
+        *,
+        summary: str = "",
+        source_references: list[str] | None = None,
+        observable_result: str = "",
+        verification_source: str = "",
+        reviewer: str = "",
+    ) -> None:
         """Record the structured production path proven by ReviewerAgent."""
         task = self.get_task(task_id)
         normalized = [str(item).strip() for item in path if str(item).strip()]
         if len(normalized) < 3:
             raise ValueError("integration evidence requires an entrypoint, reachable capability, and observable result")
+        sources = [str(item).strip() for item in (source_references or []) if str(item).strip()]
+        if not sources:
+            raise ValueError("integration evidence requires repository or tool source references")
+        if not str(observable_result or summary).strip():
+            raise ValueError("integration evidence requires an observable result")
         task.integration_evidence = normalized
+        task.integration_evidence_records = [{
+            "entrypoint": normalized[0],
+            "path": normalized,
+            "observable_result": str(observable_result or summary).strip(),
+            "source_references": sources,
+            "verification_source": str(verification_source or "").strip(),
+            "reviewer": str(reviewer or "").strip(),
+            "timestamp": utc_now().isoformat(),
+        }]
         task.integration_verified = True
         task.runtime_reachability_verified = True
         if summary:
             task.evidence.append(f"Integration verification: {summary}")
         task.updated_at = utc_now()
-        self._record("task.integration_verified", {"task_id": task_id, "path": normalized})
+        self._record(
+            "task.integration_verified",
+            {"task_id": task_id, "path": normalized, "sources": sources},
+        )
         self.save()
 
     def _validate_feature_completion(self, task: TaskBoardItem) -> None:
@@ -359,6 +386,11 @@ class TaskBoard:
             raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: implementation verification is absent")
         if not task.integration_verified or not task.runtime_reachability_verified:
             raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime reachability evidence is absent")
+        if not task.integration_evidence_records or not all(
+            record.get("source_references") and record.get("observable_result")
+            for record in task.integration_evidence_records
+        ):
+            raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent")
 
     def project_supervisor_completion(
         self,

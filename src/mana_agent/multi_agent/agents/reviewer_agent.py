@@ -7,10 +7,27 @@ from mana_agent.evals.recorder import record_current
 
 
 class ReviewerAgent(BaseAgent):
-    def verify_runtime_reachability(self, task_id: str, path: list[str], *, summary: str = "") -> bool:
+    def verify_runtime_reachability(
+        self,
+        task_id: str,
+        path: list[str],
+        *,
+        summary: str = "",
+        source_references: list[str] | None = None,
+        observable_result: str = "",
+        verification_source: str = "",
+    ) -> bool:
         """Persist a concrete production path with an observable result."""
         try:
-            self.taskboard.record_integration_evidence(task_id, path, summary=summary)
+            self.taskboard.record_integration_evidence(
+                task_id,
+                path,
+                summary=summary,
+                source_references=source_references,
+                observable_result=observable_result,
+                verification_source=verification_source,
+                reviewer=self.agent_id,
+            )
         except ValueError as exc:
             self.reject_weak_evidence(task_id, f"INCOMPLETE_FEATURE_WIRING: {exc}")
             return False
@@ -87,7 +104,13 @@ class ReviewerAgent(BaseAgent):
                     "INCOMPLETE_FEATURE_WIRING: integration tasks are incomplete: " + ", ".join(incomplete),
                 )
                 return False
-            if not task.integration_verified or not task.runtime_reachability_verified or len(task.integration_evidence) < 3:
+            if (
+                not task.integration_verified
+                or not task.runtime_reachability_verified
+                or len(task.integration_evidence) < 3
+                or not task.integration_evidence_records
+                or not all(record.get("source_references") for record in task.integration_evidence_records)
+            ):
                 self.reject_weak_evidence(
                     task_id,
                     "INCOMPLETE_FEATURE_WIRING: no verified production entrypoint-to-capability path",
