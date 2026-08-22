@@ -24,6 +24,23 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
     if task.status in _TERMINAL:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value} without reopen")
     if next_status == TaskStatus.DONE:
+        if task.implementation_targets and not str(task.wiring_reason or "").strip():
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"
+            )
+        if task.wiring_required:
+            if not task.required_wiring_task_ids:
+                raise InvalidTaskTransition(
+                    "INCOMPLETE_FEATURE_WIRING: wiring is required but no integration task exists"
+                )
+            if not task.implementation_verified:
+                raise InvalidTaskTransition(
+                    "INCOMPLETE_FEATURE_WIRING: implementation verification is absent"
+                )
+            if not task.integration_verified or not task.runtime_reachability_verified:
+                raise InvalidTaskTransition(
+                    "INCOMPLETE_FEATURE_WIRING: runtime reachability evidence is absent"
+                )
         evidence = dict(task.supervisor_verification_evidence or {})
         if not task.supervisor_execution_id:
             raise InvalidTaskTransition(

@@ -5,6 +5,7 @@ import threading
 from typing import Any, Callable
 
 from mana_agent.multi_agent.core.ids import new_task_id
+from mana_agent.multi_agent.core.errors import InvalidTaskTransition
 from mana_agent.multi_agent.core.types import (
     DecisionRecord,
     HandoffRecord,
@@ -180,6 +181,7 @@ class TaskBoard:
         previous_task_id: str = "",
         parent_memory_principal: MemoryPrincipal | None = None,
         delegated_capsule_ids: list[str] | None = None,
+        integration_role: str = "",
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
         task_id = self._new_task_id()
@@ -209,6 +211,7 @@ class TaskBoard:
             acceptance_criteria=list(acceptance_criteria or []),
             plan=list(plan or []),
             depends_on=list(depends_on or []),
+            integration_role=integration_role,
             decomposition_local_id=decomposition_local_id,
             preferred_parallelism=preferred_parallelism,
             memory_status={
@@ -222,6 +225,9 @@ class TaskBoard:
         )
         self.tasks[task_id] = task
         _append_unique(parent.child_task_ids, [task_id])
+        if integration_role:
+            _append_unique(parent.depends_on, [task_id])
+            _append_unique(parent.required_wiring_task_ids, [task_id])
         if decomposition_local_id:
             parent.decomposition_id_map[decomposition_local_id] = task_id
         parent.updated_at = utc_now()
@@ -301,6 +307,8 @@ class TaskBoard:
 
     def update_status(self, task_id: str, status: TaskStatus, *, reason: str | None = None) -> None:
         task = self.get_task(task_id)
+        if status == TaskStatus.DONE:
+            self._validate_feature_completion(task)
         validate_transition(task, status, reason=reason)
         task.status = status
         task.updated_at = utc_now()
@@ -308,6 +316,49 @@ class TaskBoard:
             self.add_blocker(task_id, reason, save=False)
         self._record("task.updated", {"task_id": task_id, "status": status.value, "reason": reason})
         self.save()
+
+    def record_integration_evidence(self, task_id: str, path: list[str], *, summary: str = "") -> None:
+        """Record the structured production path proven by ReviewerAgent."""
+        task = self.get_task(task_id)
+        normalized = [str(item).strip() for item in path if str(item).strip()]
+        if len(normalized) < 3:
+            raise ValueError("integration evidence requires an entrypoint, reachable capability, and observable result")
+        task.integration_evidence = normalized
+        task.integration_verified = True
+        task.runtime_reachability_verified = True
+        if summary:
+            task.evidence.append(f"Integration verification: {summary}")
+        task.updated_at = utc_now()
+        self._record("task.integration_verified", {"task_id": task_id, "path": normalized})
+        self.save()
+
+    def _validate_feature_completion(self, task: TaskBoardItem) -> None:
+        """Reject false success before the generic supervisor gate runs."""
+        if task.implementation_targets and not str(task.wiring_reason or "").strip():
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"
+            )
+        if not task.wiring_required:
+            return
+        if not task.required_wiring_task_ids:
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: wiring is required but no integration task exists"
+            )
+        missing = [
+            dependency_id
+            for dependency_id in task.required_wiring_task_ids
+            if dependency_id not in self.tasks
+            or self.tasks[dependency_id].status is not TaskStatus.DONE
+        ]
+        if missing:
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: required integration tasks are incomplete: "
+                + ", ".join(missing)
+            )
+        if not task.implementation_verified:
+            raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: implementation verification is absent")
+        if not task.integration_verified or not task.runtime_reachability_verified:
+            raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime reachability evidence is absent")
 
     def project_supervisor_completion(
         self,
@@ -324,6 +375,7 @@ class TaskBoard:
         )
         if state != "completed" or verification != "passed":
             raise ValueError("supervisor projection cannot advertise an unverified completion")
+        self._validate_feature_completion(task)
         task.supervisor_execution_id = str(getattr(supervisor_task, "task_id", ""))
         task.supervisor_state = state
         task.supervisor_state_version = int(getattr(supervisor_task, "state_version", 0))

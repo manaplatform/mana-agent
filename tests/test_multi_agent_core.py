@@ -198,6 +198,75 @@ def test_taskboard_done_requires_supervisor_projection(tmp_path):
         board.update_status(task.task_id, TaskStatus.DONE)
 
 
+def _prepare_verified_feature(board: TaskBoard):
+    task = board.create_task(title="Capability", user_request="add capability")
+    child = board.create_child_task(
+        task.task_id,
+        title="Wire capability",
+        user_request="wire capability into runtime",
+        integration_role="wiring",
+    )
+    child.status = TaskStatus.DONE
+    task.wiring_required = True
+    task.implementation_verified = True
+    task.supervisor_execution_id = "supervisor-1"
+    task.supervisor_state = "completed"
+    task.verification_status = "passed"
+    task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    return task
+
+
+def test_feature_completion_rejects_missing_wiring_task(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Capability", user_request="add capability")
+    task.wiring_required = True
+    task.integration_verified = True
+    task.runtime_reachability_verified = True
+    task.supervisor_execution_id = "supervisor-1"
+    task.supervisor_state = "completed"
+    task.verification_status = "passed"
+    task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
+        board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_feature_completion_rejects_unit_evidence_without_runtime_path(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = _prepare_verified_feature(board)
+    with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
+        board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_feature_completion_allows_verified_runtime_path(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = _prepare_verified_feature(board)
+    board.record_integration_evidence(
+        task.task_id,
+        ["CLI entrypoint", "router", "Capability implementation", "observable result"],
+    )
+    board.update_status(task.task_id, TaskStatus.VERIFYING)
+    board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_pure_internal_task_can_complete_without_wiring(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Utility", user_request="refactor internal helper")
+    task.wiring_required = False
+    task.wiring_reason = "Pure internal utility; integration path is unchanged."
+    task.supervisor_execution_id = "supervisor-1"
+    task.supervisor_state = "completed"
+    task.verification_status = "passed"
+    task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    board.update_status(task.task_id, TaskStatus.VERIFYING)
+    board.update_status(task.task_id, TaskStatus.DONE)
+
+
 def test_taskboard_compaction_is_reversible(tmp_path, monkeypatch):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     board = TaskBoard(tmp_path)

@@ -7,6 +7,16 @@ from mana_agent.evals.recorder import record_current
 
 
 class ReviewerAgent(BaseAgent):
+    def verify_runtime_reachability(self, task_id: str, path: list[str], *, summary: str = "") -> bool:
+        """Persist a concrete production path with an observable result."""
+        try:
+            self.taskboard.record_integration_evidence(task_id, path, summary=summary)
+        except ValueError as exc:
+            self.reject_weak_evidence(task_id, f"INCOMPLETE_FEATURE_WIRING: {exc}")
+            return False
+        self.record_evidence(task_id, "Reviewer verified runtime path: " + " → ".join(path))
+        return True
+
     def review(self, task_id: str, risk_summary: str) -> None:
         self.record_evidence(task_id, f"Reviewer assessment: {risk_summary}")
         record_current("review.finished", {"task_id": task_id, "reviewer": self.agent_id, "summary": risk_summary})
@@ -62,6 +72,28 @@ class ReviewerAgent(BaseAgent):
             if latest is None or not latest.passed or not task.verification_queue_job_ids:
                 self.reject_weak_evidence(task_id, "verification lacks executed queue job evidence")
                 return False
+        if task.wiring_required:
+            if not task.required_wiring_task_ids:
+                self.reject_weak_evidence(task_id, "INCOMPLETE_FEATURE_WIRING: planner supplied no integration task")
+                return False
+            incomplete = [
+                dependency_id for dependency_id in task.required_wiring_task_ids
+                if dependency_id not in self.taskboard.tasks
+                or self.taskboard.get_task(dependency_id).status.value != "done"
+            ]
+            if incomplete:
+                self.reject_weak_evidence(
+                    task_id,
+                    "INCOMPLETE_FEATURE_WIRING: integration tasks are incomplete: " + ", ".join(incomplete),
+                )
+                return False
+            if not task.integration_verified or not task.runtime_reachability_verified or len(task.integration_evidence) < 3:
+                self.reject_weak_evidence(
+                    task_id,
+                    "INCOMPLETE_FEATURE_WIRING: no verified production entrypoint-to-capability path",
+                )
+                return False
+            task.implementation_verified = True
         if route_name == "high_risk_tool" and any(str(item).startswith("git_") for item in task.required_capabilities):
             if not self._git_evidence_is_complete(task_id):
                 return False

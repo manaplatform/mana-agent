@@ -4060,3 +4060,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Integrated Codex lifecycle metadata with durable execution tasks, checkpoints, failure results, and escrow lookup, including fallback failure evidence and reauthentication guidance.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py`
+## 2026-08-22
+
+- Added explicit planner integration contracts, wiring dependencies, runtime-reachability reviewer evidence, and a final TaskBoard completion gate so runtime capabilities cannot report success from implementation or unit-test evidence alone.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
