@@ -176,6 +176,23 @@ def test_queue_manager_stamps_execution_root_from_task(repo: Path) -> None:
     assert job.payload.get("execution_repo_root") == ws.worktree_path
 
 
+def test_wiring_child_inherits_parent_managed_execution_root(repo: Path) -> None:
+    manager = WorkspaceManager(repo)
+    board = TaskBoard(repo)
+    parent = board.create_task(title="Feature", user_request="implement feature")
+    ws = manager.create_for_task(parent.task_id, title="Feature")
+    manager.attach_to_taskboard(parent, ws)
+    child = board.create_child_task(
+        parent.task_id,
+        title="Wire feature",
+        user_request="wire feature",
+        integration_role="wiring",
+    )
+
+    assert child.execution_repo_root == parent.execution_repo_root == ws.worktree_path
+    assert child.managed_workspace_id == parent.managed_workspace_id == ws.workspace_id
+
+
 def test_verification_runs_in_worktree_root(repo: Path) -> None:
     manager = WorkspaceManager(repo)
     ws = manager.create_for_task("task_verify_root", title="Verify root")

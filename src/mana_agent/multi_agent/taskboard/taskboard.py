@@ -202,6 +202,12 @@ class TaskBoard:
             previous_task_id=previous_task_id or parent_task_id,
             primary_repository_id=parent.primary_repository_id,
             repository_ids=list(parent.repository_ids),
+            managed_workspace_id=parent.managed_workspace_id,
+            managed_branch=parent.managed_branch,
+            managed_worktree_path=parent.managed_worktree_path,
+            workspace_status=parent.workspace_status,
+            base_revision=parent.base_revision,
+            execution_repo_root=parent.execution_repo_root,
             owner_agent_id=owner_agent_id,
             supervisor_agent_id=parent.owner_agent_id,
             delegated_by_agent_id=parent.owner_agent_id,
@@ -361,6 +367,20 @@ class TaskBoard:
 
     def _validate_feature_completion(self, task: TaskBoardItem) -> None:
         """Reject false success before the generic supervisor gate runs."""
+        if task.integration_role == "wiring":
+            if not task.implementation_verified:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
+            if not task.integration_verified or not task.runtime_reachability_verified:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring runtime reachability evidence is absent")
+            if not task.verification_provenance:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: child verification provenance is absent")
+            if not task.integration_evidence_records or not all(
+                record.get("source_references") and record.get("observable_result")
+                for record in task.integration_evidence_records
+            ):
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring evidence provenance is absent")
         if task.implementation_targets and not str(task.wiring_reason or "").strip():
             raise InvalidTaskTransition(
                 "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"

@@ -84,6 +84,26 @@ class ReviewerAgent(BaseAgent):
         if any(event.get("agent_id") == "main" or str(event.get("agent_id", "")).startswith("agent_main_") for event in task.actual_tool_events):
             self.reject_weak_evidence(task_id, "MainAgent appeared in actual tool execution events")
             return False
+        if task.integration_role == "wiring":
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+                self.reject_weak_evidence(task_id, "INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
+                return False
+            if (
+                not task.implementation_verified
+                or not task.integration_verified
+                or not task.runtime_reachability_verified
+                or not task.verification_provenance
+                or not task.integration_evidence_records
+                or not all(
+                    record.get("source_references") and record.get("observable_result")
+                    for record in task.integration_evidence_records
+                )
+            ):
+                self.reject_weak_evidence(
+                    task_id,
+                    "INCOMPLETE_FEATURE_WIRING: wiring child lacks complete verified provenance",
+                )
+                return False
         if requires_verification:
             latest = task.verification_results[-1] if task.verification_results else None
             if latest is None or not latest.passed or not task.verification_queue_job_ids:

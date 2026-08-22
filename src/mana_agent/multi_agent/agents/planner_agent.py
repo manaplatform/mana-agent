@@ -46,7 +46,7 @@ class PlannerAgent(BaseAgent):
             ),
             wiring_reason=(
                 "The selected mutation route may change a production capability; construction, registration, and reachability must be verified."
-                if route_name in {"coding", "tool", "high_risk_tool"}
+                if route_name in {"coding", "tool", "high_risk_tool"} and runtime_capability_change
                 else "The selected route does not introduce or change a runtime capability; no wiring child is required."
             ),
         )

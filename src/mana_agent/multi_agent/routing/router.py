@@ -38,21 +38,21 @@ class Router:
             subagents = list(agent_decision.required_subagents)
             return RouteDecision(task_id, "coding", "large" if subagents else "medium", ["main", "head_decision", "planner", "coding", "tool", "verifier", "reviewer", "summarizer"], subagents, ["planning", "coding", "tool_execution", "verification", "review", "summarization"], True, True, RiskLevel.MEDIUM, agent_decision.reasoning_summary or "Code mutation or repository edit request.", agent_decision.runtime_capability_change)
         if kind == "analyze":
-            return RouteDecision(task_id, "analyze", "medium", ["main", "head_decision", "research", "planner", "reviewer", "summarizer"], ["repo_inventory"], ["repo_search", "repo_read", "planning", "review", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Repository analysis request.")
+            return RouteDecision(task_id, "analyze", "medium", ["main", "head_decision", "research", "planner", "reviewer", "summarizer"], ["repo_inventory"], ["repo_search", "repo_read", "planning", "review", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Repository analysis request.", agent_decision.runtime_capability_change)
         if kind == "planning":
-            return RouteDecision(task_id, "planning", "medium", ["main", "head_decision", "planner", "reviewer", "summarizer"], [], ["planning", "review", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Planning request.")
+            return RouteDecision(task_id, "planning", "medium", ["main", "head_decision", "planner", "reviewer", "summarizer"], [], ["planning", "review", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Planning request.", agent_decision.runtime_capability_change)
         if kind == "high_risk_tool":
-            return RouteDecision(task_id, "high_risk_tool", "medium", ["main", "head_decision", "tool", "verifier", "reviewer", "summarizer"], [], ["decision", "tool_execution"], True, True, RiskLevel.HIGH, agent_decision.reasoning_summary or "High-risk shell or git operation requires approval.")
+            return RouteDecision(task_id, "high_risk_tool", "medium", ["main", "head_decision", "tool", "verifier", "reviewer", "summarizer"], [], ["decision", "tool_execution"], True, True, RiskLevel.HIGH, agent_decision.reasoning_summary or "High-risk shell or git operation requires approval.", agent_decision.runtime_capability_change)
         if kind == "tool":
-            return RouteDecision(task_id, "tool", "medium", ["main", "head_decision", "tool", "verifier", "summarizer"], [], ["tool_execution", "verification", "summarization"], agent_decision.repo_context_needed, True, RiskLevel.MEDIUM, agent_decision.reasoning_summary or "Tool-heavy request.")
+            return RouteDecision(task_id, "tool", "medium", ["main", "head_decision", "tool", "verifier", "summarizer"], [], ["tool_execution", "verification", "summarization"], agent_decision.repo_context_needed, True, RiskLevel.MEDIUM, agent_decision.reasoning_summary or "Tool-heavy request.", agent_decision.runtime_capability_change)
         if agent_decision.intent == "web_research":
             external_tools = [
                 tool for tool in agent_decision.selected_tools if tool in {"web_search", "github_search"}
             ]
-            return RouteDecision(task_id, "research", "medium", ["main", "head_decision", "research", "summarizer"], [], [*external_tools, "summarization"], False, False, RiskLevel.LOW, agent_decision.reasoning_summary or "External research request.")
+            return RouteDecision(task_id, "research", "medium", ["main", "head_decision", "research", "summarizer"], [], [*external_tools, "summarization"], False, False, RiskLevel.LOW, agent_decision.reasoning_summary or "External research request.", agent_decision.runtime_capability_change)
         if agent_decision.intent == "repo_search":
-            return RouteDecision(task_id, "repo_search", "medium", ["main", "head_decision", "research", "summarizer"], ["repo_inventory"], ["repo_search", "repo_read", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Repository search request.")
-        return RouteDecision(task_id, "simple", "simple", ["main", "head_decision", "summarizer"], [], ["conversation", "summarization"], agent_decision.repo_context_needed, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Simple explanation or Q&A request.")
+            return RouteDecision(task_id, "repo_search", "medium", ["main", "head_decision", "research", "summarizer"], ["repo_inventory"], ["repo_search", "repo_read", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Repository search request.", agent_decision.runtime_capability_change)
+        return RouteDecision(task_id, "simple", "simple", ["main", "head_decision", "summarizer"], [], ["conversation", "summarization"], agent_decision.repo_context_needed, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Simple explanation or Q&A request.", agent_decision.runtime_capability_change)
 
     @staticmethod
     def _route_kind(decision: AgentDecision) -> str:

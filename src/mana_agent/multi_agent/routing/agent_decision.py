@@ -112,7 +112,7 @@ class AgentDecision:
     verifier_summary: str = ""
     # Explicit model decision used by planning to distinguish runtime
     # capability work from documentation, tests, and unchanged refactors.
-    runtime_capability_change: bool = True
+    runtime_capability_change: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

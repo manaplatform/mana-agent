@@ -70,6 +70,25 @@ class MainAgentResult:
     repository_ids: list[str] | None = None
 
 
+def connected_wiring_path(edges: list[dict[str, str]]) -> list[str]:
+    """Render a connected edge chain while keeping node identity separate."""
+    if len(edges) < 2:
+        return []
+    current_node = edges[0].get("from", "")
+    nodes = [current_node]
+    for edge in edges:
+        if edge.get("from") != current_node:
+            return []
+        nodes.append(edge.get("to", ""))
+        current_node = edge.get("to", "")
+    if not all(nodes):
+        return []
+    path = [nodes[0]]
+    for edge, node in zip(edges, nodes[1:]):
+        path.append(f'{edge["relation"]} {node}')
+    return path
+
+
 class _MainAgentSkillDraftGenerator:
     """Adapter around the existing model selected for the task lifecycle."""
 
@@ -706,6 +725,9 @@ class MainAgent:
             return
         task = self.taskboard.get_task(task_id)
         self.workspace_manager.attach_to_taskboard(task, workspace)
+        for child_id in list(task.required_wiring_task_ids):
+            child = self.taskboard.get_task(child_id)
+            self.workspace_manager.attach_to_taskboard(child, workspace)
         self.taskboard.save()
 
     def _delegate_initial_tool_work(self, task_id: str, request: str, route_name: str) -> None:
@@ -753,9 +775,15 @@ class MainAgent:
                 "configuration that enables or selects the capability.",
                 "a production cli, api, gateway, lifecycle, or supervisor entrypoint.",
             }
+            parent_changed_files = [
+                *parent.files_touched,
+                *(path for job in self.queue_manager.jobs_for_task(parent.task_id) for path in job.changed_files),
+            ]
             identifiers = list(dict.fromkeys(
                 str(item) for item in (
-                    list(child.files_touched)
+                    parent_changed_files
+                    + list(child.files_touched)
+                    + list(parent.implementation_targets)
                     + getattr(plan, "files_to_inspect", [])
                     + getattr(plan, "implementation_targets", [])
                 )
@@ -870,7 +898,8 @@ class MainAgent:
         child = self.taskboard.get_task(child_task_id)
         supervisor.create_task(
             task_id=child_task_id, assigned_agent=child.owner_agent_id or "coding",
-            routing_decision_id=child_task_id, workspace_path=self.root,
+            routing_decision_id=child_task_id,
+            workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or self.root).resolve(),
             side_effect_classification=SideEffectClassification.IDEMPOTENT,
             session_id=child.session_id, workspace_id=child.workspace_id,
             repository_id=child.primary_repository_id, normalized_intent=child.user_request,
@@ -909,13 +938,8 @@ class MainAgent:
             ]
             if len(edges) < 2:
                 continue
-            path = [edges[0]["from"]]
-            for edge in edges:
-                if path[-1] != edge["from"]:
-                    path = []
-                    break
-                path.append(f'{edge["relation"]} {edge["to"]}')
-            if not path or len(path) != len(edges) + 1:
+            path = connected_wiring_path(edges)
+            if not path:
                 continue
             path.append("observable result: verification passed")
             refs = list(dict.fromkeys([edge["source_reference"] for edge in edges] + list(child.queue_job_ids)))
@@ -1061,6 +1085,7 @@ class MainAgent:
             requires_verification=True,
             risk_level=RiskLevel.HIGH,
             reason_summary="Git intent requires repository-state inspection, queued Git execution, verification, and review.",
+            runtime_capability_change=False,
         )
 
     def _commit_message_from_diff(self, *, diff_stat: str, diff: str, paths: list[str]) -> str:

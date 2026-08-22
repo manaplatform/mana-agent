@@ -24,6 +24,20 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
     if task.status in _TERMINAL:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value} without reopen")
     if next_status == TaskStatus.DONE:
+        if task.integration_role == "wiring":
+            if not task.implementation_verified:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
+            if not task.integration_verified or not task.runtime_reachability_verified:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring runtime reachability evidence is absent")
+            if not task.verification_provenance:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: child verification provenance is absent")
+            if not task.integration_evidence_records or not all(
+                record.get("source_references") and record.get("observable_result")
+                for record in task.integration_evidence_records
+            ):
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring evidence provenance is absent")
         if task.implementation_targets and not str(task.wiring_reason or "").strip():
             raise InvalidTaskTransition(
                 "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"

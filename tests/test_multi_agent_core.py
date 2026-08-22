@@ -13,6 +13,7 @@ from mana_agent.commands.cli_internal import _record_multi_agent_request
 from mana_agent.commands import cli_internal
 from mana_agent.config import user_config
 from mana_agent.multi_agent import MainAgent
+from mana_agent.multi_agent.agents.main_agent import connected_wiring_path
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
 from mana_agent.multi_agent.agents.planner_agent import PlannerAgent
@@ -98,6 +99,7 @@ def _route_payload(
     code_editing_needed: bool = False,
     required_subagents: list[str] | None = None,
     reasoning_summary: str = "Model selected route.",
+    runtime_capability_change: bool | None = None,
 ) -> dict:
     semantic_contract = {
         "answer": ("none", "conversation"),
@@ -112,7 +114,7 @@ def _route_payload(
         "plan": ("none", "conversation"),
     }
     requested_effect, target_surface = semantic_contract[intent]
-    return {
+    payload = {
         "intent": intent,
         "confidence": confidence,
         "selected_tools": selected_tools or [],
@@ -125,6 +127,9 @@ def _route_payload(
         "required_subagents": required_subagents or [],
         "reasoning_summary": reasoning_summary,
     }
+    if runtime_capability_change is not None:
+        payload["runtime_capability_change"] = runtime_capability_change
+    return payload
 
 
 def _git_job_commands(main: MainAgent, task_id: str) -> list[list[str]]:
@@ -240,6 +245,40 @@ def test_feature_completion_rejects_unit_evidence_without_runtime_path(tmp_path)
     task = _prepare_verified_feature(board)
     with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
         board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_connected_wiring_path_accepts_three_edges_and_rejects_disconnected_edges():
+    edges = [
+        {"from": "Gateway", "relation": "calls", "to": "Router"},
+        {"from": "Router", "relation": "selects", "to": "Registry"},
+        {"from": "Registry", "relation": "constructs", "to": "Provider"},
+    ]
+    assert connected_wiring_path(edges) == [
+        "Gateway",
+        "calls Router",
+        "selects Registry",
+        "constructs Provider",
+    ]
+    assert connected_wiring_path([edges[0], edges[2]]) == []
+
+
+def test_wiring_child_cannot_complete_without_reachability_provenance(tmp_path):
+    board = TaskBoard(tmp_path)
+    parent = board.create_task(title="Capability", user_request="add capability")
+    child = board.create_child_task(
+        parent.task_id,
+        title="Wire capability",
+        user_request="wire capability",
+        integration_role="wiring",
+    )
+    child.implementation_verified = True
+    child.wiring_outcome = "already_integrated"
+    child.verification_provenance = {"verification_id": "verification-1"}
+    board.update_status(child.task_id, TaskStatus.ROUTED)
+    board.update_status(child.task_id, TaskStatus.IN_PROGRESS)
+    board.update_status(child.task_id, TaskStatus.VERIFYING)
+    with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
+        board.update_status(child.task_id, TaskStatus.DONE)
 
 
 def test_feature_completion_allows_verified_runtime_path(tmp_path):
@@ -699,6 +738,31 @@ def test_router_selects_required_routes():
     readme_route = router.route(task_id="task_1", user_request="project architecture changed, update README.md")
     assert readme_route.task_size == "large"
     assert readme_route.required_subagents == ["repo_inventory", "docs"]
+
+
+def test_router_preserves_false_runtime_capability_change_for_tool_routes():
+    router = Router(
+        decision_engine=AgentDecisionEngine(
+            llm=_RouteModel(
+                {
+                    "browser inspection": _route_payload(
+                        "tool", selected_tools=["browser_open"], runtime_capability_change=False
+                    ),
+                    "git status": _route_payload(
+                        "high_risk_tool", selected_tools=["git"], runtime_capability_change=False
+                    ),
+                }
+            )
+        )
+    )
+    assert router.route(task_id="task-browser", user_request="browser inspection").runtime_capability_change is False
+    assert router.route(task_id="task-git", user_request="git status").runtime_capability_change is False
+
+
+def test_git_intent_route_does_not_require_runtime_wiring(tmp_path):
+    main = MainAgent.__new__(MainAgent)
+    route = main._route_with_git_contract("task-git", GitIntent())
+    assert route.runtime_capability_change is False
 
 
 def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
