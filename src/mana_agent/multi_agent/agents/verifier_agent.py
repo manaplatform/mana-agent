@@ -64,6 +64,7 @@ class VerifierAgent(BaseAgent):
                 priority=80,
             )
             queue_job_ids.append(job.job_id)
+            self.taskboard.add_verification_queue_job(task_id, job.job_id)
             ran = self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
             if ran is None:
                 failures.append(f"{text}: verification job did not run")

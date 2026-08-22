@@ -310,6 +310,31 @@ def test_planner_does_not_create_wiring_child_for_read_only_route(tmp_path):
     assert task.required_wiring_task_ids == []
 
 
+def test_planner_respects_explicit_runtime_capability_decision(tmp_path):
+    board = TaskBoard(tmp_path)
+    registry = AgentRegistry()
+    planner_node = registry.find_by_role(AgentRole.PLANNER)
+    planner = PlannerAgent(
+        agent_id=planner_node.agent_id,
+        role=AgentRole.PLANNER,
+        parent_agent_id=planner_node.parent_agent_id,
+        capabilities=planner_node.capabilities,
+        mailbox=MessageBus(tmp_path),
+        taskboard=board,
+        message_bus=MessageBus(tmp_path),
+        registry=registry,
+    )
+    task = board.create_task(title="Docs", user_request="update documentation")
+    result = planner.plan(
+        task.task_id,
+        task.user_request,
+        "coding",
+        runtime_capability_change=False,
+    )
+    assert result.wiring_required is False
+    assert task.required_wiring_task_ids == []
+
+
 def test_pure_internal_task_can_complete_without_wiring(tmp_path):
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Utility", user_request="refactor internal helper")
@@ -969,6 +994,11 @@ def test_verifier_executes_real_verification_queue_job(tmp_path):
     task_after = main.taskboard.get_task(task.task_id)
     assert result.passed is True
     assert task_after.verification_queue_job_ids
+    assert task_after.verification_queue_job_ids == [
+        event["queue_job_id"]
+        for event in task_after.actual_tool_events
+        if event["queue_job_id"] in task_after.verification_queue_job_ids
+    ]
     assert task_after.actual_tool_events[-1]["queue_job_id"] in task_after.verification_queue_job_ids
 
 

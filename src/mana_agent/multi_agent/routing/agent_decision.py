@@ -110,6 +110,9 @@ class AgentDecision:
     source: str = "model"
     verifier_passed: bool = False
     verifier_summary: str = ""
+    # Explicit model decision used by planning to distinguish runtime
+    # capability work from documentation, tests, and unchanged refactors.
+    runtime_capability_change: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -192,6 +195,11 @@ Use repo_search/read_file for local repository inspection.
 Use browser tools for interactive website tasks that require navigation, page inspection, forms, clicks, uploads, downloads, tabs, account creation, sign-up, login, or authenticated browser state. Website actions do not edit repository code: set intent="tool", repo_context_needed=false, and code_editing_needed=false. Words such as create, change, submit, delete, or edit refer to the website when their target is a page, account, form, or URL; they must not select repository mutation tools. Select browser_open and browser_inspect plus the browser interaction capabilities the browser operator may need. Choose each concrete action later from current page evidence; do not assume a website-specific workflow.
 Never select browser actions intended to bypass CAPTCHA, MFA, access restrictions, or website security controls. Sensitive or irreversible final actions require explicit user approval before execution.
 Use apply_patch or edit/write tools only when the user wants code or files changed.
+Set runtime_capability_change=true only when the requested repository change adds
+or changes production runtime behavior (for example a provider, connector,
+handler, service, registry, factory, router, or lifecycle hook). Set it to
+false for documentation, comments, formatting, tests, read-only inspection,
+Git-only work, and refactors whose integration graph is unchanged.
 When operation_constraint is supplied, it is a model-selected execution boundary
 for a follow-up operation. Satisfy it exactly: select only the permitted tool,
 provide every required tool input, and do not add unrelated tools or context.
@@ -208,6 +216,7 @@ Return JSON only with this schema:
   "requested_effect": "none|read|write|execute|external_action",
   "target_surface": "conversation|repository|web|browser|local_system|external_service",
   "required_subagents": ["repo_inventory|docs"],
+  "runtime_capability_change": true,
   "reasoning_summary": "short reason"
 }
 
@@ -428,6 +437,9 @@ class AgentDecisionEngine:
             target_surface=target_surface,  # type: ignore[arg-type]
             required_subagents=_clean_required_subagents(data.get("required_subagents")),
             reasoning_summary=str(data.get("reasoning_summary") or "Model-routed agent decision.")[:500],
+            runtime_capability_change=bool(
+                data.get("runtime_capability_change", intent == "edit")
+            ),
             source="model",
         )
 

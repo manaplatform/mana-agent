@@ -36,7 +36,7 @@ class Router:
         kind = self._route_kind(agent_decision)
         if kind == "coding":
             subagents = list(agent_decision.required_subagents)
-            return RouteDecision(task_id, "coding", "large" if subagents else "medium", ["main", "head_decision", "planner", "coding", "tool", "verifier", "reviewer", "summarizer"], subagents, ["planning", "coding", "tool_execution", "verification", "review", "summarization"], True, True, RiskLevel.MEDIUM, agent_decision.reasoning_summary or "Code mutation or repository edit request.")
+            return RouteDecision(task_id, "coding", "large" if subagents else "medium", ["main", "head_decision", "planner", "coding", "tool", "verifier", "reviewer", "summarizer"], subagents, ["planning", "coding", "tool_execution", "verification", "review", "summarization"], True, True, RiskLevel.MEDIUM, agent_decision.reasoning_summary or "Code mutation or repository edit request.", agent_decision.runtime_capability_change)
         if kind == "analyze":
             return RouteDecision(task_id, "analyze", "medium", ["main", "head_decision", "research", "planner", "reviewer", "summarizer"], ["repo_inventory"], ["repo_search", "repo_read", "planning", "review", "summarization"], True, False, RiskLevel.LOW, agent_decision.reasoning_summary or "Repository analysis request.")
         if kind == "planning":

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from pydantic import BaseModel, Field
 
 from mana_agent.multi_agent.agents.base_agent import BaseAgent
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
@@ -42,6 +43,21 @@ from mana_agent.builtin_skills.skill_creator import (
     WorkshopConfig,
 )
 from mana_agent.services.execution_event_hub import get_execution_event_hub
+from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig, SideEffectClassification
+
+
+class WiringDecision(BaseModel):
+    """Model-selected result of feature-specific integration inspection."""
+
+    outcome: Literal["mutation_required", "mutation_applied", "already_integrated", "incomplete", "failed"] = Field(
+        description="mutation_required, mutation_applied, already_integrated, incomplete, or failed"
+    )
+    patch: str = ""
+    wiring_targets: list[str] = Field(default_factory=list)
+    runtime_entrypoints: list[str] = Field(default_factory=list)
+    configuration_targets: list[str] = Field(default_factory=list)
+    edges: list[dict[str, str]] = Field(default_factory=list)
+    reason: str = ""
 
 @dataclass
 class MainAgentResult:
@@ -149,6 +165,11 @@ class MainAgent:
             memory_service=self.memory_service,
             hierarchy_policy=self.hierarchy_policy,
         )
+        supervisor_config = ExecutionSupervisorConfig(
+            root=self.root / ".mana-execution",
+            startup_recovery=False,
+        )
+        self.execution_supervisor = ExecutionSupervisor(config=supervisor_config)
         settings = Settings()
         self.managed_worktrees_enabled = bool(
             getattr(settings, "mana_managed_worktrees_enabled", True)
@@ -315,7 +336,12 @@ class MainAgent:
             f"Decided route {route.route_name} for task {task.task_id}: {route.reason_summary}",
         )
         planner = self._agent(AgentRole.PLANNER, PlannerAgent)
-        plan = planner.plan(task.task_id, request, route.route_name)
+        plan = planner.plan(
+            task.task_id,
+            request,
+            route.route_name,
+            runtime_capability_change=route.runtime_capability_change,
+        )
         self.memory.remember_agent(
             planner.agent_id,
             f"Created plan for task {task.task_id}; verification commands: "
@@ -706,6 +732,8 @@ class MainAgent:
             child = self.taskboard.get_task(child_id)
             if child.integration_role != "wiring":
                 continue
+            if child.status is TaskStatus.DONE:
+                continue
             child.owner_agent_id = coding.agent_id
             self.taskboard.assign(child.task_id, coding.agent_id)
             if child.status is TaskStatus.NEW:
@@ -713,26 +741,39 @@ class MainAgent:
             if child.status is TaskStatus.ROUTED:
                 self.taskboard.update_status(child.task_id, TaskStatus.IN_PROGRESS, reason="CodingAgent is executing the required integration lifecycle.")
 
-            # These searches are the discovery evidence used to replace the
-            # planner's generic contract placeholders with concrete repository
-            # paths.  They are ordinary QueueManager jobs and therefore retain
-            # worker, lock, and tool provenance.
-            searches = (
-                (r"registry|factory|router", "wiring_targets"),
-                (r"gateway|entrypoint|supervisor", "runtime_entrypoints"),
-                (r"config|export", "configuration_targets"),
-            )
-            discovered: dict[str, list[str]] = {name: [] for _, name in searches}
+            # The planner/model supplies the feature identifiers; discovery is
+            # only used to locate evidence around those identifiers.
+            # Search from concrete implementation output and model-selected
+            # files.  Planner prose such as "relevant registry" is not an
+            # integration identifier and must never become a search contract.
+            generic = {
+                "selected implementation files and their downstream callers.",
+                "production construction, registration, routing, and entrypoint wiring.",
+                "relevant registry, factory, dependency-injection, or router.",
+                "configuration that enables or selects the capability.",
+                "a production cli, api, gateway, lifecycle, or supervisor entrypoint.",
+            }
+            identifiers = list(dict.fromkeys(
+                str(item) for item in (
+                    list(child.files_touched)
+                    + getattr(plan, "files_to_inspect", [])
+                    + getattr(plan, "implementation_targets", [])
+                )
+                if str(item).strip() and str(item).strip().lower() not in generic
+            ))
+            if not identifiers:
+                self.taskboard.add_blocker(child.task_id, "INCOMPLETE_FEATURE_WIRING: no model-selected feature identifiers")
+                continue
             source_refs: list[str] = []
             source_files: list[str] = []
-            for query, category in searches:
+            for identifier in identifiers:
                 job = self.queue_manager.enqueue(
                     task_id=child.task_id,
                     requested_by_agent_id=coding.agent_id,
                     approved_by_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
                     job_type=QueueJobType.REPO_SEARCH,
-                    payload={"query": query, "regex": True, "limit": 25},
-                    purpose=f"Discover concrete {category} for the planned wiring contract.",
+                    payload={"query": identifier, "regex": False, "limit": 25},
+                    purpose="Discover feature-specific callers and integration points.",
                     priority=45,
                 )
                 ran = self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
@@ -745,88 +786,160 @@ class MainAgent:
                     ref = f"{match['file']}:{match.get('line', '?')}"
                     source_refs.append(ref)
                     source_files.append(str(match["file"]))
-                    discovered[category].append(str(match["file"]))
-            for category, values in discovered.items():
-                unique = list(dict.fromkeys(values))
-                if category == "wiring_targets":
-                    child.wiring_targets = unique
-                    parent.wiring_targets = unique
-                elif category == "runtime_entrypoints":
-                    child.runtime_entrypoints = unique
-                    parent.runtime_entrypoints = unique
-                else:
-                    child.configuration_targets = unique
-                    parent.configuration_targets = unique
-            all_targets = list(dict.fromkeys(
-                item for values in discovered.values() for item in values
-            ))
-            child.implementation_targets = all_targets
-            parent.implementation_targets = all_targets
+            child.files_to_inspect = list(dict.fromkeys(source_files))
+            read_job = coding.request_batch_read(child.task_id, child.files_to_inspect) if child.files_to_inspect else None
+            if read_job is not None:
+                read_job = self.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
+            decision = self._wiring_decision(child, plan, route, source_refs)
+            child.wiring_outcome = decision.outcome
+            child.wiring_outcome_reason = decision.reason
+            child.wiring_targets = list(dict.fromkeys(decision.wiring_targets))
+            child.runtime_entrypoints = list(dict.fromkeys(decision.runtime_entrypoints))
+            child.configuration_targets = list(dict.fromkeys(decision.configuration_targets))
+            child.reachability_edges = list(decision.edges)
+            parent.wiring_targets = list(dict.fromkeys(parent.wiring_targets + child.wiring_targets))
+            parent.runtime_entrypoints = list(dict.fromkeys(parent.runtime_entrypoints + child.runtime_entrypoints))
+            parent.configuration_targets = list(dict.fromkeys(parent.configuration_targets + child.configuration_targets))
             self.taskboard.add_evidence(
                 child.task_id,
-                "Integration impact discovery completed with repository references: " + ", ".join(source_refs[:12]),
+                f"Feature-specific wiring outcome={decision.outcome}: {decision.reason}; references: " + ", ".join(source_refs[:12]),
             )
-            child.files_to_inspect = list(dict.fromkeys(source_files))
             self.taskboard.save()
-
-            if child.status is TaskStatus.IN_PROGRESS:
-                # A discovery-only pass is not a wiring completion.  Leave the
-                # child in verification only when an actual mutation was
-                # executed, so the strong parent gate cannot be bypassed.
-                has_patch = any(
-                    job.job_type is QueueJobType.APPLY_PATCH and job.status is QueueJobStatus.DONE
-                    for job in self.queue_manager.jobs_for_task(child.task_id)
-                )
-                if has_patch:
-                    child.implementation_verified = True
-                    self.taskboard.update_status(child.task_id, TaskStatus.VERIFYING, reason="Wiring mutation completed; VerifierAgent and ReviewerAgent evidence are required.")
-                    child_verification = self._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(
-                        child.task_id,
-                        self._verification_commands(getattr(plan, "verification_commands", [])),
-                    )
-                    if child_verification.passed:
-                        reviewer.review_evidence(
-                            child.task_id,
-                            route_name="coding",
-                            requires_verification=True,
-                        )
-                    else:
-                        reviewer.reject_weak_evidence(child.task_id, child_verification.summary)
+            if decision.outcome == "mutation_required" and decision.patch.strip():
+                patch_job = coding.request_patch(child.task_id, decision.patch)
+                ran_patch = None if patch_job is None else self.queue_manager.run_next(worker_agent_id=patch_job.assigned_worker_agent_id)
+                if ran_patch is None or ran_patch.status is not QueueJobStatus.DONE:
+                    child.wiring_outcome = "failed"
                 else:
-                    reviewer.reject_weak_evidence(child.task_id, "INCOMPLETE_FEATURE_WIRING: no wiring mutation was executed")
-                    self.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason="INCOMPLETE_FEATURE_WIRING: no wiring mutation was executed")
+                    child.wiring_outcome = "mutation_applied"
+            elif decision.outcome not in {"already_integrated"}:
+                reviewer.reject_weak_evidence(child.task_id, "INCOMPLETE_FEATURE_WIRING: " + (decision.reason or "wiring decision incomplete"))
+                self.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason="INCOMPLETE_FEATURE_WIRING: wiring outcome is incomplete")
+                continue
+            if child.wiring_outcome == "failed":
+                reviewer.reject_weak_evidence(child.task_id, "INCOMPLETE_FEATURE_WIRING: wiring mutation failed")
+                self.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason="INCOMPLETE_FEATURE_WIRING: wiring mutation failed")
+                continue
+            child.implementation_verified = child.wiring_outcome in {"mutation_applied", "already_integrated"}
+            self.taskboard.update_status(child.task_id, TaskStatus.VERIFYING, reason="Wiring outcome requires verifier and reviewer evidence.")
+            child_verification = self._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(
+                child.task_id, self._verification_commands(getattr(plan, "verification_commands", [])),
+            )
+            if not child_verification.passed:
+                reviewer.reject_weak_evidence(child.task_id, child_verification.summary)
+                continue
+            child.verification_provenance = {
+                "verification_id": child_verification.verification_id,
+                "queue_job_ids": list(child.verification_queue_job_ids),
+                "changed_files": list(child.files_touched),
+            }
+            self._record_wiring_reachability(
+                parent_task_id,
+                child_verification,
+                child_task_id=child.task_id,
+                include_parent=False,
+            )
+            if reviewer.review_evidence(child.task_id, route_name="coding", requires_verification=True):
+                self._project_wiring_completion(child.task_id, child_verification)
+                self._record_wiring_reachability(
+                    parent_task_id,
+                    child_verification,
+                    child_task_id=child.task_id,
+                    include_parent=True,
+                )
 
-    def _record_wiring_reachability(self, parent_task_id: str, verification) -> None:  # noqa: ANN001
-        """Record only paths assembled from discovered files and executed jobs."""
+    def _wiring_decision(self, child, plan, route, source_refs):  # noqa: ANN001
+        if self.routing_llm is None:
+            return WiringDecision(outcome="incomplete", reason="wiring decision model is unavailable")
+        read_evidence = [
+            job.result for job in self.queue_manager.jobs_for_task(child.task_id)
+            if job.job_type is QueueJobType.REPO_BATCH_READ and isinstance(job.result, dict)
+        ]
+        prompt = (
+            "Return a WiringDecision for this feature. Use mutation_required only when a concrete non-empty patch is needed. "
+            "Use already_integrated only with connected edge evidence from production entrypoint to capability. "
+            "Never invent files or edges.\n"
+            f"Task: {child.user_request}\nFeature targets: {getattr(plan, 'implementation_targets', [])}\n"
+            f"Repository references: {source_refs}\nRead evidence: {read_evidence}\n"
+        )
+        result = self.routing_llm.with_structured_output(WiringDecision).invoke(prompt)
+        return result if isinstance(result, WiringDecision) else WiringDecision.model_validate(result)
+
+    def _project_wiring_completion(self, child_task_id: str, verification) -> None:  # noqa: ANN001
+        supervisor = self.execution_supervisor
+        child = self.taskboard.get_task(child_task_id)
+        supervisor.create_task(
+            task_id=child_task_id, assigned_agent=child.owner_agent_id or "coding",
+            routing_decision_id=child_task_id, workspace_path=self.root,
+            side_effect_classification=SideEffectClassification.IDEMPOTENT,
+            session_id=child.session_id, workspace_id=child.workspace_id,
+            repository_id=child.primary_repository_id, normalized_intent=child.user_request,
+            requested_operation="wire production runtime", expected_output="verified wiring outcome",
+        )
+        supervisor.queue(child_task_id)
+        leased, token = supervisor.acquire_lease(child_task_id, owner="main", worker=child.owner_agent_id or "coding")
+        supervisor.start(child_task_id, attempt_id=leased.attempt_id, lease_token=token)
+        supervisor.submit_result(child_task_id, attempt_id=leased.attempt_id, lease_token=token, payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome})
+        completed = supervisor.verify_completion(child_task_id)
+        manifest = supervisor.store.artifact_manifest(child_task_id) or {}
+        self.taskboard.project_supervisor_completion(
+            child_task_id, supervisor_task=completed,
+            verification_evidence={"result_id": completed.result_id, "verification": manifest.get("verification"), "artefacts": manifest.get("artefacts", [])},
+        )
+
+    def _record_wiring_reachability(
+        self,
+        parent_task_id: str,
+        verification,
+        *,
+        child_task_id: str | None = None,
+        include_parent: bool = True,
+    ) -> None:  # noqa: ANN001
+        """Record only connected, model-selected paths with child provenance."""
         parent = self.taskboard.get_task(parent_task_id)
         reviewer = self._agent(AgentRole.REVIEWER, ReviewerAgent)
-        for child_id in parent.required_wiring_task_ids:
+        child_ids = [child_task_id] if child_task_id else list(parent.required_wiring_task_ids)
+        for child_id in child_ids:
             child = self.taskboard.get_task(child_id)
-            if child.status is not TaskStatus.VERIFYING or not child.implementation_verified:
+            if child.status not in {TaskStatus.VERIFYING, TaskStatus.DONE} or not child.implementation_verified:
                 continue
-            concrete = list(dict.fromkeys(
-                [*child.runtime_entrypoints, *child.wiring_targets, *child.files_touched]
-            ))
-            if len(concrete) < 3 or not child.files_to_inspect:
+            edges = [
+                edge for edge in child.reachability_edges
+                if all(edge.get(key) for key in ("from", "to", "relation", "source_reference"))
+            ]
+            if len(edges) < 2:
                 continue
-            path = [*concrete[:3], "observable result: verification passed"]
-            refs = list(dict.fromkeys([*child.files_to_inspect, *child.queue_job_ids]))
+            path = [edges[0]["from"]]
+            for edge in edges:
+                if path[-1] != edge["from"]:
+                    path = []
+                    break
+                path.append(f'{edge["relation"]} {edge["to"]}')
+            if not path or len(path) != len(edges) + 1:
+                continue
+            path.append("observable result: verification passed")
+            refs = list(dict.fromkeys([edge["source_reference"] for edge in edges] + list(child.queue_job_ids)))
+            verification_source = str(
+                child.verification_provenance.get("verification_id")
+                or getattr(verification, "verification_id", "")
+            )
             if reviewer.verify_runtime_reachability(
                 child.task_id,
                 path,
                 summary="Executed wiring mutation is reachable through discovered repository integration points.",
                 source_references=refs,
                 observable_result="verification passed",
-                verification_source=", ".join(getattr(verification, "commands_run", []) or []),
+                verification_source=verification_source,
             ):
-                reviewer.verify_runtime_reachability(
-                    parent_task_id,
-                    path,
-                    summary="Wiring child and parent share a provenance-backed production reachability path.",
-                    source_references=refs,
-                    observable_result="verification passed",
-                    verification_source=", ".join(getattr(verification, "commands_run", []) or []),
-                )
+                if include_parent:
+                    reviewer.verify_runtime_reachability(
+                        parent_task_id,
+                        path,
+                        summary="Wiring child and parent share a provenance-backed production reachability path.",
+                        source_references=refs,
+                        observable_result="verification passed",
+                        verification_source=verification_source,
+                    )
 
     def _delegate_git_intent_work(self, task_id: str, intent: GitIntent) -> None:
         coding = self._agent(AgentRole.CODING, CodingAgent)

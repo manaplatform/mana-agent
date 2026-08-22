@@ -5,7 +5,14 @@ from mana_agent.multi_agent.core.types import PlanResult
 
 
 class PlannerAgent(BaseAgent):
-    def plan(self, task_id: str, user_request: str, route_name: str) -> PlanResult:
+    def plan(
+        self,
+        task_id: str,
+        user_request: str,
+        route_name: str,
+        *,
+        runtime_capability_change: bool = True,
+    ) -> PlanResult:
         commands = ["python3 -m compileall src"]
         if route_name in {"coding", "tool", "high_risk_tool"}:
             commands.append("pytest")
@@ -33,10 +40,13 @@ class PlannerAgent(BaseAgent):
             configuration_targets=["Configuration that enables or selects the capability."],
             export_targets=["Public exports required by the production import path."],
             integration_verification=["Reviewer traces a production entrypoint to the implementation and records the observable result."],
-            wiring_required=route_name == "coding",
+            wiring_required=(
+                route_name in {"coding", "tool", "high_risk_tool"}
+                and runtime_capability_change
+            ),
             wiring_reason=(
-                "The routed task may change runtime behavior; construction, registration, and reachability must be verified."
-                if route_name == "coding"
+                "The selected mutation route may change a production capability; construction, registration, and reachability must be verified."
+                if route_name in {"coding", "tool", "high_risk_tool"}
                 else "The selected route does not introduce or change a runtime capability; no wiring child is required."
             ),
         )
