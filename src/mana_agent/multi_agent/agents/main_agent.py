@@ -711,6 +711,10 @@ class MainAgent:
         FeatureIntegrationCoordinator().run_taskboard_lifecycle(self, parent_task_id, route, plan)
 
     def _run_feature_integration_taskboard_lifecycle(self, parent_task_id: str, route: RouteDecision, plan) -> None:  # noqa: ANN001
+        """Compatibility shim; FeatureIntegrationCoordinator owns this lifecycle."""
+        FeatureIntegrationCoordinator().run_taskboard_lifecycle(self, parent_task_id, route, plan)
+        return
+
         parent = self.taskboard.get_task(parent_task_id)
         if not parent.required_wiring_task_ids:
             return

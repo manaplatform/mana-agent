@@ -167,14 +167,17 @@ def test_model_reported_complete_evidence_without_runtime_authority_is_blocked()
 def test_authority_provider_is_evaluated_after_continuation():
     authority = _authority()
     calls = []
+    coding = _Coding({"status": "completed", "integration": _verified_integration()})
     result = FeatureIntegrationCoordinator(
         checkpoint=lambda payload: calls.append(payload),
     ).run(
-        coding_agent=_Coding({"status": "completed", "integration": _verified_integration()}),
+        coding_agent=coding,
         core_result={"status": "completed", "changed_files": ["provider.py"]},
         request="add provider", gateway_task_id="gateway-8", flow_id="flow-8",
         runtime_capability_change=True,
-        authority_provider=lambda: authority,
+        authority_provider=lambda: (calls.append("authority"), authority)[1],
     )
     assert result.passed
     assert calls[0]["boundary"] == "after_core_implementation"
+    assert calls[-1] == "authority"
+    assert coding.calls

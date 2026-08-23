@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
 from typing import Any, Callable
 from typing import Literal
 from pydantic import BaseModel, Field
+from mana_agent.multi_agent.core.types import AgentRole, QueueJobStatus, QueueJobType, TaskStatus
+from mana_agent.multi_agent.agents.coding_agent import CodingAgent
+from mana_agent.multi_agent.agents.reviewer_agent import ReviewerAgent
+from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
 
 
 INCOMPLETE_FEATURE_WIRING = "INCOMPLETE_FEATURE_WIRING"
@@ -259,9 +262,6 @@ class FeatureIntegrationCoordinator:
 
         integration = result.get("integration")
 
-        def current_authority() -> IntegrationAuthority | None:
-            return authority or (authority_provider() if authority_provider else None)
-
         if not isinstance(integration, dict) and any(key in result for key in ("wiring_outcome", "reachability_edges")):
             integration = {
                 "wiring_outcome": result.get("wiring_outcome"),
@@ -318,7 +318,9 @@ class FeatureIntegrationCoordinator:
             "wiring_outcome": integration.get("wiring_outcome"),
             "reachability_edges": list(integration.get("reachability_edges") or []),
         }
-        resolved_authority = current_authority()
+        # Never poll persisted authority as a precondition. The lifecycle
+        # below is what creates that authority.
+        resolved_authority = authority
         if (
             resolved_authority is None
             and taskboard is not None
@@ -334,6 +336,15 @@ class FeatureIntegrationCoordinator:
                 request=request,
                 changed_files=[str(item) for item in result.get("changed_files") or []],
             )
+        # A TaskBoard-backed run must obtain authority from the lifecycle it
+        # just executed. An injected provider is retained for the standalone
+        # adapter contract, where no runtime lifecycle is available.
+        if (
+            resolved_authority is None
+            and authority_provider is not None
+            and not (taskboard is not None and taskboard_parent_task_id and execution_supervisor is not None)
+        ):
+            resolved_authority = authority_provider()
         if not self._proven_reachability(integration, authority=resolved_authority):
             if taskboard is not None and taskboard_parent_task_id:
                 self.block_wiring_child(
@@ -381,7 +392,6 @@ class FeatureIntegrationCoordinator:
         manufacture completion authority.
         """
         from mana_agent.multi_agent.core.types import TaskStatus
-        from mana_agent.execution_supervisor import SideEffectClassification
 
         child_id = self.ensure_wiring_child(
             taskboard,
@@ -409,81 +419,166 @@ class FeatureIntegrationCoordinator:
         child.implementation_verified = True
         taskboard.update_status(child_id, TaskStatus.VERIFYING, reason="Runtime integration evidence is being reviewed.")
 
-        verification_id = f"gateway-verification-{uuid4().hex}"
-        child.verification_provenance = {
-            "verification_id": verification_id,
-            "source": "gateway_feature_integration_runtime",
-            "changed_files": list(changed_files),
-        }
-        source_refs = list(dict.fromkeys(str(edge["source_reference"]) for edge in edges))
-        taskboard.record_integration_evidence(
-            child_id,
-            [*path, "observable result: runtime integration lifecycle completed"],
-            summary="Gateway runtime integration lifecycle completed.",
-            source_references=source_refs,
-            observable_result="runtime integration lifecycle completed",
-            verification_source=verification_id,
-            reviewer="gateway:reviewer",
-        )
-        child.reviewed_by_agent_id = "gateway:reviewer"
-        taskboard.save()
-
-        supervisor_task = execution_supervisor.store.get_task_or_none(child_id)
-        if supervisor_task is None:
-            execution_supervisor.create_task(
-                task_id=child_id,
-                assigned_agent="gateway:feature_integration",
-                routing_decision_id=child_id,
-                workspace_path=Path(workspace_root or taskboard.store.root).resolve(),
-                side_effect_classification=SideEffectClassification.IDEMPOTENT,
-                session_id=child.session_id,
-                workspace_id=child.workspace_id,
-                repository_id=child.primary_repository_id,
-                normalized_intent=child.user_request,
-                requested_operation="wire production runtime",
-                expected_output="verified wiring outcome",
-            )
-            execution_supervisor.queue(child_id)
-            leased, token = execution_supervisor.acquire_lease(
-                child_id, owner="gateway", worker="gateway:feature_integration"
-            )
-            execution_supervisor.start(child_id, attempt_id=leased.attempt_id, lease_token=token)
-            execution_supervisor.submit_result(
-                child_id,
-                attempt_id=leased.attempt_id,
-                lease_token=token,
-                payload={"changed_files": changed_files, "wiring_outcome": child.wiring_outcome},
-            )
-            supervisor_task = execution_supervisor.verify_completion(child_id)
-        if supervisor_task is None:
-            return None
-        taskboard.project_supervisor_completion(
-            child_id,
-            supervisor_task=supervisor_task,
-            verification_evidence={
-                "result_id": str(getattr(supervisor_task, "result_id", "")),
-                "verification_id": verification_id,
-                "source": "gateway_feature_integration_runtime",
-            },
-        )
-        return IntegrationAuthority.from_taskboard(taskboard, parent_task_id)
+        # The Gateway adapter has no MainAgent agent registry. It must not
+        # manufacture reviewer or verification evidence from the model payload.
+        # Such calls remain incomplete until the coordinator is given the
+        # runtime agent bundle through run_taskboard_lifecycle().
+        return None
 
     def run_taskboard_lifecycle(self, main_agent: Any, parent_task_id: str, route: Any, plan: Any) -> None:
-        """Run the existing TaskBoard lifecycle through this coordinator.
-
-        MainAgent supplies the repository/runtime adapter, but the coordinator
-        is the only public entry point for integration execution.  Keeping the
-        adapter call here also makes Gateway and MainAgent share one gate.
-        """
+        """Own the complete wiring-child lifecycle after core coding."""
         parent = main_agent.taskboard.get_task(parent_task_id)
-        self.ensure_wiring_child(
-            main_agent.taskboard,
-            parent_task_id,
-            request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
-            changed_files=list(parent.files_touched),
-            trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
-        )
-        main_agent._run_feature_integration_taskboard_lifecycle(parent_task_id, route, plan)
+        child_ids = [
+            self.ensure_wiring_child(
+                main_agent.taskboard,
+                parent_task_id,
+                request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
+                changed_files=list(parent.files_touched),
+                trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
+            )
+        ]
+        for child_id in child_ids:
+            if not child_id:
+                continue
+            child = main_agent.taskboard.get_task(child_id)
+            if child.status is TaskStatus.DONE:
+                continue
+            coding = main_agent._agent(AgentRole.CODING, CodingAgent)
+            reviewer = main_agent._agent(AgentRole.REVIEWER, ReviewerAgent)
+            child.owner_agent_id = coding.agent_id
+            main_agent.taskboard.assign(child.task_id, coding.agent_id)
+            if child.status is TaskStatus.NEW:
+                main_agent.taskboard.update_status(child.task_id, TaskStatus.ROUTED, reason="Coordinator delegated wiring to CodingAgent.")
+            if child.status is TaskStatus.ROUTED:
+                main_agent.taskboard.update_status(child.task_id, TaskStatus.IN_PROGRESS, reason="Coordinator is executing the wiring lifecycle.")
+            # Reuse the model-selected inspection and mutation decisions, but
+            # keep their execution and all completion state in this class.
+            direct_files = self._validated_execution_files(main_agent, child, list(parent.files_touched))
+            read_job = coding.request_batch_read(child.task_id, direct_files) if direct_files else None
+            if read_job is not None:
+                main_agent.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
+            generic = {
+                "selected implementation files and their downstream callers.",
+                "production construction, registration, routing, and entrypoint wiring.",
+                "relevant registry, factory, dependency-injection, or router.",
+                "configuration that enables or selects the capability.",
+                "a production cli, api, gateway, lifecycle, or supervisor entrypoint.",
+            }
+            identifiers = list(dict.fromkeys(str(item) for item in (
+                list(child.files_touched) + list(parent.implementation_targets)
+                + list(getattr(plan, "files_to_inspect", []))
+                + list(getattr(plan, "implementation_targets", []))
+            ) if str(item).strip() and str(item).strip().lower() not in generic))
+            if not identifiers:
+                main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: no model-selected feature identifiers")
+                continue
+            refs: list[str] = []
+            files: list[str] = []
+            for identifier in identifiers:
+                job = main_agent.queue_manager.enqueue(
+                    task_id=child.task_id, requested_by_agent_id=coding.agent_id,
+                    approved_by_agent_id=main_agent.registry.find_by_role(AgentRole.MAIN).agent_id,
+                    job_type=QueueJobType.REPO_SEARCH,
+                    payload={"query": identifier, "regex": False, "limit": 25},
+                    purpose="Discover feature-specific callers and integration points.", priority=45,
+                )
+                ran = main_agent.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
+                if ran is None or ran.status is not QueueJobStatus.DONE:
+                    continue
+                for match in ((ran.result or {}).get("matches", []) if isinstance(ran.result, dict) else []):
+                    if isinstance(match, dict) and match.get("file"):
+                        refs.append(f"{match['file']}:{match.get('line', '?')}")
+                        files.append(str(match["file"]))
+            child.files_to_inspect = list(dict.fromkeys([*direct_files, *files]))
+            discovered = [item for item in child.files_to_inspect if item not in direct_files]
+            read_job = coding.request_batch_read(child.task_id, discovered) if discovered else None
+            if read_job is not None:
+                main_agent.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
+            decision = main_agent._wiring_decision(child, plan, route, refs)
+            child.wiring_outcome = decision.outcome
+            child.wiring_outcome_reason = decision.reason
+            child.wiring_targets = list(dict.fromkeys(decision.wiring_targets))
+            child.runtime_entrypoints = list(dict.fromkeys(decision.runtime_entrypoints))
+            child.configuration_targets = list(dict.fromkeys(decision.configuration_targets))
+            child.reachability_edges = list(decision.edges)
+            main_agent.taskboard.add_files_touched(child.task_id, list(child.files_touched))
+            main_agent.taskboard.save()
+            if decision.outcome == "mutation_required" and decision.patch.strip():
+                patch = coding.request_patch(child.task_id, decision.patch)
+                ran_patch = None if patch is None else main_agent.queue_manager.run_next(worker_agent_id=patch.assigned_worker_agent_id)
+                if ran_patch is not None and ran_patch.status is QueueJobStatus.DONE:
+                    child.wiring_outcome = "mutation_applied"
+                    main_agent.taskboard.add_files_touched(
+                        child.task_id,
+                        list(ran_patch.changed_files),
+                    )
+                    main_agent.taskboard.add_files_touched(
+                        parent_task_id,
+                        list(ran_patch.changed_files),
+                    )
+                    main_agent.taskboard.save()
+                else:
+                    child.wiring_outcome = "failed"
+            if child.wiring_outcome not in _ACCEPTED_OUTCOMES:
+                reviewer.reject_weak_evidence(child.task_id, f"{INCOMPLETE_FEATURE_WIRING}: wiring outcome incomplete")
+                main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: wiring outcome incomplete")
+                continue
+            child.implementation_verified = True
+            main_agent.taskboard.update_status(child.task_id, TaskStatus.VERIFYING, reason="Coordinator requires verifier and reviewer evidence.")
+            verification = main_agent._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(
+                child.task_id, main_agent._verification_commands(getattr(plan, "verification_commands", []))
+            )
+            if not verification.passed:
+                reviewer.reject_weak_evidence(child.task_id, verification.summary)
+                continue
+            child.verification_provenance = {
+                "verification_id": verification.verification_id,
+                "queue_job_ids": list(child.verification_queue_job_ids),
+                "changed_files": list(child.files_touched),
+            }
+            self._record_reachability(main_agent, parent_task_id, child, verification, reviewer)
+            if reviewer.review_evidence(child.task_id, route_name="coding", requires_verification=True):
+                self._project_completion(main_agent, child, verification)
+                self._record_reachability(main_agent, parent_task_id, child, verification, reviewer, include_parent=True)
+
+    @staticmethod
+    def _validated_execution_files(main_agent: Any, task: Any, paths: list[str]) -> list[str]:
+        root = Path(task.execution_repo_root or task.managed_worktree_path or main_agent.root).resolve()
+        valid = []
+        for raw in paths:
+            candidate = (Path(str(raw)).expanduser() if Path(str(raw)).is_absolute() else root / str(raw)).resolve()
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                valid.append(relative.as_posix())
+        return list(dict.fromkeys(valid))
+
+    @staticmethod
+    def _record_reachability(main_agent: Any, parent_id: str, child: Any, verification: Any, reviewer: Any, *, include_parent: bool = False) -> None:
+        edges = [edge for edge in child.reachability_edges if isinstance(edge, dict) and all(edge.get(key) for key in ("from", "to", "relation", "source_reference"))]
+        path = connected_wiring_path(edges)
+        if len(edges) < 2 or not path:
+            return
+        path.append("observable result: verification passed")
+        refs = list(dict.fromkeys([edge["source_reference"] for edge in edges] + list(child.queue_job_ids)))
+        if reviewer.verify_runtime_reachability(child.task_id, path, summary="Executed wiring mutation is reachable through production integration points.", source_references=refs, observable_result="verification passed", verification_source=child.verification_provenance.get("verification_id", "")) and include_parent:
+            reviewer.verify_runtime_reachability(parent_id, path, summary="Wiring child and parent share a provenance-backed production path.", source_references=refs, observable_result="verification passed", verification_source=child.verification_provenance.get("verification_id", ""))
+
+    @staticmethod
+    def _project_completion(main_agent: Any, child: Any, verification: Any) -> None:
+        from mana_agent.execution_supervisor import SideEffectClassification
+        supervisor = main_agent.execution_supervisor
+        if supervisor.store.get_task_or_none(child.task_id) is None:
+            supervisor.create_task(task_id=child.task_id, assigned_agent=child.owner_agent_id or "coding", routing_decision_id=child.task_id, workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or main_agent.root).resolve(), side_effect_classification=SideEffectClassification.IDEMPOTENT, session_id=child.session_id, workspace_id=child.workspace_id, repository_id=child.primary_repository_id, normalized_intent=child.user_request, requested_operation="wire production runtime", expected_output="verified wiring outcome")
+            supervisor.queue(child.task_id)
+            leased, token = supervisor.acquire_lease(child.task_id, owner="coordinator", worker=child.owner_agent_id or "coding")
+            supervisor.start(child.task_id, attempt_id=leased.attempt_id, lease_token=token)
+            supervisor.submit_result(child.task_id, attempt_id=leased.attempt_id, lease_token=token, payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome})
+        completed = supervisor.verify_completion(child.task_id)
+        manifest = supervisor.store.artifact_manifest(child.task_id) or {}
+        main_agent.taskboard.project_supervisor_completion(child.task_id, supervisor_task=completed, verification_evidence={"result_id": completed.result_id, "verification": manifest.get("verification"), "artefacts": manifest.get("artefacts", [])})
 
     @staticmethod
     def _valid_model_reachability(integration: dict[str, Any]) -> bool:

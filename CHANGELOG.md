@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-23
 
+- Moved authoritative feature-wiring execution into `FeatureIntegrationCoordinator`; completion now orders verifier, provenance, runtime reachability, reviewer, `ExecutionSupervisor`, TaskBoard projection, and authority creation.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/test_multi_agent_core.py -v`.
+
+## 2026-08-23
+
 - Corrected normal Gateway lane bookkeeping so incomplete integration blocks the coordinator-owned wiring child without reusing an unrelated lane task identifier.
   - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
 - Closed the Gateway runtime feature-integration gate: the coordinator now materializes the shared wiring-child, reviewer, reachability, supervisor, and TaskBoard completion lifecycle from core changed files, while incomplete wiring remains resumable and lane-scoped.
