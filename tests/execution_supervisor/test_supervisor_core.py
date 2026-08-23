@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -255,6 +256,24 @@ def test_heartbeat_renews_lease_and_stale_token_is_rejected(runtime):
     assert renewed.lease_expires_at > original
     with pytest.raises(StaleLeaseError):
         supervisor.heartbeat(task.task_id, attempt_id=attempt_id, lease_token="stale")
+
+
+def test_lease_renewal_surfaces_ownership_loss_after_operation(runtime, monkeypatch):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+
+    def lose_ownership(*_args, **_kwargs):
+        raise StaleLeaseError("lease ownership lost")
+
+    monkeypatch.setattr(supervisor, "heartbeat", lose_ownership)
+    with pytest.raises(StaleLeaseError, match="lease ownership lost"):
+        with supervisor.lease_renewal(
+            task.task_id,
+            attempt_id=attempt_id,
+            lease_token=token,
+        ):
+            time.sleep(2.2)
 
 
 def test_unstarted_lease_can_be_released_without_reusing_attempt(runtime):

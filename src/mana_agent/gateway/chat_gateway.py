@@ -5673,7 +5673,7 @@ class AgentChatGateway:
                         # The continuation must be part of execution state.  A
                         # prompt annotation is observational only and cannot
                         # decide whether the core generation is skipped.
-                        if checkpoint.boundary == "after_core_implementation":
+                        if eligibility.boundary == "after_core_implementation":
                             state["feature_integration_checkpoint"] = dict(
                                 checkpoint.resume_payload
                             )
@@ -8757,6 +8757,7 @@ class AgentChatGateway:
             feature_integration_trigger_turn_id=context.turn_id,
             feature_integration_execution_supervisor=self._lane_coordinator.execution_supervisor,
             feature_integration_workspace_root=self.root,
+            feature_integration_queue_manager=getattr(self._coding_agent, "queue_manager", None),
         )
         wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
             self._lane_coordinator.taskboard,

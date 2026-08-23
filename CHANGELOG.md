@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-23
 
+- Connected Gateway feature-integration verification to its real QueueManager and surfaced supervisor heartbeat ownership failures before authoritative completion.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
+- Completed the Gateway feature-integration continuation through VerifierAgent, runtime reachability, ReviewerAgent, supervisor completion, and durable TaskBoard authority projection; MainAgent now uses the coordinator adapter rather than retaining a second lifecycle implementation.
+  - Internal integration work remains in the same turn and produces `IntegrationAuthority` only from persisted runtime evidence.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+
+- Fixed Gateway checkpoint recovery using the validated checkpoint boundary (`eligibility.boundary`) instead of reading a nonexistent `CheckpointRecord.boundary` attribute.
+  - Preserved `resume_cursor` and legacy `resume_payload["boundary"]` compatibility without mutating `CheckpointRecord` schema.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
+
 - Tightened lifecycle safety: orphan `VERIFYING` states and false Reviewer verification evidence are rejected; feature integration stages are explicit; internal integration work is blocked rather than parked in `WAITING` without a wake-up contract.
   - User verification required: `python3 -m pytest tests/test_multi_agent_core.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
 - Preserved authoritative post-core integration recovery metadata and distinguished internal pending work from deterministic integration failure and external dependency outcomes.

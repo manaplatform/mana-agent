@@ -275,6 +275,7 @@ class LaneExecution:
     created_at: str = field(default_factory=_iso)
     updated_at: str = field(default_factory=_iso)
     error: str = ""
+    heartbeat_failure: str = ""
     progress_summary: str = ""
     current_tool_activity: dict[str, Any] = field(default_factory=dict)
     evidence: list[dict[str, Any]] = field(default_factory=list)
@@ -1000,6 +1001,7 @@ class LaneCoordinator:
         with self._condition:
             execution.state = LaneTaskState.RUNNING
             execution.worker_id = f"gateway:{os.getpid()}:{threading.get_ident()}"
+            execution.heartbeat_failure = ""
             execution.supervisor_attempt_id = supervised.attempt_id
             execution.supervisor_lease_token = lease_token
             execution.last_heartbeat = execution.updated_at = _iso()
@@ -1027,7 +1029,9 @@ class LaneCoordinator:
                         lease_token=execution.supervisor_lease_token,
                     )
                 except Exception as exc:
-                    execution.error = f"supervisor heartbeat failed: {exc}"
+                    failure = f"supervisor heartbeat failed: {type(exc).__name__}: {exc}"
+                    execution.heartbeat_failure = failure
+                    execution.error = failure
                     stop.set()
 
         heartbeat_thread = threading.Thread(
@@ -1121,6 +1125,9 @@ class LaneCoordinator:
             effective_provider_metadata = verification_state.get("codex_metadata")
         with self._condition:
             execution = self._executions[task_id]
+            if state == LaneTaskState.COMPLETED and execution.heartbeat_failure:
+                state = LaneTaskState.FAILED
+                error = execution.heartbeat_failure
             execution.changed_files = self.canonical_paths(changed_files)
             execution_had_usage = execution.budget.consumed_tokens > 0
             incremental_usage = consumed_input_tokens > 0 or consumed_output_tokens > 0

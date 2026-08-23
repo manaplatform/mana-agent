@@ -992,6 +992,8 @@ class ExecutionSupervisor:
         finally:
             stopped.set()
             worker.join(timeout=max(1.0, float(self.config.heartbeat_seconds) + 0.5))
+        if failure:
+            raise failure[0]
 
     def resume_running(
         self,

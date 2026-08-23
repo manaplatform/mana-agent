@@ -217,6 +217,8 @@ class FeatureIntegrationCoordinator:
         from mana_agent.multi_agent.core.types import TaskStatus
 
         child = taskboard.get_task(child_id)
+        if not child.owner_agent_id:
+            child.owner_agent_id = "gateway:feature_integration"
         if child.status is not TaskStatus.BLOCKED:
             taskboard.update_status(child_id, TaskStatus.BLOCKED, reason=reason)
         return child_id
@@ -237,6 +239,8 @@ class FeatureIntegrationCoordinator:
         trigger_turn_id: str = "",
         execution_supervisor: Any | None = None,
         workspace_root: str | Path | None = None,
+        queue_manager: Any | None = None,
+        verification_commands: list[str] | None = None,
     ) -> FeatureIntegrationResult:
         result = dict(core_result or {})
         if str(result.get("status") or result.get("run_status") or "").strip().lower() not in {"completed", "success"}:
@@ -350,6 +354,10 @@ class FeatureIntegrationCoordinator:
                 workspace_root=workspace_root,
                 request=request,
                 changed_files=[str(item) for item in result.get("changed_files") or []],
+                owner_agent_id=str(getattr(coding_agent, "agent_id", "") or ""),
+                queue_manager=queue_manager or getattr(coding_agent, "queue_manager", None),
+                verification_commands=verification_commands,
+                trigger_turn_id=trigger_turn_id,
             )
         # A TaskBoard-backed run must obtain authority from the lifecycle it
         # just executed. An injected provider is retained for the standalone
@@ -398,6 +406,10 @@ class FeatureIntegrationCoordinator:
         workspace_root: str | Path | None,
         request: str,
         changed_files: list[str],
+        owner_agent_id: str,
+        queue_manager: Any | None,
+        verification_commands: list[str] | None,
+        trigger_turn_id: str,
     ) -> IntegrationAuthority | None:
         """Materialize model evidence into the runtime-owned integration gate.
 
@@ -406,7 +418,7 @@ class FeatureIntegrationCoordinator:
         checks and supervisor transition, so a CodingAgent payload cannot
         manufacture completion authority.
         """
-        from mana_agent.multi_agent.core.types import TaskStatus
+        from mana_agent.multi_agent.core.types import AgentRole, TaskStatus
 
         child_id = self.ensure_wiring_child(
             taskboard,
@@ -417,6 +429,8 @@ class FeatureIntegrationCoordinator:
         if not child_id:
             return None
         child = taskboard.get_task(child_id)
+        if owner_agent_id and not child.owner_agent_id:
+            child.owner_agent_id = owner_agent_id
         edges = list(integration.get("reachability_edges") or [])
         path = connected_wiring_path(edges)
         if integration.get("wiring_outcome") not in _ACCEPTED_OUTCOMES or not path:
@@ -432,13 +446,175 @@ class FeatureIntegrationCoordinator:
         child.wiring_outcome = str(integration["wiring_outcome"])
         child.reachability_edges = edges
         child.implementation_verified = True
-        # This method only establishes the post-core integration context. The
-        # actual verifier/reviewer/supervisor lifecycle below owns VERIFYING;
-        # model payloads cannot manufacture that evidence.
-        return None
+        child.integration_stage = "INTEGRATION_VERIFY"
+
+        # Gateway does not own a MainAgent instance.  Build the two small
+        # certification actors from explicit runtime dependencies instead of
+        # borrowing MainAgent's private lifecycle.  Their writes go through
+        # TaskBoard, so model payloads remain proposals only.
+        if queue_manager is None:
+            return None
+        from mana_agent.multi_agent.agents.reviewer_agent import ReviewerAgent
+        from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
+        from mana_agent.multi_agent.communication.message_bus import MessageBus
+        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+
+        bus = MessageBus(workspace_root or taskboard.store.root)
+        registry = AgentRegistry()
+        verifier_node = registry.find_by_role(AgentRole.VERIFIER)
+        reviewer_node = registry.find_by_role(AgentRole.REVIEWER)
+        verifier = VerifierAgent(
+            agent_id=verifier_node.agent_id,
+            role=AgentRole.VERIFIER,
+            parent_agent_id=verifier_node.parent_agent_id,
+            capabilities=verifier_node.capabilities,
+            mailbox=bus,
+            taskboard=taskboard,
+            message_bus=bus,
+            registry=registry,
+            queue_manager=queue_manager,
+        )
+        reviewer = ReviewerAgent(
+            agent_id=reviewer_node.agent_id,
+            role=AgentRole.REVIEWER,
+            parent_agent_id=reviewer_node.parent_agent_id,
+            capabilities=reviewer_node.capabilities,
+            mailbox=bus,
+            taskboard=taskboard,
+            message_bus=bus,
+            registry=registry,
+        )
+
+        commands = [str(item).strip() for item in (verification_commands or []) if str(item).strip()]
+        if not commands:
+            proposed = integration.get("verification_evidence")
+            if isinstance(proposed, dict):
+                commands = [
+                    str(item).strip()
+                    for item in (proposed.get("commands_run") or proposed.get("commands") or [])
+                    if str(item).strip()
+                ]
+        verification = verifier.execute_verification(child_id, commands)
+        child.queue_job_ids = list(dict.fromkeys(
+            [*child.queue_job_ids, *(job.job_id for job in queue_manager.jobs_for_task(child_id))]
+        ))
+        taskboard.save()
+        taskboard.update_status(
+            child_id,
+            TaskStatus.VERIFYING,
+            reason="VerifierAgent recorded executed integration verification evidence.",
+        )
+        if not verification.passed:
+            reviewer.reject_weak_evidence(child_id, verification.summary)
+            taskboard.update_status(
+                child_id,
+                TaskStatus.BLOCKED,
+                reason=f"{DETERMINISTIC_INTEGRATION_FAILURE}: verification failed",
+            )
+            return None
+        child.verification_provenance = {
+            "verification_id": verification.verification_id,
+            "verified_by_agent_id": verifier.agent_id,
+            "queue_job_ids": list(child.verification_queue_job_ids),
+            "commands_run": list(verification.commands_run),
+            "changed_files": list(child.files_touched),
+        }
+        child.integration_stage = "REACHABILITY_VERIFY"
+        path.append("observable result: verification passed")
+        refs = list(dict.fromkeys(
+            [edge["source_reference"] for edge in edges]
+            + list(child.queue_job_ids)
+        ))
+        if not reviewer.verify_runtime_reachability(
+            child_id,
+            path,
+            summary="Executed integration is reachable through production integration points.",
+            source_references=refs,
+            observable_result="verification passed",
+            verification_source=verification.verification_id,
+        ):
+            taskboard.update_status(child_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: reachability verification failed")
+            return None
+        child.integration_stage = "REVIEW"
+        if not reviewer.review_evidence(child_id, route_name="coding", requires_verification=True):
+            taskboard.update_status(child_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: Reviewer rejected integration evidence")
+            return None
+        child.integration_stage = "SUPERVISOR_FINALIZE"
+        self._project_completion(
+            taskboard,
+            child,
+            verification,
+            execution_supervisor=execution_supervisor,
+            workspace_root=workspace_root,
+            trigger_turn_id=trigger_turn_id,
+        )
+        return IntegrationAuthority.from_taskboard(taskboard, parent_task_id)
 
     def run_taskboard_lifecycle(self, main_agent: Any, parent_task_id: str, route: Any, plan: Any) -> None:
-        """Own the complete wiring-child lifecycle after core coding."""
+        """Compatibility adapter into the coordinator-owned lifecycle.
+
+        The MainAgent adapter supplies dependencies; it does not implement a
+        second integration algorithm.
+        """
+        parent = main_agent.taskboard.get_task(parent_task_id)
+        child_id = self.ensure_wiring_child(
+            main_agent.taskboard,
+            parent_task_id,
+            request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
+            changed_files=list(parent.files_touched),
+            trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
+        )
+        if not child_id:
+            return
+        child = main_agent.taskboard.get_task(child_id)
+        coding = main_agent._agent(AgentRole.CODING, CodingAgent)
+        child.owner_agent_id = coding.agent_id
+        main_agent.taskboard.assign(child_id, coding.agent_id)
+        if child.status is TaskStatus.NEW:
+            main_agent.taskboard.update_status(child_id, TaskStatus.ROUTED, reason="Coordinator delegated wiring to CodingAgent.")
+        if child.status is TaskStatus.ROUTED:
+            main_agent.taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Coordinator is executing the wiring lifecycle.")
+        if child.wiring_outcome not in _ACCEPTED_OUTCOMES:
+            decision = main_agent._wiring_decision(
+                child,
+                plan,
+                route,
+                list(child.files_touched) + list(parent.files_touched),
+            )
+            child.wiring_outcome = decision.outcome
+            child.wiring_outcome_reason = decision.reason
+            child.wiring_targets = list(dict.fromkeys(decision.wiring_targets))
+            child.runtime_entrypoints = list(dict.fromkeys(decision.runtime_entrypoints))
+            child.configuration_targets = list(dict.fromkeys(decision.configuration_targets))
+            child.reachability_edges = list(decision.edges)
+            if decision.outcome == "mutation_required" and decision.patch.strip():
+                child.integration_stage = "INTEGRATION_MUTATION"
+                patch = coding.request_patch(child_id, decision.patch)
+                ran = None if patch is None else main_agent.queue_manager.run_next(worker_agent_id=patch.assigned_worker_agent_id)
+                if ran is not None and ran.status is QueueJobStatus.DONE:
+                    child.wiring_outcome = "mutation_applied"
+                    main_agent.taskboard.add_files_touched(child_id, list(ran.changed_files))
+                    main_agent.taskboard.add_files_touched(parent_task_id, list(ran.changed_files))
+            main_agent.taskboard.save()
+        self._complete_taskboard_lifecycle(
+            main_agent.taskboard,
+            parent_task_id,
+            integration={
+                "wiring_outcome": child.wiring_outcome,
+                "reachability_edges": list(child.reachability_edges),
+            },
+            execution_supervisor=main_agent.execution_supervisor,
+            workspace_root=main_agent.root,
+            request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
+            changed_files=list(parent.files_touched),
+            owner_agent_id=coding.agent_id,
+            queue_manager=main_agent.queue_manager,
+            verification_commands=list(getattr(plan, "verification_commands", []) or []),
+            trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
+        )
+        return
+
+        """Removed legacy MainAgent-owned implementation.
         parent = main_agent.taskboard.get_task(parent_task_id)
         child_ids = [
             self.ensure_wiring_child(
@@ -563,6 +739,7 @@ class FeatureIntegrationCoordinator:
                 child.integration_stage = "SUPERVISOR_FINALIZE"
                 self._project_completion(main_agent, child, verification)
                 self._record_reachability(main_agent, parent_task_id, child, verification, reviewer, include_parent=True)
+        """
 
     @staticmethod
     def _validated_execution_files(main_agent: Any, task: Any, paths: list[str]) -> list[str]:
@@ -590,18 +767,26 @@ class FeatureIntegrationCoordinator:
             reviewer.verify_runtime_reachability(parent_id, path, summary="Wiring child and parent share a provenance-backed production path.", source_references=refs, observable_result="verification passed", verification_source=child.verification_provenance.get("verification_id", ""))
 
     @staticmethod
-    def _project_completion(main_agent: Any, child: Any, verification: Any) -> None:
+    def _project_completion(
+        taskboard: Any,
+        child: Any,
+        verification: Any,
+        *,
+        execution_supervisor: Any,
+        workspace_root: str | Path | None,
+        trigger_turn_id: str = "",
+    ) -> None:
         from mana_agent.execution_supervisor import SideEffectClassification
-        supervisor = main_agent.execution_supervisor
+        supervisor = execution_supervisor
         if supervisor.store.get_task_or_none(child.task_id) is None:
-            supervisor.create_task(task_id=child.task_id, assigned_agent=child.owner_agent_id or "coding", routing_decision_id=child.task_id, workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or main_agent.root).resolve(), side_effect_classification=SideEffectClassification.IDEMPOTENT, session_id=child.session_id, workspace_id=child.workspace_id, repository_id=child.primary_repository_id, normalized_intent=child.user_request, requested_operation="wire production runtime", expected_output="verified wiring outcome")
+            supervisor.create_task(task_id=child.task_id, assigned_agent=child.owner_agent_id or "coding", routing_decision_id=child.task_id, workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or workspace_root or taskboard.store.root).resolve(), side_effect_classification=SideEffectClassification.IDEMPOTENT, session_id=child.session_id, workspace_id=child.workspace_id, repository_id=child.primary_repository_id, normalized_intent=child.user_request, requested_operation="wire production runtime", expected_output="verified wiring outcome", trigger_turn_id=trigger_turn_id)
             supervisor.queue(child.task_id)
             leased, token = supervisor.acquire_lease(child.task_id, owner="coordinator", worker=child.owner_agent_id or "coding")
             supervisor.start(child.task_id, attempt_id=leased.attempt_id, lease_token=token)
             supervisor.submit_result(child.task_id, attempt_id=leased.attempt_id, lease_token=token, payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome})
         completed = supervisor.verify_completion(child.task_id)
         manifest = supervisor.store.artifact_manifest(child.task_id) or {}
-        main_agent.taskboard.project_supervisor_completion(child.task_id, supervisor_task=completed, verification_evidence={"result_id": completed.result_id, "verification": manifest.get("verification"), "artefacts": manifest.get("artefacts", [])})
+        taskboard.project_supervisor_completion(child.task_id, supervisor_task=completed, verification_evidence={"result_id": completed.result_id, "verification": manifest.get("verification"), "artefacts": manifest.get("artefacts", [])})
 
     @staticmethod
     def _valid_model_reachability(integration: dict[str, Any]) -> bool:
