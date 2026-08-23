@@ -36,7 +36,10 @@ from mana_agent.search.router import SearchRouter
 from mana_agent.workspaces.preparation import RepositoryPreparationError
 from mana_agent.gateway.feature_integration import (
     FeatureIntegrationCoordinator,
+    FeatureIntegrationVerificationPlan,
     IntegrationAuthority,
+    IntegrationVerificationExecutor,
+    WiringDecision,
 )
 
 logger = logging.getLogger(__name__)
@@ -709,6 +712,10 @@ def process_chat_turn(
     feature_integration_workspace_root: str | Path | None = None,
     feature_integration_queue_manager: Any | None = None,
     feature_integration_verification_commands: list[str] | None = None,
+    feature_integration_verification_plan: FeatureIntegrationVerificationPlan | None = None,
+    feature_integration_verification_executor: IntegrationVerificationExecutor | None = None,
+    feature_integration_decision_provider: Callable[..., WiringDecision | dict[str, Any] | None] | None = None,
+    feature_integration_decision: WiringDecision | dict[str, Any] | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1197,6 +1204,10 @@ def process_chat_turn(
             workspace_root=feature_integration_workspace_root,
             queue_manager=feature_integration_queue_manager,
             verification_commands=feature_integration_verification_commands,
+            verification_plan=feature_integration_verification_plan,
+            verification_executor=feature_integration_verification_executor,
+            integration_decision_provider=feature_integration_decision_provider,
+            integration_decision=feature_integration_decision,
         )
         result = integration_result.result
         if not integration_result.passed:

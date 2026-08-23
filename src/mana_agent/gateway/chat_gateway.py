@@ -111,8 +111,19 @@ from mana_agent.gateway.envelope import (
 )
 from mana_agent.gateway.feature_integration import (
     FeatureIntegrationCoordinator,
-    INCOMPLETE_FEATURE_WIRING,
+    FeatureIntegrationVerificationPlan,
     IntegrationAuthority,
+    IntegrationVerificationExecutor,
+    MultiAgentVerificationExecutor,
+    WiringDecision,
+    INCOMPLETE_FEATURE_WIRING,
+    FEATURE_INTEGRATION_DECISION_INVALID,
+    FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+    FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+    FEATURE_INTEGRATION_VERIFICATION_FAILED,
+    FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+    FEATURE_INTEGRATION_REVIEW_REJECTED,
+    FEATURE_INTEGRATION_STATE_INVALID,
 )
 from mana_agent.tools.context_retrieval import (
     MemoryTaskBinding,
@@ -5942,7 +5953,16 @@ class AgentChatGateway:
                                 LaneTaskState.WAITING,
                                 reason="waiting for interactive approval",
                             )
-                        elif result.error == INCOMPLETE_FEATURE_WIRING:
+                        elif result.error in {
+                            INCOMPLETE_FEATURE_WIRING,
+                            FEATURE_INTEGRATION_DECISION_INVALID,
+                            FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+                            FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+                            FEATURE_INTEGRATION_VERIFICATION_FAILED,
+                            FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+                            FEATURE_INTEGRATION_REVIEW_REJECTED,
+                            FEATURE_INTEGRATION_STATE_INVALID,
+                        }:
                             # This is resumable integration work, not a failed
                             # core execution. Keep the lane and supervisor
                             # non-terminal while blocking the wiring child.
@@ -5951,13 +5971,14 @@ class AgentChatGateway:
                                 reservation.execution.taskboard_task_id,
                                 request=text,
                                 changed_files=list(result.changed_files),
+                                reason=result.error,
                                 trigger_turn_id=turn_id,
                             )
                             if wiring_child_id:
                                 result.payload["wiring_child_task_id"] = wiring_child_id
                             self._lane_coordinator.mark_blocked(
                                 reservation.execution.task_id,
-                                reason=f"{INTERNAL_WORK_PENDING}: {INCOMPLETE_FEATURE_WIRING}; integration continuation is required",
+                                reason=f"{INTERNAL_WORK_PENDING}: {result.error}; integration continuation is required",
                             )
                             status = "waiting"
                         else:
@@ -8758,6 +8779,18 @@ class AgentChatGateway:
             feature_integration_execution_supervisor=self._lane_coordinator.execution_supervisor,
             feature_integration_workspace_root=self.root,
             feature_integration_queue_manager=getattr(self._coding_agent, "queue_manager", None),
+            feature_integration_verification_commands=options.get("feature_integration_verification_commands"),
+            feature_integration_verification_plan=options.get("feature_integration_verification_plan"),
+            feature_integration_verification_executor=(
+                options.get("feature_integration_verification_executor")
+                or MultiAgentVerificationExecutor(
+                    taskboard=self._lane_coordinator.taskboard,
+                    queue_manager=getattr(self._coding_agent, "queue_manager", None),
+                    workspace_root=self.root,
+                )
+            ),
+            feature_integration_decision_provider=options.get("feature_integration_decision_provider"),
+            feature_integration_decision=options.get("feature_integration_decision"),
         )
         wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
             self._lane_coordinator.taskboard,

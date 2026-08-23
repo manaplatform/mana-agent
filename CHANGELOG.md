@@ -2,6 +2,15 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-24
+
+- Repaired Feature Integration evidence and verification lifecycle (P0.1–P0.4).
+  - P0.1: Decoupled Feature Integration evidence from Coding backend payloads using typed `WiringDecision` and explicit `integration_decision_provider`; invalid decisions stop safely with `FEATURE_INTEGRATION_DECISION_INVALID`.
+  - P0.2: Provided `FeatureIntegrationCoordinator` an explicit `IntegrationVerificationExecutor` protocol and `MultiAgentVerificationExecutor` implementation; fails closed with `FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE` when verifier infrastructure is missing.
+  - P0.3: Preserved and executed the real verification contract using `FeatureIntegrationVerificationPlan`; rejected empty plans with `FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING` and verification failures with `FEATURE_INTEGRATION_VERIFICATION_FAILED`.
+  - P0.4: Corrected wiring-child resume state transitions and stage normalization across `INTEGRATION_STAGES`, preventing illegal state jumps and preserving completed stages on resume.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+
 ## 2026-08-23
 
 - Connected Gateway feature-integration verification to its real QueueManager and surfaced supervisor heartbeat ownership failures before authoritative completion.

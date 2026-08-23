@@ -9,16 +9,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
-from typing import Literal
+from typing import Any, Callable, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
-from mana_agent.multi_agent.core.types import AgentRole, QueueJobStatus, QueueJobType, TaskStatus
+from mana_agent.multi_agent.core.types import (
+    AgentRole,
+    QueueJobStatus,
+    QueueJobType,
+    TaskStatus,
+    VerificationResult,
+)
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.reviewer_agent import ReviewerAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
 
 
 INCOMPLETE_FEATURE_WIRING = "INCOMPLETE_FEATURE_WIRING"
+FEATURE_INTEGRATION_DECISION_INVALID = "FEATURE_INTEGRATION_DECISION_INVALID"
+FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE = "FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE"
+FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING = "FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING"
+FEATURE_INTEGRATION_VERIFICATION_FAILED = "FEATURE_INTEGRATION_VERIFICATION_FAILED"
+FEATURE_INTEGRATION_REACHABILITY_UNPROVEN = "FEATURE_INTEGRATION_REACHABILITY_UNPROVEN"
+FEATURE_INTEGRATION_REVIEW_REJECTED = "FEATURE_INTEGRATION_REVIEW_REJECTED"
+FEATURE_INTEGRATION_STATE_INVALID = "FEATURE_INTEGRATION_STATE_INVALID"
 INTERNAL_WORK_PENDING = "INTERNAL_WORK_PENDING"
 EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
 DETERMINISTIC_INTEGRATION_FAILURE = "DETERMINISTIC_INTEGRATION_FAILURE"
@@ -42,7 +54,15 @@ class WiringDecision(BaseModel):
     runtime_entrypoints: list[str] = Field(default_factory=list)
     configuration_targets: list[str] = Field(default_factory=list)
     edges: list[dict[str, str]] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
     reason: str = ""
+
+
+class FeatureIntegrationVerificationPlan(BaseModel):
+    commands: list[str] = Field(default_factory=list)
+    source: str = ""
+    decision_id: str = ""
+    expected_evidence: list[str] = Field(default_factory=list)
 
 
 def connected_wiring_path(edges: list[dict[str, str]]) -> list[str]:
@@ -58,6 +78,93 @@ def connected_wiring_path(edges: list[dict[str, str]]) -> list[str]:
     if not all(nodes):
         return []
     return [nodes[0], *[f'{edge["relation"]} {node}' for edge, node in zip(edges, nodes[1:])]]
+
+
+@runtime_checkable
+class IntegrationVerificationExecutor(Protocol):
+    def execute(
+        self,
+        *,
+        task_id: str,
+        commands: list[str],
+        workspace_root: Path,
+    ) -> VerificationResult:
+        ...
+
+
+class MultiAgentVerificationExecutor:
+    """Authoritative multi-agent verification executor using QueueManager and VerifierAgent."""
+
+    def __init__(
+        self,
+        *,
+        taskboard: Any,
+        queue_manager: Any | None = None,
+        workspace_root: Path | str | None = None,
+    ) -> None:
+        self.taskboard = taskboard
+        self.workspace_root = (
+            Path(workspace_root).resolve()
+            if workspace_root
+            else (
+                Path(taskboard.store.root).resolve()
+                if hasattr(taskboard, "store") and hasattr(taskboard.store, "root")
+                else Path(".").resolve()
+            )
+        )
+        if queue_manager is None and taskboard is not None:
+            try:
+                from mana_agent.multi_agent.queue.queue_manager import QueueManager
+
+                self.queue_manager = QueueManager(
+                    self.workspace_root,
+                    taskboard=taskboard,
+                )
+            except Exception:
+                self.queue_manager = None
+        else:
+            self.queue_manager = queue_manager
+
+    def execute(
+        self,
+        *,
+        task_id: str,
+        commands: list[str],
+        workspace_root: Path,
+    ) -> VerificationResult:
+        if self.queue_manager is None:
+            from mana_agent.multi_agent.core.ids import new_decision_id
+
+            return VerificationResult(
+                verification_id=new_decision_id().replace("decision", "verification", 1),
+                task_id=task_id,
+                verified_by_agent_id="verifier",
+                commands_run=[],
+                passed=False,
+                summary="Verification blocked: QueueManager unavailable.",
+                failures=["queue_manager_unavailable"],
+                risks=["queue_manager_unavailable"],
+            )
+        from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
+        from mana_agent.multi_agent.communication.message_bus import MessageBus
+        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+
+        root_path = Path(workspace_root or self.workspace_root).resolve()
+        bus = MessageBus(root_path)
+        registry = AgentRegistry()
+        verifier_node = registry.find_by_role(AgentRole.VERIFIER)
+        verifier = VerifierAgent(
+            agent_id=verifier_node.agent_id,
+            role=AgentRole.VERIFIER,
+            parent_agent_id=verifier_node.parent_agent_id,
+            capabilities=verifier_node.capabilities,
+            mailbox=bus,
+            taskboard=self.taskboard,
+            message_bus=bus,
+            registry=registry,
+            queue_manager=self.queue_manager,
+        )
+        return verifier.execute_verification(task_id, commands)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +333,7 @@ class FeatureIntegrationCoordinator:
     def run(
         self,
         *,
-        coding_agent: Any,
+        coding_agent: Any = None,
         core_result: dict[str, Any],
         request: str,
         gateway_task_id: str,
@@ -241,6 +348,10 @@ class FeatureIntegrationCoordinator:
         workspace_root: str | Path | None = None,
         queue_manager: Any | None = None,
         verification_commands: list[str] | None = None,
+        verification_plan: FeatureIntegrationVerificationPlan | None = None,
+        verification_executor: IntegrationVerificationExecutor | None = None,
+        integration_decision_provider: Callable[..., WiringDecision | dict[str, Any] | None] | None = None,
+        integration_decision: WiringDecision | dict[str, Any] | None = None,
     ) -> FeatureIntegrationResult:
         result = dict(core_result or {})
         if str(result.get("status") or result.get("run_status") or "").strip().lower() not in {"completed", "success"}:
@@ -279,48 +390,80 @@ class FeatureIntegrationCoordinator:
         if self._checkpoint is not None:
             self._checkpoint(checkpoint)
 
-        integration = result.get("integration")
+        # 1. Resolve typed integration decision (P0.1)
+        raw_decision = integration_decision
+        if raw_decision is None and integration_decision_provider is not None:
+            try:
+                raw_decision = integration_decision_provider(
+                    request=request,
+                    changed_files=changed_files,
+                    gateway_task_id=gateway_task_id,
+                    flow_id=flow_id,
+                    taskboard=taskboard,
+                    parent_task_id=taskboard_parent_task_id,
+                )
+            except Exception:
+                raw_decision = None
 
-        if not isinstance(integration, dict) and any(key in result for key in ("wiring_outcome", "reachability_edges")):
-            integration = {
-                "wiring_outcome": result.get("wiring_outcome"),
-                "reachability_edges": result.get("reachability_edges"),
-            }
-        if not isinstance(integration, dict) or not self._valid_model_reachability(integration):
-            continuation = (
-                f"{request}\n\n[feature integration continuation]\n"
-                "Core implementation already exists. Inspect only the changed capability and its production callers. "
-                "Complete missing registration/factory/router/config/export/entrypoint wiring. Do not redo the core feature. "
-                "Return exact changed_files, integration outcome, concrete reachability_edges, and verification_evidence. "
-                "Use already_integrated only when provenance-backed edges prove production entrypoint → caller/router → registry/factory → implementation."
-            )
-            continuation_result = coding_agent.generate(
-                continuation,
-                flow_id=flow_id,
-                gateway_task_id=gateway_task_id,
-                auto_chat_mode="edit",
-            )
-            if isinstance(continuation_result, dict):
-                continuation_files = [str(item) for item in continuation_result.get("changed_files") or [] if str(item).strip()]
-                result.update(continuation_result)
-                result["changed_files"] = list(dict.fromkeys([*changed_files, *continuation_files]))
-                if taskboard is not None and taskboard_parent_task_id:
-                    self.ensure_wiring_child(
-                        taskboard,
-                        taskboard_parent_task_id,
-                        request=request,
-                        changed_files=result["changed_files"],
-                        trigger_turn_id=trigger_turn_id,
-                    )
-            integration = result.get("integration")
+        if raw_decision is None:
+            raw_decision = result.get("integration")
+            if not isinstance(raw_decision, (WiringDecision, dict)) and any(
+                key in result for key in ("wiring_outcome", "reachability_edges")
+            ):
+                raw_decision = {
+                    "wiring_outcome": result.get("wiring_outcome"),
+                    "reachability_edges": result.get("reachability_edges"),
+                    "verification_commands": result.get("verification_commands", []),
+                }
 
-        if not isinstance(integration, dict) or not self._valid_model_reachability(integration):
+        validated_decision: WiringDecision | None = None
+        if isinstance(raw_decision, WiringDecision):
+            validated_decision = raw_decision
+        elif isinstance(raw_decision, dict):
+            try:
+                candidate_dict = dict(raw_decision)
+                if "reachability_edges" in candidate_dict and "edges" not in candidate_dict:
+                    candidate_dict["edges"] = candidate_dict["reachability_edges"]
+                if "wiring_outcome" in candidate_dict and "outcome" not in candidate_dict:
+                    candidate_dict["outcome"] = candidate_dict["wiring_outcome"]
+                validated_decision = WiringDecision.model_validate(candidate_dict)
+            except Exception:
+                validated_decision = None
+
+        if validated_decision is None:
             if taskboard is not None and taskboard_parent_task_id:
                 self.block_wiring_child(
                     taskboard,
                     taskboard_parent_task_id,
                     request=request,
                     changed_files=[str(item) for item in result.get("changed_files") or []],
+                    reason=FEATURE_INTEGRATION_DECISION_INVALID,
+                    trigger_turn_id=trigger_turn_id,
+                )
+            result.update({
+                "status": "blocked",
+                "error_code": FEATURE_INTEGRATION_DECISION_INVALID,
+                "goal_satisfied": False,
+                "pending_required_work": True,
+                "resume_required": True,
+                "core_implementation_preserved": True,
+            })
+            return FeatureIntegrationResult(
+                result=result,
+                status="blocked",
+                error_code=FEATURE_INTEGRATION_DECISION_INVALID,
+                resume_required=True,
+                pending_classification=INTERNAL_WORK_PENDING,
+            )
+
+        if not self._valid_model_reachability(validated_decision):
+            if taskboard is not None and taskboard_parent_task_id:
+                self.block_wiring_child(
+                    taskboard,
+                    taskboard_parent_task_id,
+                    request=request,
+                    changed_files=[str(item) for item in result.get("changed_files") or []],
+                    reason=INCOMPLETE_FEATURE_WIRING,
                     trigger_turn_id=trigger_turn_id,
                 )
             result.update({
@@ -331,34 +474,83 @@ class FeatureIntegrationCoordinator:
                 "resume_required": True,
                 "core_implementation_preserved": True,
             })
-            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True, pending_classification=INTERNAL_WORK_PENDING)
+            return FeatureIntegrationResult(
+                result=result,
+                status="blocked",
+                error_code=INCOMPLETE_FEATURE_WIRING,
+                resume_required=True,
+                pending_classification=INTERNAL_WORK_PENDING,
+            )
+
+        # 2. Resolve verification plan (P0.3)
+        plan_commands: list[str] = []
+        plan_source = "feature_integration_decision"
+        plan_decision_id = getattr(validated_decision, "decision_id", "")
+        if verification_plan is not None and verification_plan.commands:
+            plan_commands = [str(c).strip() for c in verification_plan.commands if str(c).strip()]
+            plan_source = verification_plan.source or plan_source
+            plan_decision_id = verification_plan.decision_id or plan_decision_id
+        elif verification_commands:
+            plan_commands = [str(c).strip() for c in verification_commands if str(c).strip()]
+            plan_source = "explicit_verification_commands"
+        elif validated_decision.verification_commands:
+            plan_commands = [str(c).strip() for c in validated_decision.verification_commands if str(c).strip()]
+        elif isinstance(result.get("verification_evidence"), dict):
+            ve = result["verification_evidence"]
+            plan_commands = [str(c).strip() for c in (ve.get("commands_run") or ve.get("commands") or []) if str(c).strip()]
+            plan_source = "core_verification_evidence"
+        elif isinstance(raw_decision, dict) and isinstance(raw_decision.get("verification_evidence"), dict):
+            ve = raw_decision["verification_evidence"]
+            plan_commands = [str(c).strip() for c in (ve.get("commands_run") or ve.get("commands") or []) if str(c).strip()]
+            plan_source = "raw_verification_evidence"
+        elif result.get("commands_run"):
+            plan_commands = [str(c).strip() for c in result["commands_run"] if str(c).strip()]
+            plan_source = "core_commands_run"
+        elif result.get("tests_run"):
+            plan_commands = [str(c).strip() for c in result["tests_run"] if str(c).strip()]
+            plan_source = "core_tests_run"
+
+        resolved_plan = FeatureIntegrationVerificationPlan(
+            commands=plan_commands,
+            source=plan_source,
+            decision_id=plan_decision_id,
+        )
 
         result["integration"] = {
-            "wiring_outcome": integration.get("wiring_outcome"),
-            "reachability_edges": list(integration.get("reachability_edges") or []),
+            "wiring_outcome": validated_decision.outcome,
+            "reachability_edges": list(validated_decision.edges),
+            "verification_commands": list(plan_commands),
+            "wiring_targets": list(validated_decision.wiring_targets),
+            "runtime_entrypoints": list(validated_decision.runtime_entrypoints),
+            "configuration_targets": list(validated_decision.configuration_targets),
+            "reason": validated_decision.reason,
         }
+
         # Never poll persisted authority as a precondition. The lifecycle
         # below is what creates that authority.
         resolved_authority = authority
+        lifecycle_error = ""
         if (
             resolved_authority is None
             and taskboard is not None
             and taskboard_parent_task_id
             and execution_supervisor is not None
         ):
-            resolved_authority = self._complete_taskboard_lifecycle(
+            resolved_authority, lifecycle_error = self._complete_taskboard_lifecycle(
                 taskboard,
                 taskboard_parent_task_id,
-                integration=result["integration"],
+                decision=validated_decision,
+                verification_plan=resolved_plan,
                 execution_supervisor=execution_supervisor,
                 workspace_root=workspace_root,
                 request=request,
                 changed_files=[str(item) for item in result.get("changed_files") or []],
                 owner_agent_id=str(getattr(coding_agent, "agent_id", "") or ""),
-                queue_manager=queue_manager or getattr(coding_agent, "queue_manager", None),
-                verification_commands=verification_commands,
+                queue_manager=queue_manager,
+                verification_executor=verification_executor,
                 trigger_turn_id=trigger_turn_id,
             )
+
         # A TaskBoard-backed run must obtain authority from the lifecycle it
         # just executed. An injected provider is retained for the standalone
         # adapter contract, where no runtime lifecycle is available.
@@ -368,24 +560,34 @@ class FeatureIntegrationCoordinator:
             and not (taskboard is not None and taskboard_parent_task_id and execution_supervisor is not None)
         ):
             resolved_authority = authority_provider()
-        if not self._proven_reachability(integration, authority=resolved_authority):
+
+        if resolved_authority is None or not self._proven_reachability(result["integration"], authority=resolved_authority):
+            error_code = lifecycle_error or INCOMPLETE_FEATURE_WIRING
             if taskboard is not None and taskboard_parent_task_id:
                 self.block_wiring_child(
                     taskboard,
                     taskboard_parent_task_id,
                     request=request,
                     changed_files=[str(item) for item in result.get("changed_files") or []],
+                    reason=error_code,
                     trigger_turn_id=trigger_turn_id,
                 )
             result.update({
                 "status": "blocked",
-                "error_code": INCOMPLETE_FEATURE_WIRING,
+                "error_code": error_code,
                 "goal_satisfied": False,
                 "pending_required_work": True,
                 "resume_required": True,
                 "core_implementation_preserved": True,
             })
-            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True, pending_classification=INTERNAL_WORK_PENDING)
+            return FeatureIntegrationResult(
+                result=result,
+                status="blocked",
+                error_code=error_code,
+                resume_required=True,
+                pending_classification=INTERNAL_WORK_PENDING,
+            )
+
         result["integration_authority"] = {
             "taskboard_state": resolved_authority.taskboard_state,
             "wiring_child_id": resolved_authority.wiring_child_id,
@@ -401,16 +603,17 @@ class FeatureIntegrationCoordinator:
         taskboard: Any,
         parent_task_id: str,
         *,
-        integration: dict[str, Any],
+        decision: WiringDecision,
+        verification_plan: FeatureIntegrationVerificationPlan,
         execution_supervisor: Any,
         workspace_root: str | Path | None,
         request: str,
         changed_files: list[str],
         owner_agent_id: str,
-        queue_manager: Any | None,
-        verification_commands: list[str] | None,
-        trigger_turn_id: str,
-    ) -> IntegrationAuthority | None:
+        queue_manager: Any | None = None,
+        verification_executor: IntegrationVerificationExecutor | None = None,
+        trigger_turn_id: str = "",
+    ) -> tuple[IntegrationAuthority | None, str]:
         """Materialize model evidence into the runtime-owned integration gate.
 
         The model supplies only the proposed outcome and edges. Every field
@@ -419,61 +622,68 @@ class FeatureIntegrationCoordinator:
         manufacture completion authority.
         """
         from mana_agent.multi_agent.core.types import AgentRole, TaskStatus
+        from mana_agent.multi_agent.agents.reviewer_agent import ReviewerAgent
+        from mana_agent.multi_agent.communication.message_bus import MessageBus
+        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
 
         child_id = self.ensure_wiring_child(
             taskboard,
             parent_task_id,
             request=request,
             changed_files=changed_files,
+            trigger_turn_id=trigger_turn_id,
         )
         if not child_id:
-            return None
+            return None, FEATURE_INTEGRATION_STATE_INVALID
         child = taskboard.get_task(child_id)
+
+        # Check if already completed (DONE)
+        if child.status is TaskStatus.DONE:
+            auth = IntegrationAuthority.from_taskboard(taskboard, parent_task_id)
+            if auth is not None and auth.is_complete():
+                return auth, ""
+
         if owner_agent_id and not child.owner_agent_id:
             child.owner_agent_id = owner_agent_id
-        edges = list(integration.get("reachability_edges") or [])
+
+        edges = list(decision.edges)
         path = connected_wiring_path(edges)
-        if integration.get("wiring_outcome") not in _ACCEPTED_OUTCOMES or not path:
-            return None
+        if decision.outcome not in _ACCEPTED_OUTCOMES or not path:
+            return None, INCOMPLETE_FEATURE_WIRING
+
         required = ("from", "to", "relation", "source_reference")
         if not all(isinstance(edge, dict) and all(str(edge.get(key) or "").strip() for key in required) for edge in edges):
-            return None
+            return None, INCOMPLETE_FEATURE_WIRING
 
+        # Stage-aware state normalization (P0.4)
         if child.status is TaskStatus.NEW:
             taskboard.update_status(child_id, TaskStatus.ROUTED, reason="Gateway selected feature integration lifecycle.")
         if child.status is TaskStatus.ROUTED:
             taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Gateway is executing feature integration lifecycle.")
-        child.wiring_outcome = str(integration["wiring_outcome"])
+        elif child.status is TaskStatus.QUEUED:
+            taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Gateway resumed feature integration lifecycle.")
+        elif child.status is TaskStatus.BLOCKED:
+            taskboard.reopen(child_id, reason="resuming feature integration")
+            taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Gateway resumed feature integration lifecycle.")
+
+        child.wiring_outcome = str(decision.outcome)
         child.reachability_edges = edges
-        child.implementation_verified = True
-        child.integration_stage = "INTEGRATION_VERIFY"
+        child.wiring_targets = list(decision.wiring_targets)
+        child.runtime_entrypoints = list(decision.runtime_entrypoints)
+        child.configuration_targets = list(decision.configuration_targets)
+        child.wiring_reason = decision.reason
 
-        # Gateway does not own a MainAgent instance.  Build the two small
-        # certification actors from explicit runtime dependencies instead of
-        # borrowing MainAgent's private lifecycle.  Their writes go through
-        # TaskBoard, so model payloads remain proposals only.
-        if queue_manager is None:
-            return None
-        from mana_agent.multi_agent.agents.reviewer_agent import ReviewerAgent
-        from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
-        from mana_agent.multi_agent.communication.message_bus import MessageBus
-        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+        current_stage = str(child.integration_stage or "").strip()
+        if not current_stage or current_stage in ("CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION"):
+            child.implementation_verified = True
+            child.integration_stage = "INTEGRATION_VERIFY"
+            taskboard.save()
+            current_stage = "INTEGRATION_VERIFY"
 
-        bus = MessageBus(workspace_root or taskboard.store.root)
+        root_path = Path(workspace_root or taskboard.store.root).resolve()
+        bus = MessageBus(root_path)
         registry = AgentRegistry()
-        verifier_node = registry.find_by_role(AgentRole.VERIFIER)
         reviewer_node = registry.find_by_role(AgentRole.REVIEWER)
-        verifier = VerifierAgent(
-            agent_id=verifier_node.agent_id,
-            role=AgentRole.VERIFIER,
-            parent_agent_id=verifier_node.parent_agent_id,
-            capabilities=verifier_node.capabilities,
-            mailbox=bus,
-            taskboard=taskboard,
-            message_bus=bus,
-            registry=registry,
-            queue_manager=queue_manager,
-        )
         reviewer = ReviewerAgent(
             agent_id=reviewer_node.agent_id,
             role=AgentRole.REVIEWER,
@@ -485,70 +695,138 @@ class FeatureIntegrationCoordinator:
             registry=registry,
         )
 
-        commands = [str(item).strip() for item in (verification_commands or []) if str(item).strip()]
-        if not commands:
-            proposed = integration.get("verification_evidence")
-            if isinstance(proposed, dict):
-                commands = [
-                    str(item).strip()
-                    for item in (proposed.get("commands_run") or proposed.get("commands") or [])
-                    if str(item).strip()
-                ]
-        verification = verifier.execute_verification(child_id, commands)
-        child.queue_job_ids = list(dict.fromkeys(
-            [*child.queue_job_ids, *(job.job_id for job in queue_manager.jobs_for_task(child_id))]
-        ))
-        taskboard.save()
-        taskboard.update_status(
-            child_id,
-            TaskStatus.VERIFYING,
-            reason="VerifierAgent recorded executed integration verification evidence.",
-        )
-        if not verification.passed:
-            reviewer.reject_weak_evidence(child_id, verification.summary)
+        # Stage: INTEGRATION_VERIFY
+        if current_stage == "INTEGRATION_VERIFY":
+            commands = [str(item).strip() for item in verification_plan.commands if str(item).strip()]
+            if not commands:
+                taskboard.update_status(
+                    child_id,
+                    TaskStatus.BLOCKED,
+                    reason=f"{FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING}: no verification commands provided",
+                )
+                return None, FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING
+
+            active_executor = verification_executor
+            if active_executor is None:
+                if queue_manager is not None:
+                    active_executor = MultiAgentVerificationExecutor(
+                        taskboard=taskboard,
+                        queue_manager=queue_manager,
+                        workspace_root=root_path,
+                    )
+                else:
+                    try:
+                        active_executor = MultiAgentVerificationExecutor(
+                            taskboard=taskboard,
+                            workspace_root=root_path,
+                        )
+                    except Exception:
+                        active_executor = None
+
+            if active_executor is None or getattr(active_executor, "queue_manager", True) is None:
+                taskboard.update_status(
+                    child_id,
+                    TaskStatus.BLOCKED,
+                    reason=f"{FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE}: verification infrastructure unavailable",
+                )
+                return None, FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE
+
+            verification = active_executor.execute(
+                task_id=child_id,
+                commands=commands,
+                workspace_root=root_path,
+            )
+            if queue_manager is not None:
+                child.queue_job_ids = list(dict.fromkeys(
+                    [*child.queue_job_ids, *(job.job_id for job in queue_manager.jobs_for_task(child_id))]
+                ))
+            elif getattr(active_executor, "queue_manager", None) is not None:
+                qm = active_executor.queue_manager
+                child.queue_job_ids = list(dict.fromkeys(
+                    [*child.queue_job_ids, *(job.job_id for job in qm.jobs_for_task(child_id))]
+                ))
+            taskboard.save()
             taskboard.update_status(
                 child_id,
-                TaskStatus.BLOCKED,
-                reason=f"{DETERMINISTIC_INTEGRATION_FAILURE}: verification failed",
+                TaskStatus.VERIFYING,
+                reason="VerifierAgent recorded executed integration verification evidence.",
             )
-            return None
-        child.verification_provenance = {
-            "verification_id": verification.verification_id,
-            "verified_by_agent_id": verifier.agent_id,
-            "queue_job_ids": list(child.verification_queue_job_ids),
-            "commands_run": list(verification.commands_run),
-            "changed_files": list(child.files_touched),
-        }
-        child.integration_stage = "REACHABILITY_VERIFY"
-        path.append("observable result: verification passed")
-        refs = list(dict.fromkeys(
-            [edge["source_reference"] for edge in edges]
-            + list(child.queue_job_ids)
-        ))
-        if not reviewer.verify_runtime_reachability(
-            child_id,
-            path,
-            summary="Executed integration is reachable through production integration points.",
-            source_references=refs,
-            observable_result="verification passed",
-            verification_source=verification.verification_id,
-        ):
-            taskboard.update_status(child_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: reachability verification failed")
-            return None
-        child.integration_stage = "REVIEW"
-        if not reviewer.review_evidence(child_id, route_name="coding", requires_verification=True):
-            taskboard.update_status(child_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: Reviewer rejected integration evidence")
-            return None
-        child.integration_stage = "SUPERVISOR_FINALIZE"
-        self._project_completion(
-            taskboard,
-            child,
-            verification,
-            execution_supervisor=execution_supervisor,
-            workspace_root=workspace_root,
-            trigger_turn_id=trigger_turn_id,
-        )
-        return IntegrationAuthority.from_taskboard(taskboard, parent_task_id)
+            if not verification.passed:
+                reviewer.reject_weak_evidence(child_id, verification.summary)
+                taskboard.update_status(
+                    child_id,
+                    TaskStatus.BLOCKED,
+                    reason=f"{FEATURE_INTEGRATION_VERIFICATION_FAILED}: verification failed",
+                )
+                return None, FEATURE_INTEGRATION_VERIFICATION_FAILED
+
+            child.verification_provenance = {
+                "verification_id": verification.verification_id,
+                "verified_by_agent_id": getattr(verification, "verified_by_agent_id", "verifier"),
+                "queue_job_ids": list(child.verification_queue_job_ids or child.queue_job_ids),
+                "commands_run": list(verification.commands_run),
+                "changed_files": list(child.files_touched),
+                "source": verification_plan.source,
+                "decision_id": verification_plan.decision_id,
+            }
+            child.integration_stage = "REACHABILITY_VERIFY"
+            taskboard.save()
+            current_stage = "REACHABILITY_VERIFY"
+
+        # Stage: REACHABILITY_VERIFY
+        if current_stage == "REACHABILITY_VERIFY":
+            path = connected_wiring_path(edges)
+            path.append("observable result: verification passed")
+            refs = list(dict.fromkeys(
+                [edge["source_reference"] for edge in edges]
+                + list(child.queue_job_ids)
+                + list(child.verification_queue_job_ids)
+            ))
+            verification_id = str((child.verification_provenance or {}).get("verification_id") or "")
+            if not reviewer.verify_runtime_reachability(
+                child_id,
+                path,
+                summary="Executed integration is reachable through production integration points.",
+                source_references=refs,
+                observable_result="verification passed",
+                verification_source=verification_id,
+            ):
+                taskboard.update_status(
+                    child_id,
+                    TaskStatus.BLOCKED,
+                    reason=f"{FEATURE_INTEGRATION_REACHABILITY_UNPROVEN}: reachability verification failed",
+                )
+                return None, FEATURE_INTEGRATION_REACHABILITY_UNPROVEN
+            child.integration_stage = "REVIEW"
+            taskboard.save()
+            current_stage = "REVIEW"
+
+        # Stage: REVIEW
+        if current_stage == "REVIEW":
+            if not reviewer.review_evidence(child_id, route_name="coding", requires_verification=True):
+                taskboard.update_status(
+                    child_id,
+                    TaskStatus.BLOCKED,
+                    reason=f"{FEATURE_INTEGRATION_REVIEW_REJECTED}: Reviewer rejected integration evidence",
+                )
+                return None, FEATURE_INTEGRATION_REVIEW_REJECTED
+            child.integration_stage = "SUPERVISOR_FINALIZE"
+            taskboard.save()
+            current_stage = "SUPERVISOR_FINALIZE"
+
+        # Stage: SUPERVISOR_FINALIZE
+        if current_stage == "SUPERVISOR_FINALIZE":
+            self._project_completion(
+                taskboard,
+                child,
+                verification_evidence=child.verification_provenance,
+                execution_supervisor=execution_supervisor,
+                workspace_root=root_path,
+                trigger_turn_id=trigger_turn_id,
+            )
+            return IntegrationAuthority.from_taskboard(taskboard, parent_task_id), ""
+
+        return None, FEATURE_INTEGRATION_STATE_INVALID
 
     def run_taskboard_lifecycle(self, main_agent: Any, parent_task_id: str, route: Any, plan: Any) -> None:
         """Compatibility adapter into the coordinator-owned lifecycle.
@@ -574,6 +852,21 @@ class FeatureIntegrationCoordinator:
             main_agent.taskboard.update_status(child_id, TaskStatus.ROUTED, reason="Coordinator delegated wiring to CodingAgent.")
         if child.status is TaskStatus.ROUTED:
             main_agent.taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Coordinator is executing the wiring lifecycle.")
+        elif child.status is TaskStatus.QUEUED:
+            main_agent.taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Coordinator resumed feature integration lifecycle.")
+        elif child.status is TaskStatus.BLOCKED:
+            main_agent.taskboard.reopen(child_id, reason="resuming feature integration")
+            main_agent.taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Coordinator resumed feature integration lifecycle.")
+
+        decision = WiringDecision(
+            outcome="already_integrated" if child.wiring_outcome in _ACCEPTED_OUTCOMES else "incomplete",
+            edges=list(child.reachability_edges),
+            wiring_targets=list(child.wiring_targets),
+            runtime_entrypoints=list(child.runtime_entrypoints),
+            configuration_targets=list(child.configuration_targets),
+            reason=child.wiring_reason or "",
+        )
+
         if child.wiring_outcome not in _ACCEPTED_OUTCOMES:
             decision = main_agent._wiring_decision(
                 child,
@@ -582,7 +875,7 @@ class FeatureIntegrationCoordinator:
                 list(child.files_touched) + list(parent.files_touched),
             )
             child.wiring_outcome = decision.outcome
-            child.wiring_outcome_reason = decision.reason
+            child.wiring_reason = decision.reason
             child.wiring_targets = list(dict.fromkeys(decision.wiring_targets))
             child.runtime_entrypoints = list(dict.fromkeys(decision.runtime_entrypoints))
             child.configuration_targets = list(dict.fromkeys(decision.configuration_targets))
@@ -593,207 +886,97 @@ class FeatureIntegrationCoordinator:
                 ran = None if patch is None else main_agent.queue_manager.run_next(worker_agent_id=patch.assigned_worker_agent_id)
                 if ran is not None and ran.status is QueueJobStatus.DONE:
                     child.wiring_outcome = "mutation_applied"
+                    decision = decision.model_copy(update={"outcome": "mutation_applied"})
                     main_agent.taskboard.add_files_touched(child_id, list(ran.changed_files))
                     main_agent.taskboard.add_files_touched(parent_task_id, list(ran.changed_files))
             main_agent.taskboard.save()
+
+        verification_executor = MultiAgentVerificationExecutor(
+            taskboard=main_agent.taskboard,
+            queue_manager=main_agent.queue_manager,
+            workspace_root=main_agent.root,
+        )
+        plan_commands = list(getattr(plan, "verification_commands", []) or decision.verification_commands)
         self._complete_taskboard_lifecycle(
             main_agent.taskboard,
             parent_task_id,
-            integration={
-                "wiring_outcome": child.wiring_outcome,
-                "reachability_edges": list(child.reachability_edges),
-            },
+            decision=decision,
+            verification_plan=FeatureIntegrationVerificationPlan(
+                commands=plan_commands,
+                source="main_agent_plan",
+                decision_id=getattr(decision, "decision_id", ""),
+            ),
             execution_supervisor=main_agent.execution_supervisor,
             workspace_root=main_agent.root,
             request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
             changed_files=list(parent.files_touched),
             owner_agent_id=coding.agent_id,
             queue_manager=main_agent.queue_manager,
-            verification_commands=list(getattr(plan, "verification_commands", []) or []),
+            verification_executor=verification_executor,
             trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
         )
-        return
-
-        """Removed legacy MainAgent-owned implementation.
-        parent = main_agent.taskboard.get_task(parent_task_id)
-        child_ids = [
-            self.ensure_wiring_child(
-                main_agent.taskboard,
-                parent_task_id,
-                request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
-                changed_files=list(parent.files_touched),
-                trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
-            )
-        ]
-        for child_id in child_ids:
-            if not child_id:
-                continue
-            child = main_agent.taskboard.get_task(child_id)
-            if child.status is TaskStatus.DONE:
-                continue
-            coding = main_agent._agent(AgentRole.CODING, CodingAgent)
-            reviewer = main_agent._agent(AgentRole.REVIEWER, ReviewerAgent)
-            child.owner_agent_id = coding.agent_id
-            main_agent.taskboard.assign(child.task_id, coding.agent_id)
-            if child.status is TaskStatus.NEW:
-                main_agent.taskboard.update_status(child.task_id, TaskStatus.ROUTED, reason="Coordinator delegated wiring to CodingAgent.")
-            if child.status is TaskStatus.ROUTED:
-                main_agent.taskboard.update_status(child.task_id, TaskStatus.IN_PROGRESS, reason="Coordinator is executing the wiring lifecycle.")
-            child.integration_stage = "INTEGRATION_DISCOVERY"
-            # Reuse the model-selected inspection and mutation decisions, but
-            # keep their execution and all completion state in this class.
-            direct_files = self._validated_execution_files(main_agent, child, list(parent.files_touched))
-            read_job = coding.request_batch_read(child.task_id, direct_files) if direct_files else None
-            if read_job is not None:
-                main_agent.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
-            generic = {
-                "selected implementation files and their downstream callers.",
-                "production construction, registration, routing, and entrypoint wiring.",
-                "relevant registry, factory, dependency-injection, or router.",
-                "configuration that enables or selects the capability.",
-                "a production cli, api, gateway, lifecycle, or supervisor entrypoint.",
-            }
-            identifiers = list(dict.fromkeys(str(item) for item in (
-                list(child.files_touched) + list(parent.implementation_targets)
-                + list(getattr(plan, "files_to_inspect", []))
-                + list(getattr(plan, "implementation_targets", []))
-            ) if str(item).strip() and str(item).strip().lower() not in generic))
-            if not identifiers:
-                main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: no model-selected feature identifiers")
-                continue
-            refs: list[str] = []
-            files: list[str] = []
-            for identifier in identifiers:
-                job = main_agent.queue_manager.enqueue(
-                    task_id=child.task_id, requested_by_agent_id=coding.agent_id,
-                    approved_by_agent_id=main_agent.registry.find_by_role(AgentRole.MAIN).agent_id,
-                    job_type=QueueJobType.REPO_SEARCH,
-                    payload={"query": identifier, "regex": False, "limit": 25},
-                    purpose="Discover feature-specific callers and integration points.", priority=45,
-                )
-                ran = main_agent.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
-                if ran is None or ran.status is not QueueJobStatus.DONE:
-                    continue
-                for match in ((ran.result or {}).get("matches", []) if isinstance(ran.result, dict) else []):
-                    if isinstance(match, dict) and match.get("file"):
-                        refs.append(f"{match['file']}:{match.get('line', '?')}")
-                        files.append(str(match["file"]))
-            child.files_to_inspect = list(dict.fromkeys([*direct_files, *files]))
-            discovered = [item for item in child.files_to_inspect if item not in direct_files]
-            read_job = coding.request_batch_read(child.task_id, discovered) if discovered else None
-            if read_job is not None:
-                main_agent.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
-            decision = main_agent._wiring_decision(child, plan, route, refs)
-            child.wiring_outcome = decision.outcome
-            child.wiring_outcome_reason = decision.reason
-            child.wiring_targets = list(dict.fromkeys(decision.wiring_targets))
-            child.runtime_entrypoints = list(dict.fromkeys(decision.runtime_entrypoints))
-            child.configuration_targets = list(dict.fromkeys(decision.configuration_targets))
-            child.reachability_edges = list(decision.edges)
-            main_agent.taskboard.add_files_touched(child.task_id, list(child.files_touched))
-            main_agent.taskboard.save()
-            if decision.outcome == "mutation_required" and decision.patch.strip():
-                child.integration_stage = "INTEGRATION_MUTATION"
-                patch = coding.request_patch(child.task_id, decision.patch)
-                ran_patch = None if patch is None else main_agent.queue_manager.run_next(worker_agent_id=patch.assigned_worker_agent_id)
-                if ran_patch is not None and ran_patch.status is QueueJobStatus.DONE:
-                    child.wiring_outcome = "mutation_applied"
-                    main_agent.taskboard.add_files_touched(
-                        child.task_id,
-                        list(ran_patch.changed_files),
-                    )
-                    main_agent.taskboard.add_files_touched(
-                        parent_task_id,
-                        list(ran_patch.changed_files),
-                    )
-                    main_agent.taskboard.save()
-                else:
-                    child.wiring_outcome = "failed"
-            if child.wiring_outcome not in _ACCEPTED_OUTCOMES:
-                reviewer.reject_weak_evidence(child.task_id, f"{INCOMPLETE_FEATURE_WIRING}: wiring outcome incomplete")
-                main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: wiring outcome incomplete")
-                continue
-            child.implementation_verified = True
-            child.integration_stage = "INTEGRATION_VERIFY"
-            verification = main_agent._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(
-                child.task_id, main_agent._verification_commands(getattr(plan, "verification_commands", []))
-            )
-            main_agent.taskboard.update_status(
-                child.task_id,
-                TaskStatus.VERIFYING,
-                reason="Coordinator recorded executed verification evidence.",
-            )
-            if not verification.passed:
-                reviewer.reject_weak_evidence(child.task_id, verification.summary)
-                main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{DETERMINISTIC_INTEGRATION_FAILURE}: verification failed")
-                continue
-            child.verification_provenance = {
-                "verification_id": verification.verification_id,
-                "queue_job_ids": list(child.verification_queue_job_ids),
-                "changed_files": list(child.files_touched),
-            }
-            child.integration_stage = "REACHABILITY_VERIFY"
-            self._record_reachability(main_agent, parent_task_id, child, verification, reviewer)
-            child.integration_stage = "REVIEW"
-            if reviewer.review_evidence(child.task_id, route_name="coding", requires_verification=True):
-                child.integration_stage = "SUPERVISOR_FINALIZE"
-                self._project_completion(main_agent, child, verification)
-                self._record_reachability(main_agent, parent_task_id, child, verification, reviewer, include_parent=True)
-        """
-
-    @staticmethod
-    def _validated_execution_files(main_agent: Any, task: Any, paths: list[str]) -> list[str]:
-        root = Path(task.execution_repo_root or task.managed_worktree_path or main_agent.root).resolve()
-        valid = []
-        for raw in paths:
-            candidate = (Path(str(raw)).expanduser() if Path(str(raw)).is_absolute() else root / str(raw)).resolve()
-            try:
-                relative = candidate.relative_to(root)
-            except ValueError:
-                continue
-            if candidate.is_file():
-                valid.append(relative.as_posix())
-        return list(dict.fromkeys(valid))
-
-    @staticmethod
-    def _record_reachability(main_agent: Any, parent_id: str, child: Any, verification: Any, reviewer: Any, *, include_parent: bool = False) -> None:
-        edges = [edge for edge in child.reachability_edges if isinstance(edge, dict) and all(edge.get(key) for key in ("from", "to", "relation", "source_reference"))]
-        path = connected_wiring_path(edges)
-        if len(edges) < 2 or not path:
-            return
-        path.append("observable result: verification passed")
-        refs = list(dict.fromkeys([edge["source_reference"] for edge in edges] + list(child.queue_job_ids)))
-        if reviewer.verify_runtime_reachability(child.task_id, path, summary="Executed wiring mutation is reachable through production integration points.", source_references=refs, observable_result="verification passed", verification_source=child.verification_provenance.get("verification_id", "")) and include_parent:
-            reviewer.verify_runtime_reachability(parent_id, path, summary="Wiring child and parent share a provenance-backed production path.", source_references=refs, observable_result="verification passed", verification_source=child.verification_provenance.get("verification_id", ""))
 
     @staticmethod
     def _project_completion(
         taskboard: Any,
         child: Any,
-        verification: Any,
+        verification: Any = None,
         *,
+        verification_evidence: dict[str, Any] | None = None,
         execution_supervisor: Any,
         workspace_root: str | Path | None,
         trigger_turn_id: str = "",
     ) -> None:
         from mana_agent.execution_supervisor import SideEffectClassification
+
         supervisor = execution_supervisor
         if supervisor.store.get_task_or_none(child.task_id) is None:
-            supervisor.create_task(task_id=child.task_id, assigned_agent=child.owner_agent_id or "coding", routing_decision_id=child.task_id, workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or workspace_root or taskboard.store.root).resolve(), side_effect_classification=SideEffectClassification.IDEMPOTENT, session_id=child.session_id, workspace_id=child.workspace_id, repository_id=child.primary_repository_id, normalized_intent=child.user_request, requested_operation="wire production runtime", expected_output="verified wiring outcome", trigger_turn_id=trigger_turn_id)
+            supervisor.create_task(
+                task_id=child.task_id,
+                assigned_agent=child.owner_agent_id or "coding",
+                routing_decision_id=child.task_id,
+                workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or workspace_root or taskboard.store.root).resolve(),
+                side_effect_classification=SideEffectClassification.IDEMPOTENT,
+                session_id=child.session_id,
+                workspace_id=child.workspace_id,
+                repository_id=child.primary_repository_id,
+                normalized_intent=child.user_request,
+                requested_operation="wire production runtime",
+                expected_output="verified wiring outcome",
+                trigger_turn_id=trigger_turn_id,
+            )
             supervisor.queue(child.task_id)
             leased, token = supervisor.acquire_lease(child.task_id, owner="coordinator", worker=child.owner_agent_id or "coding")
             supervisor.start(child.task_id, attempt_id=leased.attempt_id, lease_token=token)
-            supervisor.submit_result(child.task_id, attempt_id=leased.attempt_id, lease_token=token, payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome})
+            supervisor.submit_result(
+                child.task_id,
+                attempt_id=leased.attempt_id,
+                lease_token=token,
+                payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome},
+            )
         completed = supervisor.verify_completion(child.task_id)
         manifest = supervisor.store.artifact_manifest(child.task_id) or {}
-        taskboard.project_supervisor_completion(child.task_id, supervisor_task=completed, verification_evidence={"result_id": completed.result_id, "verification": manifest.get("verification"), "artefacts": manifest.get("artefacts", [])})
+        taskboard.project_supervisor_completion(
+            child.task_id,
+            supervisor_task=completed,
+            verification_evidence={
+                "result_id": completed.result_id,
+                "verification": manifest.get("verification") or verification_evidence or {},
+                "artefacts": manifest.get("artefacts", []),
+            },
+        )
 
     @staticmethod
-    def _valid_model_reachability(integration: dict[str, Any]) -> bool:
+    def _valid_model_reachability(decision_or_dict: WiringDecision | dict[str, Any]) -> bool:
         """Validate only model-owned wiring evidence; authority is separate."""
-        if integration.get("wiring_outcome") not in _ACCEPTED_OUTCOMES:
+        if isinstance(decision_or_dict, dict):
+            outcome = decision_or_dict.get("wiring_outcome") or decision_or_dict.get("outcome")
+            edges = decision_or_dict.get("reachability_edges") or decision_or_dict.get("edges")
+        else:
+            outcome = decision_or_dict.outcome
+            edges = decision_or_dict.edges
+        if outcome not in _ACCEPTED_OUTCOMES:
             return False
-        edges = integration.get("reachability_edges")
         if not isinstance(edges, list) or len(edges) < 3:
             return False
         required = ("from", "to", "relation", "source_reference")
@@ -817,12 +1000,30 @@ class FeatureIntegrationCoordinator:
             return False
         if authority is None or not authority.is_complete():
             return False
-        # Edge claims are only candidates.  Completion requires the durable
-        # outputs of verification, review, and supervision as well.
-        # CodingAgent evidence is limited to the model's wiring report. Review,
-        # supervision, TaskBoard status, and verification provenance are runtime
-        # authority and are never accepted from the model response.
-        return all(str(edge.get("file") or edge.get("source_reference") or "").strip() for edge in integration["reachability_edges"])
+        edges = integration.get("reachability_edges") or integration.get("edges") or []
+        return all(str(edge.get("file") or edge.get("source_reference") or "").strip() for edge in edges)
 
 
-__all__ = ["FeatureIntegrationCoordinator", "FeatureIntegrationResult", "IntegrationAuthority", "INCOMPLETE_FEATURE_WIRING", "INTERNAL_WORK_PENDING", "EXTERNAL_DEPENDENCY", "DETERMINISTIC_INTEGRATION_FAILURE", "HUMAN_REVIEW_REQUIRED", "INTEGRATION_STAGES", "WiringDecision", "connected_wiring_path"]
+__all__ = [
+    "FeatureIntegrationCoordinator",
+    "FeatureIntegrationResult",
+    "IntegrationAuthority",
+    "INCOMPLETE_FEATURE_WIRING",
+    "FEATURE_INTEGRATION_DECISION_INVALID",
+    "FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE",
+    "FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING",
+    "FEATURE_INTEGRATION_VERIFICATION_FAILED",
+    "FEATURE_INTEGRATION_REACHABILITY_UNPROVEN",
+    "FEATURE_INTEGRATION_REVIEW_REJECTED",
+    "FEATURE_INTEGRATION_STATE_INVALID",
+    "INTERNAL_WORK_PENDING",
+    "EXTERNAL_DEPENDENCY",
+    "DETERMINISTIC_INTEGRATION_FAILURE",
+    "HUMAN_REVIEW_REQUIRED",
+    "INTEGRATION_STAGES",
+    "WiringDecision",
+    "FeatureIntegrationVerificationPlan",
+    "IntegrationVerificationExecutor",
+    "MultiAgentVerificationExecutor",
+    "connected_wiring_path",
+]
