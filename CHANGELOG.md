@@ -4079,3 +4079,13 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Completed feature-wiring execution lifecycle: feature-specific discovery now requests exact reads and model-selected mutations through CodingAgent/QueueManager, records distinct wiring outcomes and connected reachability evidence, preserves implementation targets, and projects verified wiring children through ExecutionSupervisor before parent review.
   - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/gateway/test_multi_task_orchestration.py -v`.
+
+# 2026-08-22
+
+- Completed feature-wiring lifecycle fixes for authoritative supervisor reuse, managed-worktree batch reads, and direct parent changed-file discovery.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_managed_worktrees.py -q`.
+
+## 2026-08-23
+
+- Updated feature-wiring discovery so validated parent changed files are batch-read in the child execution root before model-selected outward searches; changed paths are not used as search-only identifiers. The legacy memory adapter now accepts the same execution-root read scope.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_managed_worktrees.py -q`.

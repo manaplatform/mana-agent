@@ -265,12 +265,15 @@ class ExternalRuntimeMemory:
         file_path: str,
         task_id: str,
         agent_id: str,
+        execution_repo_root: str | Path | None = None,
     ) -> tuple[str, FileReadMemoryRecord, bool]:
-        resolved = (self.root / file_path).resolve()
-        resolved.relative_to(self.root)
+        effective_root = Path(execution_repo_root).resolve() if execution_repo_root is not None else self.root
+        candidate = Path(file_path)
+        resolved = (effective_root / file_path).resolve() if not candidate.is_absolute() else candidate.resolve()
+        resolved.relative_to(effective_root)
         content = resolved.read_text(encoding="utf-8", errors="replace")
         record = FileReadMemoryRecord(
-            file_path=normalize_file_path(resolved, root=self.root),
+            file_path=normalize_file_path(resolved, root=effective_root),
             content_hash=hashlib.sha256(content.encode()).hexdigest(),
             mtime=resolved.stat().st_mtime,
             last_read_at=utc_iso(),

@@ -115,6 +115,7 @@ class MainAgent:
         routing_llm: Any | None = None,
         session_id: str | None = None,
         workspace_id: str | None = None,
+        execution_supervisor: ExecutionSupervisor | None = None,
     ) -> None:
         requested_root = Path(root).resolve()
         self.routing_llm = routing_llm
@@ -184,11 +185,10 @@ class MainAgent:
             memory_service=self.memory_service,
             hierarchy_policy=self.hierarchy_policy,
         )
-        supervisor_config = ExecutionSupervisorConfig(
-            root=self.root / ".mana-execution",
-            startup_recovery=False,
+        supervisor_config = ExecutionSupervisorConfig.from_settings(Settings()).model_copy(
+            update={"startup_recovery": False}
         )
-        self.execution_supervisor = ExecutionSupervisor(config=supervisor_config)
+        self.execution_supervisor = execution_supervisor or ExecutionSupervisor(config=supervisor_config)
         settings = Settings()
         self.managed_worktrees_enabled = bool(
             getattr(settings, "mana_managed_worktrees_enabled", True)
@@ -779,10 +779,13 @@ class MainAgent:
                 *parent.files_touched,
                 *(path for job in self.queue_manager.jobs_for_task(parent.task_id) for path in job.changed_files),
             ]
+            direct_parent_files = self._validated_execution_files(child, parent_changed_files)
+            direct_read_job = coding.request_batch_read(child.task_id, direct_parent_files) if direct_parent_files else None
+            if direct_read_job is not None:
+                self.queue_manager.run_next(worker_agent_id=direct_read_job.assigned_worker_agent_id)
             identifiers = list(dict.fromkeys(
                 str(item) for item in (
-                    parent_changed_files
-                    + list(child.files_touched)
+                    list(child.files_touched)
                     + list(parent.implementation_targets)
                     + getattr(plan, "files_to_inspect", [])
                     + getattr(plan, "implementation_targets", [])
@@ -814,8 +817,11 @@ class MainAgent:
                     ref = f"{match['file']}:{match.get('line', '?')}"
                     source_refs.append(ref)
                     source_files.append(str(match["file"]))
-            child.files_to_inspect = list(dict.fromkeys(source_files))
-            read_job = coding.request_batch_read(child.task_id, child.files_to_inspect) if child.files_to_inspect else None
+            child.files_to_inspect = list(dict.fromkeys([*direct_parent_files, *source_files]))
+            newly_discovered_files = [
+                path for path in child.files_to_inspect if path not in direct_parent_files
+            ]
+            read_job = coding.request_batch_read(child.task_id, newly_discovered_files) if newly_discovered_files else None
             if read_job is not None:
                 read_job = self.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
             decision = self._wiring_decision(child, plan, route, source_refs)
@@ -964,6 +970,21 @@ class MainAgent:
                         observable_result="verification passed",
                         verification_source=verification_source,
                     )
+
+    def _validated_execution_files(self, task, paths: list[str]) -> list[str]:  # noqa: ANN001
+        """Return changed files that exist under the task's effective repository root."""
+        execution_root = Path(task.execution_repo_root or task.managed_worktree_path or self.root).resolve()
+        validated: list[str] = []
+        for raw_path in paths:
+            candidate = Path(str(raw_path)).expanduser()
+            resolved = (candidate if candidate.is_absolute() else execution_root / candidate).resolve()
+            try:
+                relative = resolved.relative_to(execution_root)
+            except ValueError:
+                continue
+            if resolved.is_file():
+                validated.append(relative.as_posix())
+        return list(dict.fromkeys(validated))
 
     def _delegate_git_intent_work(self, task_id: str, intent: GitIntent) -> None:
         coding = self._agent(AgentRole.CODING, CodingAgent)

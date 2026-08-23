@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from mana_agent.commands.cli import app
@@ -22,6 +23,9 @@ from mana_agent.multi_agent.worktrees import (
 )
 from mana_agent.multi_agent.worktrees.manager import coding_route_requires_worktree
 from mana_agent.multi_agent.worktrees.store import ManagedWorkspaceStore
+from mana_agent.multi_agent.agents.main_agent import MainAgent
+from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
+from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.workspaces.paths import repository_id_for_path
 
 
@@ -143,6 +147,53 @@ def test_tools_manager_uses_execution_repo_root_not_primary(repo: Path) -> None:
     assert result.result["execution_repo_root"] == str(Path(ws.worktree_path).resolve())
     # Primary checkout untouched.
     assert (repo / "src" / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_main_agent_uses_canonical_supervisor_store(repo: Path, mana_home: Path) -> None:
+    supervisor = ExecutionSupervisor(
+        ExecutionSupervisorConfig(root=mana_home / "execution", startup_recovery=False)
+    )
+    main = MainAgent(repo, execution_supervisor=supervisor)
+
+    assert main.execution_supervisor is supervisor
+    assert supervisor.config.root == mana_home / "execution"
+    assert not (repo / ".mana-execution").exists()
+
+
+def test_memory_enabled_batch_read_uses_managed_worktree(repo: Path) -> None:
+    manager = WorkspaceManager(repo)
+    ws = manager.create_for_task("task_memory_root", title="Memory root")
+    worktree = Path(ws.worktree_path)
+    (worktree / "src" / "app.py").write_text("value = managed\n", encoding="utf-8")
+    memory = MultiAgentMemoryService(root=repo, capsules_enabled=False)
+    tools = ToolsManager(repo, memory_service=memory)
+    job = QueueJob(
+        job_id="job_memory_root",
+        task_id="task_memory_root",
+        requested_by_agent_id="agent_coding",
+        job_type=QueueJobType.REPO_BATCH_READ,
+        payload={"files": ["src/app.py"]},
+        execution_repo_root=ws.worktree_path,
+    )
+
+    result = tools.execute_job(job)
+
+    assert result.ok
+    assert result.result["files"][0]["content"] == "value = managed\n"
+    assert result.result["execution_repo_root"] == str(worktree.resolve())
+
+
+def test_parent_changed_file_is_direct_execution_evidence(repo: Path) -> None:
+    manager = WorkspaceManager(repo)
+    ws = manager.create_for_task("task_parent_changed", title="Parent changed")
+    worktree = Path(ws.worktree_path)
+    changed = worktree / "src" / "app.py"
+    changed.write_text("value = parent change\n", encoding="utf-8")
+    main = MainAgent.__new__(MainAgent)
+    main.root = repo.resolve()
+    child = SimpleNamespace(execution_repo_root=str(worktree))
+
+    assert main._validated_execution_files(child, ["src/app.py"]) == ["src/app.py"]
 
 
 def test_queue_manager_stamps_execution_root_from_task(repo: Path) -> None:

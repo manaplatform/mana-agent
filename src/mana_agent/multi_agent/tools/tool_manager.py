@@ -70,9 +70,10 @@ class ToolsManager:
             root = self.execution_root_for_job(job)
             cache_key = self._cache_key(job, root=root)
             if cache_key and self.memory_service is not None:
+                memory_args = {**job.payload, "execution_repo_root": str(root)}
                 cached_tool = self.memory_service.get_reusable_tool_result(
                     tool_name=job.job_type.value,
-                    args=job.payload,
+                    args=memory_args,
                 )
                 if cached_tool is not None:
                     result = copy.deepcopy(cached_tool.result)
@@ -204,6 +205,7 @@ class ToolsManager:
                                 file_path=str(raw),
                                 task_id=job.task_id,
                                 agent_id=job.requested_by_agent_id,
+                                execution_repo_root=root,
                             )
                             files.append(
                                 {
@@ -482,7 +484,7 @@ class ToolsManager:
             if self.memory_service is not None:
                 self.memory_service.record_tool_execution(
                     tool_name=job.job_type.value,
-                    args=job.payload,
+                    args={**job.payload, "execution_repo_root": str(self.execution_root_for_job(job))},
                     task_id=job.task_id,
                     agent_id=job.requested_by_agent_id,
                     status="ok",
