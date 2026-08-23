@@ -5946,13 +5946,15 @@ class AgentChatGateway:
                             # This is resumable integration work, not a failed
                             # core execution. Keep the lane and supervisor
                             # non-terminal while blocking the wiring child.
-                            FeatureIntegrationCoordinator.block_wiring_child(
+                            wiring_child_id = FeatureIntegrationCoordinator.block_wiring_child(
                                 self._lane_coordinator.taskboard,
                                 reservation.execution.taskboard_task_id,
                                 request=text,
                                 changed_files=list(result.changed_files),
                                 trigger_turn_id=turn_id,
                             )
+                            if wiring_child_id:
+                                result.payload["wiring_child_task_id"] = wiring_child_id
                             self._lane_coordinator.transition(
                                 reservation.execution.task_id,
                                 LaneTaskState.WAITING,
@@ -7484,11 +7486,19 @@ class AgentChatGateway:
                 LaneTaskState.WAITING,
                 reason=INCOMPLETE_FEATURE_WIRING,
             )
-            self._lane_coordinator.taskboard.update_status(
-                child_task_id,
-                TaskStatus.BLOCKED,
-                reason=INCOMPLETE_FEATURE_WIRING,
-            )
+            if wiring_child_task_id:
+                wiring_child = self._lane_coordinator.taskboard.get_task(wiring_child_task_id)
+                if wiring_child.status is not TaskStatus.BLOCKED:
+                    self._lane_coordinator.taskboard.update_status(
+                        wiring_child_task_id,
+                        TaskStatus.BLOCKED,
+                        reason=INCOMPLETE_FEATURE_WIRING,
+                    )
+            result.payload.update({
+                "pending_required_work": True,
+                "resume_required": True,
+                "core_implementation_preserved": True,
+            })
             status = "waiting"
         elif (
             result.error == "route_unavailable" or decision.route == "capability_error"
@@ -8031,6 +8041,9 @@ class AgentChatGateway:
         options: dict[str, Any],
     ) -> ChatTurnResult:
         lane_task_id = str(options.get("_lane_task_id") or "")
+        # The lane task owns ordinary route output; integration owns a distinct
+        # coordinator-created wiring child.
+        child_task_id = lane_task_id
         execution_text = text
         resume_context = options.get("_resume_checkpoint_context")
         if isinstance(resume_context, dict):
@@ -8744,6 +8757,12 @@ class AgentChatGateway:
             feature_integration_taskboard=self._lane_coordinator.taskboard,
             feature_integration_parent_task_id=integration_parent_task_id,
             feature_integration_trigger_turn_id=context.turn_id,
+            feature_integration_execution_supervisor=self._lane_coordinator.execution_supervisor,
+            feature_integration_workspace_root=self.root,
+        )
+        wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
+            self._lane_coordinator.taskboard,
+            integration_parent_task_id,
         )
         # Keep the entry-routing decision distinct from the internal execution path
         # (process_chat_turn sets payload.route to "auto_chat" / coding modes).

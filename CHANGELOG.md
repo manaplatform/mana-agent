@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-23
 
+- Corrected normal Gateway lane bookkeeping so incomplete integration blocks the coordinator-owned wiring child without reusing an unrelated lane task identifier.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
+- Closed the Gateway runtime feature-integration gate: the coordinator now materializes the shared wiring-child, reviewer, reachability, supervisor, and TaskBoard completion lifecycle from core changed files, while incomplete wiring remains resumable and lane-scoped.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
+
+## 2026-08-23
+
 - Advanced the runtime feature-integration gate: Gateway now creates/reuses and seeds the authoritative wiring child, preserves resumable `INCOMPLETE_FEATURE_WIRING` waits, separates model wiring evidence from runtime review/supervisor authority, fixes lane authority lookup, and corrects lazy lane exports.
   - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
 - Centralized resumable wiring-child blocking and ensured continuation outputs are retained on the authoritative TaskBoard child.

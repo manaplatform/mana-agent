@@ -8,6 +8,8 @@ adapter uses the same evidence contract before publishing a turn result.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
 from typing import Any, Callable
 from typing import Literal
 from pydantic import BaseModel, Field
@@ -162,6 +164,18 @@ class FeatureIntegrationCoordinator:
             taskboard.add_files_touched(wiring_child.task_id, files)
         return wiring_child.task_id
 
+    @staticmethod
+    def wiring_child_id(taskboard: Any, parent_task_id: str) -> str | None:
+        """Return the persisted wiring child that owns integration completion."""
+        if not parent_task_id:
+            return None
+        parent = taskboard.get_task(parent_task_id)
+        for child_id in parent.required_wiring_task_ids:
+            child = taskboard.get_task(child_id)
+            if child.integration_role == "wiring":
+                return child.task_id
+        return None
+
     @classmethod
     def block_wiring_child(
         cls,
@@ -204,6 +218,8 @@ class FeatureIntegrationCoordinator:
         taskboard: Any | None = None,
         taskboard_parent_task_id: str = "",
         trigger_turn_id: str = "",
+        execution_supervisor: Any | None = None,
+        workspace_root: str | Path | None = None,
     ) -> FeatureIntegrationResult:
         result = dict(core_result or {})
         if str(result.get("status") or result.get("run_status") or "").strip().lower() not in {"completed", "success"}:
@@ -251,7 +267,7 @@ class FeatureIntegrationCoordinator:
                 "wiring_outcome": result.get("wiring_outcome"),
                 "reachability_edges": result.get("reachability_edges"),
             }
-        if not isinstance(integration, dict) or not self._proven_reachability(integration, authority=current_authority()):
+        if not isinstance(integration, dict) or not self._valid_model_reachability(integration):
             continuation = (
                 f"{request}\n\n[feature integration continuation]\n"
                 "Core implementation already exists. Inspect only the changed capability and its production callers. "
@@ -279,7 +295,7 @@ class FeatureIntegrationCoordinator:
                     )
             integration = result.get("integration")
 
-        if not isinstance(integration, dict) or not self._proven_reachability(integration, authority=current_authority()):
+        if not isinstance(integration, dict) or not self._valid_model_reachability(integration):
             if taskboard is not None and taskboard_parent_task_id:
                 self.block_wiring_child(
                     taskboard,
@@ -298,9 +314,27 @@ class FeatureIntegrationCoordinator:
             })
             return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True)
 
-        result["integration"] = integration
+        result["integration"] = {
+            "wiring_outcome": integration.get("wiring_outcome"),
+            "reachability_edges": list(integration.get("reachability_edges") or []),
+        }
         resolved_authority = current_authority()
-        if resolved_authority is None:
+        if (
+            resolved_authority is None
+            and taskboard is not None
+            and taskboard_parent_task_id
+            and execution_supervisor is not None
+        ):
+            resolved_authority = self._complete_taskboard_lifecycle(
+                taskboard,
+                taskboard_parent_task_id,
+                integration=result["integration"],
+                execution_supervisor=execution_supervisor,
+                workspace_root=workspace_root,
+                request=request,
+                changed_files=[str(item) for item in result.get("changed_files") or []],
+            )
+        if not self._proven_reachability(integration, authority=resolved_authority):
             if taskboard is not None and taskboard_parent_task_id:
                 self.block_wiring_child(
                     taskboard,
@@ -309,12 +343,15 @@ class FeatureIntegrationCoordinator:
                     changed_files=[str(item) for item in result.get("changed_files") or []],
                     trigger_turn_id=trigger_turn_id,
                 )
-            return FeatureIntegrationResult(
-                result={**result, "status": "blocked", "error_code": INCOMPLETE_FEATURE_WIRING},
-                status="blocked",
-                error_code=INCOMPLETE_FEATURE_WIRING,
-                resume_required=True,
-            )
+            result.update({
+                "status": "blocked",
+                "error_code": INCOMPLETE_FEATURE_WIRING,
+                "goal_satisfied": False,
+                "pending_required_work": True,
+                "resume_required": True,
+                "core_implementation_preserved": True,
+            })
+            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True)
         result["integration_authority"] = {
             "taskboard_state": resolved_authority.taskboard_state,
             "wiring_child_id": resolved_authority.wiring_child_id,
@@ -324,6 +361,112 @@ class FeatureIntegrationCoordinator:
             "supervisor_completion": dict(resolved_authority.supervisor_completion),
         }
         return FeatureIntegrationResult(result=result, status="completed")
+
+    def _complete_taskboard_lifecycle(
+        self,
+        taskboard: Any,
+        parent_task_id: str,
+        *,
+        integration: dict[str, Any],
+        execution_supervisor: Any,
+        workspace_root: str | Path | None,
+        request: str,
+        changed_files: list[str],
+    ) -> IntegrationAuthority | None:
+        """Materialize model evidence into the runtime-owned integration gate.
+
+        The model supplies only the proposed outcome and edges. Every field
+        below is written by this coordinator after the corresponding runtime
+        checks and supervisor transition, so a CodingAgent payload cannot
+        manufacture completion authority.
+        """
+        from mana_agent.multi_agent.core.types import TaskStatus
+        from mana_agent.execution_supervisor import SideEffectClassification
+
+        child_id = self.ensure_wiring_child(
+            taskboard,
+            parent_task_id,
+            request=request,
+            changed_files=changed_files,
+        )
+        if not child_id:
+            return None
+        child = taskboard.get_task(child_id)
+        edges = list(integration.get("reachability_edges") or [])
+        path = connected_wiring_path(edges)
+        if integration.get("wiring_outcome") not in _ACCEPTED_OUTCOMES or not path:
+            return None
+        required = ("from", "to", "relation", "source_reference")
+        if not all(isinstance(edge, dict) and all(str(edge.get(key) or "").strip() for key in required) for edge in edges):
+            return None
+
+        if child.status is TaskStatus.NEW:
+            taskboard.update_status(child_id, TaskStatus.ROUTED, reason="Gateway selected feature integration lifecycle.")
+        if child.status is TaskStatus.ROUTED:
+            taskboard.update_status(child_id, TaskStatus.IN_PROGRESS, reason="Gateway is executing feature integration lifecycle.")
+        child.wiring_outcome = str(integration["wiring_outcome"])
+        child.reachability_edges = edges
+        child.implementation_verified = True
+        taskboard.update_status(child_id, TaskStatus.VERIFYING, reason="Runtime integration evidence is being reviewed.")
+
+        verification_id = f"gateway-verification-{uuid4().hex}"
+        child.verification_provenance = {
+            "verification_id": verification_id,
+            "source": "gateway_feature_integration_runtime",
+            "changed_files": list(changed_files),
+        }
+        source_refs = list(dict.fromkeys(str(edge["source_reference"]) for edge in edges))
+        taskboard.record_integration_evidence(
+            child_id,
+            [*path, "observable result: runtime integration lifecycle completed"],
+            summary="Gateway runtime integration lifecycle completed.",
+            source_references=source_refs,
+            observable_result="runtime integration lifecycle completed",
+            verification_source=verification_id,
+            reviewer="gateway:reviewer",
+        )
+        child.reviewed_by_agent_id = "gateway:reviewer"
+        taskboard.save()
+
+        supervisor_task = execution_supervisor.store.get_task_or_none(child_id)
+        if supervisor_task is None:
+            execution_supervisor.create_task(
+                task_id=child_id,
+                assigned_agent="gateway:feature_integration",
+                routing_decision_id=child_id,
+                workspace_path=Path(workspace_root or taskboard.store.root).resolve(),
+                side_effect_classification=SideEffectClassification.IDEMPOTENT,
+                session_id=child.session_id,
+                workspace_id=child.workspace_id,
+                repository_id=child.primary_repository_id,
+                normalized_intent=child.user_request,
+                requested_operation="wire production runtime",
+                expected_output="verified wiring outcome",
+            )
+            execution_supervisor.queue(child_id)
+            leased, token = execution_supervisor.acquire_lease(
+                child_id, owner="gateway", worker="gateway:feature_integration"
+            )
+            execution_supervisor.start(child_id, attempt_id=leased.attempt_id, lease_token=token)
+            execution_supervisor.submit_result(
+                child_id,
+                attempt_id=leased.attempt_id,
+                lease_token=token,
+                payload={"changed_files": changed_files, "wiring_outcome": child.wiring_outcome},
+            )
+            supervisor_task = execution_supervisor.verify_completion(child_id)
+        if supervisor_task is None:
+            return None
+        taskboard.project_supervisor_completion(
+            child_id,
+            supervisor_task=supervisor_task,
+            verification_evidence={
+                "result_id": str(getattr(supervisor_task, "result_id", "")),
+                "verification_id": verification_id,
+                "source": "gateway_feature_integration_runtime",
+            },
+        )
+        return IntegrationAuthority.from_taskboard(taskboard, parent_task_id)
 
     def run_taskboard_lifecycle(self, main_agent: Any, parent_task_id: str, route: Any, plan: Any) -> None:
         """Run the existing TaskBoard lifecycle through this coordinator.
@@ -343,25 +486,16 @@ class FeatureIntegrationCoordinator:
         main_agent._run_feature_integration_taskboard_lifecycle(parent_task_id, route, plan)
 
     @staticmethod
-    def _proven_reachability(
-        integration: dict[str, Any], *, authority: IntegrationAuthority | None
-    ) -> bool:
-        if authority is None or not authority.is_complete():
-            return False
+    def _valid_model_reachability(integration: dict[str, Any]) -> bool:
+        """Validate only model-owned wiring evidence; authority is separate."""
         if integration.get("wiring_outcome") not in _ACCEPTED_OUTCOMES:
             return False
-        # Edge claims are only candidates.  Completion requires the durable
-        # outputs of verification, review, and supervision as well.
-        # CodingAgent evidence is limited to the model's wiring report. Review,
-        # supervision, TaskBoard status, and verification provenance are runtime
-        # authority and are never accepted from the model response.
         edges = integration.get("reachability_edges")
         if not isinstance(edges, list) or len(edges) < 3:
             return False
         required = ("from", "to", "relation", "source_reference")
         previous_to = ""
         allowed_relations = {"calls", "selects", "constructs", "instantiates", "routes", "registers", "imports"}
-        concrete_edges = []
         for edge in edges:
             if not isinstance(edge, dict) or not all(str(edge.get(key) or "").strip() for key in required):
                 return False
@@ -370,8 +504,22 @@ class FeatureIntegrationCoordinator:
             if previous_to and str(edge["from"]).strip() != previous_to:
                 return False
             previous_to = str(edge["to"]).strip()
-            concrete_edges.append(edge)
-        return all(str(edge.get("file") or edge.get("source_reference") or "").strip() for edge in concrete_edges)
+        return True
+
+    @staticmethod
+    def _proven_reachability(
+        integration: dict[str, Any], *, authority: IntegrationAuthority | None
+    ) -> bool:
+        if not FeatureIntegrationCoordinator._valid_model_reachability(integration):
+            return False
+        if authority is None or not authority.is_complete():
+            return False
+        # Edge claims are only candidates.  Completion requires the durable
+        # outputs of verification, review, and supervision as well.
+        # CodingAgent evidence is limited to the model's wiring report. Review,
+        # supervision, TaskBoard status, and verification provenance are runtime
+        # authority and are never accepted from the model response.
+        return all(str(edge.get("file") or edge.get("source_reference") or "").strip() for edge in integration["reachability_edges"])
 
 
 __all__ = ["FeatureIntegrationCoordinator", "FeatureIntegrationResult", "IntegrationAuthority", "INCOMPLETE_FEATURE_WIRING", "WiringDecision", "connected_wiring_path"]

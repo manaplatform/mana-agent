@@ -705,6 +705,8 @@ def process_chat_turn(
     feature_integration_taskboard: Any | None = None,
     feature_integration_parent_task_id: str = "",
     feature_integration_trigger_turn_id: str = "",
+    feature_integration_execution_supervisor: Any | None = None,
+    feature_integration_workspace_root: str | Path | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1189,6 +1191,8 @@ def process_chat_turn(
             taskboard=feature_integration_taskboard,
             taskboard_parent_task_id=feature_integration_parent_task_id,
             trigger_turn_id=feature_integration_trigger_turn_id,
+            execution_supervisor=feature_integration_execution_supervisor,
+            workspace_root=feature_integration_workspace_root,
         )
         result = integration_result.result
         if not integration_result.passed:
