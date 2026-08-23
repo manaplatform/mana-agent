@@ -110,6 +110,7 @@ from mana_agent.gateway.envelope import (
     build_routing_execution_envelope,
 )
 from mana_agent.gateway.feature_integration import (
+    FeatureIntegrationCoordinator,
     INCOMPLETE_FEATURE_WIRING,
     IntegrationAuthority,
 )
@@ -5941,6 +5942,23 @@ class AgentChatGateway:
                                 LaneTaskState.WAITING,
                                 reason="waiting for interactive approval",
                             )
+                        elif result.error == INCOMPLETE_FEATURE_WIRING:
+                            # This is resumable integration work, not a failed
+                            # core execution. Keep the lane and supervisor
+                            # non-terminal while blocking the wiring child.
+                            FeatureIntegrationCoordinator.block_wiring_child(
+                                self._lane_coordinator.taskboard,
+                                reservation.execution.taskboard_task_id,
+                                request=text,
+                                changed_files=list(result.changed_files),
+                                trigger_turn_id=turn_id,
+                            )
+                            self._lane_coordinator.transition(
+                                reservation.execution.task_id,
+                                LaneTaskState.WAITING,
+                                reason=INCOMPLETE_FEATURE_WIRING,
+                            )
+                            status = "waiting"
                         else:
                             if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
                                 actual_tools = [
@@ -8690,6 +8708,13 @@ class AgentChatGateway:
                     pending_steps=["feature_integration", "verification", "final_response"],
                 )
 
+        integration_parent_task_id = ""
+        if lane_task_id:
+            lane_execution = self._lane_coordinator.inspect_task(lane_task_id)
+            integration_parent_task_id = str(
+                getattr(lane_execution, "taskboard_task_id", "") or lane_task_id
+            )
+
         result = process_chat_turn(
             root=self.root,
             text=text,
@@ -8709,9 +8734,16 @@ class AgentChatGateway:
             coding_workspace_preparer=self._prepare_coding_workspace,
             gateway_task_id=lane_task_id,
             feature_integration_checkpoint=_save_feature_integration_checkpoint,
-            feature_integration_authority_provider=lambda: IntegrationAuthority.from_taskboard(
-                self._lane_coordinator.taskboard, child_task_id
+            feature_integration_authority_provider=(
+                lambda: IntegrationAuthority.from_taskboard(
+                    self._lane_coordinator.taskboard, integration_parent_task_id
+                )
+                if integration_parent_task_id
+                else None
             ),
+            feature_integration_taskboard=self._lane_coordinator.taskboard,
+            feature_integration_parent_task_id=integration_parent_task_id,
+            feature_integration_trigger_turn_id=context.turn_id,
         )
         # Keep the entry-routing decision distinct from the internal execution path
         # (process_chat_turn sets payload.route to "auto_chat" / coding modes).

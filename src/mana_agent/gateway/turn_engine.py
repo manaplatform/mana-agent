@@ -702,6 +702,9 @@ def process_chat_turn(
     feature_integration_checkpoint: Callable[[dict[str, Any]], None] | None = None,
     feature_integration_authority: IntegrationAuthority | None = None,
     feature_integration_authority_provider: Callable[[], IntegrationAuthority | None] | None = None,
+    feature_integration_taskboard: Any | None = None,
+    feature_integration_parent_task_id: str = "",
+    feature_integration_trigger_turn_id: str = "",
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1183,6 +1186,9 @@ def process_chat_turn(
             runtime_capability_change=bool(agent_decision.runtime_capability_change),
             authority=feature_integration_authority,
             authority_provider=feature_integration_authority_provider,
+            taskboard=feature_integration_taskboard,
+            taskboard_parent_task_id=feature_integration_parent_task_id,
+            trigger_turn_id=feature_integration_trigger_turn_id,
         )
         result = integration_result.result
         if not integration_result.passed:

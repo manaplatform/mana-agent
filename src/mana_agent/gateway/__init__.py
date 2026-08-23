@@ -124,7 +124,7 @@ if TYPE_CHECKING:
     # If LaneContract / LaneId / LanePriority / LaneTaskState / LockMode live
     # in a different module in the repository, update only this mapping and
     # _LAZY_EXPORTS below.
-    from .lane_contract import (
+    from .lanes import (
         LaneContract,
         LaneId,
         LanePriority,
@@ -178,19 +178,11 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "GatewayRoutingError": (".routing", "GatewayRoutingError"),
 
     # lane contract / lane models
-    #
-    # NOTE:
-    # Your original __all__ exported these names but the supplied file did not
-    # import them at all. This mapping assumes they are defined in
-    # ``gateway/lane_contract.py``.
-    #
-    # If they actually live elsewhere, change ".lane_contract" to the real
-    # module path.
-    "LaneContract": (".lane_contract", "LaneContract"),
-    "LaneId": (".lane_contract", "LaneId"),
-    "LanePriority": (".lane_contract", "LanePriority"),
-    "LaneTaskState": (".lane_contract", "LaneTaskState"),
-    "LockMode": (".lane_contract", "LockMode"),
+    "LaneContract": (".lanes", "LaneContract"),
+    "LaneId": (".lanes", "LaneId"),
+    "LanePriority": (".lanes", "LanePriority"),
+    "LaneTaskState": (".lanes", "LaneTaskState"),
+    "LockMode": (".lanes", "LockMode"),
 
     # multi-task runtime
     "MultiTaskError": (

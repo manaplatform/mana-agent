@@ -3,6 +3,43 @@ from mana_agent.gateway.feature_integration import (
     IntegrationAuthority,
     INCOMPLETE_FEATURE_WIRING,
 )
+from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+
+
+def test_gateway_exports_lane_id_from_lanes_module():
+    from mana_agent.gateway import LaneId
+    from mana_agent.gateway.lanes import LaneId as LaneIdFromLanes
+
+    assert LaneId is LaneIdFromLanes
+
+
+def test_taskboard_wiring_child_is_reused_and_seeded_from_core_files(tmp_path):
+    board = TaskBoard(tmp_path)
+    parent = board.create_task(
+        title="Add provider",
+        user_request="add provider",
+        action_type="coding",
+    )
+    coordinator = FeatureIntegrationCoordinator()
+
+    first = coordinator.ensure_wiring_child(
+        board,
+        parent.task_id,
+        request="add provider",
+        changed_files=["src/provider.py"],
+        trigger_turn_id="turn-1",
+    )
+    second = coordinator.ensure_wiring_child(
+        board,
+        parent.task_id,
+        request="add provider",
+        changed_files=["src/registry.py"],
+        trigger_turn_id="turn-2",
+    )
+
+    assert first == second
+    assert board.get_task(parent.task_id).required_wiring_task_ids == [first]
+    assert board.get_task(first).files_touched == ["src/provider.py", "src/registry.py"]
 
 
 def _edges():

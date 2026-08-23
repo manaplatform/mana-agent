@@ -117,6 +117,79 @@ class FeatureIntegrationCoordinator:
     def __init__(self, *, checkpoint: Callable[[dict[str, Any]], None] | None = None) -> None:
         self._checkpoint = checkpoint
 
+    @staticmethod
+    def ensure_wiring_child(
+        taskboard: Any,
+        parent_task_id: str,
+        *,
+        request: str,
+        changed_files: list[str],
+        trigger_turn_id: str = "",
+    ) -> str | None:
+        """Create/reuse the authoritative wiring child and seed core output.
+
+        This is intentionally mechanical: the model may describe wiring, but
+        it never chooses the TaskBoard authority or its completion state.
+        """
+        if not parent_task_id:
+            return None
+        parent = taskboard.get_task(parent_task_id)
+        wiring_child = next(
+            (
+                taskboard.get_task(child_id)
+                for child_id in parent.required_wiring_task_ids
+                if taskboard.get_task(child_id).integration_role == "wiring"
+            ),
+            None,
+        )
+        if wiring_child is None:
+            wiring_child = taskboard.create_child_task(
+                parent_task_id,
+                title="Feature integration wiring",
+                user_request=f"Complete production wiring for: {request}",
+                owner_agent_id="gateway:feature_integration",
+                trigger_turn_id=trigger_turn_id,
+                relation_type="feature_integration",
+                integration_role="wiring",
+            )
+        elif str(getattr(wiring_child.status, "value", wiring_child.status)) == "blocked":
+            # A resumed integration turn reopens only the reusable wiring
+            # child; the core parent and its durable checkpoint remain intact.
+            taskboard.reopen(wiring_child.task_id, reason="resuming feature integration")
+        files = [str(path) for path in changed_files if str(path).strip()]
+        if files:
+            taskboard.add_files_touched(parent_task_id, files)
+            taskboard.add_files_touched(wiring_child.task_id, files)
+        return wiring_child.task_id
+
+    @classmethod
+    def block_wiring_child(
+        cls,
+        taskboard: Any,
+        parent_task_id: str,
+        *,
+        request: str = "",
+        changed_files: list[str] | None = None,
+        reason: str = INCOMPLETE_FEATURE_WIRING,
+        trigger_turn_id: str = "",
+    ) -> str | None:
+        """Persist a resumable integration wait on the authoritative child."""
+        child_id = cls.ensure_wiring_child(
+            taskboard,
+            parent_task_id,
+            request=request,
+            changed_files=list(changed_files or []),
+            trigger_turn_id=trigger_turn_id,
+        )
+        if child_id is None:
+            return None
+        from mana_agent.multi_agent.core.types import TaskStatus
+
+        child = taskboard.get_task(child_id)
+        if child.status is not TaskStatus.BLOCKED:
+            taskboard.update_status(child_id, TaskStatus.BLOCKED, reason=reason)
+        return child_id
+
     def run(
         self,
         *,
@@ -128,6 +201,9 @@ class FeatureIntegrationCoordinator:
         runtime_capability_change: bool,
         authority: IntegrationAuthority | None = None,
         authority_provider: Callable[[], IntegrationAuthority | None] | None = None,
+        taskboard: Any | None = None,
+        taskboard_parent_task_id: str = "",
+        trigger_turn_id: str = "",
     ) -> FeatureIntegrationResult:
         result = dict(core_result or {})
         if str(result.get("status") or result.get("run_status") or "").strip().lower() not in {"completed", "success"}:
@@ -135,6 +211,15 @@ class FeatureIntegrationCoordinator:
         changed_files = [str(item) for item in result.get("changed_files") or [] if str(item).strip()]
         if not runtime_capability_change:
             return FeatureIntegrationResult(result=result, status="completed")
+
+        if taskboard is not None and taskboard_parent_task_id:
+            self.ensure_wiring_child(
+                taskboard,
+                taskboard_parent_task_id,
+                request=request,
+                changed_files=changed_files,
+                trigger_turn_id=trigger_turn_id,
+            )
 
         checkpoint = {
             "boundary": "after_core_implementation",
@@ -184,9 +269,25 @@ class FeatureIntegrationCoordinator:
                 continuation_files = [str(item) for item in continuation_result.get("changed_files") or [] if str(item).strip()]
                 result.update(continuation_result)
                 result["changed_files"] = list(dict.fromkeys([*changed_files, *continuation_files]))
+                if taskboard is not None and taskboard_parent_task_id:
+                    self.ensure_wiring_child(
+                        taskboard,
+                        taskboard_parent_task_id,
+                        request=request,
+                        changed_files=result["changed_files"],
+                        trigger_turn_id=trigger_turn_id,
+                    )
             integration = result.get("integration")
 
         if not isinstance(integration, dict) or not self._proven_reachability(integration, authority=current_authority()):
+            if taskboard is not None and taskboard_parent_task_id:
+                self.block_wiring_child(
+                    taskboard,
+                    taskboard_parent_task_id,
+                    request=request,
+                    changed_files=[str(item) for item in result.get("changed_files") or []],
+                    trigger_turn_id=trigger_turn_id,
+                )
             result.update({
                 "status": "blocked",
                 "error_code": INCOMPLETE_FEATURE_WIRING,
@@ -200,6 +301,14 @@ class FeatureIntegrationCoordinator:
         result["integration"] = integration
         resolved_authority = current_authority()
         if resolved_authority is None:
+            if taskboard is not None and taskboard_parent_task_id:
+                self.block_wiring_child(
+                    taskboard,
+                    taskboard_parent_task_id,
+                    request=request,
+                    changed_files=[str(item) for item in result.get("changed_files") or []],
+                    trigger_turn_id=trigger_turn_id,
+                )
             return FeatureIntegrationResult(
                 result={**result, "status": "blocked", "error_code": INCOMPLETE_FEATURE_WIRING},
                 status="blocked",
@@ -223,6 +332,14 @@ class FeatureIntegrationCoordinator:
         is the only public entry point for integration execution.  Keeping the
         adapter call here also makes Gateway and MainAgent share one gate.
         """
+        parent = main_agent.taskboard.get_task(parent_task_id)
+        self.ensure_wiring_child(
+            main_agent.taskboard,
+            parent_task_id,
+            request=str(getattr(route, "reasoning_summary", "") or parent.user_request),
+            changed_files=list(parent.files_touched),
+            trigger_turn_id=str(getattr(parent, "trigger_turn_id", "") or ""),
+        )
         main_agent._run_feature_integration_taskboard_lifecycle(parent_task_id, route, plan)
 
     @staticmethod
@@ -235,25 +352,9 @@ class FeatureIntegrationCoordinator:
             return False
         # Edge claims are only candidates.  Completion requires the durable
         # outputs of verification, review, and supervision as well.
-        verification = integration.get("verification_evidence")
-        reviewer_approval = integration.get("reviewer_approval")
-        supervisor_completion = integration.get("supervisor_completion")
-        if not verification or not reviewer_approval:
-            return False
-        if not isinstance(supervisor_completion, dict):
-            return False
-        if supervisor_completion.get("state") != "completed":
-            return False
-        if supervisor_completion.get("verification_status") != "passed":
-            return False
-        if integration.get("verification_provenance") != authority.verification_provenance:
-            return False
-        if integration.get("runtime_reachability") != authority.runtime_reachability:
-            return False
-        if integration.get("reviewer_approval") != authority.reviewer_approval:
-            return False
-        if integration.get("supervisor_completion") != authority.supervisor_completion:
-            return False
+        # CodingAgent evidence is limited to the model's wiring report. Review,
+        # supervision, TaskBoard status, and verification provenance are runtime
+        # authority and are never accepted from the model response.
         edges = integration.get("reachability_edges")
         if not isinstance(edges, list) or len(edges) < 3:
             return False

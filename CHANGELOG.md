@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-23
+
+- Advanced the runtime feature-integration gate: Gateway now creates/reuses and seeds the authoritative wiring child, preserves resumable `INCOMPLETE_FEATURE_WIRING` waits, separates model wiring evidence from runtime review/supervisor authority, fixes lane authority lookup, and corrects lazy lane exports.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
+- Centralized resumable wiring-child blocking and ensured continuation outputs are retained on the authoritative TaskBoard child.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py -v`.
+
 ## 2026-08-22
 
 - Fixed feature-wiring reachability validation, managed-worktree propagation, parent-evidence discovery, strict wiring-child completion, and runtime-capability route propagation.
