@@ -100,6 +100,7 @@ class _RouteModel:
                     "reuse_active_route": len(self.payloads) > 1,
                     "artifact_family": "pdf" if route == "artifact" else "",
                     "automation_operation": "create" if route == "automation" else "",
+                    "runtime_capability_change": route == "coding",
                     "mcp_request": {"provider_id": "kaggle"} if route == "mcp" else None,
                 }
             )

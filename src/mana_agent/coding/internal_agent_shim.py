@@ -12,6 +12,7 @@ from mana_agent.multi_agent.runtime.coding_agent import CodingAgent as NativeCod
 
 class InternalCodingAgentShim:
     name = "internal"
+    supports_gateway_task_identity = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # Gateway compatibility supplies both the repository root and its
@@ -40,7 +41,7 @@ class InternalCodingAgentShim:
         return self._execute("generate_auto_execute", request, kwargs)
 
     def _execute(self, method: str, request: str, kwargs: dict[str, Any]) -> Any:
-        task_id = f"internal_task_{uuid.uuid4().hex[:16]}"
+        task_id = str(kwargs.pop("gateway_task_id", "") or "").strip() or f"internal_task_{uuid.uuid4().hex[:16]}"
         model = str(getattr(getattr(self._agent, "ask_agent", None), "model", "") or "")
         with coding_execution_context(task_id=task_id, backend="internal", model=model) as state:
             self._emit(state, "backend.selected", "Internal backend selected", model=model)

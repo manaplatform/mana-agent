@@ -4089,3 +4089,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Updated feature-wiring discovery so validated parent changed files are batch-read in the child execution root before model-selected outward searches; changed paths are not used as search-only identifiers. The legacy memory adapter now accepts the same execution-root read scope.
   - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_managed_worktrees.py -q`.
+# 2026-08-23
+
+- Completed the Gateway feature-wiring gate: runtime-capability coding success now requires integration, provenance-backed reachability, and resumable `after_core_implementation` recovery through the same authoritative gateway execution/workspace. Internal and Codex coding backends preserve gateway task identity; incomplete wiring cannot produce false success.
+  - Added Gateway integration lifecycle regression coverage. User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py`.

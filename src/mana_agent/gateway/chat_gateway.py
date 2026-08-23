@@ -8623,6 +8623,7 @@ class AgentChatGateway:
                 else "new",
                 reasoning_summary=decision.reason,
                 verifier_passed=True,
+                runtime_capability_change=decision.runtime_capability_change,
             ),
             "repository": AgentDecision(
                 intent="repo_search",
@@ -8649,6 +8650,17 @@ class AgentChatGateway:
         resolved_index = options.get("index_dir", self._index_dir) or default_index_dir(
             self.root
         )
+        def _save_feature_integration_checkpoint(payload: dict[str, Any]) -> None:
+            state["feature_integration_checkpoint"] = dict(payload)
+            if lane_task_id:
+                self._lane_coordinator.checkpoint(
+                    lane_task_id,
+                    boundary="after_core_implementation",
+                    resume_payload=payload,
+                    completed_steps=["routing", "core_implementation"],
+                    pending_steps=["feature_integration", "verification", "final_response"],
+                )
+
         result = process_chat_turn(
             root=self.root,
             text=text,
@@ -8667,6 +8679,7 @@ class AgentChatGateway:
             agent_decision=mapped,
             coding_workspace_preparer=self._prepare_coding_workspace,
             gateway_task_id=lane_task_id,
+            feature_integration_checkpoint=_save_feature_integration_checkpoint,
         )
         # Keep the entry-routing decision distinct from the internal execution path
         # (process_chat_turn sets payload.route to "auto_chat" / coding modes).

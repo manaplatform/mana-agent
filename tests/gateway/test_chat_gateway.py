@@ -119,6 +119,7 @@ class _DummyAskService:
                         "reason_code": "TEST_ROUTE",
                         "error_code": "",
                         "reuse_active_route": False,
+                        "runtime_capability_change": route == "coding",
                     }
                 )
             )
@@ -1784,4 +1785,3 @@ def test_context_budget_exceeded_finishes_lane_and_charges_budget(tmp_path: Path
     task = gw._lane_coordinator.inspect_task(lane_task_id)
     assert task.state == LaneTaskState.BUDGET_EXHAUSTED
     assert task.budget.consumed_tokens > 0
-

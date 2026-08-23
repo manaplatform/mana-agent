@@ -34,6 +34,7 @@ from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
 from mana_agent.workspaces.preparation import RepositoryPreparationError
+from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -695,6 +696,7 @@ def process_chat_turn(
     agent_decision: AgentDecision | None = None,
     coding_workspace_preparer: Callable[[], Any] | None = None,
     gateway_task_id: str = "",
+    feature_integration_checkpoint: Callable[[dict[str, Any]], None] | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1117,8 +1119,23 @@ def process_chat_turn(
 
         result: dict[str, Any] = {}
         resume_cycles = 0
+        saved_integration_checkpoint = session_state.get("feature_integration_checkpoint")
+        resume_core_result = (
+            saved_integration_checkpoint.get("core_result")
+            if isinstance(saved_integration_checkpoint, dict)
+            and saved_integration_checkpoint.get("boundary") == "after_core_implementation"
+            and bool(saved_integration_checkpoint.get("runtime_capability_change"))
+            and str(saved_integration_checkpoint.get("gateway_task_id") or "") == str(gateway_task_id or "")
+            else None
+        )
         while True:
-            result = _call() or {}
+            if isinstance(resume_core_result, dict):
+                result = dict(resume_core_result)
+                result["changed_files"] = list(saved_integration_checkpoint.get("core_changed_files") or [])
+                result["flow_id"] = saved_integration_checkpoint.get("flow_id") or active_flow_id
+                resume_core_result = None
+            else:
+                result = _call() or {}
             if not (auto_continue and execute_plan_now and isinstance(result, dict)):
                 break
             terminal_reason = str(
@@ -1146,6 +1163,35 @@ def process_chat_turn(
         if isinstance(flow_from, str) and flow_from.strip():
             active_flow_id = flow_from.strip()
             session_state["active_flow_id"] = active_flow_id
+
+        # Runtime-capability changes are not publishable until the shared
+        # integration coordinator has completed its evidence gate.  The
+        # coordinator receives the real post-core changed_files list.
+        integration_result = FeatureIntegrationCoordinator(
+            checkpoint=feature_integration_checkpoint
+        ).run(
+            coding_agent=coding_agent,
+            core_result=result,
+            request=question,
+            gateway_task_id=gateway_task_id,
+            flow_id=active_flow_id,
+            runtime_capability_change=bool(agent_decision.runtime_capability_change),
+        )
+        result = integration_result.result
+        if not integration_result.passed:
+            return ChatTurnResult(
+                answer="",
+                error=integration_result.error_code or "INCOMPLETE_FEATURE_WIRING",
+                mode="coding-agent-blocked",
+                flow_id=active_flow_id,
+                decision=agent_decision,
+                auto_chat_mode=auto_chat_mode.value,
+                payload=dict(result),
+                warnings=warns,
+                used_coding_agent=True,
+            )
+        answer = str((result or {}).get("answer", "") or "").strip()
+        changed = [str(c) for c in ((result or {}).get("changed_files") or []) if str(c).strip()]
 
         # Clear consumed prechecklist
         if execute_plan_now:

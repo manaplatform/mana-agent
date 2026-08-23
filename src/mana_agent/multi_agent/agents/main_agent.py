@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
-from pydantic import BaseModel, Field
+from typing import Any
 
 from mana_agent.multi_agent.agents.base_agent import BaseAgent
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
@@ -44,20 +43,7 @@ from mana_agent.builtin_skills.skill_creator import (
 )
 from mana_agent.services.execution_event_hub import get_execution_event_hub
 from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig, SideEffectClassification
-
-
-class WiringDecision(BaseModel):
-    """Model-selected result of feature-specific integration inspection."""
-
-    outcome: Literal["mutation_required", "mutation_applied", "already_integrated", "incomplete", "failed"] = Field(
-        description="mutation_required, mutation_applied, already_integrated, incomplete, or failed"
-    )
-    patch: str = ""
-    wiring_targets: list[str] = Field(default_factory=list)
-    runtime_entrypoints: list[str] = Field(default_factory=list)
-    configuration_targets: list[str] = Field(default_factory=list)
-    edges: list[dict[str, str]] = Field(default_factory=list)
-    reason: str = ""
+from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator, WiringDecision, connected_wiring_path
 
 @dataclass
 class MainAgentResult:
@@ -68,25 +54,6 @@ class MainAgentResult:
     required_agents: list[str]
     required_subagents: list[str]
     repository_ids: list[str] | None = None
-
-
-def connected_wiring_path(edges: list[dict[str, str]]) -> list[str]:
-    """Render a connected edge chain while keeping node identity separate."""
-    if len(edges) < 2:
-        return []
-    current_node = edges[0].get("from", "")
-    nodes = [current_node]
-    for edge in edges:
-        if edge.get("from") != current_node:
-            return []
-        nodes.append(edge.get("to", ""))
-        current_node = edge.get("to", "")
-    if not all(nodes):
-        return []
-    path = [nodes[0]]
-    for edge, node in zip(edges, nodes[1:]):
-        path.append(f'{edge["relation"]} {node}')
-    return path
 
 
 class _MainAgentSkillDraftGenerator:
@@ -406,7 +373,7 @@ class MainAgent:
         # the same CodingAgent/QueueManager lifecycle before the parent review;
         # the reviewer must see the child as real TaskBoard work, not a planner
         # declaration.
-        self._execute_required_wiring_tasks(task.task_id, route, plan)
+        FeatureIntegrationCoordinator().run_taskboard_lifecycle(self, task.task_id, route, plan)
         if route.risk_level.value in {"medium", "high"} or len(route.required_agents) > 4:
             self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
         verification_passed: bool | None = None
