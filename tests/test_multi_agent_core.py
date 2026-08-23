@@ -204,6 +204,29 @@ def test_taskboard_done_requires_supervisor_projection(tmp_path):
         board.update_status(task.task_id, TaskStatus.DONE)
 
 
+def test_taskboard_verifying_requires_authoritative_verification_evidence(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Needs evidence", user_request="run the operation")
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    with pytest.raises(InvalidTaskTransition, match="executed verification"):
+        board.update_status(task.task_id, TaskStatus.VERIFYING)
+
+
+def test_taskboard_verifying_rejects_supervisor_projection_reason_without_execution(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Needs supervisor", user_request="run the operation")
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    task.verification_commands = ["echo planned"]
+    with pytest.raises(InvalidTaskTransition, match="without a supervisor execution"):
+        board.update_status(
+            task.task_id,
+            TaskStatus.VERIFYING,
+            reason="Awaiting authoritative supervisor completion projection",
+        )
+
+
 def _prepare_verified_feature(board: TaskBoard):
     task = board.create_task(title="Capability", user_request="add capability")
     child = board.create_child_task(
@@ -219,6 +242,7 @@ def _prepare_verified_feature(board: TaskBoard):
     task.supervisor_state = "completed"
     task.verification_status = "passed"
     task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    task.verification_queue_job_ids = ["verification-job-1"]
     board.update_status(task.task_id, TaskStatus.ROUTED)
     board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
     return task
@@ -274,6 +298,7 @@ def test_wiring_child_cannot_complete_without_reachability_provenance(tmp_path):
     child.implementation_verified = True
     child.wiring_outcome = "already_integrated"
     child.verification_provenance = {"verification_id": "verification-1"}
+    child.verification_queue_job_ids = ["verification-job-1"]
     board.update_status(child.task_id, TaskStatus.ROUTED)
     board.update_status(child.task_id, TaskStatus.IN_PROGRESS)
     board.update_status(child.task_id, TaskStatus.VERIFYING)

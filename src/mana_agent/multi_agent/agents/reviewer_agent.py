@@ -141,7 +141,10 @@ class ReviewerAgent(BaseAgent):
             if not self._git_evidence_is_complete(task_id):
                 return False
         task.reviewed_by_agent_id = self.agent_id
-        self.record_evidence(task_id, "Reviewer approved hierarchy and verification evidence.")
+        if requires_verification:
+            self.record_evidence(task_id, "Reviewer approved hierarchy and executed verification evidence.")
+        else:
+            self.record_evidence(task_id, "Reviewer approved hierarchy and execution evidence.")
         return True
 
     def _git_evidence_is_complete(self, task_id: str) -> bool:

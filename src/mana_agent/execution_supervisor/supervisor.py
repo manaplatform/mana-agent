@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -960,6 +962,37 @@ class ExecutionSupervisor:
         self._emit("heartbeat", task, lease_expires_at=task.lease_expires_at)
         return task
 
+    @contextmanager
+    def lease_renewal(self, task_id: str, *, attempt_id: str, lease_token: str):
+        """Renew a live attempt independently of provider/tool boundaries.
+
+        Callers wrap the complete model, integration, verifier, or reviewer
+        operation in this context. Renewal stops on normal completion,
+        cancellation, a deliberate WAITING transition, or an expired lease.
+        It never extends the immutable execution deadline.
+        """
+        stopped = threading.Event()
+        failure: list[BaseException] = []
+
+        def renew() -> None:
+            while not stopped.wait(max(0.1, float(self.config.heartbeat_seconds))):
+                try:
+                    current = self.store.get_task(task_id)
+                    if current.state is ExecutionState.WAITING or current.wall_clock_deadline_exceeded(self.clock()):
+                        return
+                    self.heartbeat(task_id, attempt_id=attempt_id, lease_token=lease_token)
+                except (StaleLeaseError, LeaseConflictError, BudgetExceededError) as exc:
+                    failure.append(exc)
+                    return
+
+        worker = threading.Thread(target=renew, name=f"lease-renewal-{task_id}", daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            worker.join(timeout=max(1.0, float(self.config.heartbeat_seconds) + 0.5))
+
     def resume_running(
         self,
         task_id: str,
@@ -1112,6 +1145,11 @@ class ExecutionSupervisor:
             validate_transition(task.state, ExecutionState.WAITING)
             task.state = ExecutionState.WAITING
             task.waiting_inbox_item_id = inbox_item_id
+            task.waiting_kind = "human_review" if request_type == "approval" else "human_input"
+            task.wake_up_source = "human_inbox"
+            task.wake_up_reference = inbox_item_id
+            task.resume_checkpoint_id = checkpoint_id
+            task.resume_operation = "resume_from_human_input"
             task.waiting_reason = f"waiting_for_{request_type}"
             task.human_wait_started_at = task.human_wait_started_at or self.clock()
             task.lease_owner = ""
@@ -1185,6 +1223,11 @@ class ExecutionSupervisor:
                 task.deadline_at += wait_duration
             task.state = ExecutionState.QUEUED
             task.waiting_inbox_item_id = ""
+            task.waiting_kind = ""
+            task.wake_up_source = ""
+            task.wake_up_reference = ""
+            task.resume_checkpoint_id = ""
+            task.resume_operation = ""
             task.waiting_reason = ""
             task.human_wait_started_at = None
             task.lease_owner = ""
@@ -1275,6 +1318,11 @@ class ExecutionSupervisor:
                 validate_transition(task.state, ExecutionState.WAITING)
             task.state = ExecutionState.WAITING
             task.waiting_reason = "waiting_for_connector"
+            task.waiting_kind = "external_dependency"
+            task.wake_up_source = "connector_health"
+            task.wake_up_reference = connector_id
+            task.resume_checkpoint_id = active_checkpoint
+            task.resume_operation = "resume_from_connector"
             task.waiting_connector_id = connector_id
             task.human_wait_started_at = task.human_wait_started_at or self.clock()
             task.lease_owner = ""
@@ -1327,6 +1375,11 @@ class ExecutionSupervisor:
             task.human_resume_claim_ids.append(resume_claim_id)
             task.state = ExecutionState.QUEUED
             task.waiting_reason = ""
+            task.waiting_kind = ""
+            task.wake_up_source = ""
+            task.wake_up_reference = ""
+            task.resume_checkpoint_id = ""
+            task.resume_operation = ""
             task.waiting_connector_id = ""
             task.human_wait_started_at = None
             task.recovery_reason = "connector_healthy"

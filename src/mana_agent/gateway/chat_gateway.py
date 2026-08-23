@@ -5955,10 +5955,9 @@ class AgentChatGateway:
                             )
                             if wiring_child_id:
                                 result.payload["wiring_child_task_id"] = wiring_child_id
-                            self._lane_coordinator.transition(
+                            self._lane_coordinator.mark_blocked(
                                 reservation.execution.task_id,
-                                LaneTaskState.WAITING,
-                                reason=INCOMPLETE_FEATURE_WIRING,
+                                reason=f"{INTERNAL_WORK_PENDING}: {INCOMPLETE_FEATURE_WIRING}; integration continuation is required",
                             )
                             status = "waiting"
                         else:
@@ -7481,10 +7480,9 @@ class AgentChatGateway:
             # outcome through the terminal FAILED path.
             from mana_agent.multi_agent.core.types import TaskStatus
 
-            self._lane_coordinator.transition(
+            self._lane_coordinator.mark_blocked(
                 reservation.execution.task_id,
-                LaneTaskState.WAITING,
-                reason=INCOMPLETE_FEATURE_WIRING,
+                reason=f"{INTERNAL_WORK_PENDING}: {INCOMPLETE_FEATURE_WIRING}; integration continuation is required",
             )
             if wiring_child_task_id:
                 wiring_child = self._lane_coordinator.taskboard.get_task(wiring_child_task_id)

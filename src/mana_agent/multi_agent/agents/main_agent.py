@@ -373,7 +373,6 @@ class MainAgent:
             self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
         verification_passed: bool | None = None
         if route.requires_verification:
-            self.taskboard.update_status(task.task_id, TaskStatus.VERIFYING, reason="VerifierAgent executes verification queue jobs.")
             if managed_workspace is not None and self.workspace_manager is not None:
                 try:
                     self.workspace_manager.mark_verifying(
@@ -390,6 +389,13 @@ class MainAgent:
             else:
                 verification = verifier.execute_verification(task.task_id, verification_commands)
             verification_passed = bool(verification.passed)
+            # VERIFYING is an evidence-bearing state. The verifier must first
+            # persist its result; planned commands alone are not execution.
+            self.taskboard.update_status(
+                task.task_id,
+                TaskStatus.VERIFYING,
+                reason="VerifierAgent recorded executed verification evidence.",
+            )
             self.memory.remember_agent(
                 verifier.agent_id,
                 f"Recorded verification for task {task.task_id}: passed={verification.passed}; {verification.summary}",
@@ -445,6 +451,21 @@ class MainAgent:
             done_reason = "Multi-agent hierarchy completed and reviewer approved evidence."
             if managed_workspace is not None:
                 done_reason += " Managed worktree is a merge candidate; explicit merge intent is still required."
+            supervisor_task = self.execution_supervisor.store.get_task_or_none(task.task_id)
+            if supervisor_task is None:
+                # A direct MainAgent invocation has no authority to project
+                # supervisor completion. Do not leave an orphan VERIFYING
+                # task behind after review/summarization.
+                self.taskboard.update_status(
+                    task.task_id,
+                    TaskStatus.BLOCKED,
+                    reason="No registered supervisor execution owns completion of this task.",
+                )
+                answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
+                return MainAgentResult(
+                    task.task_id, route.route_name, route.task_size, answer,
+                    route.required_agents, route.required_subagents, scope.repository_ids,
+                )
             self.taskboard.update_status(
                 task.task_id,
                 TaskStatus.VERIFYING,

@@ -19,7 +19,20 @@ from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
 
 
 INCOMPLETE_FEATURE_WIRING = "INCOMPLETE_FEATURE_WIRING"
+INTERNAL_WORK_PENDING = "INTERNAL_WORK_PENDING"
+EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
+DETERMINISTIC_INTEGRATION_FAILURE = "DETERMINISTIC_INTEGRATION_FAILURE"
+HUMAN_REVIEW_REQUIRED = "HUMAN_REVIEW_REQUIRED"
 _ACCEPTED_OUTCOMES = {"mutation_applied", "already_integrated"}
+INTEGRATION_STAGES = (
+    "CORE_COMPLETE",
+    "INTEGRATION_DISCOVERY",
+    "INTEGRATION_MUTATION",
+    "INTEGRATION_VERIFY",
+    "REACHABILITY_VERIFY",
+    "REVIEW",
+    "SUPERVISOR_FINALIZE",
+)
 
 
 class WiringDecision(BaseModel):
@@ -53,6 +66,7 @@ class FeatureIntegrationResult:
     status: str
     error_code: str = ""
     resume_required: bool = False
+    pending_classification: str = ""
 
     @property
     def passed(self) -> bool:
@@ -239,6 +253,7 @@ class FeatureIntegrationCoordinator:
                 changed_files=changed_files,
                 trigger_turn_id=trigger_turn_id,
             )
+            taskboard.get_task(taskboard_parent_task_id).integration_stage = "CORE_COMPLETE"
 
         checkpoint = {
             "boundary": "after_core_implementation",
@@ -312,7 +327,7 @@ class FeatureIntegrationCoordinator:
                 "resume_required": True,
                 "core_implementation_preserved": True,
             })
-            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True)
+            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True, pending_classification=INTERNAL_WORK_PENDING)
 
         result["integration"] = {
             "wiring_outcome": integration.get("wiring_outcome"),
@@ -362,7 +377,7 @@ class FeatureIntegrationCoordinator:
                 "resume_required": True,
                 "core_implementation_preserved": True,
             })
-            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True)
+            return FeatureIntegrationResult(result=result, status="blocked", error_code=INCOMPLETE_FEATURE_WIRING, resume_required=True, pending_classification=INTERNAL_WORK_PENDING)
         result["integration_authority"] = {
             "taskboard_state": resolved_authority.taskboard_state,
             "wiring_child_id": resolved_authority.wiring_child_id,
@@ -417,12 +432,9 @@ class FeatureIntegrationCoordinator:
         child.wiring_outcome = str(integration["wiring_outcome"])
         child.reachability_edges = edges
         child.implementation_verified = True
-        taskboard.update_status(child_id, TaskStatus.VERIFYING, reason="Runtime integration evidence is being reviewed.")
-
-        # The Gateway adapter has no MainAgent agent registry. It must not
-        # manufacture reviewer or verification evidence from the model payload.
-        # Such calls remain incomplete until the coordinator is given the
-        # runtime agent bundle through run_taskboard_lifecycle().
+        # This method only establishes the post-core integration context. The
+        # actual verifier/reviewer/supervisor lifecycle below owns VERIFYING;
+        # model payloads cannot manufacture that evidence.
         return None
 
     def run_taskboard_lifecycle(self, main_agent: Any, parent_task_id: str, route: Any, plan: Any) -> None:
@@ -451,6 +463,7 @@ class FeatureIntegrationCoordinator:
                 main_agent.taskboard.update_status(child.task_id, TaskStatus.ROUTED, reason="Coordinator delegated wiring to CodingAgent.")
             if child.status is TaskStatus.ROUTED:
                 main_agent.taskboard.update_status(child.task_id, TaskStatus.IN_PROGRESS, reason="Coordinator is executing the wiring lifecycle.")
+            child.integration_stage = "INTEGRATION_DISCOVERY"
             # Reuse the model-selected inspection and mutation decisions, but
             # keep their execution and all completion state in this class.
             direct_files = self._validated_execution_files(main_agent, child, list(parent.files_touched))
@@ -504,6 +517,7 @@ class FeatureIntegrationCoordinator:
             main_agent.taskboard.add_files_touched(child.task_id, list(child.files_touched))
             main_agent.taskboard.save()
             if decision.outcome == "mutation_required" and decision.patch.strip():
+                child.integration_stage = "INTEGRATION_MUTATION"
                 patch = coding.request_patch(child.task_id, decision.patch)
                 ran_patch = None if patch is None else main_agent.queue_manager.run_next(worker_agent_id=patch.assigned_worker_agent_id)
                 if ran_patch is not None and ran_patch.status is QueueJobStatus.DONE:
@@ -524,20 +538,29 @@ class FeatureIntegrationCoordinator:
                 main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{INCOMPLETE_FEATURE_WIRING}: wiring outcome incomplete")
                 continue
             child.implementation_verified = True
-            main_agent.taskboard.update_status(child.task_id, TaskStatus.VERIFYING, reason="Coordinator requires verifier and reviewer evidence.")
+            child.integration_stage = "INTEGRATION_VERIFY"
             verification = main_agent._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(
                 child.task_id, main_agent._verification_commands(getattr(plan, "verification_commands", []))
             )
+            main_agent.taskboard.update_status(
+                child.task_id,
+                TaskStatus.VERIFYING,
+                reason="Coordinator recorded executed verification evidence.",
+            )
             if not verification.passed:
                 reviewer.reject_weak_evidence(child.task_id, verification.summary)
+                main_agent.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason=f"{DETERMINISTIC_INTEGRATION_FAILURE}: verification failed")
                 continue
             child.verification_provenance = {
                 "verification_id": verification.verification_id,
                 "queue_job_ids": list(child.verification_queue_job_ids),
                 "changed_files": list(child.files_touched),
             }
+            child.integration_stage = "REACHABILITY_VERIFY"
             self._record_reachability(main_agent, parent_task_id, child, verification, reviewer)
+            child.integration_stage = "REVIEW"
             if reviewer.review_evidence(child.task_id, route_name="coding", requires_verification=True):
+                child.integration_stage = "SUPERVISOR_FINALIZE"
                 self._project_completion(main_agent, child, verification)
                 self._record_reachability(main_agent, parent_task_id, child, verification, reviewer, include_parent=True)
 
@@ -617,4 +640,4 @@ class FeatureIntegrationCoordinator:
         return all(str(edge.get("file") or edge.get("source_reference") or "").strip() for edge in integration["reachability_edges"])
 
 
-__all__ = ["FeatureIntegrationCoordinator", "FeatureIntegrationResult", "IntegrationAuthority", "INCOMPLETE_FEATURE_WIRING", "WiringDecision", "connected_wiring_path"]
+__all__ = ["FeatureIntegrationCoordinator", "FeatureIntegrationResult", "IntegrationAuthority", "INCOMPLETE_FEATURE_WIRING", "INTERNAL_WORK_PENDING", "EXTERNAL_DEPENDENCY", "DETERMINISTIC_INTEGRATION_FAILURE", "HUMAN_REVIEW_REQUIRED", "INTEGRATION_STAGES", "WiringDecision", "connected_wiring_path"]

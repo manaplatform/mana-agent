@@ -7,7 +7,7 @@ import sys
 import uuid
 
 from .cli_internal import *
-from .cli_internal import _build_project_llm_analyzer, _record_multi_agent_request
+from .cli_internal import _build_project_llm_analyzer
 from .chat_analyze_command import (
     analyze_command_args,
     handle_analyze_command,
@@ -814,18 +814,7 @@ def chat(
     else:
         workspace_service.finalize_stale_sessions(root)
         gateway_session_id = workspace_service.open_chat_session(root).session_id
-    _record_multi_agent_request(
-        root,
-        "chat command",
-        entrypoint="chat",
-        command_scope=True,
-        session_id=gateway_session_id,
-    )
-
-    recorded_initial_prompt = False
     if prompt:
-        _record_multi_agent_request(root, prompt, entrypoint="chat", session_id=gateway_session_id)
-        recorded_initial_prompt = True
         direct_edit_result = handle_small_direct_edit(root, prompt)
         if direct_edit_result.handled:
             console.print(f"[bold cyan]mana ❯[/bold cyan] {prompt}")
@@ -2269,11 +2258,6 @@ def chat(
                 plan_args = question.strip()[len("/plan"):].strip()
                 question = f"plan {plan_args}" if plan_args else "plan the next repository change"
             chat_ui_state.begin_conversation_turn(question, current_turn_id)
-
-            if recorded_initial_prompt and question == prompt:
-                recorded_initial_prompt = False
-            else:
-                _record_multi_agent_request(root, question, entrypoint="chat", session_id=chat_ui_state.session_id)
 
             # -----------------------------
             # /analyze slash command (read-only; writes only .mana/ artifacts).

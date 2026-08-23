@@ -493,6 +493,11 @@ class TaskRecord(StrictModel):
     result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
     waiting_inbox_item_id: str = ""
+    waiting_kind: str = ""
+    wake_up_source: str = ""
+    wake_up_reference: str = ""
+    resume_checkpoint_id: str = ""
+    resume_operation: str = ""
     waiting_reason: Literal[
         "",
         "waiting_for_approval",

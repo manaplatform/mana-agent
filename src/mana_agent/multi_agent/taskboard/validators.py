@@ -19,7 +19,7 @@ _ALLOWED: dict[TaskStatus, set[TaskStatus]] = {
 
 
 def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason: str | None = None) -> None:
-    if task.status == next_status:
+    if task.status == next_status and next_status != TaskStatus.VERIFYING:
         return
     if task.status in _TERMINAL:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value} without reopen")
@@ -82,5 +82,22 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
         raise InvalidTaskTransition("failed status requires a reason")
     if next_status == TaskStatus.BLOCKED and not str(reason or "").strip() and not task.blockers:
         raise InvalidTaskTransition("blocked status requires a blocker")
-    if next_status == TaskStatus.VERIFYING and not task.verification_commands and not str(reason or "").strip():
-        raise InvalidTaskTransition("verifying status requires verification commands or an explicit reason")
+    if next_status == TaskStatus.VERIFYING:
+        verification_evidence = bool(task.verification_queue_job_ids or task.verification_results)
+        supervisor_evidence = bool(
+            task.supervisor_execution_id
+            and task.supervisor_state
+            and task.supervisor_verification_evidence
+        )
+        if not verification_evidence and not supervisor_evidence:
+            raise InvalidTaskTransition(
+                "verifying status requires an executed verification result, verification queue job, "
+                "or registered supervisor verification execution"
+            )
+        if (
+            "Awaiting authoritative supervisor completion projection" in str(reason or "")
+            and not task.supervisor_execution_id
+        ):
+            raise InvalidTaskTransition(
+                "verifying status cannot await supervisor completion without a supervisor execution"
+            )

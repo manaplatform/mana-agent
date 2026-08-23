@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-23
 
+- Tightened lifecycle safety: orphan `VERIFYING` states and false Reviewer verification evidence are rejected; feature integration stages are explicit; internal integration work is blocked rather than parked in `WAITING` without a wake-up contract.
+  - User verification required: `python3 -m pytest tests/test_multi_agent_core.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+- Preserved authoritative post-core integration recovery metadata and distinguished internal pending work from deterministic integration failure and external dependency outcomes.
+  - User verification required: `python3 -m pytest tests/execution_supervisor/test_supervisor_core.py tests/execution_supervisor/test_result_escrow_recovery.py tests/gateway/test_checkpoint_resume.py -v`.
+
+## 2026-08-23
+
 - Moved authoritative feature-wiring execution into `FeatureIntegrationCoordinator`; completion now orders verifier, provenance, runtime reachability, reviewer, `ExecutionSupervisor`, TaskBoard projection, and authority creation.
   - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/test_multi_agent_core.py -v`.
 

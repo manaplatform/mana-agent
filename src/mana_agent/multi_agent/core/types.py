@@ -268,6 +268,13 @@ class TaskBoardItem:
     runtime_reachability_verified: bool = False
     integration_evidence: list[str] = field(default_factory=list)
     integration_evidence_records: list[dict[str, Any]] = field(default_factory=list)
+    integration_stage: str = ""
+    waiting_kind: str = ""
+    waiting_reason: str = ""
+    wake_up_source: str = ""
+    wake_up_reference: str = ""
+    resume_checkpoint_id: str = ""
+    resume_operation: str = ""
     discussion_ids: list[str] = field(default_factory=list)
     decision_ids: list[str] = field(default_factory=list)
     handoff_records: list[HandoffRecord] = field(default_factory=list)
