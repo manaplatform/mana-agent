@@ -369,11 +369,6 @@ class MainAgent:
                 self._delegate_git_intent_work(task.task_id, git_intent)
             else:
                 self._delegate_initial_tool_work(task.task_id, request, route.route_name)
-        # Wiring is a required part of the planned feature.  Execute it through
-        # the same CodingAgent/QueueManager lifecycle before the parent review;
-        # the reviewer must see the child as real TaskBoard work, not a planner
-        # declaration.
-        FeatureIntegrationCoordinator().run_taskboard_lifecycle(self, task.task_id, route, plan)
         if route.risk_level.value in {"medium", "high"} or len(route.required_agents) > 4:
             self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
         verification_passed: bool | None = None
@@ -712,6 +707,10 @@ class MainAgent:
         self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
 
     def _execute_required_wiring_tasks(self, parent_task_id: str, route: RouteDecision, plan) -> None:  # noqa: ANN001
+        """Compatibility adapter for the authoritative coordinator lifecycle."""
+        FeatureIntegrationCoordinator().run_taskboard_lifecycle(self, parent_task_id, route, plan)
+
+    def _run_feature_integration_taskboard_lifecycle(self, parent_task_id: str, route: RouteDecision, plan) -> None:  # noqa: ANN001
         parent = self.taskboard.get_task(parent_task_id)
         if not parent.required_wiring_task_ids:
             return

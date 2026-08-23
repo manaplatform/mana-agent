@@ -4093,3 +4093,12 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Completed the Gateway feature-wiring gate: runtime-capability coding success now requires integration, provenance-backed reachability, and resumable `after_core_implementation` recovery through the same authoritative gateway execution/workspace. Internal and Codex coding backends preserve gateway task identity; incomplete wiring cannot produce false success.
   - Added Gateway integration lifecycle regression coverage. User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py`.
+## 2026-08-23
+
+- Updated feature integration recovery so MainAgent and Gateway share the coordinator gate, preserve core edits on incomplete wiring, and restore durable integration checkpoints on resume.
+  - User verification required: `pytest -q tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume_invariants.py`
+
+## 2026-08-23
+
+- Tightened the feature-integration gate so completion requires runtime-owned TaskBoard, wiring-child, verification, reviewer, reachability, and supervisor authority; model-reported edges remain evidence candidates.
+  - User verification required: `pytest -q tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume_invariants.py`

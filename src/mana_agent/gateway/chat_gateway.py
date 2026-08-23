@@ -109,6 +109,10 @@ from mana_agent.gateway.envelope import (
     RoutingExecutionEnvelope,
     build_routing_execution_envelope,
 )
+from mana_agent.gateway.feature_integration import (
+    INCOMPLETE_FEATURE_WIRING,
+    IntegrationAuthority,
+)
 from mana_agent.tools.context_retrieval import (
     MemoryTaskBinding,
     TurnRetrievalLedger,
@@ -5665,6 +5669,13 @@ class AgentChatGateway:
                                 resume_decision.task_id
                             )
                         )
+                        # The continuation must be part of execution state.  A
+                        # prompt annotation is observational only and cannot
+                        # decide whether the core generation is skipped.
+                        if checkpoint.boundary == "after_core_implementation":
+                            state["feature_integration_checkpoint"] = dict(
+                                checkpoint.resume_payload
+                            )
                         options["_resume_checkpoint_context"] = redact_secrets(
                             {
                                 "task_id": resume_decision.task_id,
@@ -7443,6 +7454,24 @@ class AgentChatGateway:
                 LaneTaskState.WAITING,
                 reason="waiting for child-specific approval",
             )
+        elif result.error == INCOMPLETE_FEATURE_WIRING:
+            # Integration is deliberately resumable: core edits and the
+            # after-core checkpoint remain durable while the lane waits for a
+            # later integration continuation.  Do not route this structured
+            # outcome through the terminal FAILED path.
+            from mana_agent.multi_agent.core.types import TaskStatus
+
+            self._lane_coordinator.transition(
+                reservation.execution.task_id,
+                LaneTaskState.WAITING,
+                reason=INCOMPLETE_FEATURE_WIRING,
+            )
+            self._lane_coordinator.taskboard.update_status(
+                child_task_id,
+                TaskStatus.BLOCKED,
+                reason=INCOMPLETE_FEATURE_WIRING,
+            )
+            status = "waiting"
         elif (
             result.error == "route_unavailable" or decision.route == "capability_error"
         ):
@@ -8680,6 +8709,9 @@ class AgentChatGateway:
             coding_workspace_preparer=self._prepare_coding_workspace,
             gateway_task_id=lane_task_id,
             feature_integration_checkpoint=_save_feature_integration_checkpoint,
+            feature_integration_authority_provider=lambda: IntegrationAuthority.from_taskboard(
+                self._lane_coordinator.taskboard, child_task_id
+            ),
         )
         # Keep the entry-routing decision distinct from the internal execution path
         # (process_chat_turn sets payload.route to "auto_chat" / coding modes).

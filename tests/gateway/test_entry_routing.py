@@ -152,7 +152,7 @@ class _CodingAgent:
 
     def generate(self, request: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(request)
-        return {"answer": "coding route", "changed_files": [], "warnings": []}
+        return {"answer": "coding route", "status": "completed", "changed_files": [], "warnings": []}
 
     generate_auto_execute = generate
     generate_dir_mode = generate

@@ -119,7 +119,7 @@ class _DummyAskService:
                         "reason_code": "TEST_ROUTE",
                         "error_code": "",
                         "reuse_active_route": False,
-                        "runtime_capability_change": route == "coding",
+                        "runtime_capability_change": False,
                     }
                 )
             )
@@ -153,6 +153,7 @@ class _DummyCodingAgent:
     def generate(self, request, **kwargs):
         return {
             "answer": f"coding-ok: {request[:40]}",
+            "status": "completed",
             "changed_files": [],
             "warnings": [],
             "flow_id": "flow-test",
@@ -163,6 +164,7 @@ class _DummyCodingAgent:
         readme.write_text("# Updated by the coding-agent test double\n", encoding="utf-8")
         return {
             "answer": f"auto-exec: {request[:40]}",
+            "status": "completed",
             "changed_files": ["README.md"],
             "warnings": [],
             "flow_id": "flow-auto",
@@ -1036,10 +1038,11 @@ def test_gateway_process_turn_coding_path(tmp_path: Path, monkeypatch) -> None:
         selected_tools=["apply_patch"],
         tool_inputs={},
         flow_action="none",
-        reasoning_summary="edit files",
-        confidence=0.95,
-        verifier_passed=True,
-    )
+            reasoning_summary="edit files",
+            confidence=0.95,
+            verifier_passed=True,
+            runtime_capability_change=False,
+        )
     monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.decide_chat_route",
         lambda **kw: fixed,

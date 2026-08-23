@@ -34,7 +34,10 @@ from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
 from mana_agent.workspaces.preparation import RepositoryPreparationError
-from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator
+from mana_agent.gateway.feature_integration import (
+    FeatureIntegrationCoordinator,
+    IntegrationAuthority,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -697,6 +700,8 @@ def process_chat_turn(
     coding_workspace_preparer: Callable[[], Any] | None = None,
     gateway_task_id: str = "",
     feature_integration_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    feature_integration_authority: IntegrationAuthority | None = None,
+    feature_integration_authority_provider: Callable[[], IntegrationAuthority | None] | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1176,6 +1181,8 @@ def process_chat_turn(
             gateway_task_id=gateway_task_id,
             flow_id=active_flow_id,
             runtime_capability_change=bool(agent_decision.runtime_capability_change),
+            authority=feature_integration_authority,
+            authority_provider=feature_integration_authority_provider,
         )
         result = integration_result.result
         if not integration_result.passed:
