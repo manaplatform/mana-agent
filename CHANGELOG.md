@@ -2,6 +2,18 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-25
+
+- Added a centralized JSON-safe normalization layer for tool outputs to prevent "Object of type set is not JSON serializable" errors across Gmail/email connectors, execution supervisor, accounting, and chat turn persistence:
+  - Added `json_safe_tool_payload` and `json_safe_dumps` in `mana_agent/utils/tool_results.py` to recursively convert sets/frozensets/tuples into lists (with deterministic sorting for sortable elements) and serialize Pydantic models, dataclasses, enums, and datetimes into JSON-safe structures while preserving standard JSON types.
+  - Updated `redact_secrets` in `mana_agent/utils/redaction.py` to support `set` and `frozenset` collections.
+  - Updated `ToolInvocationTrace.to_dict()` and `AskResponseWithTrace.to_dict()` in `mana_agent/analysis/models.py`, `_serialize_tool_traces` in `mana_agent/gateway/turn_engine.py`, and `AskAgent` in `mana_agent/multi_agent/runtime/ask_agent.py` to ensure tool traces, intermediate payloads, and memory calls are JSON-safe.
+  - Updated `ChatTurnStore` in `mana_agent/gateway/chat_turn_store.py` and `atomic_write_json` in `mana_agent/workspaces/store.py` to sanitize turn response dictionaries and avoid JSON serialization errors on disk.
+  - Updated `ExecutionStore` in `mana_agent/execution_supervisor/store.py`, `ActionRecord` and `EscrowResult` in `mana_agent/execution_supervisor/models.py`, and `AccountingStore` in `mana_agent/context_cost/store.py` to ensure supervised action records, escrow results, and accounting reservations store JSON-serializable payloads.
+  - Updated email runtime tools in `mana_agent/connectors/email/runtime_tools.py` (`email_accounts_list`, `email_search`, `email_read`, `email_thread_read`) and `dumps_tool_result` in `mana_agent/tools/repository.py` to produce JSON-safe payloads.
+  - Added unit and regression tests in `tests/test_tool_results_normalization.py`, `tests/connectors/test_email_core.py`, `tests/gateway/test_chat_turn_store.py`, and `tests/execution_supervisor/test_supervisor_core.py`.
+  - User verification required: `python -m pytest tests/test_tool_results_normalization.py tests/connectors/test_email_core.py tests/gateway/test_chat_turn_store.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
 ## 2026-08-24
 
 - Fixed test regressions and error classification in gateway coding exceptions and interruption recovery tests:

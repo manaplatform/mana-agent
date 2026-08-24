@@ -664,6 +664,8 @@ def _save_auto_chat_turn_state(
 
 def _serialize_tool_traces(resp: Any) -> list[dict[str, Any]]:
     """Normalize AskResponseWithTrace / list traces into JSON-serializable dicts."""
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
     raw = getattr(resp, "trace", None)
     if raw is None and isinstance(resp, dict):
         raw = resp.get("trace")
@@ -679,21 +681,23 @@ def _serialize_tool_traces(resp: Any) -> list[dict[str, Any]]:
             except Exception:
                 payload = None
             if isinstance(payload, dict):
-                out.append(payload)
+                out.append(json_safe_tool_payload(payload))
                 continue
         if isinstance(item, dict):
-            out.append(dict(item))
+            out.append(json_safe_tool_payload(dict(item)))
             continue
         name = str(getattr(item, "tool_name", None) or getattr(item, "name", "") or "tool")
         out.append(
-            {
-                "tool_name": name,
-                "args_summary": str(getattr(item, "args_summary", "") or "")[:500],
-                "duration_ms": float(getattr(item, "duration_ms", 0.0) or 0.0),
-                "status": str(getattr(item, "status", "ok") or "ok"),
-                "output_preview": str(getattr(item, "output_preview", "") or "")[:4000],
-                "result": getattr(item, "result", None),
-            }
+            json_safe_tool_payload(
+                {
+                    "tool_name": name,
+                    "args_summary": str(getattr(item, "args_summary", "") or "")[:500],
+                    "duration_ms": float(getattr(item, "duration_ms", 0.0) or 0.0),
+                    "status": str(getattr(item, "status", "ok") or "ok"),
+                    "output_preview": str(getattr(item, "output_preview", "") or "")[:4000],
+                    "result": getattr(item, "result", None),
+                }
+            )
         )
     return out
 

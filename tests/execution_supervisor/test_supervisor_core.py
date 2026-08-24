@@ -1582,3 +1582,54 @@ def test_completed_file_result_is_reverified_against_recorded_hash(runtime):
     with pytest.raises(CompletionVerificationError, match="no longer satisfies"):
         supervisor.reverify_completed(task.task_id)
     assert supervisor.store.get_task(task.task_id).verification_status == VerificationStatus.FAILED
+
+
+def test_supervisor_store_persists_actions_and_results_with_sets(runtime):
+    supervisor, _clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+
+    # Save action with sets in verification_state
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="email_search",
+        action_fingerprint="action_fp_1",
+        classification=SideEffectClassification.READ_ONLY,
+        verification_state={
+            "labels": {"INBOX", "UNREAD"},
+            "granted_permissions": {"email.read", "email.metadata"},
+        },
+    )
+    supervisor.store.save_action(action)
+    reloaded_action = supervisor.store.get_action(action.action_id)
+    assert reloaded_action is not None
+    assert sorted(reloaded_action.verification_state["labels"]) == ["INBOX", "UNREAD"]
+    assert sorted(reloaded_action.verification_state["granted_permissions"]) == ["email.metadata", "email.read"]
+
+    # Submit result with sets in payload and verification_evidence
+    result_payload = {
+        "messages": [
+            {
+                "id": "msg-1",
+                "labels": {"INBOX", "IMPORTANT"},
+                "tags": frozenset({"tag1", "tag2"}),
+            }
+        ]
+    }
+    submitted_task = supervisor.submit_result(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        payload=result_payload,
+    )
+    assert submitted_task.state in {
+        ExecutionState.COMPLETED_PENDING_VERIFICATION,
+        ExecutionState.COMPLETED,
+    }
+    escrow = supervisor.store.get_result(submitted_task.result_id)
+    assert escrow is not None
+    assert sorted(escrow.payload["messages"][0]["labels"]) == ["IMPORTANT", "INBOX"]
+    assert sorted(escrow.payload["messages"][0]["tags"]) == ["tag1", "tag2"]
+

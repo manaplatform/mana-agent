@@ -61,6 +61,8 @@ def redact_secrets(value: Any) -> Any:
         return [redact_secrets(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact_secrets(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return type(value)(redact_secrets(item) for item in value)
     if isinstance(value, str):
         redacted = _BEARER_RE.sub(f"Bearer {REDACTED}", value)
         return _OPENAI_KEY_RE.sub(REDACTED, redacted)

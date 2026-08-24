@@ -136,6 +136,10 @@ class ActionRecord(StrictModel):
     def infer_effect_scope(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        if "verification_state" in data and data["verification_state"]:
+            from mana_agent.utils.tool_results import json_safe_tool_payload
+
+            data["verification_state"] = json_safe_tool_payload(data["verification_state"])
         if "effect_scope" not in data or not data["effect_scope"]:
             tool = str(data.get("tool_name") or "")
             classification = data.get("classification")
@@ -422,6 +426,11 @@ class EscrowResult(StrictModel):
                     data["verification_status"] = VerificationStatus.PENDING.value
             if not data.get("result_kind"):
                 data["result_kind"] = "chat_result"
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
+        for key in ("payload", "verification_evidence", "provider_metadata", "error_metadata"):
+            if key in data and data[key]:
+                data[key] = json_safe_tool_payload(data[key])
         return data
 
 

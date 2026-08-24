@@ -184,7 +184,11 @@ class ToolInvocationTrace:
     result: Any = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
+        payload = asdict(self)
+        payload["result"] = json_safe_tool_payload(self.result)
+        return json_safe_tool_payload(payload)
 
 
 @dataclass(slots=True)
@@ -194,12 +198,14 @@ class AskResponseWithTrace(AskResponse):
     route_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
         payload = AskResponse.to_dict(self)
         payload["mode"] = self.mode
         payload["trace"] = [item.to_dict() for item in self.trace]
         if self.route_trace:
-            payload["route_trace"] = self.route_trace
-        return payload
+            payload["route_trace"] = json_safe_tool_payload(self.route_trace)
+        return json_safe_tool_payload(payload)
 
 
 @dataclass(slots=True)

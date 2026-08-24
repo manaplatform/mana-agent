@@ -51,7 +51,10 @@ _atomic_replace = os.replace
 
 
 def _redact_for_persistence(payload):
-    safe = redact_secrets(payload)
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
+    normalized = json_safe_tool_payload(payload)
+    safe = redact_secrets(normalized)
 
     def restore_hashes(original, redacted) -> None:
         if isinstance(original, dict) and isinstance(redacted, dict):
@@ -68,8 +71,8 @@ def _redact_for_persistence(payload):
             for source, target in zip(original, redacted):
                 restore_hashes(source, target)
 
-    restore_hashes(payload, safe)
-    return safe
+    restore_hashes(normalized, safe)
+    return json_safe_tool_payload(safe)
 
 
 class ExecutionStore(Protocol):

@@ -56,6 +56,7 @@ from mana_agent.mcp.tools import discovered_mcp_langchain_tools
 from mana_agent.execution.manager import ExecutionManager
 from mana_agent.execution.models import ExecutionRequest, RoutingRequest, SandboxSpec
 from mana_agent.execution.errors import ExecutionTimeoutError
+from mana_agent.utils.tool_results import json_safe_tool_payload
 
 logger = logging.getLogger(__name__)
 
@@ -365,7 +366,7 @@ class AskAgent:
     @staticmethod
     def _coerce_tool_payload(content: Any) -> dict[str, Any] | None:
         if isinstance(content, dict):
-            return content
+            return json_safe_tool_payload(content)
         if not isinstance(content, str):
             return None
         text = content.strip()
@@ -378,14 +379,14 @@ class AskAgent:
             try:
                 loaded = json.loads(candidate)
                 if isinstance(loaded, dict):
-                    return loaded
+                    return json_safe_tool_payload(loaded)
             except Exception:
                 pass
             # Some models/tools may return Python dict repr with single quotes.
             try:
                 loaded = ast.literal_eval(candidate)
                 if isinstance(loaded, dict):
-                    return loaded
+                    return json_safe_tool_payload(loaded)
             except Exception:
                 pass
         return None
@@ -2300,8 +2301,8 @@ class AskAgent:
                 self.coding_memory_service.record_tool_call(
                     flow_id=flow_id,
                     tool_name=tool_name,
-                    arguments=safe_tool_args(tool_name, tool_args),
-                    result=tool_result,
+                    arguments=json_safe_tool_payload(safe_tool_args(tool_name, tool_args)),
+                    result=json_safe_tool_payload(tool_result),
                     status=status,
                 )
                 if tool_name == "verify_project":
@@ -2796,13 +2797,13 @@ class AskAgent:
                             governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:
                             tool_result_payload = None
-                            if isinstance(content, (dict, list)):
-                                tool_result_payload = content
+                            if isinstance(content, (dict, list, set, frozenset, tuple)):
+                                tool_result_payload = json_safe_tool_payload(content)
                             elif isinstance(content, str) and content.strip():
                                 try:
                                     decoded = json.loads(content)
                                     if isinstance(decoded, (dict, list)):
-                                        tool_result_payload = decoded
+                                        tool_result_payload = json_safe_tool_payload(decoded)
                                 except Exception:
                                     tool_result_payload = content
                             traces.append(
@@ -2817,7 +2818,7 @@ class AskAgent:
                                         args=args if isinstance(args, dict) else {},
                                         content=content,
                                     ),
-                                    result=tool_result_payload,
+                                    result=json_safe_tool_payload(tool_result_payload),
                                 )
                             )
                     except Exception as exc:
@@ -2840,7 +2841,7 @@ class AskAgent:
                     persist_tool_call(
                         name,
                         args if isinstance(args, dict) else {},
-                        content,
+                        json_safe_tool_payload(content),
                         "error" if self._tool_error_detail(content) else "ok",
                     )
                     # No-progress detection: a successful result that adds new
