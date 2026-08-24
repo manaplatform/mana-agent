@@ -199,10 +199,22 @@ def test_c_codex_timeout_after_completed_checkpoint(tmp_path: Path) -> None:
         edges=[
             {
                 "from": "src/main.py",
-                "to": "src/service.py",
+                "to": "src/router.py",
                 "relation": "calls",
                 "source_reference": "src/main.py:10",
-            }
+            },
+            {
+                "from": "src/router.py",
+                "to": "src/service.py",
+                "relation": "selects",
+                "source_reference": "src/router.py:20",
+            },
+            {
+                "from": "src/service.py",
+                "to": "src/handler.py",
+                "relation": "constructs",
+                "source_reference": "src/service.py:30",
+            },
         ],
         verification_commands=["python -m pytest tests/"],
         reason="integrated directly",
@@ -284,7 +296,7 @@ def test_e_codex_timeout_separated_from_lost_lease(tmp_path: Path) -> None:
     """Classifier separates coding interruption from external lost-lease ambiguity."""
     clock = SimulatedClock()
     supervisor = ExecutionSupervisor(
-        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10),
+        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10, heartbeat_seconds=2),
         clock=clock,
     )
 
@@ -312,7 +324,7 @@ def test_f_local_mutation_after_timeout(tmp_path: Path) -> None:
     """Attempt-specific evidence decides ALREADY_APPLIED vs PARTIALLY_APPLIED."""
     clock = SimulatedClock()
     supervisor = ExecutionSupervisor(
-        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10),
+        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10, heartbeat_seconds=2),
         clock=clock,
     )
 
@@ -346,7 +358,7 @@ def test_f_local_mutation_after_timeout(tmp_path: Path) -> None:
     outcome, details = supervisor.classify_lost_lease(task, now=clock(), actions=[action])
 
     # Reconciled from exact hash match -> ALREADY_APPLIED -> marked succeeded
-    assert outcome == LostLeaseOutcome.DURABLE_RESULT_AVAILABLE or outcome == LostLeaseOutcome.LOCAL_RECONCILIATION_REQUIRED
+    assert outcome == LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY
     updated_action = supervisor.store.get_action(action.action_id)
     assert updated_action.request_state == ActionRequestState.SUCCEEDED
 
@@ -358,7 +370,7 @@ def test_g_external_receipt_after_timeout(tmp_path: Path) -> None:
     """Durable receipt consumed, marked ACTION_RECONCILED, no duplicate action."""
     clock = SimulatedClock()
     supervisor = ExecutionSupervisor(
-        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10),
+        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10, heartbeat_seconds=2),
         clock=clock,
     )
 
@@ -410,7 +422,7 @@ def test_h_human_review_after_unknown_external_timeout(tmp_path: Path) -> None:
     )
 
     supervisor = ExecutionSupervisor(
-        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10),
+        ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=10, heartbeat_seconds=2),
         clock=clock,
     )
 

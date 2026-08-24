@@ -1321,26 +1321,25 @@ def process_chat_turn(
         err_code = getattr(exc, "error_code", None)
         interruption = getattr(exc, "reason", None)
         err_cat = "execution"
-        if not err_code:
-            lowered = exc_text.lower()
-            if isinstance(exc, (CodexTimeoutError, asyncio.TimeoutError)) or "timed out" in lowered:
-                err_code = "CODING_PROVIDER_TIMEOUT"
-                err_cat = "timeout"
-                interruption = "CODING_TIMEOUT"
-            elif isinstance(exc, CodexInterruptionError) or "interrupted" in lowered:
-                err_code = "MODEL_INTERRUPTED"
-                err_cat = "interruption"
-                interruption = "MODEL_INTERRUPTED"
-            elif "deadline" in lowered:
-                err_code = "DEADLINE_EXPIRED"
-                err_cat = "deadline"
-                interruption = "DEADLINE_EXPIRED"
-            elif "lease" in lowered:
-                err_code = "LEASE_LOST_DURING_EXECUTION"
-                err_cat = "lease"
-                interruption = "LEASE_LOST_DURING_EXECUTION"
-            else:
-                err_code = "CODING_AGENT_FAILED"
+        lowered = exc_text.lower()
+        if isinstance(exc, (CodexTimeoutError, asyncio.TimeoutError)) or (err_code in {"CODING_PROVIDER_TIMEOUT", "CODING_TIMEOUT"}) or ("timed out" in lowered):
+            err_code = err_code or "CODING_PROVIDER_TIMEOUT"
+            err_cat = "timeout"
+            interruption = interruption or "CODING_TIMEOUT"
+        elif isinstance(exc, CodexInterruptionError) or (err_code == "MODEL_INTERRUPTED") or ("interrupted" in lowered):
+            err_code = err_code or "MODEL_INTERRUPTED"
+            err_cat = "interruption"
+            interruption = interruption or "MODEL_INTERRUPTED"
+        elif (err_code == "DEADLINE_EXPIRED") or ("deadline" in lowered):
+            err_code = err_code or "DEADLINE_EXPIRED"
+            err_cat = "deadline"
+            interruption = interruption or "DEADLINE_EXPIRED"
+        elif (err_code == "LEASE_LOST_DURING_EXECUTION") or ("lease" in lowered):
+            err_code = err_code or "LEASE_LOST_DURING_EXECUTION"
+            err_cat = "lease"
+            interruption = interruption or "LEASE_LOST_DURING_EXECUTION"
+        elif not err_code:
+            err_code = "CODING_AGENT_FAILED"
 
         saved_cp = session_state.get("feature_integration_checkpoint")
         has_cp = bool(isinstance(saved_cp, dict) and saved_cp.get("core_changed_files"))
