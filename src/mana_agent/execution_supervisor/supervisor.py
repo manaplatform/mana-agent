@@ -43,6 +43,7 @@ from mana_agent.execution_supervisor.models import (
     EscrowStatus,
     ExecutionEvent,
     ExecutionState,
+    HumanRecoveryDecisionAction,
     ParentProgress,
     RecoveryAction,
     RecoveryDecision,
@@ -1271,6 +1272,34 @@ class ExecutionSupervisor:
             checkpoint_id=checkpoint_id,
             request_type=request_type,
         )
+
+    def record_external_wait(
+        self,
+        task_id: str,
+        *,
+        waiting_kind: str,
+        wake_up_source: str,
+        wake_up_reference: str,
+        resume_checkpoint_id: str = "",
+        resume_operation: str = "",
+    ) -> TaskRecord:
+        """Persist the wake contract required for a non-human external wait."""
+        if not waiting_kind.strip() or not wake_up_source.strip() or not wake_up_reference.strip():
+            raise ValueError("external waits require kind, wake-up source, and wake-up reference")
+
+        def update(task: TaskRecord) -> None:
+            if task.state is not ExecutionState.WAITING:
+                raise InvalidTransitionError("external wait metadata requires a waiting supervisor task")
+            task.waiting_kind = waiting_kind
+            task.wake_up_source = wake_up_source
+            task.wake_up_reference = wake_up_reference
+            task.resume_checkpoint_id = resume_checkpoint_id
+            task.resume_operation = resume_operation
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, update)
+        self._emit("external_wait_recorded", task, wake_up_source=wake_up_source)
+        return task
 
     def suspend_for_connector(
         self,
@@ -2617,7 +2646,11 @@ class ExecutionSupervisor:
         return task
 
     def _require_ambiguous_lease_review(
-        self, task: TaskRecord, *, now: datetime
+        self,
+        task: TaskRecord,
+        *,
+        now: datetime,
+        actions: Iterable[ActionRecord] = (),
     ) -> RecoveryInterventionRecord:
         """Persist lost-lease evidence before terminalizing uncertain work.
 
@@ -2625,6 +2658,19 @@ class ExecutionSupervisor:
         the task. A restart between those writes can re-use the same record and
         still terminalize the task without creating a second execution.
         """
+        action_list = list(actions)
+        ambiguous_action = next(
+            (
+                a for a in action_list
+                if a.request_state in {ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN}
+                and a.classification not in {
+                    SideEffectClassification.READ_ONLY,
+                    SideEffectClassification.IDEMPOTENT,
+                }
+                and not a.external_receipt
+            ),
+            None,
+        )
         existing = next(
             (
                 item
@@ -2634,16 +2680,39 @@ class ExecutionSupervisor:
             ),
             None,
         )
+        external_possible = (
+            ambiguous_action is not None
+            or task.irreversible_side_effect_started
+            or task.side_effect_classification not in {
+                SideEffectClassification.READ_ONLY,
+                SideEffectClassification.IDEMPOTENT,
+                SideEffectClassification.DEDUPLICATED,
+            }
+        )
         intervention = existing or RecoveryInterventionRecord(
             task_id=task.task_id,
             execution_id=task.task_id,
             attempt_id=task.attempt_id,
+            action_id=ambiguous_action.action_id if ambiguous_action else "",
+            checkpoint_id=task.checkpoint_id,
+            integration_stage=getattr(task, "integration_stage", ""),
+            target_resources=[ambiguous_action.tool_name] if ambiguous_action else [],
+            receipt_lookup_state="missing_receipt" if ambiguous_action else "",
+            reason_details=(
+                "consequential action started with unknown outcome"
+                if ambiguous_action
+                else "uncertain side-effect outcome after lease expiry"
+            ),
+            inbox_item_id=f"inbox_recovery_{task.task_id}_{task.attempt_id or '1'}",
+            side_effect_classification=str(
+                task.side_effect_classification.value
+                if hasattr(task.side_effect_classification, "value")
+                else task.side_effect_classification
+            ),
             reason=RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE,
             last_lease_owner=task.lease_owner,
             lease_expiry=task.lease_expires_at,
-            external_side_effects_possible=(
-                task.side_effect_classification is not SideEffectClassification.READ_ONLY
-            ),
+            external_side_effects_possible=external_possible,
             created_at=now,
         )
         if existing is None:
@@ -2652,6 +2721,12 @@ class ExecutionSupervisor:
         if task.recovery_intervention_id != intervention.intervention_id:
             def link(current: TaskRecord) -> None:
                 current.recovery_intervention_id = intervention.intervention_id
+                current.waiting_kind = "human_review"
+                current.waiting_reason = "ambiguous_lost_lease"
+                current.wake_up_source = "human_inbox"
+                current.wake_up_reference = intervention.inbox_item_id or intervention.intervention_id
+                current.resume_checkpoint_id = current.checkpoint_id
+                current.resume_operation = "resume_from_human_input"
                 current.updated_at = now
 
             task, _ = self.store.update_task(task.task_id, link)
@@ -2681,6 +2756,88 @@ class ExecutionSupervisor:
             external_side_effects_possible=intervention.external_side_effects_possible,
         )
         return intervention
+
+    def resolve_recovery_intervention(
+        self,
+        intervention_id: str,
+        *,
+        action: HumanRecoveryDecisionAction | str,
+        actor_id: str = "operator",
+        comment: str = "",
+        response_data: dict[str, Any] | None = None,
+    ) -> TaskRecord:
+        """Resolve a durable recovery intervention and resume the original execution lineage."""
+        intervention = self.store.get_recovery_intervention(intervention_id)
+        if intervention is None:
+            raise RetrySafetyError(f"recovery intervention not found: {intervention_id}")
+        task = self.store.get_task(intervention.task_id)
+        if (
+            task.state is not ExecutionState.RECOVERY_REVIEW_REQUIRED
+            and task.state is not ExecutionState.WAITING
+        ):
+            raise RetrySafetyError(
+                f"task is not awaiting recovery review (current state: {task.state.value})"
+            )
+
+        act = action.value if isinstance(action, HumanRecoveryDecisionAction) else str(action)
+        now = self.clock()
+
+        if act in {HumanRecoveryDecisionAction.ABORT_EXECUTION.value, "ABORT_EXECUTION"}:
+            task = self.transition(
+                task.task_id,
+                ExecutionState.CANCELLED,
+                reason=comment or f"aborted by human reviewer {actor_id}",
+                recovery_reason="human review resolution: abort",
+            )
+            self._emit("recovery_intervention_resolved", task, intervention_id=intervention_id, action=act)
+            return task
+
+        if act in {
+            HumanRecoveryDecisionAction.MARK_ACTION_ALREADY_COMPLETED.value,
+            "MARK_ACTION_ALREADY_COMPLETED",
+        }:
+            if intervention.action_id:
+                action_rec = self.store.get_action(intervention.action_id)
+                if action_rec is not None:
+                    action_rec.request_state = ActionRequestState.SUCCEEDED
+                    action_rec.external_receipt = comment or "confirmed_by_human_reviewer"
+                    action_rec.updated_at = now
+                    self.store.save_action(action_rec)
+
+        elif act in {HumanRecoveryDecisionAction.RETRY_ACTION.value, "RETRY_ACTION"}:
+            if intervention.action_id:
+                action_rec = self.store.get_action(intervention.action_id)
+                if action_rec is not None:
+                    action_rec.request_state = ActionRequestState.PREPARED
+                    action_rec.updated_at = now
+                    self.store.save_action(action_rec)
+
+        elif act in {
+            HumanRecoveryDecisionAction.RESUME_WITHOUT_REPLAY.value,
+            "RESUME_WITHOUT_REPLAY",
+        }:
+            pass
+        else:
+            raise RetrySafetyError(f"unsupported human recovery action: {act}")
+
+        def clear_wait(current: TaskRecord) -> None:
+            validate_transition(current.state, ExecutionState.QUEUED)
+            current.state = ExecutionState.QUEUED
+            current.waiting_kind = ""
+            current.waiting_reason = ""
+            current.wake_up_source = ""
+            current.wake_up_reference = ""
+            current.resume_checkpoint_id = ""
+            current.resume_operation = ""
+            current.lease_owner = ""
+            current.lease_token = ""
+            current.lease_expires_at = None
+            current.recovery_reason = f"human review resolved: {act}"
+            current.updated_at = now
+
+        task, _ = self.store.update_task(task.task_id, clear_wait)
+        self._emit("recovery_intervention_resolved", task, intervention_id=intervention_id, action=act)
+        return task
 
     def recover(self) -> RecoverySummary:
         """Recover expired work deterministically; safe to invoke repeatedly."""
@@ -2792,13 +2949,22 @@ class ExecutionSupervisor:
                 attempt.recovery_reason = "startup recovery"
                 self.store.save_attempt(attempt)
             self._emit("lease_expired", task, lease_owner=task.lease_owner)
+            actions = self.store.actions_for_task(task.task_id)
+            attempt_actions = (
+                [a for a in actions if a.attempt_id == task.attempt_id]
+                if task.attempt_id
+                else actions
+            )
             decision = self.retry_policy.automatic_recovery_decision(
                 task,
                 category=RetryCategory.LEASE_LOSS,
                 reason="active lease expired during execution",
+                actions=attempt_actions,
             )
             if decision is None:
-                intervention = self._require_ambiguous_lease_review(task, now=now)
+                intervention = self._require_ambiguous_lease_review(
+                    task, now=now, actions=attempt_actions
+                )
                 summary.intervention_required.append(task.task_id)
                 summary.intervention_records.append(intervention)
                 continue

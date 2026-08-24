@@ -374,6 +374,13 @@ class RecoveryInterventionReason(str, Enum):
     AMBIGUOUS_LOST_LEASE = "AMBIGUOUS_LOST_LEASE"
 
 
+class HumanRecoveryDecisionAction(str, Enum):
+    RESUME_WITHOUT_REPLAY = "RESUME_WITHOUT_REPLAY"
+    RETRY_ACTION = "RETRY_ACTION"
+    MARK_ACTION_ALREADY_COMPLETED = "MARK_ACTION_ALREADY_COMPLETED"
+    ABORT_EXECUTION = "ABORT_EXECUTION"
+
+
 class RecoveryInterventionRecord(StrictModel):
     """Durable evidence for recovery that is blocked pending human review."""
 
@@ -381,6 +388,14 @@ class RecoveryInterventionRecord(StrictModel):
     task_id: str
     execution_id: str
     attempt_id: str = ""
+    action_id: str = ""
+    checkpoint_id: str = ""
+    integration_stage: str = ""
+    target_resources: list[str] = Field(default_factory=list)
+    receipt_lookup_state: str = ""
+    reason_details: str = ""
+    inbox_item_id: str = ""
+    side_effect_classification: str = ""
     execution_state: Literal["interrupted"] = "interrupted"
     status: Literal["blocked"] = "blocked"
     reason: RecoveryInterventionReason

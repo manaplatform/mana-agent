@@ -26,6 +26,7 @@ from mana_agent.gateway import (
 )
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
 from mana_agent.gateway.lanes import LaneId
+from mana_agent.gateway.feature_integration import IntegrationAuthority
 from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
 from mana_agent.human_inbox.models import (
     InboxRequest,
@@ -2600,4 +2601,19 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
     assert wiring_child.runtime_reachability_verified is True
     assert wiring_child.reviewed_by_agent_id != ""
     assert wiring_child.status is TaskStatus.DONE
-
+    assert wiring_child.implementation_verified is True
+    assert wiring_child.integration_verified is True
+    assert wiring_child.runtime_reachability_verified is True
+    assert wiring_child.supervisor_execution_id
+    assert wiring_child.supervisor_state == "completed"
+    assert wiring_child.verification_status == "passed"
+    assert wiring_child.supervisor_verification_evidence["result_id"]
+    assert wiring_child.supervisor_verification_evidence["verification"]
+    authority = IntegrationAuthority.from_taskboard(taskboard, wiring_child.parent_task_id)
+    assert authority is not None
+    assert authority.is_complete()
+    root_lane = gw._lane_coordinator.inspect_task(result.payload["lane_task_id"])
+    assert root_lane.state.value == "completed"
+    assert result.payload["status"] == "completed"
+    assert result.payload["pending_required_work"] is False
+    assert result.payload.get("resume_required") is not True

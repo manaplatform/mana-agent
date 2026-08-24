@@ -127,6 +127,9 @@ from mana_agent.gateway.feature_integration import (
     FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
     FEATURE_INTEGRATION_REVIEW_REJECTED,
     FEATURE_INTEGRATION_STATE_INVALID,
+    CORE_EXECUTION_FAILED,
+    DETERMINISTIC_INTEGRATION_FAILURE,
+    EXTERNAL_DEPENDENCY,
 )
 from mana_agent.tools.context_retrieval import (
     MemoryTaskBinding,
@@ -5965,10 +5968,11 @@ class AgentChatGateway:
                             FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
                             FEATURE_INTEGRATION_REVIEW_REJECTED,
                             FEATURE_INTEGRATION_STATE_INVALID,
+                            CORE_EXECUTION_FAILED,
                         }:
-                            # This is resumable integration work, not a failed
-                            # core execution. Keep the lane and supervisor
-                            # non-terminal while blocking the wiring child.
+                            # Integration results carry their own typed outcome.
+                            # Local failures are terminal; only an explicit
+                            # wake-up contract may leave the lane waiting.
                             wiring_child_id = FeatureIntegrationCoordinator.block_wiring_child(
                                 self._lane_coordinator.taskboard,
                                 reservation.execution.taskboard_task_id,
@@ -5979,11 +5983,39 @@ class AgentChatGateway:
                             )
                             if wiring_child_id:
                                 result.payload["wiring_child_task_id"] = wiring_child_id
-                            self._lane_coordinator.mark_blocked(
-                                reservation.execution.task_id,
-                                reason=f"{INTERNAL_WORK_PENDING}: {result.error}; integration continuation is required",
+                            classification = str(
+                                result.payload.get("pending_classification")
+                                or DETERMINISTIC_INTEGRATION_FAILURE
                             )
-                            status = "waiting"
+                            if classification == EXTERNAL_DEPENDENCY:
+                                wake_source = str(result.payload.get("wake_up_source") or "").strip()
+                                wake_reference = str(result.payload.get("wake_up_reference") or "").strip()
+                                if not wake_source or not wake_reference:
+                                    raise LaneCoordinatorError(
+                                        "EXTERNAL_DEPENDENCY requires wake_up_source and wake_up_reference"
+                                    )
+                                self._lane_coordinator.transition(
+                                    reservation.execution.task_id,
+                                    LaneTaskState.WAITING,
+                                    reason=f"{classification}: {result.error}",
+                                )
+                                self._lane_coordinator.execution_supervisor.record_external_wait(
+                                    reservation.execution.task_id,
+                                    waiting_kind=str(result.payload.get("waiting_kind") or "external_dependency"),
+                                    wake_up_source=wake_source,
+                                    wake_up_reference=wake_reference,
+                                    resume_checkpoint_id=str(result.payload.get("resume_checkpoint_id") or ""),
+                                    resume_operation=str(result.payload.get("resume_operation") or "resume_feature_integration"),
+                                )
+                                status = "waiting"
+                            else:
+                                self._lane_coordinator.mark_blocked(
+                                    reservation.execution.task_id,
+                                    reason=f"{classification}: {result.error}",
+                                )
+                                status = "blocked"
+                                result.payload["pending_required_work"] = False
+                                result.payload["resume_required"] = False
                         else:
                             if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
                                 actual_tools = [
@@ -7497,17 +7529,56 @@ class AgentChatGateway:
                 LaneTaskState.WAITING,
                 reason="waiting for child-specific approval",
             )
-        elif result.error == INCOMPLETE_FEATURE_WIRING:
-            # Integration is deliberately resumable: core edits and the
-            # after-core checkpoint remain durable while the lane waits for a
-            # later integration continuation.  Do not route this structured
-            # outcome through the terminal FAILED path.
+        elif result.error in {
+            INCOMPLETE_FEATURE_WIRING,
+            FEATURE_INTEGRATION_DECISION_INVALID,
+            FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+            FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+            FEATURE_INTEGRATION_VERIFICATION_FAILED,
+            FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+            FEATURE_INTEGRATION_REVIEW_REJECTED,
+            FEATURE_INTEGRATION_STATE_INVALID,
+        }:
+            # A structured integration result is either an explicit external
+            # wait or a deterministic terminal outcome. Internal work is not a
+            # conversational continuation.
             from mana_agent.multi_agent.core.types import TaskStatus
 
-            self._lane_coordinator.mark_blocked(
-                reservation.execution.task_id,
-                reason=f"{INTERNAL_WORK_PENDING}: {INCOMPLETE_FEATURE_WIRING}; integration continuation is required",
+            classification = str(
+                result.payload.get("pending_classification")
+                or DETERMINISTIC_INTEGRATION_FAILURE
             )
+            if classification == EXTERNAL_DEPENDENCY:
+                wake_source = str(result.payload.get("wake_up_source") or "").strip()
+                wake_reference = str(result.payload.get("wake_up_reference") or "").strip()
+                if not wake_source or not wake_reference:
+                    raise LaneCoordinatorError(
+                        "EXTERNAL_DEPENDENCY requires wake_up_source and wake_up_reference"
+                    )
+                self._lane_coordinator.transition(
+                    reservation.execution.task_id,
+                    LaneTaskState.WAITING,
+                    reason=f"{classification}: {result.error}",
+                )
+                self._lane_coordinator.execution_supervisor.record_external_wait(
+                    reservation.execution.task_id,
+                    waiting_kind=str(result.payload.get("waiting_kind") or "external_dependency"),
+                    wake_up_source=wake_source,
+                    wake_up_reference=wake_reference,
+                    resume_checkpoint_id=str(result.payload.get("resume_checkpoint_id") or ""),
+                    resume_operation=str(result.payload.get("resume_operation") or "resume_feature_integration"),
+                )
+                status = "waiting"
+            else:
+                self._lane_coordinator.mark_blocked(
+                    reservation.execution.task_id,
+                    reason=f"{classification}: {result.error}",
+                )
+                status = "blocked"
+                result.payload.update({
+                    "pending_required_work": False,
+                    "resume_required": False,
+                })
             if wiring_child_task_id:
                 wiring_child = self._lane_coordinator.taskboard.get_task(wiring_child_task_id)
                 if wiring_child.status is not TaskStatus.BLOCKED:
@@ -7516,12 +7587,7 @@ class AgentChatGateway:
                         TaskStatus.BLOCKED,
                         reason=INCOMPLETE_FEATURE_WIRING,
                     )
-            result.payload.update({
-                "pending_required_work": True,
-                "resume_required": True,
-                "core_implementation_preserved": True,
-            })
-            status = "waiting"
+            result.payload.setdefault("core_implementation_preserved", True)
         elif (
             result.error == "route_unavailable" or decision.route == "capability_error"
         ):

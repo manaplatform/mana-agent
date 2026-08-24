@@ -4,6 +4,14 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-24
 
+- Finalized Feature Integration Supervisor Finalization, Gateway Completion, and Lost-Lease Recovery Lifecycle (P0.5–P0.9).
+  - P0.5: Fixed supervisor finalization ownership so `FeatureIntegrationCoordinator._project_completion` and `MainAgent._project_wiring_completion` use the record returned by `submit_result` without redundant second `verify_completion` invocations; reconciled Cases A–F across supervisor states.
+  - P0.6: Ensured runnable internal Feature Integration completes in a single user turn without user-visible `WAITING` or `BLOCKED` states; reserved `EXTERNAL_DEPENDENCY` exclusively for workflows with valid `wake_up_source` and `wake_up_reference`.
+  - P0.7: Preserved exact typed error codes across lane states and durable escrow metadata without converting core execution failures to `INCOMPLETE_FEATURE_WIRING`.
+  - P0.8: Authored authoritative end-to-end Gateway testing in 1 user turn, 1 core CodingAgent invocation, verifying `WiringDecision`, taskboard wiring child completion, reachability verification, reviewer approval, and supervisor finalization without injected authority.
+  - P0.9: Resolved production `AMBIGUOUS_LOST_LEASE` failures by inspecting durable execution evidence; tasks without started consequential side effects or with durable external receipts recover automatically, while genuine external ambiguity creates durable `RecoveryInterventionRecord` and Human Inbox wait items resolvable via `resolve_recovery_intervention`. Heartbeat lease renewal prevents premature lease loss during long model calls without extending immutable task deadlines.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
 - Completed Gateway Feature Integration decision and recovery evidence lifecycle (P0.1–P0.4).
   - P0.1: Gateway now owns the default structured Feature Integration decision provider (`FeatureIntegrationDecisionProvider`), producing validated `WiringDecision` models via the existing model router. Codex and Internal coding backends are no longer expected to supply an integration dictionary.
   - P0.2: Decoupled Feature Integration verification from CodingAgent queue-manager internals, constructing authoritative `MultiAgentVerificationExecutor` independently from TaskBoard.

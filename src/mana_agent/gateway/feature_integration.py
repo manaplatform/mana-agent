@@ -34,6 +34,7 @@ FEATURE_INTEGRATION_VERIFICATION_FAILED = "FEATURE_INTEGRATION_VERIFICATION_FAIL
 FEATURE_INTEGRATION_REACHABILITY_UNPROVEN = "FEATURE_INTEGRATION_REACHABILITY_UNPROVEN"
 FEATURE_INTEGRATION_REVIEW_REJECTED = "FEATURE_INTEGRATION_REVIEW_REJECTED"
 FEATURE_INTEGRATION_STATE_INVALID = "FEATURE_INTEGRATION_STATE_INVALID"
+CORE_EXECUTION_FAILED = "CORE_EXECUTION_FAILED"
 INTERNAL_WORK_PENDING = "INTERNAL_WORK_PENDING"
 EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
 DETERMINISTIC_INTEGRATION_FAILURE = "DETERMINISTIC_INTEGRATION_FAILURE"
@@ -417,6 +418,22 @@ class FeatureIntegrationResult:
         return self.status == "completed" and not self.error_code
 
 
+def integration_pending_classification(error_code: str, metadata: dict[str, Any] | None = None) -> str:
+    """Classify an integration outcome without turning local failures into waits.
+
+    External waiting is only valid when the result carries an explicit wake-up
+    contract.  Feature-integration failures otherwise describe work that was
+    attempted and must be surfaced as a deterministic outcome.
+    """
+    details = metadata or {}
+    if error_code == FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE:
+        if str(details.get("wake_up_source") or "").strip() and str(
+            details.get("wake_up_reference") or ""
+        ).strip():
+            return EXTERNAL_DEPENDENCY
+    return DETERMINISTIC_INTEGRATION_FAILURE
+
+
 @dataclass(frozen=True, slots=True)
 class IntegrationAuthority:
     """Durable execution evidence supplied by the runtime, not the model.
@@ -592,7 +609,22 @@ class FeatureIntegrationCoordinator:
     ) -> FeatureIntegrationResult:
         result = dict(core_result or {})
         if str(result.get("status") or result.get("run_status") or "").strip().lower() not in {"completed", "success"}:
-            return FeatureIntegrationResult(result=result, status="failed")
+            error_code = str(result.get("error_code") or CORE_EXECUTION_FAILED)
+            result.update({
+                "status": "failed",
+                "error_code": error_code,
+                "pending_classification": DETERMINISTIC_INTEGRATION_FAILURE,
+                "resume_required": False,
+                "pending_required_work": False,
+                "goal_satisfied": False,
+            })
+            return FeatureIntegrationResult(
+                result=result,
+                status="failed",
+                error_code=error_code,
+                resume_required=False,
+                pending_classification=DETERMINISTIC_INTEGRATION_FAILURE,
+            )
         changed_files = [str(item) for item in result.get("changed_files") or [] if str(item).strip()]
         if not runtime_capability_change:
             return FeatureIntegrationResult(result=result, status="completed")
@@ -684,16 +716,17 @@ class FeatureIntegrationCoordinator:
                 "status": "blocked",
                 "error_code": FEATURE_INTEGRATION_DECISION_INVALID,
                 "goal_satisfied": False,
-                "pending_required_work": True,
-                "resume_required": True,
+                "pending_required_work": False,
+                "resume_required": False,
+                "pending_classification": DETERMINISTIC_INTEGRATION_FAILURE,
                 "core_implementation_preserved": True,
             })
             return FeatureIntegrationResult(
                 result=result,
                 status="blocked",
                 error_code=FEATURE_INTEGRATION_DECISION_INVALID,
-                resume_required=True,
-                pending_classification=INTERNAL_WORK_PENDING,
+                resume_required=False,
+                pending_classification=DETERMINISTIC_INTEGRATION_FAILURE,
             )
 
         if not self._valid_model_reachability(validated_decision):
@@ -710,16 +743,17 @@ class FeatureIntegrationCoordinator:
                 "status": "blocked",
                 "error_code": INCOMPLETE_FEATURE_WIRING,
                 "goal_satisfied": False,
-                "pending_required_work": True,
-                "resume_required": True,
+                "pending_required_work": False,
+                "resume_required": False,
+                "pending_classification": DETERMINISTIC_INTEGRATION_FAILURE,
                 "core_implementation_preserved": True,
             })
             return FeatureIntegrationResult(
                 result=result,
                 status="blocked",
                 error_code=INCOMPLETE_FEATURE_WIRING,
-                resume_required=True,
-                pending_classification=INTERNAL_WORK_PENDING,
+                resume_required=False,
+                pending_classification=DETERMINISTIC_INTEGRATION_FAILURE,
             )
 
         # 2. Resolve verification plan (P0.3)
@@ -816,16 +850,17 @@ class FeatureIntegrationCoordinator:
                 "status": "blocked",
                 "error_code": error_code,
                 "goal_satisfied": False,
-                "pending_required_work": True,
-                "resume_required": True,
+                "pending_required_work": False,
+                "resume_required": False,
+                "pending_classification": integration_pending_classification(error_code),
                 "core_implementation_preserved": True,
             })
             return FeatureIntegrationResult(
                 result=result,
                 status="blocked",
                 error_code=error_code,
-                resume_required=True,
-                pending_classification=INTERNAL_WORK_PENDING,
+                resume_required=False,
+                pending_classification=integration_pending_classification(error_code),
             )
 
         result["integration_authority"] = {
@@ -1194,7 +1229,8 @@ class FeatureIntegrationCoordinator:
         from mana_agent.execution_supervisor import SideEffectClassification
 
         supervisor = execution_supervisor
-        if supervisor.store.get_task_or_none(child.task_id) is None:
+        existing = supervisor.store.get_task_or_none(child.task_id)
+        if existing is None:
             supervisor.create_task(
                 task_id=child.task_id,
                 assigned_agent=child.owner_agent_id or "coding",
@@ -1212,20 +1248,46 @@ class FeatureIntegrationCoordinator:
             supervisor.queue(child.task_id)
             leased, token = supervisor.acquire_lease(child.task_id, owner="coordinator", worker=child.owner_agent_id or "coding")
             supervisor.start(child.task_id, attempt_id=leased.attempt_id, lease_token=token)
-            supervisor.submit_result(
+            completed = supervisor.submit_result(
                 child.task_id,
                 attempt_id=leased.attempt_id,
                 lease_token=token,
                 payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome},
             )
-        completed = supervisor.verify_completion(child.task_id)
+        else:
+            state = str(getattr(existing.state, "value", existing.state))
+            if state == "completed":
+                # submit_result owns normal completion verification. Reuse the
+                # durable record during re-entry after a projection crash.
+                completed = existing
+            elif state == "completed_pending_verification":
+                # Recovery may find the escrowed result between publication and
+                # verification. This is the sole recovery verification call.
+                completed = supervisor.verify_completion(child.task_id)
+            elif state == "pending_budget_decision":
+                raise RuntimeError(
+                    f"supervisor task {child.task_id} is awaiting budget finalization"
+                )
+            elif state in {"created", "queued", "leased", "running", "checkpointing", "waiting"}:
+                raise RuntimeError(
+                    f"supervisor task {child.task_id} is still active at SUPERVISOR_FINALIZE ({state})"
+                )
+            else:
+                raise RuntimeError(
+                    f"supervisor task {child.task_id} ended in terminal failure state ({state})"
+                )
         manifest = supervisor.store.artifact_manifest(child.task_id) or {}
+        verification_manifest = manifest.get("verification")
+        if not isinstance(verification_manifest, dict) or not verification_manifest:
+            raise RuntimeError(
+                f"supervisor task {child.task_id} has no durable completion verification manifest"
+            )
         taskboard.project_supervisor_completion(
             child.task_id,
             supervisor_task=completed,
             verification_evidence={
                 "result_id": completed.result_id,
-                "verification": manifest.get("verification") or verification_evidence or {},
+                "verification": verification_manifest,
                 "artefacts": manifest.get("artefacts", []),
             },
         )
@@ -1280,9 +1342,11 @@ __all__ = [
     "FEATURE_INTEGRATION_REACHABILITY_UNPROVEN",
     "FEATURE_INTEGRATION_REVIEW_REJECTED",
     "FEATURE_INTEGRATION_STATE_INVALID",
+    "CORE_EXECUTION_FAILED",
     "INTERNAL_WORK_PENDING",
     "EXTERNAL_DEPENDENCY",
     "DETERMINISTIC_INTEGRATION_FAILURE",
+    "integration_pending_classification",
     "HUMAN_REVIEW_REQUIRED",
     "INTEGRATION_STAGES",
     "WiringDecision",

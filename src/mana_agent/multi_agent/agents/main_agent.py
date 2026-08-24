@@ -904,13 +904,21 @@ class MainAgent:
         )
         supervisor.queue(child_task_id)
         leased, token = supervisor.acquire_lease(child_task_id, owner="main", worker=child.owner_agent_id or "coding")
-        supervisor.start(child_task_id, attempt_id=leased.attempt_id, lease_token=token)
-        supervisor.submit_result(child_task_id, attempt_id=leased.attempt_id, lease_token=token, payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome})
-        completed = supervisor.verify_completion(child_task_id)
+        completed = supervisor.submit_result(
+            child_task_id,
+            attempt_id=leased.attempt_id,
+            lease_token=token,
+            payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome},
+        )
         manifest = supervisor.store.artifact_manifest(child_task_id) or {}
         self.taskboard.project_supervisor_completion(
-            child_task_id, supervisor_task=completed,
-            verification_evidence={"result_id": completed.result_id, "verification": manifest.get("verification"), "artefacts": manifest.get("artefacts", [])},
+            child_task_id,
+            supervisor_task=completed,
+            verification_evidence={
+                "result_id": completed.result_id,
+                "verification": manifest.get("verification"),
+                "artefacts": manifest.get("artefacts", []),
+            },
         )
 
     def _record_wiring_reachability(

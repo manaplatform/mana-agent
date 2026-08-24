@@ -23,6 +23,7 @@ from mana_agent.execution_supervisor.errors import (
     CompletionVerificationError,
 )
 from mana_agent.execution_supervisor.models import (
+    ActionRecord,
     ActionRequestState,
     BudgetOverrunAction,
     BudgetOverrunFinalizationDecision,
@@ -31,8 +32,11 @@ from mana_agent.execution_supervisor.models import (
     CompletionContractType,
     ExecutionState,
     EscrowResult,
+    HumanRecoveryDecisionAction,
     RecoveryAction,
     RecoveryDecision,
+    RecoveryInterventionReason,
+    RecoveryInterventionRecord,
     RetryCategory,
     SideEffectClassification,
     TaskRecord,
@@ -345,9 +349,19 @@ def test_ambiguous_lost_lease_creates_durable_review_intervention_without_retry(
     task = create(
         supervisor,
         tmp_path,
-        side_effect_classification=SideEffectClassification.UNKNOWN,
+        side_effect_classification=SideEffectClassification.NON_IDEMPOTENT,
     )
     attempt_id, _token = running(supervisor, task)
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="external_api_call",
+        action_fingerprint="fp-api",
+        classification=SideEffectClassification.NON_IDEMPOTENT,
+        request_state=ActionRequestState.STARTED,
+    )
+    supervisor.store.save_action(action)
     clock.advance(11)
     first = supervisor.recover()
     blocked = supervisor.store.get_task(task.task_id)
@@ -378,6 +392,168 @@ def test_ambiguous_lost_lease_creates_durable_review_intervention_without_retry(
     assert supervisor.store.recovery_interventions_for_task(task.task_id) == [intervention]
     assert task.task_id not in second.retry_scheduled
     assert second.intervention_records == [intervention]
+
+
+def test_p09_test_a_lost_lease_before_side_effects_auto_recovers(runtime):
+    """P0.9 Test A: Lost lease during model/reasoning/read-only work with no started side effects automatically recovers."""
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.UNKNOWN,
+    )
+    attempt_id, _token = running(supervisor, task)
+    clock.advance(11)
+    # Recover should automatically schedule retry, NOT produce AMBIGUOUS_LOST_LEASE
+    summary = supervisor.recover()
+    assert task.task_id in summary.retry_scheduled
+    assert task.task_id not in summary.intervention_required
+    recovered_task = supervisor.store.get_task(task.task_id)
+    assert recovered_task.state in {ExecutionState.RETRY_SCHEDULED, ExecutionState.QUEUED}
+    assert supervisor.store.recovery_interventions_for_task(task.task_id) == []
+
+
+def test_p09_test_f_durable_external_receipt_prevents_replay(runtime):
+    """P0.9 Test F: Consequential action with durable success receipt is reused, not replayed or blocked."""
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.NON_IDEMPOTENT,
+    )
+    attempt_id, token = running(supervisor, task)
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="cloud_deploy",
+        action_fingerprint="fp-deploy",
+        classification=SideEffectClassification.NON_IDEMPOTENT,
+        request_state=ActionRequestState.SUCCEEDED,
+        external_receipt="deploy-receipt-12345",
+    )
+    supervisor.store.save_action(action)
+    clock.advance(11)
+    summary = supervisor.recover()
+    # With durable receipt, automatic retry/resume is allowed without human review intervention
+    assert task.task_id in summary.retry_scheduled
+    assert task.task_id not in summary.intervention_required
+    assert supervisor.store.recovery_interventions_for_task(task.task_id) == []
+
+
+def test_p09_test_g_genuine_external_ambiguity_creates_human_inbox_intervention(runtime):
+    """P0.9 Test G: Started consequential external action with no receipt creates durable intervention and human wait."""
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.NON_IDEMPOTENT,
+    )
+    attempt_id, token = running(supervisor, task)
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="send_payment",
+        action_fingerprint="fp-pay",
+        classification=SideEffectClassification.NON_IDEMPOTENT,
+        request_state=ActionRequestState.STARTED,
+    )
+    supervisor.store.save_action(action)
+    clock.advance(11)
+    summary = supervisor.recover()
+    assert task.task_id in summary.intervention_required
+    blocked = supervisor.store.get_task(task.task_id)
+    assert blocked.state == ExecutionState.RECOVERY_REVIEW_REQUIRED
+    assert blocked.waiting_kind == "human_review"
+    assert blocked.waiting_reason == "ambiguous_lost_lease"
+    assert blocked.wake_up_source == "human_inbox"
+    assert blocked.wake_up_reference != ""
+
+
+def test_p09_test_h_human_decision_resumes_lineage(runtime):
+    """P0.9 Test H: Human decision resolves recovery intervention and resumes original task lineage."""
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.NON_IDEMPOTENT,
+    )
+    attempt_id, token = running(supervisor, task)
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="send_payment",
+        action_fingerprint="fp-pay",
+        classification=SideEffectClassification.NON_IDEMPOTENT,
+        request_state=ActionRequestState.STARTED,
+    )
+    supervisor.store.save_action(action)
+    clock.advance(11)
+    supervisor.recover()
+
+    interventions = supervisor.store.recovery_interventions_for_task(task.task_id)
+    assert len(interventions) == 1
+    intervention_id = interventions[0].intervention_id
+
+    # Resolve via MARK_ACTION_ALREADY_COMPLETED
+    resolved_task = supervisor.resolve_recovery_intervention(
+        intervention_id,
+        action=HumanRecoveryDecisionAction.MARK_ACTION_ALREADY_COMPLETED,
+        actor_id="admin",
+        comment="payment confirmed in banking portal",
+    )
+    assert resolved_task.task_id == task.task_id
+    assert resolved_task.state == ExecutionState.QUEUED
+    updated_action = supervisor.store.get_action(action.action_id)
+    assert updated_action.request_state == ActionRequestState.SUCCEEDED
+    assert updated_action.external_receipt == "payment confirmed in banking portal"
+
+
+def test_p09_test_i_heartbeat_prevents_false_lease_expiry(runtime):
+    """P0.9 Test I: Background heartbeat renewal keeps attempt active without modifying deadline_at."""
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.IDEMPOTENT,
+    )
+    task, token = supervisor.acquire_lease(task.task_id, owner="worker-live")
+    task = supervisor.start(task.task_id, attempt_id=task.attempt_id, lease_token=token)
+    initial_deadline = task.deadline_at
+    initial_expiry = task.lease_expires_at
+
+    # Run renewal context for several intervals
+    with supervisor.lease_renewal(task.task_id, attempt_id=task.attempt_id, lease_token=token):
+        clock.advance(supervisor.config.heartbeat_seconds)
+        time.sleep(0.05)
+        current = supervisor.store.get_task(task.task_id)
+        assert current.state == ExecutionState.RUNNING
+
+    final_task = supervisor.store.get_task(task.task_id)
+    assert final_task.deadline_at == initial_deadline  # deadline never extended
+    assert final_task.state == ExecutionState.RUNNING
+
+
+def test_p09_test_j_lease_renewal_ownership_failure(runtime):
+    """P0.9 Test J: Stale lease ownership during renewal surfaces failure before result publication."""
+    supervisor, clock, tmp_path = runtime
+    task = create(
+        supervisor,
+        tmp_path,
+        side_effect_classification=SideEffectClassification.IDEMPOTENT,
+    )
+    task, token = supervisor.acquire_lease(task.task_id, owner="worker-1")
+    task = supervisor.start(task.task_id, attempt_id=task.attempt_id, lease_token=token)
+
+    # Invalidate lease token in store to simulate stolen lease
+    supervisor.store.update_task(task.task_id, lambda t: setattr(t, "lease_token", "rival-token"))
+
+    with pytest.raises((StaleLeaseError, LeaseConflictError)):
+        with supervisor.lease_renewal(task.task_id, attempt_id=task.attempt_id, lease_token=token):
+            clock.advance(supervisor.config.heartbeat_seconds)
+            time.sleep(0.05)
 
 
 def test_checkpoint_and_durable_result_escrow_survive_restart(runtime):

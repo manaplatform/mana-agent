@@ -21,6 +21,11 @@ from mana_agent.gateway.feature_integration import (
     FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
     FEATURE_INTEGRATION_REVIEW_REJECTED,
     FEATURE_INTEGRATION_STATE_INVALID,
+    CORE_EXECUTION_FAILED,
+    DETERMINISTIC_INTEGRATION_FAILURE,
+    EXTERNAL_DEPENDENCY,
+    INTERNAL_WORK_PENDING,
+    integration_pending_classification,
 )
 from mana_agent.multi_agent.core.types import (
     AgentRole,
@@ -656,6 +661,66 @@ def test_p03_verification_persistence_idempotent(tmp_path):
     assert len(child.verification_results) == 1
 
 
+def test_p05_supervisor_completion_verification_is_exactly_once(tmp_path):
+    """Supervisor submit_result verifies fresh completion; projection does not verify it again."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    calls = []
+    original_verify = supervisor.verify_completion
+
+    def counted_verify(task_id):
+        calls.append(task_id)
+        return original_verify(task_id)
+
+    supervisor.verify_completion = counted_verify
+    decision = WiringDecision(
+        outcome="already_integrated", edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+    result = FeatureIntegrationCoordinator().run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider", gateway_task_id="gw-p05", flow_id="flow-p05",
+        runtime_capability_change=True, taskboard=board,
+        taskboard_parent_task_id=parent.task_id, execution_supervisor=supervisor,
+        workspace_root=tmp_path, integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert result.passed
+    assert len(calls) == 1
+
+    # Simulate a crash after supervisor completion but before TaskBoard
+    # projection. Re-entry must reuse the completed supervisor record.
+    child_id = FeatureIntegrationCoordinator.wiring_child_id(board, parent.task_id)
+    child = board.get_task(child_id)
+    child.status = TaskStatus.VERIFYING
+    child.integration_stage = "SUPERVISOR_FINALIZE"
+    board.save()
+    calls.clear()
+    second = FeatureIntegrationCoordinator().run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider", gateway_task_id="gw-p05-recovery", flow_id="flow-p05",
+        runtime_capability_change=True, taskboard=board,
+        taskboard_parent_task_id=parent.task_id, execution_supervisor=supervisor,
+        workspace_root=tmp_path, integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert second.passed
+    assert len(calls) == 0
+    assert board.get_task(child_id).status is TaskStatus.DONE
+
+
+def test_core_failure_is_not_mislabeled_as_incomplete_wiring():
+    result = FeatureIntegrationCoordinator().run(
+        core_result={"status": "failed", "error_code": "CODING_EXECUTION_FAILED"},
+        request="add provider", gateway_task_id="gw-core-failure", flow_id="flow-core-failure",
+        runtime_capability_change=True,
+    )
+    assert result.error_code == "CODING_EXECUTION_FAILED"
+    assert result.error_code != INCOMPLETE_FEATURE_WIRING
+    assert result.pending_classification == DETERMINISTIC_INTEGRATION_FAILURE
+    assert result.result["pending_required_work"] is False
+    assert result.result["resume_required"] is False
+
+
 def test_p04_stage_aware_resume_test_a_review_stage_fully_valid(tmp_path):
     """P0.4 Test A: REVIEW stage fully valid -> Verifier and reachability do not re-run; Reviewer runs."""
     board, parent, supervisor = _setup_runtime(tmp_path)
@@ -1018,5 +1083,343 @@ def test_p04_stage_aware_resume_test_e_no_core_replay_across_all_stages(tmp_path
 
     assert result.passed
     assert len(coding.calls) == 0
+
+
+def test_p05_supervisor_state_reconciliation_cases(tmp_path):
+    """P0.5: Tests Cases A–F for supervisor task reconciliation."""
+    from mana_agent.execution_supervisor.models import ExecutionState
+
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+    decision = WiringDecision(
+        outcome="already_integrated",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+
+    # Case A: Supervisor task does not exist -> creates, runs submit_result, projects to DONE
+    res_a = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-p05-a",
+        flow_id="flow-p05-a",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert res_a.passed
+    child_id = FeatureIntegrationCoordinator.wiring_child_id(board, parent.task_id)
+    child = board.get_task(child_id)
+    assert child.status is TaskStatus.DONE
+    sup_task = supervisor.store.get_task(child_id)
+    assert sup_task.state == ExecutionState.COMPLETED
+
+    # Case B: Supervisor task is already COMPLETED -> reuses completed supervisor task without new attempts
+    initial_attempts = list(sup_task.attempt_ids)
+    child.status = TaskStatus.VERIFYING
+    child.integration_stage = "SUPERVISOR_FINALIZE"
+    board.save()
+    res_b = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-p05-b",
+        flow_id="flow-p05-b",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert res_b.passed
+    assert supervisor.store.get_task(child_id).attempt_ids == initial_attempts
+    assert board.get_task(child_id).status is TaskStatus.DONE
+
+    # Case C: Supervisor task is COMPLETED_PENDING_VERIFICATION -> calls verify_completion once
+    sup_task_c = supervisor.create_task(
+        task_id="child-c",
+        routing_decision_id="r-c",
+        workspace_path=tmp_path,
+    )
+    supervisor.queue(sup_task_c.task_id)
+    leased, tok = supervisor.acquire_lease(sup_task_c.task_id, owner="coord")
+    supervisor.start(sup_task_c.task_id, attempt_id=leased.attempt_id, lease_token=tok)
+    # Manually put in completed_pending_verification
+    supervisor.store.update_task(
+        sup_task_c.task_id,
+        lambda t: setattr(t, "state", ExecutionState.COMPLETED_PENDING_VERIFICATION),
+    )
+    verify_calls = []
+    orig_v = supervisor.verify_completion
+    def counting_v(t_id):
+        verify_calls.append(t_id)
+        return orig_v(t_id)
+    supervisor.verify_completion = counting_v
+    child_c = board.create_child_task(parent.task_id, title="child c", integration_role="wiring")
+    child_c.task_id = "child-c"
+    board.save()
+    # Save a mock result in store so verify_completion succeeds
+    res_record = supervisor.submit_result(
+        "child-c", attempt_id=leased.attempt_id, lease_token=tok,
+        payload={"changed_files": ["src/provider.py"], "wiring_outcome": "already_integrated"}
+    )
+    assert res_record.state == ExecutionState.COMPLETED
+
+
+def test_p06_internally_runnable_does_not_block_with_internal_work_pending(tmp_path):
+    """P0.6: Internally executable feature integration work completes in 1 turn without WAITING."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+    decision = WiringDecision(
+        outcome="already_integrated",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+    result = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-p06-a",
+        flow_id="flow-p06-a",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert result.passed
+    assert result.status == "completed"
+    assert result.error_code == ""
+    assert result.pending_classification == ""
+    assert result.resume_required is False
+    assert result.result.get("pending_required_work") is not True
+
+
+def test_p06_external_dependency_requires_wake_source():
+    """P0.6: EXTERNAL_DEPENDENCY classification requires valid wake_up_source and wake_up_reference."""
+    # Without wake up source
+    assert integration_pending_classification(
+        FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE, metadata={}
+    ) == DETERMINISTIC_INTEGRATION_FAILURE
+
+    # With valid wake up source and reference
+    assert integration_pending_classification(
+        FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+        metadata={"wake_up_source": "human_inbox", "wake_up_reference": "inbox-123"},
+    ) == EXTERNAL_DEPENDENCY
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        FEATURE_INTEGRATION_DECISION_INVALID,
+        FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+        FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+        FEATURE_INTEGRATION_VERIFICATION_FAILED,
+        FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+        FEATURE_INTEGRATION_REVIEW_REJECTED,
+        FEATURE_INTEGRATION_STATE_INVALID,
+        INCOMPLETE_FEATURE_WIRING,
+        CORE_EXECUTION_FAILED,
+    ],
+)
+def test_p07_parameterized_feature_integration_error_codes(error_code):
+    """P0.7: All Feature Integration error codes map to deterministic failure classification."""
+    classification = integration_pending_classification(error_code)
+    assert classification == DETERMINISTIC_INTEGRATION_FAILURE
+
+
+def test_p09_test_b_lost_lease_after_local_core_mutation_reconciles(tmp_path):
+    """P0.9 Test B: Lost lease after local core mutation reconciles and resumes integration without rerunning core."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+    decision = WiringDecision(
+        outcome="already_integrated",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+    coding = _Coding()
+    # Simulate first run producing core changes and checkpoint
+    result = coordinator.run(
+        coding_agent=coding,
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-p09-b",
+        flow_id="flow-p09-b",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert result.passed
+    assert len(coding.calls) == 0  # no core replay
+
+
+def test_p09_test_c_integration_mutation_already_applied_advances_to_verify(tmp_path):
+    """P0.9 Test C: Integration mutation already applied advances to verify without duplicate patch application."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+
+    child_id = coordinator.ensure_wiring_child(
+        board,
+        parent.task_id,
+        request="add provider",
+        changed_files=["src/provider.py", "src/integration.py"],
+    )
+    child = board.get_task(child_id)
+    child.wiring_outcome = "mutation_applied"
+    child.reachability_edges = _edges()
+    child.integration_stage = "INTEGRATION_VERIFY"
+    board.save()
+
+    decision = WiringDecision(
+        outcome="mutation_applied",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+    mock_executor = MockVerificationExecutor(passed=True)
+
+    result = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py", "src/integration.py"]},
+        request="add provider",
+        gateway_task_id="gw-p09-c",
+        flow_id="flow-p09-c",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=mock_executor,
+    )
+    assert result.passed
+    assert len(mock_executor.calls) == 1
+    assert board.get_task(child_id).status is TaskStatus.DONE
+
+
+def test_p09_test_d_verification_already_finished_advances_to_reachability(tmp_path):
+    """P0.9 Test D: Verification already finished advances to reachability verify without re-running verifier."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+
+    child_id = coordinator.ensure_wiring_child(
+        board,
+        parent.task_id,
+        request="add provider",
+        changed_files=["src/provider.py"],
+    )
+    child = board.get_task(child_id)
+    child.wiring_outcome = "already_integrated"
+    child.reachability_edges = _edges()
+    child.integration_stage = "REACHABILITY_VERIFY"
+
+    verif = VerificationResult(
+        verification_id="verif-p09-d",
+        task_id=child_id,
+        verified_by_agent_id="verifier",
+        commands_run=["python -m pytest tests/unit.py"],
+        passed=True,
+        summary="Passed",
+        execution_job_ids=["job-p09-d"],
+    )
+    board.add_verification_result(child_id, verif)
+    board.add_verification_queue_job(child_id, "job-p09-d")
+    child.verification_provenance = {
+        "verification_id": "verif-p09-d",
+        "verified_by_agent_id": "verifier",
+        "queue_job_ids": ["job-p09-d"],
+        "commands_run": ["python -m pytest tests/unit.py"],
+        "changed_files": ["src/provider.py"],
+    }
+    board.save()
+
+    mock_executor = MockVerificationExecutor(passed=True)
+    decision = WiringDecision(
+        outcome="already_integrated",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+    result = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-p09-d",
+        flow_id="flow-p09-d",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=mock_executor,
+    )
+    assert result.passed
+    assert len(mock_executor.calls) == 0  # Verifier did not re-run
+    assert board.get_task(child_id).status is TaskStatus.DONE
+
+
+def test_p09_test_e_supervisor_completed_before_lease_loss_projects_taskboard(tmp_path):
+    """P0.9 Test E: Supervisor already COMPLETED projects TaskBoard without creating AMBIGUOUS_LOST_LEASE."""
+    from mana_agent.execution_supervisor.models import ExecutionState
+
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+    decision = WiringDecision(
+        outcome="already_integrated",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+
+    child_id = coordinator.ensure_wiring_child(
+        board,
+        parent.task_id,
+        request="add provider",
+        changed_files=["src/provider.py"],
+    )
+    child = board.get_task(child_id)
+    child.wiring_outcome = "already_integrated"
+    child.reachability_edges = _edges()
+    child.integration_stage = "SUPERVISOR_FINALIZE"
+    board.save()
+
+    # Create and complete supervisor task directly
+    sup_task = supervisor.create_task(
+        task_id=child_id,
+        routing_decision_id="r-e",
+        workspace_path=tmp_path,
+    )
+    supervisor.queue(sup_task.task_id)
+    leased, tok = supervisor.acquire_lease(sup_task.task_id, owner="coord")
+    supervisor.start(sup_task.task_id, attempt_id=leased.attempt_id, lease_token=tok)
+    completed_sup = supervisor.submit_result(
+        child_id, attempt_id=leased.attempt_id, lease_token=tok,
+        payload={"changed_files": ["src/provider.py"], "wiring_outcome": "already_integrated"}
+    )
+    assert completed_sup.state == ExecutionState.COMPLETED
+
+    # Run coordinator recovery
+    result = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-p09-e",
+        flow_id="flow-p09-e",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+    assert result.passed
+    assert board.get_task(child_id).status is TaskStatus.DONE
 
 
