@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-24
 
+- Fixed test regressions and error classification in gateway coding exceptions and interruption recovery tests:
+  - Correctly mapped `error_category` and `interruption_reason` in `turn_engine.py` when caught exceptions contain structured `error_code` fields (such as `CodexTimeoutError` with `CODING_PROVIDER_TIMEOUT`).
+  - Updated `test_codex_interruption_recovery.py` to provide valid connected 3-edge reachability paths for completed checkpoint verification in `test_c`, valid `heartbeat_seconds` for short lease supervisor fixtures in `test_e` through `test_h`, and `LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY` expectation for reconciled local workspace mutations in `test_f`.
+  - User verification required: `python -m pytest tests/gateway/test_codex_interruption_recovery.py -v`.
+
 - Fixed suite regressions across execution supervisor, durable human inbox, lane coordinator, gateway feature integration, ask agent, entry routing, and multi-agent taskboard:
   - Preserved `expires_at`, `escalation_policy`, `reminder_policy`, `reversibility`, and `other_work_continues` in `InboxRequest` while providing safe automatic default generation for omitted idempotency keys, deduplication keys, and expiry timestamps.
   - Guarded `lease_renewal` background worker against attempting heartbeats or logging failures after context block exit or terminal state transition, while ensuring active stolen leases are captured immediately.
