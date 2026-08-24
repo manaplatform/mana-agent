@@ -7,9 +7,11 @@ adapter uses the same evidence contract before publishing a turn result.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, runtime_checkable
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from mana_agent.multi_agent.core.types import (
     AgentRole,
@@ -21,6 +23,7 @@ from mana_agent.multi_agent.core.types import (
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.reviewer_agent import ReviewerAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
+from mana_agent.utils.text import extract_model_text
 
 
 INCOMPLETE_FEATURE_WIRING = "INCOMPLETE_FEATURE_WIRING"
@@ -56,6 +59,240 @@ class WiringDecision(BaseModel):
     edges: list[dict[str, str]] = Field(default_factory=list)
     verification_commands: list[str] = Field(default_factory=list)
     reason: str = ""
+
+
+FEATURE_INTEGRATION_DECISION_PROMPT = """You are Mana-Agent's feature integration decision layer.
+Your role is to analyze a completed code implementation and determine the production wiring and reachability decision.
+
+You must return a structured WiringDecision JSON with the following fields:
+- outcome: One of "mutation_required", "mutation_applied", "already_integrated", "incomplete", "failed".
+    Use "already_integrated" when the implemented feature is already connected to production runtime entrypoints and reachable without additional code changes.
+    Use "mutation_applied" when integration changes have already been applied.
+    Use "mutation_required" only when a concrete non-empty patch is needed.
+    Use "incomplete" or "failed" if integration cannot be completed.
+- patch: The diff/patch string if mutation_required, else empty string.
+- wiring_targets: list of files or components that require wiring or were wired.
+- runtime_entrypoints: list of production entrypoint files or symbols.
+- configuration_targets: list of configuration targets.
+- edges: list of reachability edges connecting from entrypoints to capabilities. Each edge must be an object with:
+    "from": source symbol/component/file
+    "to": target symbol/component/file
+    "relation": one of "calls", "selects", "constructs", "instantiates", "routes", "registers", "imports"
+    "source_reference": concrete source file or file:line reference (e.g. "path/to/file.py:10")
+- verification_commands: list of shell commands to verify the integrated feature (e.g. ["python -m pytest tests/..."]).
+- reason: rationale explaining the wiring and reachability decision.
+
+Rules:
+1. Never invent files, symbols, line numbers, or reachability edges. Every edge must be source-grounded.
+2. The reachability path must form a connected chain from a production entrypoint to the target capability.
+3. Do NOT certify runtime authority (reviewer approval, supervisor completion, reachability verified, TaskBoard DONE). Those are owned by the runtime execution layer.
+4. Return strict JSON matching the schema.
+"""
+
+
+def _coerce_wiring_decision(response: Any) -> WiringDecision:
+    if isinstance(response, WiringDecision):
+        return response
+    if isinstance(response, dict):
+        candidate = dict(response)
+        if "reachability_edges" in candidate and "edges" not in candidate:
+            candidate["edges"] = candidate["reachability_edges"]
+        if "wiring_outcome" in candidate and "outcome" not in candidate:
+            candidate["outcome"] = candidate["wiring_outcome"]
+        return WiringDecision.model_validate(candidate)
+    content = getattr(response, "content", response)
+    text = extract_model_text(content)
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        text = text.removesuffix("```").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start : end + 1]
+    parsed = json.loads(text)
+    if isinstance(parsed, dict):
+        if "reachability_edges" in parsed and "edges" not in parsed:
+            parsed["edges"] = parsed["reachability_edges"]
+        if "wiring_outcome" in parsed and "outcome" not in parsed:
+            parsed["outcome"] = parsed["wiring_outcome"]
+        return WiringDecision.model_validate(parsed)
+    raise ValueError(f"Expected dict schema for WiringDecision, got {type(parsed)}")
+
+
+class FeatureIntegrationDecisionProvider:
+    """Gateway-owned structured Feature Integration decision provider."""
+
+    def __init__(self, llm: Any, workspace_root: Path | str | None = None) -> None:
+        self.llm = llm
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
+
+    def decide(
+        self,
+        *,
+        request: str = "",
+        user_request: str = "",
+        changed_files: list[str] | None = None,
+        workspace_root: str | Path | None = None,
+        task_id: str = "",
+        gateway_task_id: str = "",
+        parent_task_id: str = "",
+        flow_id: str | None = None,
+        current_integration_stage: str = "",
+        stage: str = "",
+        existing_wiring_child_state: dict[str, Any] | None = None,
+        existing_source_evidence: list[str] | None = None,
+        taskboard: Any = None,
+        **kwargs: Any,
+    ) -> WiringDecision | None:
+        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+            return None
+
+        effective_request = request or user_request or kwargs.get("user_prompt", "")
+        effective_task_id = gateway_task_id or task_id
+        effective_files = list(changed_files or [])
+        root_path = Path(workspace_root or self.workspace_root or ".").resolve()
+
+        child_state = dict(existing_wiring_child_state or {})
+        source_evidence = list(existing_source_evidence or [])
+        if taskboard is not None and parent_task_id:
+            try:
+                parent = taskboard.get_task(parent_task_id)
+                for child_task_id in getattr(parent, "required_wiring_task_ids", []):
+                    child = taskboard.get_task(child_task_id)
+                    if getattr(child, "integration_role", "") == "wiring":
+                        child_state = {
+                            "task_id": child.task_id,
+                            "status": getattr(child.status, "value", str(child.status)),
+                            "integration_stage": getattr(child, "integration_stage", ""),
+                            "wiring_outcome": getattr(child, "wiring_outcome", ""),
+                            "files_touched": list(getattr(child, "files_touched", [])),
+                        }
+                        break
+            except Exception:
+                pass
+
+        payload = {
+            "user_request": effective_request,
+            "changed_files": effective_files,
+            "workspace_root": str(root_path),
+            "task_id": effective_task_id,
+            "parent_task_id": parent_task_id,
+            "flow_id": flow_id or "",
+            "current_integration_stage": current_integration_stage or stage or child_state.get("integration_stage", ""),
+            "existing_wiring_child_state": child_state,
+            "existing_source_evidence": source_evidence,
+        }
+
+        messages = [
+            SystemMessage(content=FEATURE_INTEGRATION_DECISION_PROMPT),
+            HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+        ]
+
+        try:
+            structured = getattr(self.llm, "with_structured_output", None)
+            if callable(structured):
+                response = structured(WiringDecision, method="json_schema", strict=True).invoke(messages)
+            else:
+                response = self.llm.invoke(messages)
+            decision = _coerce_wiring_decision(response)
+            return decision
+        except Exception:
+            return None
+
+    def __call__(self, **kwargs: Any) -> WiringDecision | None:
+        return self.decide(**kwargs)
+
+
+def decide_feature_integration(
+    llm: Any,
+    *,
+    workspace_root: Path | str | None = None,
+    **kwargs: Any,
+) -> WiringDecision | None:
+    """Helper function to obtain a structured WiringDecision using FeatureIntegrationDecisionProvider."""
+    provider = FeatureIntegrationDecisionProvider(llm, workspace_root=workspace_root)
+    return provider.decide(**kwargs)
+
+
+def validate_or_reconcile_integration_stage(child: Any) -> str:
+    """Validate and reconcile the integration stage against durable taskboard evidence.
+
+    Recovery stages are cursors, not proofs. This function determines the first
+    incomplete integration stage based on persisted durable evidence on the wiring child.
+    Never fabricates missing evidence from the stage label alone.
+    """
+    raw_stage = str(getattr(child, "integration_stage", "") or "").strip().upper()
+
+    # Stage: CORE_COMPLETE / INTEGRATION_DISCOVERY / INTEGRATION_MUTATION
+    # Requires: core implementation checkpoint / changed files
+    has_core_evidence = bool(getattr(child, "files_touched", None))
+    if not has_core_evidence and raw_stage not in ("CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION", "INTEGRATION_VERIFY"):
+        return "CORE_COMPLETE"
+
+    # Stage: INTEGRATION_VERIFY
+    # Requires: accepted wiring outcome and reachability edge proposals
+    wiring_outcome = str(getattr(child, "wiring_outcome", "") or "")
+    edges = list(getattr(child, "reachability_edges", []) or [])
+    has_valid_decision = wiring_outcome in _ACCEPTED_OUTCOMES and bool(edges) and bool(connected_wiring_path(edges))
+
+    if not has_valid_decision:
+        if raw_stage in ("REACHABILITY_VERIFY", "REVIEW", "SUPERVISOR_FINALIZE", "DONE"):
+            return "INTEGRATION_VERIFY"
+        return raw_stage or "INTEGRATION_VERIFY"
+
+    # Stage: REACHABILITY_VERIFY
+    # Requires: passed VerificationResult, execution identity (verification_queue_job_ids or queue_job_ids),
+    # and verification_provenance
+    verification_results = list(getattr(child, "verification_results", []) or [])
+    has_passed_verification = bool(verification_results) and bool(verification_results[-1].passed)
+    execution_ids = list(getattr(child, "verification_queue_job_ids", []) or getattr(child, "queue_job_ids", []) or [])
+    verification_provenance = dict(getattr(child, "verification_provenance", {}) or {})
+    has_provenance = bool(verification_provenance and verification_provenance.get("verification_id"))
+
+    has_verification_evidence = has_passed_verification and bool(execution_ids) and has_provenance
+    if not has_verification_evidence:
+        if raw_stage in ("REACHABILITY_VERIFY", "REVIEW", "SUPERVISOR_FINALIZE", "DONE"):
+            return "INTEGRATION_VERIFY"
+        return raw_stage or "INTEGRATION_VERIFY"
+
+    # Stage: REVIEW
+    # Requires: all REACHABILITY_VERIFY prerequisites, runtime_reachability_verified,
+    # and integration_evidence_records
+    has_reachability_verified = bool(getattr(child, "runtime_reachability_verified", False))
+    evidence_records = list(getattr(child, "integration_evidence_records", []) or [])
+    has_valid_evidence_records = bool(evidence_records) and all(
+        bool(r.get("source_references")) and bool(r.get("observable_result")) for r in evidence_records if isinstance(r, dict)
+    )
+    has_reachability_evidence = has_reachability_verified and has_valid_evidence_records
+
+    if not has_reachability_evidence:
+        if raw_stage in ("REVIEW", "SUPERVISOR_FINALIZE", "DONE"):
+            return "REACHABILITY_VERIFY"
+        return raw_stage if raw_stage in ("REACHABILITY_VERIFY", "INTEGRATION_VERIFY") else "REACHABILITY_VERIFY"
+
+    # Stage: SUPERVISOR_FINALIZE
+    # Requires: all REVIEW prerequisites and reviewer approval (reviewed_by_agent_id)
+    has_reviewer_approval = bool(str(getattr(child, "reviewed_by_agent_id", "") or "").strip())
+    if not has_reviewer_approval:
+        if raw_stage in ("SUPERVISOR_FINALIZE", "DONE"):
+            return "REVIEW"
+        return raw_stage if raw_stage in ("REVIEW", "REACHABILITY_VERIFY", "INTEGRATION_VERIFY") else "REVIEW"
+
+    # Stage: DONE
+    # Requires supervisor completion projection
+    supervisor_evidence = dict(getattr(child, "supervisor_verification_evidence", {}) or {})
+    has_supervisor_complete = (
+        getattr(child, "supervisor_state", "") == "completed"
+        and getattr(child, "verification_status", "") == "passed"
+        and bool(getattr(child, "supervisor_execution_id", ""))
+        and bool(supervisor_evidence.get("verification"))
+        and bool(supervisor_evidence.get("result_id"))
+    )
+    if not has_supervisor_complete:
+        if raw_stage == "DONE":
+            return "SUPERVISOR_FINALIZE"
+        return raw_stage if raw_stage in ("SUPERVISOR_FINALIZE", "REVIEW", "REACHABILITY_VERIFY", "INTEGRATION_VERIFY") else "SUPERVISOR_FINALIZE"
+
+    return "DONE" if raw_stage == "DONE" else "SUPERVISOR_FINALIZE"
 
 
 class FeatureIntegrationVerificationPlan(BaseModel):
@@ -396,11 +633,14 @@ class FeatureIntegrationCoordinator:
             try:
                 raw_decision = integration_decision_provider(
                     request=request,
+                    user_request=request,
                     changed_files=changed_files,
                     gateway_task_id=gateway_task_id,
+                    task_id=gateway_task_id,
                     flow_id=flow_id,
                     taskboard=taskboard,
                     parent_task_id=taskboard_parent_task_id,
+                    workspace_root=workspace_root,
                 )
             except Exception:
                 raw_decision = None
@@ -673,12 +913,14 @@ class FeatureIntegrationCoordinator:
         child.configuration_targets = list(decision.configuration_targets)
         child.wiring_reason = decision.reason
 
-        current_stage = str(child.integration_stage or "").strip()
-        if not current_stage or current_stage in ("CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION"):
+        current_stage = validate_or_reconcile_integration_stage(child)
+        if not child.integration_stage or child.integration_stage in ("CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION"):
             child.implementation_verified = True
             child.integration_stage = "INTEGRATION_VERIFY"
-            taskboard.save()
             current_stage = "INTEGRATION_VERIFY"
+        else:
+            child.integration_stage = current_stage
+        taskboard.save()
 
         root_path = Path(workspace_root or taskboard.store.root).resolve()
         bus = MessageBus(root_path)
@@ -736,21 +978,27 @@ class FeatureIntegrationCoordinator:
                 commands=commands,
                 workspace_root=root_path,
             )
-            if queue_manager is not None:
-                child.queue_job_ids = list(dict.fromkeys(
-                    [*child.queue_job_ids, *(job.job_id for job in queue_manager.jobs_for_task(child_id))]
-                ))
-            elif getattr(active_executor, "queue_manager", None) is not None:
-                qm = active_executor.queue_manager
-                child.queue_job_ids = list(dict.fromkeys(
-                    [*child.queue_job_ids, *(job.job_id for job in qm.jobs_for_task(child_id))]
-                ))
-            taskboard.save()
-            taskboard.update_status(
-                child_id,
-                TaskStatus.VERIFYING,
-                reason="VerifierAgent recorded executed integration verification evidence.",
-            )
+
+            # Idempotently persist VerificationResult
+            existing_verif_ids = {
+                r.verification_id for r in child.verification_results if hasattr(r, "verification_id")
+            }
+            if verification.verification_id not in existing_verif_ids:
+                taskboard.add_verification_result(child_id, verification)
+
+            # Idempotently persist execution/queue job IDs
+            exec_job_ids = list(getattr(verification, "execution_job_ids", []) or [])
+            if not exec_job_ids:
+                if queue_manager is not None:
+                    exec_job_ids = [job.job_id for job in queue_manager.jobs_for_task(child_id)]
+                elif getattr(active_executor, "queue_manager", None) is not None:
+                    exec_job_ids = [job.job_id for job in active_executor.queue_manager.jobs_for_task(child_id)]
+            for job_id in exec_job_ids:
+                if job_id not in child.verification_queue_job_ids:
+                    taskboard.add_verification_queue_job(child_id, job_id)
+                if job_id not in child.queue_job_ids:
+                    taskboard.add_queue_job(child_id, job_id)
+
             if not verification.passed:
                 reviewer.reject_weak_evidence(child_id, verification.summary)
                 taskboard.update_status(
@@ -760,15 +1008,31 @@ class FeatureIntegrationCoordinator:
                 )
                 return None, FEATURE_INTEGRATION_VERIFICATION_FAILED
 
+            if commands and not (child.verification_queue_job_ids or exec_job_ids):
+                taskboard.update_status(
+                    child_id,
+                    TaskStatus.BLOCKED,
+                    reason=f"{FEATURE_INTEGRATION_VERIFICATION_FAILED}: no authoritative execution identity exists",
+                )
+                return None, FEATURE_INTEGRATION_VERIFICATION_FAILED
+
             child.verification_provenance = {
                 "verification_id": verification.verification_id,
                 "verified_by_agent_id": getattr(verification, "verified_by_agent_id", "verifier"),
-                "queue_job_ids": list(child.verification_queue_job_ids or child.queue_job_ids),
+                "queue_job_ids": list(child.verification_queue_job_ids or exec_job_ids or child.queue_job_ids),
                 "commands_run": list(verification.commands_run),
                 "changed_files": list(child.files_touched),
                 "source": verification_plan.source,
                 "decision_id": verification_plan.decision_id,
             }
+
+            taskboard.save()
+            taskboard.update_status(
+                child_id,
+                TaskStatus.VERIFYING,
+                reason="VerifierAgent recorded executed integration verification evidence.",
+            )
+
             child.integration_stage = "REACHABILITY_VERIFY"
             taskboard.save()
             current_stage = "REACHABILITY_VERIFY"
@@ -1023,6 +1287,9 @@ __all__ = [
     "INTEGRATION_STAGES",
     "WiringDecision",
     "FeatureIntegrationVerificationPlan",
+    "FeatureIntegrationDecisionProvider",
+    "decide_feature_integration",
+    "validate_or_reconcile_integration_stage",
     "IntegrationVerificationExecutor",
     "MultiAgentVerificationExecutor",
     "connected_wiring_path",

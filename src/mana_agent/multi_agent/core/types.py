@@ -172,6 +172,7 @@ class VerificationResult:
     summary: str
     failures: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
+    execution_job_ids: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
 
 

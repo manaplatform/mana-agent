@@ -87,6 +87,7 @@ class VerifierAgent(BaseAgent):
             summary=summary,
             failures=failures,
             risks=[] if passed else ["verification_failed_or_blocked"],
+            execution_job_ids=list(queue_job_ids),
         )
         self.taskboard.add_verification_result(task_id, result)
         record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
@@ -145,6 +146,7 @@ class VerifierAgent(BaseAgent):
             summary=summary,
             failures=failures,
             risks=[] if passed else ["git_verification_failed_or_blocked"],
+            execution_job_ids=list(queue_job_ids),
         )
         self.taskboard.add_verification_result(task_id, result)
         record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})

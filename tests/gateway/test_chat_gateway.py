@@ -2402,3 +2402,202 @@ def test_gateway_checkpoint_resume_other_boundary_does_not_invent_after_core_imp
     # Because boundary is after_routing, core implementation does run
     assert len(coding_calls) > 0
 
+
+def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2E P0.1-P0.4: AgentChatGateway.process_turn executes full feature integration lifecycle.
+
+    - runtime_capability_change is True
+    - coding agent fake has NO queue_manager attribute
+    - coding result has NO 'integration' key
+    - NO injected feature_integration_decision, decision_provider, or authority
+    - Gateway constructs FeatureIntegrationDecisionProvider and MultiAgentVerificationExecutor
+    - Validates core complete -> WiringDecision -> verification -> provenance -> reachability -> Reviewer
+    """
+    from mana_agent.multi_agent.core.types import TaskStatus
+
+    class _CodexLikeCodingAgent:
+        # Deliberately NO queue_manager attribute
+        def __init__(self, **kwargs: Any) -> None:
+            self.repo_root = kwargs.get("repo_root")
+            self.calls = []
+
+        def generate(self, request, **kwargs):
+            self.calls.append(request)
+            return {
+                "answer": "Provider implemented in src/provider.py",
+                "status": "completed",
+                "changed_files": ["src/provider.py"],
+                "warnings": [],
+                "flow_id": "flow-codex-1",
+            }
+
+        def generate_auto_execute(self, request, **kwargs):
+            return self.generate(request, **kwargs)
+
+        def generate_dir_mode(self, request, **kwargs):
+            return self.generate(request, **kwargs)
+
+        def get_active_flow_id(self):
+            return None
+
+        def reset_flow(self, flow_id: str):
+            return flow_id
+
+        def flow_summary(self, flow_id: str):
+            return None
+
+    class _StructuredEntryModel:
+        def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
+            return self
+
+        def invoke(self, messages, **_kwargs):
+            payload = json.loads(messages[-1].content)
+            if "feature integration decision layer" in str(messages[0].content).lower() or "wiring_targets" in str(payload):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "outcome": "already_integrated",
+                            "patch": "",
+                            "wiring_targets": ["src/provider.py"],
+                            "runtime_entrypoints": ["src/main.py"],
+                            "configuration_targets": [],
+                            "edges": [
+                                {"from": "ChatGateway", "to": "ModelRouter", "relation": "calls", "source_reference": "src/gateway.py:10"},
+                                {"from": "ModelRouter", "to": "ProviderFactory", "relation": "selects", "source_reference": "src/router.py:20"},
+                                {"from": "ProviderFactory", "to": "NewProvider", "relation": "constructs", "source_reference": "src/factory.py:30"},
+                            ],
+                            "verification_commands": ["python -m pytest tests/test_provider.py"],
+                            "reason": "Feature is wired into production entrypoint",
+                        }
+                    )
+                )
+            if "recovery_candidates" in payload:
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "action": "start_fresh",
+                            "task_id": "",
+                            "checkpoint_id": "",
+                            "same_work": False,
+                            "fresh_data_required": False,
+                            "checkpoint_still_valid": False,
+                            "side_effects_safe_to_repeat": False,
+                            "safe_to_continue": True,
+                            "reason": "fresh",
+                        }
+                    )
+                )
+            if "candidates" in payload:
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "action": "classify",
+                            "category": "new_task",
+                            "related_task_id": "",
+                            "safe_to_continue": True,
+                            "reason": "new",
+                        }
+                    )
+                )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "coding",
+                        "confidence": 0.95,
+                        "reason": "add provider capability",
+                        "required_sources": ["repository"],
+                        "target_urls": [],
+                        "requires_live_data": False,
+                        "reason_code": "CODING_ROUTE",
+                        "error_code": "",
+                        "reuse_active_route": False,
+                        "runtime_capability_change": True,
+                    }
+                )
+            )
+
+    class _AskServiceWithStructuredModel:
+        entry_router = SimpleNamespace(llm=_StructuredEntryModel())
+        ask_agent = SimpleNamespace(llm=_StructuredEntryModel(), update_model=lambda m: None, model="dummy")
+        qna_chain = SimpleNamespace(llm=_StructuredEntryModel(), chat=lambda q, **kw: "dummy response")
+
+        def ask(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy response)"})()
+
+        def ask_with_tools(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy tools response)"})()
+
+        def ask_dir_mode(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy dir response)"})()
+
+        def ask_with_tools_dir_mode(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy dir tools response)"})()
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _AskServiceWithStructuredModel(),
+    )
+    monkeypatch.setattr("mana_agent.gateway.stack.CodingAgent", _CodexLikeCodingAgent)
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.ToolWorkerClient",
+        lambda **kw: SimpleNamespace(
+            start=lambda: None,
+            health=lambda: True,
+            init_payload_dict=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.QueueManager",
+        lambda **kw: SimpleNamespace(attach_decision_provider=lambda x: None),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.build_tools_executor_with_fallback",
+        lambda **kw: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.CodingMemoryService",
+        lambda **kw: SimpleNamespace(),
+    )
+
+    gw = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+    )
+    # Ensure coding agent has NO queue_manager
+    assert not hasattr(gw._coding_agent, "queue_manager")
+
+    session_id = gw.create_session(frontend="test")
+
+    # Mock tool execution in queue manager for verification shell commands so they pass
+    from mana_agent.multi_agent.tools.tools_manager import ToolsManager
+    monkeypatch.setattr(
+        ToolsManager,
+        "execute_job",
+        lambda self, job: SimpleNamespace(ok=True, result={"stdout": "1 passed"}, error=None),
+    )
+
+    result = gw.process_turn(session_id, "add new provider runtime capability")
+
+    # Verify P0.1-P0.4 results:
+    assert result.error is None
+    taskboard = gw._lane_coordinator.taskboard
+    # Find the wiring child task
+    wiring_child = next(
+        (task for task in taskboard.tasks.values() if task.integration_role == "wiring"),
+        None,
+    )
+    assert wiring_child is not None
+    assert wiring_child.wiring_outcome == "already_integrated"
+    assert len(wiring_child.reachability_edges) == 3
+    assert len(wiring_child.verification_results) >= 1
+    assert wiring_child.verification_results[-1].passed is True
+    assert len(wiring_child.verification_queue_job_ids) >= 1
+    assert wiring_child.verification_provenance is not None
+    assert wiring_child.runtime_reachability_verified is True
+    assert wiring_child.reviewed_by_agent_id != ""
+    assert wiring_child.status is TaskStatus.DONE
+

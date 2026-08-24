@@ -111,11 +111,14 @@ from mana_agent.gateway.envelope import (
 )
 from mana_agent.gateway.feature_integration import (
     FeatureIntegrationCoordinator,
+    FeatureIntegrationDecisionProvider,
     FeatureIntegrationVerificationPlan,
     IntegrationAuthority,
     IntegrationVerificationExecutor,
     MultiAgentVerificationExecutor,
     WiringDecision,
+    decide_feature_integration,
+    validate_or_reconcile_integration_stage,
     INCOMPLETE_FEATURE_WIRING,
     FEATURE_INTEGRATION_DECISION_INVALID,
     FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
@@ -8778,18 +8781,20 @@ class AgentChatGateway:
             feature_integration_trigger_turn_id=context.turn_id,
             feature_integration_execution_supervisor=self._lane_coordinator.execution_supervisor,
             feature_integration_workspace_root=self.root,
-            feature_integration_queue_manager=getattr(self._coding_agent, "queue_manager", None),
+            feature_integration_queue_manager=None,
             feature_integration_verification_commands=options.get("feature_integration_verification_commands"),
             feature_integration_verification_plan=options.get("feature_integration_verification_plan"),
             feature_integration_verification_executor=(
                 options.get("feature_integration_verification_executor")
                 or MultiAgentVerificationExecutor(
                     taskboard=self._lane_coordinator.taskboard,
-                    queue_manager=getattr(self._coding_agent, "queue_manager", None),
                     workspace_root=self.root,
                 )
             ),
-            feature_integration_decision_provider=options.get("feature_integration_decision_provider"),
+            feature_integration_decision_provider=(
+                options.get("feature_integration_decision_provider")
+                or self._feature_integration_decision_provider(ask_service=ask_service)
+            ),
             feature_integration_decision=options.get("feature_integration_decision"),
         )
         wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
@@ -8801,6 +8806,21 @@ class AgentChatGateway:
         result.payload["entry_route"] = decision.route
         result.payload.setdefault("route", decision.route)
         return result
+
+    def _feature_integration_decision_provider(
+        self,
+        ask_service: Any = None,
+    ) -> FeatureIntegrationDecisionProvider:
+        """Construct the authoritative Gateway-owned Feature Integration decision provider."""
+        llm = (
+            getattr(self._entry_router, "llm", None)
+            or agent_decision_llm(ask_service)
+            or agent_decision_llm(self.get_ask_service())
+        )
+        return FeatureIntegrationDecisionProvider(
+            llm=llm,
+            workspace_root=self.root,
+        )
 
     def _execute_media_route(
         self,

@@ -4,12 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-24
 
-- Repaired Feature Integration evidence and verification lifecycle (P0.1–P0.4).
-  - P0.1: Decoupled Feature Integration evidence from Coding backend payloads using typed `WiringDecision` and explicit `integration_decision_provider`; invalid decisions stop safely with `FEATURE_INTEGRATION_DECISION_INVALID`.
-  - P0.2: Provided `FeatureIntegrationCoordinator` an explicit `IntegrationVerificationExecutor` protocol and `MultiAgentVerificationExecutor` implementation; fails closed with `FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE` when verifier infrastructure is missing.
-  - P0.3: Preserved and executed the real verification contract using `FeatureIntegrationVerificationPlan`; rejected empty plans with `FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING` and verification failures with `FEATURE_INTEGRATION_VERIFICATION_FAILED`.
-  - P0.4: Corrected wiring-child resume state transitions and stage normalization across `INTEGRATION_STAGES`, preventing illegal state jumps and preserving completed stages on resume.
-  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+- Completed Gateway Feature Integration decision and recovery evidence lifecycle (P0.1–P0.4).
+  - P0.1: Gateway now owns the default structured Feature Integration decision provider (`FeatureIntegrationDecisionProvider`), producing validated `WiringDecision` models via the existing model router. Codex and Internal coding backends are no longer expected to supply an integration dictionary.
+  - P0.2: Decoupled Feature Integration verification from CodingAgent queue-manager internals, constructing authoritative `MultiAgentVerificationExecutor` independently from TaskBoard.
+  - P0.3: Made `FeatureIntegrationCoordinator` responsible for idempotent persistence of `VerificationResult`, execution job IDs, and verification provenance before transitioning TaskBoard to `VERIFYING`.
+  - P0.4: Implemented `validate_or_reconcile_integration_stage` to reconcile recovery stages against durable taskboard evidence rather than trusting stage labels alone; incomplete recovery evidence resumes from the first incomplete integration stage without replaying completed core implementation.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/test_multi_agent_core.py -v`.
 
 ## 2026-08-23
 
