@@ -103,6 +103,13 @@ class HumanInboxService:
             tenant_id=request.tenant_id,
             project_id=request.project_id,
             task_id=request.task_id,
+            root_task_id=request.root_task_id,
+            execution_id=request.execution_id,
+            attempt_id=request.attempt_id,
+            action_id=request.action_id,
+            intervention_id=request.intervention_id,
+            integration_stage=request.integration_stage,
+            recovery_reason=request.recovery_reason,
             branch_id=request.branch_id,
             parent_task_id=request.parent_task_id,
             checkpoint_id=request.checkpoint_id,
@@ -111,6 +118,7 @@ class HumanInboxService:
             permission_request_id=request.permission_request_id,
             action_intent_id=request.action_intent_id,
             action_digest=request.action_digest,
+            recovery_intervention_id=request.recovery_intervention_id,
             requested_by_agent_id=request.requested_by_agent_id,
             assigned_reviewer_type=request.reviewer.reviewer_type,
             assigned_reviewer_id=request.reviewer.reviewer_id,
@@ -328,7 +336,11 @@ class HumanInboxService:
                 reason="operation_not_allowed",
             )
             raise PermissionError("response operation is not allowed for this inbox item")
-        if initial.action_digest:
+        # Recovery intervention identity is validated against the durable
+        # supervisor record, not against an action-material digest.  A
+        # checkpoint or receipt may legitimately change while the intervention
+        # remains the same request.
+        if initial.action_digest and not initial.recovery_intervention_id:
             resolved_digest = (
                 self.action_digest_resolver(initial.action_intent_id)
                 if self.action_digest_resolver is not None
@@ -523,6 +535,13 @@ class HumanInboxService:
             tenant_id=source.tenant_id,
             project_id=source.project_id,
             task_id=source.task_id,
+            root_task_id=source.root_task_id,
+            execution_id=source.execution_id,
+            attempt_id=source.attempt_id,
+            action_id=source.action_id,
+            intervention_id=source.intervention_id,
+            integration_stage=source.integration_stage,
+            recovery_reason=source.recovery_reason,
             branch_id=source.branch_id,
             parent_task_id=source.parent_task_id,
             checkpoint_id=source.checkpoint_id,
@@ -531,6 +550,7 @@ class HumanInboxService:
             permission_request_id=source.permission_request_id,
             action_intent_id=source.action_intent_id,
             action_digest=source.action_digest,
+            recovery_intervention_id=source.recovery_intervention_id,
             requested_by_agent_id=source.requested_by_agent_id,
             reviewer=policy.target,
             title=source.title,
@@ -987,6 +1007,18 @@ class HumanInboxService:
 
     def _validate_answer(self, item: InboxItem, submission: ResponseSubmission) -> dict[str, Any]:
         if item.request_type is InboxRequestType.APPROVAL:
+            if item.recovery_intervention_id:
+                if not submission.answer:
+                    return {}
+                allowed = {
+                    "RESUME_WITHOUT_REPLAY",
+                    "RETRY_ACTION",
+                    "MARK_ACTION_ALREADY_COMPLETED",
+                    "ABORT_EXECUTION",
+                }
+                if set(submission.answer) != {"action"} or submission.answer["action"] not in allowed:
+                    raise ValueError("recovery approval must contain one valid action")
+                return {"action": submission.answer["action"]}
             if submission.answer:
                 raise ValueError("binary approval responses cannot supply clarification answers")
             return {}

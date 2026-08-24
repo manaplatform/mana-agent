@@ -84,8 +84,7 @@ class ReconciliationOutcome(str, Enum):
     NOT_STARTED = "NOT_STARTED"
     PARTIALLY_APPLIED = "PARTIALLY_APPLIED"
     ALREADY_APPLIED = "ALREADY_APPLIED"
-    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
-    UNKNOWN_EXTERNAL_OUTCOME = "UNKNOWN_EXTERNAL_OUTCOME"
+    UNKNOWN = "UNKNOWN"
 
 
 class ActionRequestState(str, Enum):
@@ -94,7 +93,8 @@ class ActionRequestState(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     OUTCOME_UNKNOWN = "outcome_unknown"
-    RECONCILED = "reconciled"
+    ACTION_RECONCILED = "action_reconciled"
+    RECONCILED = "action_reconciled"  # backwards-compatible enum name
 
 
 LOCAL_REPOSITORY_TOOLS = frozenset(

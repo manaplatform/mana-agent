@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-24
 
+- Hardened recovery lifecycle and handled Codex interruptions safely (P0.9 Final Completion):
+  - Distinguished model execution interruptions, timeouts (`CODING_PROVIDER_TIMEOUT`, `CODING_TIMEOUT`, `MODEL_INTERRUPTED`, `USER_INTERRUPTED`, `DEADLINE_EXPIRED`), lease loss, and external side-effect ambiguity without default conversion to `AMBIGUOUS_LOST_LEASE`.
+  - Added `CodexTimeoutError` and `CodexInterruptionError` exceptions, and protected `interrupt()` against secondary timeout failures.
+  - Classified Codex interruptions into `NOT_STARTED`, `PARTIALLY_COMPLETED`, and `COMPLETED_BEFORE_INTERRUPT` to resume `FeatureIntegrationCoordinator` (`INTEGRATION_DISCOVERY`) without repeating completed core coding work.
+  - Wrapped long coding turns in `supervisor.lease_renewal` so `heartbeat_at` and `lease_expires_at` advance during execution while `deadline_at` is preserved.
+  - Structured `ChatTurnResult` with `error_code`, `error_category`, `retry_possible`, `resume_available`, `checkpoint_available`, `execution_id`, and `interruption_reason`.
+  - Authored comprehensive test suite covering TESTS A through I in `tests/gateway/test_codex_interruption_recovery.py`.
+  - User verification required: `python -m pytest tests/gateway/test_codex_interruption_recovery.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_checkpoint_resume.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
 - Hardened P0.9 execution-supervisor recovery: local mutations now require attempt-bound fingerprints or trusted result metadata, durable external receipts are consumed without retry scheduling, Human Inbox publication fails closed without synthetic references, recovery responses work without checkpoints, and unknown action scopes cannot auto-recover.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/execution_supervisor/test_result_escrow_recovery.py -v`.
 
@@ -4160,3 +4169,7 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Tightened the feature-integration gate so completion requires runtime-owned TaskBoard, wiring-child, verification, reviewer, reachability, and supervisor authority; model-reported edges remain evidence candidates.
   - User verification required: `pytest -q tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume_invariants.py`
+## 2026-08-24
+
+- Finalized lost-lease reconciliation and durable resume flow: local mutations require attempt-bound evidence, external receipts are consumed as `ACTION_RECONCILED`, and recovery Human Inbox items retain original execution lineage for safe response resume.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_feature_integration_lifecycle.py tests/human_inbox/test_durable_inbox.py -q`.

@@ -766,12 +766,43 @@ class CodexCodingAgentShim:
             requires_repository_write=requires_repository_write,
             terminal_reason=terminal_reason,
         )
+        meta = (
+            result.codex_metadata
+            if isinstance(result.codex_metadata, dict)
+            else (result.codex_metadata.as_dict() if hasattr(result.codex_metadata, "as_dict") else {})
+        )
+        interruption_reason = str(meta.get("interruption_reason") or "")
+        error_code = interruption_reason or ""
+        if not error_code:
+            for e in result.errors:
+                for candidate in (
+                    "CODING_PROVIDER_TIMEOUT",
+                    "CODING_TIMEOUT",
+                    "MODEL_INTERRUPTED",
+                    "USER_INTERRUPTED",
+                    "DEADLINE_EXPIRED",
+                    "PROVIDER_TIMEOUT",
+                    "LEASE_LOST_DURING_EXECUTION",
+                ):
+                    if candidate in e:
+                        error_code = candidate
+                        break
+                if error_code:
+                    break
+
         return {
             "answer": answer,
             "backend": result.backend,
             "status": result.status,
             "run_status": result.status,
             "run_id": result.task_id,
+            "task_id": result.task_id,
+            "execution_id": result.task_id,
+            "error_code": error_code or None,
+            "interruption_reason": interruption_reason or None,
+            "retry_possible": result.status != "completed",
+            "resume_available": bool(result.changed_files),
+            "checkpoint_available": bool(result.changed_files),
             "auto_execute_terminal_reason": terminal_reason,
             "changed_files": list(result.changed_files),
             "warnings": [*result.warnings, *result.errors],

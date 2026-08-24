@@ -13,6 +13,7 @@ building AskService / CodingAgent directly.
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import getpass
 import inspect
 import json
@@ -6291,10 +6292,17 @@ class AgentChatGateway:
                 "turn_id": turn_id,
                 "execution_id": str(
                     result.payload.get("execution_id")
+                    or result.execution_id
                     or result.payload.get("lane_task_id")
                     or ""
                 ),
                 "entry_route": existing_entry_route or fallback_route,
+                "error_code": result.error_code or (result.payload or {}).get("error_code"),
+                "error_category": result.error_category or (result.payload or {}).get("error_category"),
+                "retry_possible": result.retry_possible or (result.payload or {}).get("retry_possible", False),
+                "resume_available": result.resume_available or (result.payload or {}).get("resume_available", False),
+                "checkpoint_available": result.checkpoint_available or (result.payload or {}).get("checkpoint_available", False),
+                "interruption_reason": result.interruption_reason or (result.payload or {}).get("interruption_reason"),
             }
         )
         execution_id = str(result.payload.get("execution_id") or "")
@@ -6398,6 +6406,11 @@ class AgentChatGateway:
             turn_record.response = {
                 "answer": result.answer,
                 "error": result.error,
+                "error_code": result.error_code,
+                "error_category": result.error_category,
+                "retry_possible": result.retry_possible,
+                "resume_available": result.resume_available,
+                "checkpoint_available": result.checkpoint_available,
                 "changed_files": list(result.changed_files),
                 "payload": dict(result.payload),
             }
@@ -8816,7 +8829,23 @@ class AgentChatGateway:
                 getattr(lane_execution, "taskboard_task_id", "") or lane_task_id
             )
 
-        result = process_chat_turn(
+        supervisor = self._lane_coordinator.execution_supervisor
+        supervised_task = supervisor.store.get_task_or_none(lane_task_id) if lane_task_id else None
+        lease_ctx = (
+            supervisor.lease_renewal(
+                supervised_task.task_id,
+                attempt_id=supervised_task.attempt_id,
+                lease_token=supervised_task.lease_token,
+            )
+            if supervised_task is not None
+            and supervised_task.attempt_id
+            and supervised_task.lease_token
+            and supervised_task.state in {ExecutionState.LEASED, ExecutionState.RUNNING}
+            else nullcontext()
+        )
+
+        with lease_ctx:
+            result = process_chat_turn(
             root=self.root,
             text=text,
             chat_service=self._chat_service,

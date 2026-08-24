@@ -164,6 +164,13 @@ class DefaultRecoveryReviewPublisher:
             InboxRequest(
                 request_type=InboxRequestType.APPROVAL,
                 task_id=task.task_id,
+                root_task_id=task.root_task_id or task.task_id,
+                execution_id=intervention.execution_id,
+                attempt_id=intervention.attempt_id,
+                action_id=intervention.action_id,
+                intervention_id=intervention.intervention_id,
+                integration_stage=intervention.integration_stage,
+                recovery_reason=intervention.reason.value,
                 branch_id=task.task_id,
                 checkpoint_id=task.checkpoint_id,
                 execution_attempt_id=task.attempt_id,
@@ -182,6 +189,7 @@ class DefaultRecoveryReviewPublisher:
                 ),
                 risk_level=InboxRiskLevel.CRITICAL,
                 allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+                recovery_intervention_id=intervention.intervention_id,
                 minimal_context={
                     "task_id": task.task_id,
                     "attempt_id": task.attempt_id,
@@ -1345,7 +1353,8 @@ class ExecutionSupervisor:
             comment = str(structured_response.get("comment") or "")
             ans = structured_response.get("answer") or {}
             actor_id = str(structured_response.get("actor_id") or "operator")
-            if op in {"deny", "aborted"} or ans.get("action") == "ABORT_EXECUTION":
+            requested_action = str(ans.get("action") or "")
+            if op == "deny" or requested_action == "ABORT_EXECUTION":
                 return self.resolve_recovery_intervention(
                     branch_snapshot.recovery_intervention_id,
                     action=HumanRecoveryDecisionAction.ABORT_EXECUTION,
@@ -1353,7 +1362,7 @@ class ExecutionSupervisor:
                     comment=comment,
                     response_data=structured_response,
                 )
-            elif ans.get("action") == "RETRY_ACTION" or "RETRY" in comment.upper():
+            elif requested_action == "RETRY_ACTION":
                 return self.resolve_recovery_intervention(
                     branch_snapshot.recovery_intervention_id,
                     action=HumanRecoveryDecisionAction.RETRY_ACTION,
@@ -1361,11 +1370,7 @@ class ExecutionSupervisor:
                     comment=comment,
                     response_data=structured_response,
                 )
-            elif (
-                ans.get("action") == "MARK_ACTION_ALREADY_COMPLETED"
-                or "ALREADY_COMPLETED" in comment.upper()
-                or "CONFIRMED" in comment.upper()
-            ):
+            elif requested_action == "MARK_ACTION_ALREADY_COMPLETED" or (op == "approve" and not requested_action):
                 return self.resolve_recovery_intervention(
                     branch_snapshot.recovery_intervention_id,
                     action=HumanRecoveryDecisionAction.MARK_ACTION_ALREADY_COMPLETED,
@@ -2833,17 +2838,32 @@ class ExecutionSupervisor:
 
     def _reconcile_local_mutation(self, task: TaskRecord, action: ActionRecord) -> ReconciliationOutcome:
         """Inspect durable workspace and checkpoint evidence for a local repository mutation."""
-        if action.request_state == ActionRequestState.SUCCEEDED and action.external_receipt:
-            return ReconciliationOutcome.ALREADY_APPLIED
+        # Every accepted receipt must be attributable to this exact action and
+        # attempt.  A path or a generic success flag is never sufficient.
+        evidence = action.verification_state
+        def matching_identity(candidate: dict[str, Any]) -> bool:
+            return (
+                candidate.get("action_id") == action.action_id
+                and candidate.get("attempt_id") == action.attempt_id
+                and candidate.get("action_fingerprint", candidate.get("patch_fingerprint"))
+                == action.action_fingerprint
+            )
 
-        if action.verification_state.get("partially_applied") is True:
+        if evidence.get("partially_applied") is True and matching_identity(evidence):
             return ReconciliationOutcome.PARTIALLY_APPLIED
 
         patch_result = action.verification_state.get("patch_result") or action.verification_state.get("apply_result")
-        if isinstance(patch_result, dict):
+        if isinstance(patch_result, dict) and matching_identity(patch_result):
             if patch_result.get("success") is True or patch_result.get("applied") is True:
                 return ReconciliationOutcome.ALREADY_APPLIED
             if patch_result.get("partially_applied") is True:
+                return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        mutation_receipt = evidence.get("mutation_receipt")
+        if isinstance(mutation_receipt, dict) and matching_identity(mutation_receipt):
+            if mutation_receipt.get("completed") is True:
+                return ReconciliationOutcome.ALREADY_APPLIED
+            if mutation_receipt.get("started") is True:
                 return ReconciliationOutcome.PARTIALLY_APPLIED
 
         # A pre-existing path is not proof that this attempt produced it.  The
@@ -2884,14 +2904,22 @@ class ExecutionSupervisor:
                 if not isinstance(result, dict) or result.get("action_id") != action.action_id:
                     continue
                 metadata = result.get("metadata") or result
-                if metadata.get("patch_applied") or metadata.get("applied") or metadata.get("success"):
+                if (
+                    metadata.get("attempt_id") == action.attempt_id
+                    and metadata.get("action_fingerprint") == action.action_fingerprint
+                    and (metadata.get("patch_applied") or metadata.get("applied") or metadata.get("success"))
+                ):
                     return ReconciliationOutcome.ALREADY_APPLIED
-                if metadata.get("partially_applied"):
+                if (
+                    metadata.get("attempt_id") == action.attempt_id
+                    and metadata.get("action_fingerprint", metadata.get("patch_fingerprint")) == action.action_fingerprint
+                    and metadata.get("partially_applied")
+                ):
                     return ReconciliationOutcome.PARTIALLY_APPLIED
 
         if action.request_state == ActionRequestState.PREPARED or action.verification_state.get("execution_started") is False:
             return ReconciliationOutcome.NOT_STARTED
-        return ReconciliationOutcome.RECONCILIATION_REQUIRED
+        return ReconciliationOutcome.UNKNOWN
 
     def classify_lost_lease(
         self,
@@ -2969,7 +2997,7 @@ class ExecutionSupervisor:
                         self.store.save_action(action)
                         local_reconciled = True
                         local_reconciliation_details[action.action_id] = recon
-                    elif recon in {ReconciliationOutcome.PARTIALLY_APPLIED, ReconciliationOutcome.RECONCILIATION_REQUIRED}:
+                    elif recon in {ReconciliationOutcome.PARTIALLY_APPLIED, ReconciliationOutcome.UNKNOWN}:
                         action.request_state = ActionRequestState.OUTCOME_UNKNOWN
                         action.verification_state["reconciliation_required"] = True
                         action.updated_at = now
@@ -3100,7 +3128,10 @@ class ExecutionSupervisor:
                         intervention_id=intervention.intervention_id,
                         error=str(exc),
                     )
-                    raise RetrySafetyError("recovery review publication failed; recovery stopped safely") from exc
+                    raise RetrySafetyError(
+                        "RECOVERY_REVIEW_PUBLISH_FAILED: durable Human Inbox creation failed; "
+                        "recovery stopped safely"
+                    ) from exc
             if not inbox_item_id:
                 self._emit(
                     "recovery_review_publication_error",
@@ -3108,7 +3139,10 @@ class ExecutionSupervisor:
                     intervention_id=intervention.intervention_id,
                     error="Human Inbox returned no durable item reference",
                 )
-                raise RetrySafetyError("recovery review publication failed; no fallback inbox reference was created")
+                raise RetrySafetyError(
+                    "RECOVERY_REVIEW_PUBLISH_FAILED: Human Inbox returned no durable item reference; "
+                    "no fallback inbox reference was created"
+                )
             intervention.inbox_item_id = inbox_item_id
             if existing is None:
                 self.store.save_recovery_intervention(intervention)
@@ -3170,6 +3204,10 @@ class ExecutionSupervisor:
         if intervention is None:
             raise RetrySafetyError(f"recovery intervention not found: {intervention_id}")
         task = self.store.get_task(intervention.task_id)
+        if intervention.execution_id != task.task_id:
+            raise RetrySafetyError("recovery intervention execution lineage does not match its task")
+        if intervention.attempt_id and intervention.attempt_id != task.attempt_id:
+            raise RetrySafetyError("recovery intervention belongs to a different attempt")
         if (
             task.state is not ExecutionState.RECOVERY_REVIEW_REQUIRED
             and task.state is not ExecutionState.WAITING
@@ -3198,8 +3236,24 @@ class ExecutionSupervisor:
             if intervention.action_id:
                 action_rec = self.store.get_action(intervention.action_id)
                 if action_rec is not None:
+                    if action_rec.execution_id != intervention.execution_id or (
+                        intervention.attempt_id and action_rec.attempt_id != intervention.attempt_id
+                    ):
+                        raise RetrySafetyError("recovery action does not belong to the original execution lineage")
+                    confirmation = str(
+                        (response_data or {}).get("receipt_reference")
+                        or (response_data or {}).get("answer", {}).get("receipt_reference")
+                        or comment
+                    )
+                    if not confirmation:
+                        raise RetrySafetyError("human completion confirmation must include a receipt or reference")
                     action_rec.request_state = ActionRequestState.SUCCEEDED
-                    action_rec.external_receipt = comment or f"confirmed_by_human_reviewer:{actor_id}"
+                    action_rec.external_receipt = confirmation
+                    action_rec.verification_state.update({
+                        "human_confirmation": True,
+                        "confirmed_by": actor_id,
+                        "confirmation_reference": confirmation,
+                    })
                     action_rec.updated_at = now
                     self.store.save_action(action_rec)
 
@@ -3229,8 +3283,8 @@ class ExecutionSupervisor:
             current.wake_up_source = ""
             current.wake_up_reference = ""
             current.waiting_inbox_item_id = ""
-            current.resume_checkpoint_id = ""
-            current.resume_operation = ""
+            current.resume_checkpoint_id = intervention.checkpoint_id or current.checkpoint_id
+            current.resume_operation = intervention.integration_stage or "resume_after_recovery_intervention"
             current.lease_owner = ""
             current.lease_token = ""
             current.lease_expires_at = None
@@ -3413,7 +3467,7 @@ class ExecutionSupervisor:
                         summary.intervention_required.append(task.task_id)
                         continue
                     for action in receipt_actions:
-                        action.request_state = ActionRequestState.RECONCILED
+                        action.request_state = ActionRequestState.ACTION_RECONCILED
                         action.verification_state.update({
                             "receipt_consumed": True,
                             "receipt_consumed_at": now.isoformat(),
@@ -3428,8 +3482,15 @@ class ExecutionSupervisor:
                         self.store.save_action(action)
 
                     def resume_after_receipt(current: TaskRecord) -> None:
-                        current.resume_checkpoint_id = current.checkpoint_id
-                        current.resume_operation = "resume_after_durable_action_receipt"
+                        current.resume_checkpoint_id = str(
+                            receipt_actions[-1].verification_state.get("resume_checkpoint_id")
+                            or current.checkpoint_id
+                        )
+                        current.resume_operation = str(
+                            receipt_actions[-1].verification_state.get("next_stage")
+                            or receipt_actions[-1].verification_state.get("resume_operation")
+                            or "resume_after_durable_action_receipt"
+                        )
                         current.retry_not_before = now
                         current.lease_owner = ""
                         current.lease_token = ""

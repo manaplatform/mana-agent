@@ -434,6 +434,10 @@ def test_p09_test_f_durable_external_receipt_prevents_replay(runtime):
         classification=SideEffectClassification.NON_IDEMPOTENT,
         request_state=ActionRequestState.SUCCEEDED,
         external_receipt="deploy-receipt-12345",
+        verification_state={
+            "resume_checkpoint_id": "checkpoint-after-deploy",
+            "next_stage": "VERIFY_DEPLOYMENT",
+        },
     )
     supervisor.store.save_action(action)
     clock.advance(11)
@@ -445,6 +449,9 @@ def test_p09_test_f_durable_external_receipt_prevents_replay(runtime):
     consumed = supervisor.store.get_action(action.action_id)
     assert consumed.request_state == ActionRequestState.RECONCILED
     assert consumed.verification_state["receipt_consumed"] is True
+    resumed = supervisor.store.get_task(task.task_id)
+    assert resumed.resume_checkpoint_id == "checkpoint-after-deploy"
+    assert resumed.resume_operation == "VERIFY_DEPLOYMENT"
 
 
 def test_p09_test_g_genuine_external_ambiguity_creates_human_inbox_intervention(runtime):
@@ -625,6 +632,37 @@ def test_p09_test_b_local_file_write_reconciles_and_recovers(runtime):
     updated_action = supervisor.store.get_action(action.action_id)
     assert updated_action.request_state == ActionRequestState.SUCCEEDED
     assert updated_action.external_receipt == "reconciled_from_local_workspace"
+
+
+def test_p09_local_patch_receipt_requires_exact_attempt_identity(runtime):
+    """A generic patch-success flag from another attempt cannot prove completion."""
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, side_effect_classification=SideEffectClassification.NON_IDEMPOTENT)
+    attempt_id, _token = running(supervisor, task)
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="apply_patch",
+        action_fingerprint="patch-current",
+        classification=SideEffectClassification.NON_IDEMPOTENT,
+        effect_scope=ActionEffectScope.LOCAL_REPOSITORY,
+        request_state=ActionRequestState.STARTED,
+        verification_state={
+            "patch_result": {
+                "action_id": "action-foreign",
+                "attempt_id": "attempt-foreign",
+                "action_fingerprint": "patch-foreign",
+                "success": True,
+            }
+        },
+    )
+    supervisor.store.save_action(action)
+    clock.advance(11)
+
+    summary = supervisor.recover()
+    assert task.task_id in summary.intervention_required
+    assert supervisor.store.get_action(action.action_id).request_state == ActionRequestState.OUTCOME_UNKNOWN
 
 
 def test_p09_test_c_local_file_write_without_evidence_requires_reconciliation(runtime):

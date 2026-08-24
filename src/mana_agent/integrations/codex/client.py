@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from mana_agent._version import get_version
-from mana_agent.integrations.codex.exceptions import CodexProtocolError, CodexUnavailableError
+from mana_agent.integrations.codex.exceptions import (
+    CodexProtocolError,
+    CodexTimeoutError,
+    CodexUnavailableError,
+)
 from mana_agent.utils.redaction import redact_json_line
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_existing_directory(value: str | Path | None) -> str | None:
@@ -125,7 +132,11 @@ class AsyncCodexAppServer:
             return await asyncio.wait_for(future, timeout=self.request_timeout_seconds)
         except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
-            raise CodexProtocolError(f"Codex request timed out: {method}") from exc
+            raise CodexTimeoutError(
+                f"Codex request timed out: {method}",
+                method=method,
+                timeout_seconds=self.request_timeout_seconds,
+            ) from exc
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         await self._write({"jsonrpc": "2.0", "method": method, "params": params})
@@ -140,7 +151,21 @@ class AsyncCodexAppServer:
                 return
 
     async def interrupt(self, *, thread_id: str, turn_id: str) -> None:
-        await self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+        try:
+            await self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+        except CodexTimeoutError:
+            logger.warning(
+                "Codex turn/interrupt timed out for thread %s turn %s",
+                thread_id,
+                turn_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Codex turn/interrupt failed for thread %s turn %s: %s",
+                thread_id,
+                turn_id,
+                exc,
+            )
 
     async def deny_server_request(self, request: dict[str, Any]) -> None:
         """Reject an app-server approval request without granting permissions."""

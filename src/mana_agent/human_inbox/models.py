@@ -164,6 +164,13 @@ class InboxItem(StrictModel):
     tenant_id: str = "local"
     project_id: str = "local"
     task_id: str = Field(min_length=1)
+    root_task_id: str = ""
+    execution_id: str = ""
+    attempt_id: str = ""
+    action_id: str = ""
+    intervention_id: str = ""
+    integration_stage: str = ""
+    recovery_reason: str = ""
     branch_id: str = Field(min_length=1)
     parent_task_id: str | None = None
     checkpoint_id: str = ""
@@ -172,6 +179,7 @@ class InboxItem(StrictModel):
     permission_request_id: str = ""
     action_intent_id: str = ""
     action_digest: str = ""
+    recovery_intervention_id: str = ""
     requested_by_agent_id: str = Field(min_length=1)
     assigned_reviewer_type: ReviewerType
     assigned_reviewer_id: str = Field(min_length=1)
@@ -300,6 +308,13 @@ class InboxRequest(StrictModel):
     tenant_id: str = "local"
     project_id: str = "local"
     task_id: str = Field(min_length=1)
+    root_task_id: str = ""
+    execution_id: str = ""
+    attempt_id: str = ""
+    action_id: str = ""
+    intervention_id: str = ""
+    integration_stage: str = ""
+    recovery_reason: str = ""
     branch_id: str = Field(min_length=1)
     parent_task_id: str | None = None
     checkpoint_id: str = ""
@@ -308,6 +323,7 @@ class InboxRequest(StrictModel):
     permission_request_id: str = ""
     action_intent_id: str = ""
     action_digest: str = ""
+    recovery_intervention_id: str = ""
     requested_by_agent_id: str = Field(min_length=1)
     reviewer: ReviewerAssignment
     title: str = Field(min_length=1)
