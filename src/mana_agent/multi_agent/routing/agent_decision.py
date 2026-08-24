@@ -64,6 +64,7 @@ KNOWN_AGENT_TOOLS = frozenset(
         "delete_file",
         "run_command",
         "verify_project",
+        "git",
         "git_status",
         "git_diff",
         "semantic_search",
@@ -438,7 +439,7 @@ class AgentDecisionEngine:
             required_subagents=_clean_required_subagents(data.get("required_subagents")),
             reasoning_summary=str(data.get("reasoning_summary") or "Model-routed agent decision.")[:500],
             runtime_capability_change=bool(
-                data.get("runtime_capability_change", intent == "edit")
+                data.get("runtime_capability_change", False)
             ),
             source="model",
         )

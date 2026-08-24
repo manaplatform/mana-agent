@@ -4513,7 +4513,7 @@ class AgentChatGateway:
             if turn_record.response:
                 return ChatTurnResult(
                     answer=str(turn_record.response.get("answer") or ""),
-                    error=str(turn_record.response.get("error") or ""),
+                    error=turn_record.response.get("error") or None,
                     mode="turn-result-reused",
                     changed_files=list(turn_record.response.get("changed_files") or []),
                     payload=dict(turn_record.response.get("payload") or {}),
@@ -5894,8 +5894,6 @@ class AgentChatGateway:
                             )
                             if result.payload is not None:
                                 result.payload.setdefault("lane_id", lane_id.value)
-                            if recovered_task and result.error is None:
-                                result.error = ""
                         except BaseException as exc:
                             target_state = (
                                 LaneTaskState.BUDGET_EXHAUSTED
@@ -6039,10 +6037,10 @@ class AgentChatGateway:
                             target_state = (
                                 LaneTaskState.FAILED
                                 if result.error
-                                else LaneTaskState.COMPLETED
-                                if (status == "completed" and not pending_required_work_exists)
                                 else LaneTaskState.BUDGET_EXHAUSTED
                                 if status == "budget_exhausted"
+                                else LaneTaskState.COMPLETED
+                                if (not pending_required_work_exists and status in {"completed", "success", ""})
                                 else LaneTaskState.RUNNING
                             )
                             finished = self._finish_lane(
@@ -8829,23 +8827,7 @@ class AgentChatGateway:
                 getattr(lane_execution, "taskboard_task_id", "") or lane_task_id
             )
 
-        supervisor = self._lane_coordinator.execution_supervisor
-        supervised_task = supervisor.store.get_task_or_none(lane_task_id) if lane_task_id else None
-        lease_ctx = (
-            supervisor.lease_renewal(
-                supervised_task.task_id,
-                attempt_id=supervised_task.attempt_id,
-                lease_token=supervised_task.lease_token,
-            )
-            if supervised_task is not None
-            and supervised_task.attempt_id
-            and supervised_task.lease_token
-            and supervised_task.state in {ExecutionState.LEASED, ExecutionState.RUNNING}
-            else nullcontext()
-        )
-
-        with lease_ctx:
-            result = process_chat_turn(
+        result = process_chat_turn(
             root=self.root,
             text=text,
             chat_service=self._chat_service,

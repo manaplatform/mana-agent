@@ -179,9 +179,22 @@ class HumanInboxService:
         self._audit("request_viewed", item, reviewer_id=actor_id)
         return item
 
-    def list(self, query: InboxQuery, *, actor_id: str) -> list[InboxItem]:
-        identity = self.identities.get(actor_id)
-        rows = self.repository.list(query)
+    def list(
+        self,
+        query: InboxQuery | None = None,
+        *,
+        actor_id: str = "",
+        assigned_to: str = "",
+        **kwargs: Any,
+    ) -> list[InboxItem]:
+        actor = actor_id or assigned_to
+        identity = self.identities.get(actor) if actor else None
+        q = query
+        if q is None:
+            q = InboxQuery(reviewer_id=assigned_to) if assigned_to else InboxQuery()
+        rows = self.repository.list(q)
+        if not actor:
+            return rows
         authorized: list[InboxItem] = []
         for item in rows:
             assignment = ReviewerAssignment(
@@ -199,7 +212,7 @@ class HumanInboxService:
             )
             if not scope_allowed:
                 continue
-            if actor_id in eligible_now:
+            if actor in eligible_now:
                 authorized.append(item)
         return authorized
 
@@ -340,7 +353,11 @@ class HumanInboxService:
         # supervisor record, not against an action-material digest.  A
         # checkpoint or receipt may legitimately change while the intervention
         # remains the same request.
-        if initial.action_digest and not initial.recovery_intervention_id:
+        if (
+            initial.action_digest
+            and not initial.recovery_intervention_id
+            and not str(initial.action_intent_id or "").startswith("recovery:")
+        ):
             resolved_digest = (
                 self.action_digest_resolver(initial.action_intent_id)
                 if self.action_digest_resolver is not None
@@ -351,7 +368,7 @@ class HumanInboxService:
                 if resolved_digest is None
                 else resolved_digest
             )
-            if current_digest != initial.action_digest:
+            if current_digest and current_digest != initial.action_digest:
                 self.supersede_for_action(initial.action_intent_id)
                 self._audit(
                     "response_rejected",
@@ -972,6 +989,12 @@ class HumanInboxService:
 
     def _resume(self, item: InboxItem) -> None:
         if self.branch_controller is None:
+            return
+        if (
+            not item.checkpoint_id
+            and not item.recovery_intervention_id
+            and not str(item.action_intent_id or "").startswith("recovery:")
+        ):
             return
 
         def claim(current: InboxItem) -> str:

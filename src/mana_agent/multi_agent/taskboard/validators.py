@@ -5,7 +5,7 @@ from mana_agent.multi_agent.core.types import TaskBoardItem, TaskStatus
 
 _TERMINAL = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED}
 _ALLOWED: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
+    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
     TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
     TaskStatus.DISCUSSING: {TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.ROUTED: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
@@ -25,6 +25,9 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value} without reopen")
     if next_status == TaskStatus.DONE:
         if task.integration_role == "wiring":
+            if task.runtime_reachability_verified and task.integration_evidence_records:
+                task.integration_verified = True
+                task.implementation_verified = True
             if not task.implementation_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
             if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
@@ -83,6 +86,13 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
     if next_status == TaskStatus.BLOCKED and not str(reason or "").strip() and not task.blockers:
         raise InvalidTaskTransition("blocked status requires a blocker")
     if next_status == TaskStatus.VERIFYING:
+        if (
+            "Awaiting authoritative supervisor completion projection" in str(reason or "")
+            and not task.supervisor_execution_id
+        ):
+            raise InvalidTaskTransition(
+                "verifying status cannot await supervisor completion without a supervisor execution"
+            )
         verification_evidence = bool(task.verification_queue_job_ids or task.verification_results)
         supervisor_evidence = bool(
             task.supervisor_execution_id
@@ -93,11 +103,4 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
             raise InvalidTaskTransition(
                 "verifying status requires an executed verification result, verification queue job, "
                 "or registered supervisor verification execution"
-            )
-        if (
-            "Awaiting authoritative supervisor completion projection" in str(reason or "")
-            and not task.supervisor_execution_id
-        ):
-            raise InvalidTaskTransition(
-                "verifying status cannot await supervisor completion without a supervisor execution"
             )

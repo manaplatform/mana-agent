@@ -14,6 +14,7 @@ from mana_agent.workspaces.service import WorkspaceService
 class MessageBus:
     def __init__(self, root: str | Path = ".", *, max_messages_per_task: int = 24) -> None:
         self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
         service = WorkspaceService()
         repo = service.register_repository(self.root)
         workspace = service.workspace_for_repository(repo.repository_id)

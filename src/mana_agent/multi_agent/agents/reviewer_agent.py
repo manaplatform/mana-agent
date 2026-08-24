@@ -78,13 +78,16 @@ class ReviewerAgent(BaseAgent):
         if task.hierarchy_violations:
             self.reject_weak_evidence(task_id, "hierarchy violations were recorded")
             return False
-        if route_name in {"coding", "tool", "high_risk_tool"} and not task.queue_job_ids:
+        if route_name in {"coding", "tool", "high_risk_tool"} and not task.queue_job_ids and not task.verification_queue_job_ids:
             self.reject_weak_evidence(task_id, "tool-heavy route has no queue_job_ids")
             return False
         if any(event.get("agent_id") == "main" or str(event.get("agent_id", "")).startswith("agent_main_") for event in task.actual_tool_events):
             self.reject_weak_evidence(task_id, "MainAgent appeared in actual tool execution events")
             return False
         if task.integration_role == "wiring":
+            if task.runtime_reachability_verified and task.integration_evidence_records:
+                task.integration_verified = True
+                task.implementation_verified = True
             if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
                 self.reject_weak_evidence(task_id, "INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
                 return False

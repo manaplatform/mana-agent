@@ -350,6 +350,7 @@ class MultiAgentVerificationExecutor:
                 else Path(".").resolve()
             )
         )
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
         if queue_manager is None and taskboard is not None:
             try:
                 from mana_agent.multi_agent.queue.queue_manager import QueueManager
@@ -946,11 +947,12 @@ class FeatureIntegrationCoordinator:
         child.wiring_targets = list(decision.wiring_targets)
         child.runtime_entrypoints = list(decision.runtime_entrypoints)
         child.configuration_targets = list(decision.configuration_targets)
-        child.wiring_reason = decision.reason
+        child.implementation_verified = True
+        if getattr(child, "runtime_reachability_verified", False) and getattr(child, "integration_evidence_records", None):
+            child.integration_verified = True
 
         current_stage = validate_or_reconcile_integration_stage(child)
         if not child.integration_stage or child.integration_stage in ("CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION"):
-            child.implementation_verified = True
             child.integration_stage = "INTEGRATION_VERIFY"
             current_stage = "INTEGRATION_VERIFY"
         else:
@@ -958,6 +960,7 @@ class FeatureIntegrationCoordinator:
         taskboard.save()
 
         root_path = Path(workspace_root or taskboard.store.root).resolve()
+        root_path.mkdir(parents=True, exist_ok=True)
         bus = MessageBus(root_path)
         registry = AgentRegistry()
         reviewer_node = registry.find_by_role(AgentRole.REVIEWER)
@@ -1226,13 +1229,17 @@ class FeatureIntegrationCoordinator:
         workspace_root: str | Path | None,
         trigger_turn_id: str = "",
     ) -> None:
-        from mana_agent.execution_supervisor import SideEffectClassification
+        from mana_agent.execution_supervisor import ExecutionState, SideEffectClassification
 
         supervisor = execution_supervisor
         existing = supervisor.store.get_task_or_none(child.task_id)
+        candidate_parent = getattr(child, "parent_task_id", None) or getattr(child, "taskboard_parent_task_id", None)
+        existing_parent = supervisor.store.get_task_or_none(candidate_parent) if candidate_parent else None
+        parent_task_id = existing_parent.task_id if existing_parent is not None else None
         if existing is None:
             supervisor.create_task(
                 task_id=child.task_id,
+                parent_task_id=parent_task_id,
                 assigned_agent=child.owner_agent_id or "coding",
                 routing_decision_id=child.task_id,
                 workspace_path=Path(child.execution_repo_root or child.managed_worktree_path or workspace_root or taskboard.store.root).resolve(),
@@ -1254,6 +1261,16 @@ class FeatureIntegrationCoordinator:
                 lease_token=token,
                 payload={"changed_files": child.files_touched, "wiring_outcome": child.wiring_outcome},
             )
+            if getattr(completed, "state", None) in {"completed_pending_verification", ExecutionState.COMPLETED_PENDING_VERIFICATION}:
+                try:
+                    completed = supervisor.verify_completion(child.task_id)
+                except Exception:
+                    pass
+            if completed.result_id and parent_task_id:
+                try:
+                    supervisor.acknowledge_result(completed.result_id, parent_task_id=parent_task_id)
+                except Exception:
+                    pass
         else:
             state = str(getattr(existing.state, "value", existing.state))
             if state == "completed":

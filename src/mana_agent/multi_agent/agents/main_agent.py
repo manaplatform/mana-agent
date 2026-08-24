@@ -452,25 +452,12 @@ class MainAgent:
             if managed_workspace is not None:
                 done_reason += " Managed worktree is a merge candidate; explicit merge intent is still required."
             supervisor_task = self.execution_supervisor.store.get_task_or_none(task.task_id)
-            if supervisor_task is None:
-                # A direct MainAgent invocation has no authority to project
-                # supervisor completion. Do not leave an orphan VERIFYING
-                # task behind after review/summarization.
+            if supervisor_task is not None:
                 self.taskboard.update_status(
                     task.task_id,
-                    TaskStatus.BLOCKED,
-                    reason="No registered supervisor execution owns completion of this task.",
+                    TaskStatus.VERIFYING,
+                    reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
                 )
-                answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
-                return MainAgentResult(
-                    task.task_id, route.route_name, route.task_size, answer,
-                    route.required_agents, route.required_subagents, scope.repository_ids,
-                )
-            self.taskboard.update_status(
-                task.task_id,
-                TaskStatus.VERIFYING,
-                reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
-            )
             answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
         else:
             self.taskboard.update_status(task.task_id, TaskStatus.BLOCKED, reason="Reviewer rejected weak or incomplete hierarchy evidence.")

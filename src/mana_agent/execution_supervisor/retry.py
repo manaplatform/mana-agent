@@ -153,8 +153,9 @@ class RetryPolicy:
         category: RetryCategory,
         reason: str,
         actions: Iterable[ActionRecord] = (),
+        now: datetime | None = None,
     ) -> RecoveryDecision | None:
-        if task.wall_clock_deadline_exceeded():
+        if task.wall_clock_deadline_exceeded(now):
             return None
         if task.retry_budget.remaining(category, task.retry_usage) <= 0:
             return None

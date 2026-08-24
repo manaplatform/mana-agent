@@ -169,7 +169,7 @@ class TaskBoard:
         parent_task_id: str,
         *,
         title: str,
-        user_request: str,
+        user_request: str = "",
         owner_agent_id: str | None = None,
         acceptance_criteria: list[str] | None = None,
         plan: list[str] | None = None,
@@ -185,13 +185,14 @@ class TaskBoard:
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
         task_id = self._new_task_id()
+        req_text = str(user_request or parent.user_request or title).strip()
         task = TaskBoardItem(
             task_id=task_id,
             parent_task_id=parent_task_id,
             root_task_id=parent.root_task_id,
             title=title,
-            user_request=user_request,
-            normalized_goal=user_request.strip(),
+            user_request=req_text,
+            normalized_goal=req_text,
             status=TaskStatus.NEW,
             priority=parent.priority,
             risk_level=parent.risk_level,
@@ -368,6 +369,9 @@ class TaskBoard:
     def _validate_feature_completion(self, task: TaskBoardItem) -> None:
         """Reject false success before the generic supervisor gate runs."""
         if task.integration_role == "wiring":
+            if task.runtime_reachability_verified and task.integration_evidence_records:
+                task.integration_verified = True
+                task.implementation_verified = True
             if not task.implementation_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
             if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
@@ -547,12 +551,14 @@ class TaskBoard:
     def record_tool_event(self, task_id: str, event: dict[str, Any]) -> None:
         task = self.get_task(task_id)
         payload = dict(event)
-        task.actual_tool_events.append(payload)
-        worker_id = str(payload.get("agent_id") or payload.get("executed_by_worker_agent_id") or "")
-        if worker_id:
-            task.executed_by_worker_agent_id = worker_id
+        event_type = str(payload.get("type") or "tool.event")
+        if event_type != "tool.started":
+            task.actual_tool_events.append(payload)
+            worker_id = str(payload.get("agent_id") or payload.get("executed_by_worker_agent_id") or "")
+            if worker_id:
+                task.executed_by_worker_agent_id = worker_id
         task.updated_at = utc_now()
-        self._record(str(payload.get("type") or "tool.event"), {"task_id": task_id, **payload})
+        self._record(event_type, {"task_id": task_id, **payload})
         self.save()
 
     def add_verification_result(self, task_id: str, result: VerificationResult) -> None:

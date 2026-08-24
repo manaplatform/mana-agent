@@ -1105,6 +1105,15 @@ class LaneCoordinator:
             self.finish(reservation.execution.task_id, state=LaneTaskState.FAILED, error=str(exc))
             raise
 
+    def complete_lane(
+        self,
+        task_id: str,
+        *,
+        state: LaneTaskState = LaneTaskState.COMPLETED,
+        **kwargs: Any,
+    ) -> LaneExecution:
+        return self.finish(task_id, state=state, **kwargs)
+
     def finish(
         self,
         task_id: str,

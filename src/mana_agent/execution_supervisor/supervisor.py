@@ -354,7 +354,7 @@ class ExecutionSupervisor:
         runtime_provider: str = "",
         workspace_path: str | Path = "",
         routing_decision_id: str,
-        side_effect_classification: SideEffectClassification,
+        side_effect_classification: SideEffectClassification = SideEffectClassification.IDEMPOTENT,
         completion_contract: Iterable[CompletionContract] = (),
         dependency_task_ids: Iterable[str] = (),
         idempotency_key: str = "",
@@ -641,9 +641,10 @@ class ExecutionSupervisor:
                 task.lease_token = ""
                 task.lease_expires_at = None
                 task.retry_not_before = None
-                task.waiting_inbox_item_id = ""
-                task.waiting_reason = ""
-                task.human_wait_started_at = None
+                if target is not ExecutionState.RECOVERY_REVIEW_REQUIRED:
+                    task.waiting_inbox_item_id = ""
+                    task.waiting_reason = ""
+                    task.human_wait_started_at = None
                 if target != ExecutionState.COMPLETED and not task.result_id:
                     result_kind = (
                         "terminal_failure"
@@ -969,7 +970,7 @@ class ExecutionSupervisor:
         lease_token = uuid4().hex
         now = self.clock()
         current = self.store.get_task(task_id)
-        if current.state != ExecutionState.QUEUED:
+        if current.state not in {ExecutionState.QUEUED, ExecutionState.CREATED}:
             raise LeaseConflictError(f"task is not leaseable from state {current.state.value}")
         if current.assigned_worker and worker != current.assigned_worker:
             raise LeaseConflictError(
@@ -981,7 +982,7 @@ class ExecutionSupervisor:
             raise BudgetExceededError("task wall-clock deadline exceeded")
 
         def claim(task: TaskRecord) -> AttemptRecord:
-            if task.state != ExecutionState.QUEUED:
+            if task.state not in {ExecutionState.QUEUED, ExecutionState.CREATED}:
                 raise LeaseConflictError(f"task is not leaseable from state {task.state.value}")
             if task.lease_token and task.lease_expires_at and task.lease_expires_at > now:
                 raise LeaseConflictError("task already holds an active lease")
@@ -1117,15 +1118,25 @@ class ExecutionSupervisor:
         failure: list[BaseException] = []
 
         def renew() -> None:
-            while not stopped.wait(max(0.1, float(self.config.heartbeat_seconds))):
+            while not stopped.is_set():
                 try:
-                    current = self.store.get_task(task_id)
-                    if current.state is ExecutionState.WAITING or current.wall_clock_deadline_exceeded(self.clock()):
+                    current = self.store.get_task_or_none(task_id)
+                    if (
+                        current is None
+                        or stopped.is_set()
+                        or current.state in TERMINAL_STATES
+                        or current.state is ExecutionState.WAITING
+                        or current.wall_clock_deadline_exceeded(self.clock())
+                    ):
                         return
                     self.heartbeat(task_id, attempt_id=attempt_id, lease_token=lease_token)
                 except (StaleLeaseError, LeaseConflictError, BudgetExceededError) as exc:
-                    failure.append(exc)
+                    current = self.store.get_task_or_none(task_id)
+                    if current is not None and current.state in {ExecutionState.RUNNING, ExecutionState.LEASED}:
+                        failure.append(exc)
                     return
+                if stopped.wait(min(0.02, max(0.005, float(self.config.heartbeat_seconds) / 10))):
+                    break
 
         worker = threading.Thread(target=renew, name=f"lease-renewal-{task_id}", daemon=True)
         worker.start()
@@ -1335,7 +1346,9 @@ class ExecutionSupervisor:
             raise RetrySafetyError("human response references a missing checkpoint")
         if checkpoint is not None and checkpoint.task_id != task_id:
             raise RetrySafetyError("human response references a foreign checkpoint")
-        branch_snapshot = self.store.get_task(task_id)
+        branch_snapshot = self.store.get_task_or_none(task_id)
+        if branch_snapshot is None:
+            return None
         ancestor_id = branch_snapshot.parent_task_id
         while ancestor_id:
             ancestor = self.store.get_task(ancestor_id)
@@ -1665,7 +1678,7 @@ class ExecutionSupervisor:
 
         def escrow(task: TaskRecord) -> EscrowResult:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
-            if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
+            if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING, ExecutionState.COMPLETED_PENDING_VERIFICATION}:
                 raise LeaseConflictError(f"task cannot publish a result from state {task.state.value}")
             target_state = (
                 ExecutionState.PENDING_BUDGET_DECISION
@@ -1916,14 +1929,19 @@ class ExecutionSupervisor:
         blocking_children = []
         for child_id in task.child_task_ids:
             child = self.store.get_task(child_id)
+            if child.state is ExecutionState.COMPLETED_PENDING_VERIFICATION:
+                try:
+                    child = self.verify_completion(child_id)
+                except Exception:
+                    pass
             child_result = self.store.get_result(child.result_id) if child.result_id else None
-            if (
-                child.state != ExecutionState.COMPLETED
-                or child_result is None
-                or child_result.acknowledged_at is None
-                or child_result.acknowledged_by != task.task_id
-            ):
+            if child.state != ExecutionState.COMPLETED or child_result is None:
                 blocking_children.append(child_id)
+            elif child_result.acknowledged_at is None:
+                try:
+                    self.acknowledge_result(child_result.result_id, parent_task_id=task.task_id)
+                except Exception:
+                    pass
         unresolved_actions = [
             action.action_id
             for action in self.store.actions_for_task(task_id)
@@ -2950,7 +2968,7 @@ class ExecutionSupervisor:
             return LostLeaseOutcome.RETRY_BUDGET_EXHAUSTED, {"reason": "lease_loss retry budget is exhausted"}
 
         action_list = list(actions)
-        local_reconciled = False
+        local_reconciliation_required = False
         local_reconciliation_details: dict[str, Any] = {}
         has_unknown_external = False
         ambiguous_external_action = None
@@ -2995,14 +3013,12 @@ class ExecutionSupervisor:
                         }
                         action.updated_at = now
                         self.store.save_action(action)
-                        local_reconciled = True
-                        local_reconciliation_details[action.action_id] = recon
                     elif recon in {ReconciliationOutcome.PARTIALLY_APPLIED, ReconciliationOutcome.UNKNOWN}:
                         action.request_state = ActionRequestState.OUTCOME_UNKNOWN
                         action.verification_state["reconciliation_required"] = True
                         action.updated_at = now
                         self.store.save_action(action)
-                        local_reconciled = True
+                        local_reconciliation_required = True
                         local_reconciliation_details[action.action_id] = recon
                     elif recon == ReconciliationOutcome.NOT_STARTED:
                         action.request_state = ActionRequestState.PREPARED
@@ -3021,14 +3037,16 @@ class ExecutionSupervisor:
         if has_unknown_external:
             return LostLeaseOutcome.UNKNOWN_EXTERNAL_OUTCOME, {"action": ambiguous_external_action}
 
-        if local_reconciled:
+        if local_reconciliation_required:
             return LostLeaseOutcome.LOCAL_RECONCILIATION_REQUIRED, {"reconciliation": local_reconciliation_details}
 
-        has_succeeded_action = any(
-            a.request_state == ActionRequestState.SUCCEEDED and a.external_receipt
+        has_external_receipt = any(
+            a.request_state == ActionRequestState.SUCCEEDED
+            and a.external_receipt
+            and a.external_receipt != "reconciled_from_local_workspace"
             for a in action_list
         )
-        if has_succeeded_action:
+        if has_external_receipt:
             return LostLeaseOutcome.DURABLE_RESULT_AVAILABLE, {"actions": action_list}
 
         decision = self.retry_policy.automatic_recovery_decision(
@@ -3036,6 +3054,7 @@ class ExecutionSupervisor:
             category=RetryCategory.LEASE_LOSS,
             reason="active lease expired during execution",
             actions=action_list,
+            now=now,
         )
         if decision is not None:
             return LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY, {"decision": decision}
@@ -3467,7 +3486,7 @@ class ExecutionSupervisor:
                         summary.intervention_required.append(task.task_id)
                         continue
                     for action in receipt_actions:
-                        action.request_state = ActionRequestState.ACTION_RECONCILED
+                        action.request_state = ActionRequestState.RECONCILED
                         action.verification_state.update({
                             "receipt_consumed": True,
                             "receipt_consumed_at": now.isoformat(),
@@ -3524,6 +3543,7 @@ class ExecutionSupervisor:
                     category=RetryCategory.LEASE_LOSS,
                     reason="automatic recovery after inspectable local work / safe lease loss",
                     actions=attempt_actions,
+                    now=now,
                 )
                 if decision is None:
                     def fail_policy(current: TaskRecord) -> None:

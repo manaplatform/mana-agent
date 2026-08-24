@@ -2427,6 +2427,10 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
 
         def generate(self, request, **kwargs):
             self.calls.append(request)
+            if self.repo_root:
+                p = Path(self.repo_root) / "src" / "provider.py"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("class Provider:\n    pass\n", encoding="utf-8")
             return {
                 "answer": "Provider implemented in src/provider.py",
                 "status": "completed",
@@ -2574,7 +2578,7 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
     session_id = gw.create_session(frontend="test")
 
     # Mock tool execution in queue manager for verification shell commands so they pass
-    from mana_agent.multi_agent.tools.tools_manager import ToolsManager
+    from mana_agent.multi_agent.tools.tool_manager import ToolsManager
     monkeypatch.setattr(
         ToolsManager,
         "execute_job",

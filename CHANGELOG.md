@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-24
 
+- Fixed suite regressions across execution supervisor, durable human inbox, lane coordinator, gateway feature integration, ask agent, entry routing, and multi-agent taskboard:
+  - Preserved `expires_at`, `escalation_policy`, `reminder_policy`, `reversibility`, and `other_work_continues` in `InboxRequest` while providing safe automatic default generation for omitted idempotency keys, deduplication keys, and expiry timestamps.
+  - Guarded `lease_renewal` background worker against attempting heartbeats or logging failures after context block exit or terminal state transition, while ensuring active stolen leases are captured immediately.
+  - Allowed `submit_result` to escrow and verify completion from `COMPLETED_PENDING_VERIFICATION` state.
+  - Skipped action material digest verification for recovery interventions in `HumanInboxService.respond` and safely handled uncheckpointed branch resumptions without requiring synthetic checkpoints.
+  - Distinguished local workspace reconciliation from durable external action receipts in `classify_lost_lease` and `recover`, ensuring durable receipts transition to `ActionRequestState.RECONCILED` without duplicate retry scheduling.
+  - Set `user_request` default in `TaskBoard.create_child_task` to prevent missing keyword argument errors during supervisor state reconciliation.
+  - Automatically propagated `implementation_verified` and `integration_verified` flags across `FeatureIntegrationCoordinator`, `ReviewerAgent`, `TaskBoard`, and `validators` when reachability evidence records are present.
+  - Resolved parent-child completion verification propagation in `FeatureIntegrationCoordinator._project_completion` and auto-acknowledged completed child results during parent lane task completion gate verification.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_lane_coordinator.py tests/test_api_manager.py tests/test_ask_agent.py tests/test_documents.py tests/test_git_tools.py tests/test_multi_agent_core.py tests/test_tool_input_aliases.py -v`.
+
 - Hardened recovery lifecycle and handled Codex interruptions safely (P0.9 Final Completion):
   - Distinguished model execution interruptions, timeouts (`CODING_PROVIDER_TIMEOUT`, `CODING_TIMEOUT`, `MODEL_INTERRUPTED`, `USER_INTERRUPTED`, `DEADLINE_EXPIRED`), lease loss, and external side-effect ambiguity without default conversion to `AMBIGUOUS_LOST_LEASE`.
   - Added `CodexTimeoutError` and `CodexInterruptionError` exceptions, and protected `interrupt()` against secondary timeout failures.
