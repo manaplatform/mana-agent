@@ -63,6 +63,7 @@ class SideEffectClassification(str, Enum):
 
 
 class ActionEffectScope(str, Enum):
+    UNKNOWN = "UNKNOWN"
     LOCAL_REPOSITORY = "LOCAL_REPOSITORY"
     LOCAL_PROCESS = "LOCAL_PROCESS"
     REMOTE_REVERSIBLE = "REMOTE_REVERSIBLE"
@@ -83,6 +84,7 @@ class ReconciliationOutcome(str, Enum):
     NOT_STARTED = "NOT_STARTED"
     PARTIALLY_APPLIED = "PARTIALLY_APPLIED"
     ALREADY_APPLIED = "ALREADY_APPLIED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     UNKNOWN_EXTERNAL_OUTCOME = "UNKNOWN_EXTERNAL_OUTCOME"
 
 
@@ -121,7 +123,7 @@ class ActionRecord(StrictModel):
     action_fingerprint: str = Field(min_length=1)
     idempotency_key: str = ""
     classification: SideEffectClassification
-    effect_scope: ActionEffectScope = ActionEffectScope.LOCAL_REPOSITORY
+    effect_scope: ActionEffectScope = ActionEffectScope.UNKNOWN
     request_state: ActionRequestState = ActionRequestState.PREPARED
     external_receipt: str = ""
     result_reference: str = ""
@@ -164,7 +166,7 @@ class ActionRecord(StrictModel):
             }:
                 data["effect_scope"] = ActionEffectScope.EXTERNAL_CONSEQUENTIAL.value
             else:
-                data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY.value
+                data["effect_scope"] = ActionEffectScope.UNKNOWN.value
         return data
 
 

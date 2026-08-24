@@ -82,7 +82,7 @@ class RetryPolicy:
                 SideEffectClassification.READ_ONLY,
                 SideEffectClassification.IDEMPOTENT,
             }
-            and getattr(action, "effect_scope", ActionEffectScope.LOCAL_REPOSITORY) == ActionEffectScope.EXTERNAL_CONSEQUENTIAL
+            and action.effect_scope in {ActionEffectScope.EXTERNAL_CONSEQUENTIAL, ActionEffectScope.UNKNOWN}
             and not action.external_receipt
         ]
         if ambiguous_actions:
@@ -168,7 +168,7 @@ class RetryPolicy:
                 SideEffectClassification.READ_ONLY,
                 SideEffectClassification.IDEMPOTENT,
             }
-            and getattr(action, "effect_scope", ActionEffectScope.LOCAL_REPOSITORY) == ActionEffectScope.EXTERNAL_CONSEQUENTIAL
+            and action.effect_scope in {ActionEffectScope.EXTERNAL_CONSEQUENTIAL, ActionEffectScope.UNKNOWN}
             and not action.external_receipt
         ]
         if ambiguous:

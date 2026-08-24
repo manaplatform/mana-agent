@@ -951,7 +951,7 @@ class HumanInboxService:
         self._authorize(item, item.response_actor_id)
 
     def _resume(self, item: InboxItem) -> None:
-        if self.branch_controller is None or not item.checkpoint_id:
+        if self.branch_controller is None:
             return
 
         def claim(current: InboxItem) -> str:
@@ -982,12 +982,7 @@ class HumanInboxService:
         self._audit("branch_resumed", completed, resume_claim_id=claim_id)
 
     def _resume_terminal_if_needed(self, item: InboxItem) -> None:
-        if (
-            item.status
-            in {InboxStatus.APPROVED, InboxStatus.DENIED, InboxStatus.ANSWERED}
-            and item.checkpoint_id
-            and item.resume_completed_at is None
-        ):
+        if item.status in {InboxStatus.APPROVED, InboxStatus.DENIED, InboxStatus.ANSWERED} and item.resume_completed_at is None:
             self._resume(item)
 
     def _validate_answer(self, item: InboxItem, submission: ResponseSubmission) -> dict[str, Any]:

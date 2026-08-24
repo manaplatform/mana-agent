@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-24
 
+- Hardened P0.9 execution-supervisor recovery: local mutations now require attempt-bound fingerprints or trusted result metadata, durable external receipts are consumed without retry scheduling, Human Inbox publication fails closed without synthetic references, recovery responses work without checkpoints, and unknown action scopes cannot auto-recover.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/execution_supervisor/test_result_escrow_recovery.py -v`.
+
 - Finalized Feature Integration Supervisor Finalization, Gateway Completion, and Lost-Lease Recovery Lifecycle (P0.5–P0.9).
   - P0.5: Fixed supervisor finalization ownership so `FeatureIntegrationCoordinator._project_completion` and `MainAgent._project_wiring_completion` use the record returned by `submit_result` without redundant second `verify_completion` invocations; reconciled Cases A–F across supervisor states.
   - P0.6: Ensured runnable internal Feature Integration completes in a single user turn without user-visible `WAITING` or `BLOCKED` states; reserved `EXTERNAL_DEPENDENCY` exclusively for workflows with valid `wake_up_source` and `wake_up_reference`.

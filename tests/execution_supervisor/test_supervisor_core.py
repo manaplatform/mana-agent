@@ -438,10 +438,13 @@ def test_p09_test_f_durable_external_receipt_prevents_replay(runtime):
     supervisor.store.save_action(action)
     clock.advance(11)
     summary = supervisor.recover()
-    # With durable receipt, automatic retry/resume is allowed without human review intervention
-    assert task.task_id in summary.retry_scheduled
+    assert task.task_id in summary.recovered
+    assert task.task_id not in summary.retry_scheduled
     assert task.task_id not in summary.intervention_required
     assert supervisor.store.recovery_interventions_for_task(task.task_id) == []
+    consumed = supervisor.store.get_action(action.action_id)
+    assert consumed.request_state == ActionRequestState.RECONCILED
+    assert consumed.verification_state["receipt_consumed"] is True
 
 
 def test_p09_test_g_genuine_external_ambiguity_creates_human_inbox_intervention(runtime):
@@ -539,6 +542,33 @@ def test_p09_test_i_heartbeat_prevents_false_lease_expiry(runtime):
     assert final_task.state == ExecutionState.RUNNING
 
 
+def test_p09_heartbeat_long_operation_renews_same_lease_without_deadline_extension(runtime):
+    supervisor, clock, tmp_path = runtime
+    task, token = supervisor.acquire_lease(create(supervisor, tmp_path).task_id, owner="worker-long")
+    task = supervisor.start(task.task_id, attempt_id=task.attempt_id, lease_token=token)
+    initial_deadline = task.deadline_at
+    initial_owner = task.lease_owner
+    initial_token = task.lease_token
+    initial_expiry = task.lease_expires_at
+
+    with supervisor.lease_renewal(task.task_id, attempt_id=task.attempt_id, lease_token=token):
+        for _ in range(3):
+            clock.advance(supervisor.config.heartbeat_seconds)
+            time.sleep(0.05)
+    renewed = supervisor.store.get_task(task.task_id)
+    assert renewed.lease_expires_at > initial_expiry
+    assert renewed.lease_owner == initial_owner
+    assert renewed.lease_token == initial_token
+    assert renewed.deadline_at == initial_deadline
+    completed = supervisor.submit_result(
+        task.task_id,
+        attempt_id=task.attempt_id,
+        lease_token=token,
+        payload={"status": "completed"},
+    )
+    assert completed.state == ExecutionState.COMPLETED
+
+
 def test_p09_test_j_lease_renewal_ownership_failure(runtime):
     """P0.9 Test J: Stale lease ownership during renewal surfaces failure before result publication."""
     supervisor, clock, tmp_path = runtime
@@ -571,6 +601,7 @@ def test_p09_test_b_local_file_write_reconciles_and_recovers(runtime):
 
     target_file = tmp_path / "hello.py"
     target_file.write_text("print('hello')\n", encoding="utf-8")
+    digest = hashlib.sha256(target_file.read_bytes()).hexdigest()
 
     action = ActionRecord(
         execution_id=task.task_id,
@@ -581,7 +612,7 @@ def test_p09_test_b_local_file_write_reconciles_and_recovers(runtime):
         classification=SideEffectClassification.NON_IDEMPOTENT,
         effect_scope=ActionEffectScope.LOCAL_REPOSITORY,
         request_state=ActionRequestState.STARTED,
-        verification_state={"files": ["hello.py"]},
+        verification_state={"artifact_hashes": {"hello.py": digest}},
     )
     supervisor.store.save_action(action)
     clock.advance(11)
@@ -596,8 +627,8 @@ def test_p09_test_b_local_file_write_reconciles_and_recovers(runtime):
     assert updated_action.external_receipt == "reconciled_from_local_workspace"
 
 
-def test_p09_test_c_local_file_write_not_started_recovers(runtime):
-    """P0.9 Test C: Local file write action not yet started resets to PREPARED and auto-recovers."""
+def test_p09_test_c_local_file_write_without_evidence_requires_reconciliation(runtime):
+    """A started local mutation without proof is never reset for automatic replay."""
     supervisor, clock, tmp_path = runtime
     task = create(
         supervisor,
@@ -605,6 +636,7 @@ def test_p09_test_c_local_file_write_not_started_recovers(runtime):
         side_effect_classification=SideEffectClassification.NON_IDEMPOTENT,
     )
     attempt_id, _token = running(supervisor, task)
+    (tmp_path / "missing.py").write_text("pre-existing\n", encoding="utf-8")
 
     action = ActionRecord(
         execution_id=task.task_id,
@@ -621,12 +653,32 @@ def test_p09_test_c_local_file_write_not_started_recovers(runtime):
     clock.advance(11)
 
     summary = supervisor.recover()
-    assert task.task_id in summary.retry_scheduled
-    assert task.task_id not in summary.intervention_required
+    assert task.task_id in summary.intervention_required
     assert supervisor.store.recovery_interventions_for_task(task.task_id) == []
 
     updated_action = supervisor.store.get_action(action.action_id)
-    assert updated_action.request_state == ActionRequestState.PREPARED
+    assert updated_action.request_state == ActionRequestState.OUTCOME_UNKNOWN
+    assert updated_action.verification_state["reconciliation_required"] is True
+
+
+def test_p09_unknown_action_scope_fails_closed(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path, side_effect_classification=SideEffectClassification.UNKNOWN)
+    attempt_id, _token = running(supervisor, task)
+    action = ActionRecord(
+        execution_id=task.task_id,
+        attempt_id=attempt_id,
+        attempt_generation=1,
+        tool_name="unregistered_action",
+        action_fingerprint="fp-unknown",
+        classification=SideEffectClassification.UNKNOWN,
+        request_state=ActionRequestState.STARTED,
+    )
+    supervisor.store.save_action(action)
+    clock.advance(11)
+    summary = supervisor.recover()
+    assert task.task_id in summary.intervention_required
+    assert supervisor.store.get_action(action.action_id).effect_scope == ActionEffectScope.UNKNOWN
 
 
 def test_p09_test_d_retry_budget_exhaustion_does_not_create_ambiguous_lost_lease(runtime):
@@ -639,7 +691,7 @@ def test_p09_test_d_retry_budget_exhaustion_does_not_create_ambiguous_lost_lease
     )
     supervisor.store.update_task(
         task.task_id,
-        lambda t: setattr(t, "retry_usage", {"lease_loss": t.retry_budget.max_lease_loss_retries}),
+        lambda t: setattr(t, "retry_usage", {"lease_loss": t.retry_budget.lease_loss}),
     )
     attempt_id, _token = running(supervisor, task)
     clock.advance(11)

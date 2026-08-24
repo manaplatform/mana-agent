@@ -2836,33 +2836,62 @@ class ExecutionSupervisor:
         if action.request_state == ActionRequestState.SUCCEEDED and action.external_receipt:
             return ReconciliationOutcome.ALREADY_APPLIED
 
-        if action.verification_state.get("patch_applied") is True or action.verification_state.get("applied") is True:
-            return ReconciliationOutcome.ALREADY_APPLIED
         if action.verification_state.get("partially_applied") is True:
             return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        patch_result = action.verification_state.get("patch_result") or action.verification_state.get("apply_result")
+        if isinstance(patch_result, dict):
+            if patch_result.get("success") is True or patch_result.get("applied") is True:
+                return ReconciliationOutcome.ALREADY_APPLIED
+            if patch_result.get("partially_applied") is True:
+                return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        # A pre-existing path is not proof that this attempt produced it.  The
+        # action must carry a fingerprint (or trusted patch result) tied to it.
+        expected = action.verification_state.get("artifact_hashes") or {}
+        artifacts = action.verification_state.get("artifacts") or []
+        if isinstance(artifacts, list):
+            expected = {
+                **expected,
+                **{
+                    str(item["path"]): str(item.get("sha256") or item.get("content_fingerprint"))
+                    for item in artifacts
+                    if isinstance(item, dict) and item.get("path")
+                    and (item.get("sha256") or item.get("content_fingerprint"))
+                },
+            }
+        if isinstance(expected, dict) and expected:
+            workspace = Path(task.workspace_path) if task.workspace_path else None
+            observed = 0
+            matched = 0
+            if workspace is not None:
+                for relative, fingerprint in expected.items():
+                    path = workspace / str(relative)
+                    if not path.is_file():
+                        continue
+                    observed += 1
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    matched += digest == str(fingerprint).removeprefix("sha256:")
+            if matched == len(expected) and matched:
+                return ReconciliationOutcome.ALREADY_APPLIED
+            if observed:
+                return ReconciliationOutcome.PARTIALLY_APPLIED
 
         checkpoints = self.store.checkpoints_for_task(task.task_id)
         if checkpoints:
             latest = checkpoints[-1]
-            if action.tool_name in latest.completed_steps or action.action_id in latest.idempotency_records:
-                return ReconciliationOutcome.ALREADY_APPLIED
-            if latest.generated_files:
-                return ReconciliationOutcome.ALREADY_APPLIED
-
-        workspace = Path(task.workspace_path) if task.workspace_path else None
-        if workspace and workspace.exists():
-            target_files = action.verification_state.get("files") or task.target_resources
-            if target_files:
-                existing_count = sum((workspace / f).exists() for f in target_files if isinstance(f, str))
-                if existing_count == len(target_files) and existing_count > 0:
+            for result in latest.tool_results:
+                if not isinstance(result, dict) or result.get("action_id") != action.action_id:
+                    continue
+                metadata = result.get("metadata") or result
+                if metadata.get("patch_applied") or metadata.get("applied") or metadata.get("success"):
                     return ReconciliationOutcome.ALREADY_APPLIED
-                elif 0 < existing_count < len(target_files):
+                if metadata.get("partially_applied"):
                     return ReconciliationOutcome.PARTIALLY_APPLIED
 
-        if action.request_state == ActionRequestState.STARTED:
+        if action.request_state == ActionRequestState.PREPARED or action.verification_state.get("execution_started") is False:
             return ReconciliationOutcome.NOT_STARTED
-
-        return ReconciliationOutcome.NOT_STARTED
+        return ReconciliationOutcome.RECONCILIATION_REQUIRED
 
     def classify_lost_lease(
         self,
@@ -2903,6 +2932,10 @@ class ExecutionSupervisor:
                 continue
 
             if action.request_state in {ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN}:
+                if action.effect_scope == ActionEffectScope.UNKNOWN:
+                    has_unknown_external = True
+                    ambiguous_external_action = action
+                    break
                 provider_state = action.verification_state.get("provider_state") or task.provider_metadata.get("state")
                 if provider_state == "SUCCEEDED" or action.verification_state.get("succeeded"):
                     action.request_state = ActionRequestState.SUCCEEDED
@@ -2917,20 +2950,30 @@ class ExecutionSupervisor:
                     continue
 
                 is_local = (
-                    getattr(action, "effect_scope", ActionEffectScope.LOCAL_REPOSITORY) == ActionEffectScope.LOCAL_REPOSITORY
+                    action.effect_scope == ActionEffectScope.LOCAL_REPOSITORY
                     or action.tool_name in LOCAL_REPOSITORY_TOOLS
-                    or bool(task.workspace_path and (action.tool_name.startswith(("patch", "edit", "write", "create", "delete", "apply")) or action.classification in {SideEffectClassification.IDEMPOTENT, SideEffectClassification.CONDITIONALLY_IDEMPOTENT, SideEffectClassification.DEDUPLICATED}))
                 )
                 if is_local:
                     recon = self._reconcile_local_mutation(task, action)
                     if recon == ReconciliationOutcome.ALREADY_APPLIED:
                         action.request_state = ActionRequestState.SUCCEEDED
                         action.external_receipt = "reconciled_from_local_workspace"
+                        action.verification_state["reconciliation_receipt"] = {
+                            "execution_id": action.execution_id,
+                            "attempt_id": action.attempt_id,
+                            "action_id": action.action_id,
+                            "checkpoint_id": task.checkpoint_id,
+                            "evidence": "artifact_fingerprint_or_trusted_patch_result",
+                        }
                         action.updated_at = now
                         self.store.save_action(action)
                         local_reconciled = True
                         local_reconciliation_details[action.action_id] = recon
-                    elif recon == ReconciliationOutcome.PARTIALLY_APPLIED:
+                    elif recon in {ReconciliationOutcome.PARTIALLY_APPLIED, ReconciliationOutcome.RECONCILIATION_REQUIRED}:
+                        action.request_state = ActionRequestState.OUTCOME_UNKNOWN
+                        action.verification_state["reconciliation_required"] = True
+                        action.updated_at = now
+                        self.store.save_action(action)
                         local_reconciled = True
                         local_reconciliation_details[action.action_id] = recon
                     elif recon == ReconciliationOutcome.NOT_STARTED:
@@ -2988,7 +3031,7 @@ class ExecutionSupervisor:
                     SideEffectClassification.READ_ONLY,
                     SideEffectClassification.IDEMPOTENT,
                 }
-                and getattr(a, "effect_scope", ActionEffectScope.LOCAL_REPOSITORY) == ActionEffectScope.EXTERNAL_CONSEQUENTIAL
+                and a.effect_scope in {ActionEffectScope.EXTERNAL_CONSEQUENTIAL, ActionEffectScope.UNKNOWN}
                 and not a.external_receipt
             ),
             None,
@@ -3044,13 +3087,28 @@ class ExecutionSupervisor:
             if self.recovery_review_publisher is not None:
                 if hasattr(self.recovery_review_publisher, "_supervisor"):
                     self.recovery_review_publisher._supervisor = self
-                inbox_item_id = self.recovery_review_publisher.create_recovery_review(
-                    intervention=intervention,
-                    task=task,
-                    action=ambiguous_action,
-                )
+                try:
+                    inbox_item_id = self.recovery_review_publisher.create_recovery_review(
+                        intervention=intervention,
+                        task=task,
+                        action=ambiguous_action,
+                    )
+                except Exception as exc:
+                    self._emit(
+                        "recovery_review_publication_error",
+                        task,
+                        intervention_id=intervention.intervention_id,
+                        error=str(exc),
+                    )
+                    raise RetrySafetyError("recovery review publication failed; recovery stopped safely") from exc
             if not inbox_item_id:
-                inbox_item_id = f"inbox_recovery_{task.task_id}_{task.attempt_id or '1'}"
+                self._emit(
+                    "recovery_review_publication_error",
+                    task,
+                    intervention_id=intervention.intervention_id,
+                    error="Human Inbox returned no durable item reference",
+                )
+                raise RetrySafetyError("recovery review publication failed; no fallback inbox reference was created")
             intervention.inbox_item_id = inbox_item_id
             if existing is None:
                 self.store.save_recovery_intervention(intervention)
@@ -3347,24 +3405,59 @@ class ExecutionSupervisor:
                         summary.intervention_required.append(task.task_id)
                     continue
                 else:
-                    decision = self.retry_policy.automatic_recovery_decision(
-                        task,
-                        category=RetryCategory.LEASE_LOSS,
-                        reason="consuming durable action receipt after lease loss",
-                        actions=attempt_actions,
-                    )
-                    if decision is not None:
-                        try:
-                            task = self.retry(task.task_id, decision)
-                            summary.retry_scheduled.append(task.task_id)
-                            self._emit("task_recovered", task, action=decision.action.value)
-                        except RetrySafetyError:
-                            summary.intervention_required.append(task.task_id)
-                    else:
+                    receipt_actions = [
+                        action for action in attempt_actions
+                        if action.request_state == ActionRequestState.SUCCEEDED and action.external_receipt
+                    ]
+                    if not receipt_actions:
                         summary.intervention_required.append(task.task_id)
+                        continue
+                    for action in receipt_actions:
+                        action.request_state = ActionRequestState.RECONCILED
+                        action.verification_state.update({
+                            "receipt_consumed": True,
+                            "receipt_consumed_at": now.isoformat(),
+                            "receipt_lineage": {
+                                "execution_id": action.execution_id,
+                                "attempt_id": action.attempt_id,
+                                "action_id": action.action_id,
+                                "checkpoint_id": task.checkpoint_id,
+                            },
+                        })
+                        action.updated_at = now
+                        self.store.save_action(action)
+
+                    def resume_after_receipt(current: TaskRecord) -> None:
+                        current.resume_checkpoint_id = current.checkpoint_id
+                        current.resume_operation = "resume_after_durable_action_receipt"
+                        current.retry_not_before = now
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                        current.state = ExecutionState.QUEUED
+                        current.updated_at = now
+
+                    task, _ = self.store.update_task(task.task_id, resume_after_receipt)
+                    summary.recovered.append(task.task_id)
+                    self._emit("task_recovered", task, action="durable_action_receipt_consumed")
                     continue
 
-            elif outcome in {LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY, LostLeaseOutcome.LOCAL_RECONCILIATION_REQUIRED}:
+            elif outcome == LostLeaseOutcome.LOCAL_RECONCILIATION_REQUIRED:
+                def fail_reconciliation(current: TaskRecord) -> None:
+                    validate_transition(current.state, ExecutionState.FAILED)
+                    current.state = ExecutionState.FAILED
+                    current.finished_at = current.updated_at = now
+                    current.failure_reason = "local mutation outcome requires manual reconciliation; no replay was scheduled"
+                    current.recovery_reason = "lost lease local mutation evidence was inconclusive"
+                    current.lease_owner = ""
+                    current.lease_token = ""
+                    current.lease_expires_at = None
+                task, _ = self.store.update_task(task.task_id, fail_reconciliation)
+                summary.intervention_required.append(task.task_id)
+                self._emit("recovery_reconciliation_required", task)
+                continue
+
+            elif outcome == LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY:
                 decision = details.get("decision") or self.retry_policy.automatic_recovery_decision(
                     task,
                     category=RetryCategory.LEASE_LOSS,
@@ -3423,9 +3516,13 @@ class ExecutionSupervisor:
                 continue
 
             elif outcome == LostLeaseOutcome.UNKNOWN_EXTERNAL_OUTCOME:
-                intervention = self._require_ambiguous_lease_review(
-                    task, now=now, actions=attempt_actions
-                )
+                try:
+                    intervention = self._require_ambiguous_lease_review(
+                        task, now=now, actions=attempt_actions
+                    )
+                except RetrySafetyError:
+                    summary.intervention_required.append(task.task_id)
+                    continue
                 summary.intervention_required.append(task.task_id)
                 if intervention not in summary.intervention_records:
                     summary.intervention_records.append(intervention)
