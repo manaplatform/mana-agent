@@ -1598,3 +1598,22 @@ def test_replan_and_retry_on_verifying_and_pending_budget_states(
         session_id="session-test",
     )
     assert retry_res.execution.task_id == task2_id
+
+
+def test_lane_coordinator_supervisor_heartbeats_and_failure_surfacing(
+    coordinator: LaneCoordinator,
+) -> None:
+    """LaneCoordinator runs background heartbeats renewing the supervisor attempt and surfaces failure."""
+    res = _reserve(coordinator, LaneId.CODING, intent="test heartbeat lane")
+    exec_res = coordinator.start(res)
+    task_id = exec_res.task_id
+
+    assert task_id in coordinator._supervisor_heartbeat_threads
+    thread = coordinator._supervisor_heartbeat_threads[task_id]
+    assert thread.is_alive()
+
+    coordinator.complete_lane(
+        task_id,
+        state=LaneTaskState.COMPLETED,
+    )
+    assert task_id not in coordinator._supervisor_heartbeat_threads

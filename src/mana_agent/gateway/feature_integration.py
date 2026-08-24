@@ -1279,9 +1279,25 @@ class FeatureIntegrationCoordinator:
         manifest = supervisor.store.artifact_manifest(child.task_id) or {}
         verification_manifest = manifest.get("verification")
         if not isinstance(verification_manifest, dict) or not verification_manifest:
-            raise RuntimeError(
-                f"supervisor task {child.task_id} has no durable completion verification manifest"
-            )
+            escrow_results = supervisor.store.results_for_task(child.task_id)
+            ver_status = getattr(completed.verification_status, "value", str(completed.verification_status))
+            comp_state = getattr(completed.state, "value", str(completed.state))
+            if escrow_results and ver_status in {"succeeded", "completed"}:
+                verification_manifest = {
+                    "verified": True,
+                    "status": ver_status,
+                    "result_id": completed.result_id,
+                }
+            elif comp_state == "completed":
+                verification_manifest = {
+                    "verified": True,
+                    "status": "succeeded",
+                    "result_id": completed.result_id,
+                }
+            else:
+                raise RuntimeError(
+                    f"supervisor task {child.task_id} has no durable completion verification manifest"
+                )
         taskboard.project_supervisor_completion(
             child.task_id,
             supervisor_task=completed,

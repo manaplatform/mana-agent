@@ -9,6 +9,7 @@ from typing import Iterable
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import RetrySafetyError
 from mana_agent.execution_supervisor.models import (
+    ActionEffectScope,
     ActionRequestState,
     ActionRecord,
     RecoveryAction,
@@ -81,6 +82,7 @@ class RetryPolicy:
                 SideEffectClassification.READ_ONLY,
                 SideEffectClassification.IDEMPOTENT,
             }
+            and getattr(action, "effect_scope", ActionEffectScope.LOCAL_REPOSITORY) == ActionEffectScope.EXTERNAL_CONSEQUENTIAL
             and not action.external_receipt
         ]
         if ambiguous_actions:
@@ -166,6 +168,7 @@ class RetryPolicy:
                 SideEffectClassification.READ_ONLY,
                 SideEffectClassification.IDEMPOTENT,
             }
+            and getattr(action, "effect_scope", ActionEffectScope.LOCAL_REPOSITORY) == ActionEffectScope.EXTERNAL_CONSEQUENTIAL
             and not action.external_receipt
         ]
         if ambiguous:
