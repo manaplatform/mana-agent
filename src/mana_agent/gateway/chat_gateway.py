@@ -13,6 +13,7 @@ building AskService / CodingAgent directly.
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import getpass
 import inspect
 import json
@@ -108,6 +109,28 @@ from mana_agent.gateway.envelope import (
     PreviousTurnPointers,
     RoutingExecutionEnvelope,
     build_routing_execution_envelope,
+)
+from mana_agent.gateway.feature_integration import (
+    FeatureIntegrationCoordinator,
+    FeatureIntegrationDecisionProvider,
+    FeatureIntegrationVerificationPlan,
+    IntegrationAuthority,
+    IntegrationVerificationExecutor,
+    MultiAgentVerificationExecutor,
+    WiringDecision,
+    decide_feature_integration,
+    validate_or_reconcile_integration_stage,
+    INCOMPLETE_FEATURE_WIRING,
+    FEATURE_INTEGRATION_DECISION_INVALID,
+    FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+    FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+    FEATURE_INTEGRATION_VERIFICATION_FAILED,
+    FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+    FEATURE_INTEGRATION_REVIEW_REJECTED,
+    FEATURE_INTEGRATION_STATE_INVALID,
+    CORE_EXECUTION_FAILED,
+    DETERMINISTIC_INTEGRATION_FAILURE,
+    EXTERNAL_DEPENDENCY,
 )
 from mana_agent.tools.context_retrieval import (
     MemoryTaskBinding,
@@ -4490,7 +4513,7 @@ class AgentChatGateway:
             if turn_record.response:
                 return ChatTurnResult(
                     answer=str(turn_record.response.get("answer") or ""),
-                    error=str(turn_record.response.get("error") or ""),
+                    error=turn_record.response.get("error") or None,
                     mode="turn-result-reused",
                     changed_files=list(turn_record.response.get("changed_files") or []),
                     payload=dict(turn_record.response.get("payload") or {}),
@@ -5665,6 +5688,13 @@ class AgentChatGateway:
                                 resume_decision.task_id
                             )
                         )
+                        # The continuation must be part of execution state.  A
+                        # prompt annotation is observational only and cannot
+                        # decide whether the core generation is skipped.
+                        if eligibility.boundary == "after_core_implementation":
+                            state["feature_integration_checkpoint"] = dict(
+                                checkpoint.resume_payload
+                            )
                         options["_resume_checkpoint_context"] = redact_secrets(
                             {
                                 "task_id": resume_decision.task_id,
@@ -5864,8 +5894,6 @@ class AgentChatGateway:
                             )
                             if result.payload is not None:
                                 result.payload.setdefault("lane_id", lane_id.value)
-                            if recovered_task and result.error is None:
-                                result.error = ""
                         except BaseException as exc:
                             target_state = (
                                 LaneTaskState.BUDGET_EXHAUSTED
@@ -5930,6 +5958,63 @@ class AgentChatGateway:
                                 LaneTaskState.WAITING,
                                 reason="waiting for interactive approval",
                             )
+                        elif result.error in {
+                            INCOMPLETE_FEATURE_WIRING,
+                            FEATURE_INTEGRATION_DECISION_INVALID,
+                            FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+                            FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+                            FEATURE_INTEGRATION_VERIFICATION_FAILED,
+                            FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+                            FEATURE_INTEGRATION_REVIEW_REJECTED,
+                            FEATURE_INTEGRATION_STATE_INVALID,
+                            CORE_EXECUTION_FAILED,
+                        }:
+                            # Integration results carry their own typed outcome.
+                            # Local failures are terminal; only an explicit
+                            # wake-up contract may leave the lane waiting.
+                            wiring_child_id = FeatureIntegrationCoordinator.block_wiring_child(
+                                self._lane_coordinator.taskboard,
+                                reservation.execution.taskboard_task_id,
+                                request=text,
+                                changed_files=list(result.changed_files),
+                                reason=result.error,
+                                trigger_turn_id=turn_id,
+                            )
+                            if wiring_child_id:
+                                result.payload["wiring_child_task_id"] = wiring_child_id
+                            classification = str(
+                                result.payload.get("pending_classification")
+                                or DETERMINISTIC_INTEGRATION_FAILURE
+                            )
+                            if classification == EXTERNAL_DEPENDENCY:
+                                wake_source = str(result.payload.get("wake_up_source") or "").strip()
+                                wake_reference = str(result.payload.get("wake_up_reference") or "").strip()
+                                if not wake_source or not wake_reference:
+                                    raise LaneCoordinatorError(
+                                        "EXTERNAL_DEPENDENCY requires wake_up_source and wake_up_reference"
+                                    )
+                                self._lane_coordinator.transition(
+                                    reservation.execution.task_id,
+                                    LaneTaskState.WAITING,
+                                    reason=f"{classification}: {result.error}",
+                                )
+                                self._lane_coordinator.execution_supervisor.record_external_wait(
+                                    reservation.execution.task_id,
+                                    waiting_kind=str(result.payload.get("waiting_kind") or "external_dependency"),
+                                    wake_up_source=wake_source,
+                                    wake_up_reference=wake_reference,
+                                    resume_checkpoint_id=str(result.payload.get("resume_checkpoint_id") or ""),
+                                    resume_operation=str(result.payload.get("resume_operation") or "resume_feature_integration"),
+                                )
+                                status = "waiting"
+                            else:
+                                self._lane_coordinator.mark_blocked(
+                                    reservation.execution.task_id,
+                                    reason=f"{classification}: {result.error}",
+                                )
+                                status = "blocked"
+                                result.payload["pending_required_work"] = False
+                                result.payload["resume_required"] = False
                         else:
                             if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
                                 actual_tools = [
@@ -5952,10 +6037,10 @@ class AgentChatGateway:
                             target_state = (
                                 LaneTaskState.FAILED
                                 if result.error
-                                else LaneTaskState.COMPLETED
-                                if (status == "completed" and not pending_required_work_exists)
                                 else LaneTaskState.BUDGET_EXHAUSTED
                                 if status == "budget_exhausted"
+                                else LaneTaskState.COMPLETED
+                                if (not pending_required_work_exists and status in {"completed", "success", ""})
                                 else LaneTaskState.RUNNING
                             )
                             finished = self._finish_lane(
@@ -6205,10 +6290,17 @@ class AgentChatGateway:
                 "turn_id": turn_id,
                 "execution_id": str(
                     result.payload.get("execution_id")
+                    or result.execution_id
                     or result.payload.get("lane_task_id")
                     or ""
                 ),
                 "entry_route": existing_entry_route or fallback_route,
+                "error_code": result.error_code or (result.payload or {}).get("error_code"),
+                "error_category": result.error_category or (result.payload or {}).get("error_category"),
+                "retry_possible": result.retry_possible or (result.payload or {}).get("retry_possible", False),
+                "resume_available": result.resume_available or (result.payload or {}).get("resume_available", False),
+                "checkpoint_available": result.checkpoint_available or (result.payload or {}).get("checkpoint_available", False),
+                "interruption_reason": result.interruption_reason or (result.payload or {}).get("interruption_reason"),
             }
         )
         execution_id = str(result.payload.get("execution_id") or "")
@@ -6312,6 +6404,11 @@ class AgentChatGateway:
             turn_record.response = {
                 "answer": result.answer,
                 "error": result.error,
+                "error_code": result.error_code,
+                "error_category": result.error_category,
+                "retry_possible": result.retry_possible,
+                "resume_available": result.resume_available,
+                "checkpoint_available": result.checkpoint_available,
                 "changed_files": list(result.changed_files),
                 "payload": dict(result.payload),
             }
@@ -7443,6 +7540,65 @@ class AgentChatGateway:
                 LaneTaskState.WAITING,
                 reason="waiting for child-specific approval",
             )
+        elif result.error in {
+            INCOMPLETE_FEATURE_WIRING,
+            FEATURE_INTEGRATION_DECISION_INVALID,
+            FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE,
+            FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING,
+            FEATURE_INTEGRATION_VERIFICATION_FAILED,
+            FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
+            FEATURE_INTEGRATION_REVIEW_REJECTED,
+            FEATURE_INTEGRATION_STATE_INVALID,
+        }:
+            # A structured integration result is either an explicit external
+            # wait or a deterministic terminal outcome. Internal work is not a
+            # conversational continuation.
+            from mana_agent.multi_agent.core.types import TaskStatus
+
+            classification = str(
+                result.payload.get("pending_classification")
+                or DETERMINISTIC_INTEGRATION_FAILURE
+            )
+            if classification == EXTERNAL_DEPENDENCY:
+                wake_source = str(result.payload.get("wake_up_source") or "").strip()
+                wake_reference = str(result.payload.get("wake_up_reference") or "").strip()
+                if not wake_source or not wake_reference:
+                    raise LaneCoordinatorError(
+                        "EXTERNAL_DEPENDENCY requires wake_up_source and wake_up_reference"
+                    )
+                self._lane_coordinator.transition(
+                    reservation.execution.task_id,
+                    LaneTaskState.WAITING,
+                    reason=f"{classification}: {result.error}",
+                )
+                self._lane_coordinator.execution_supervisor.record_external_wait(
+                    reservation.execution.task_id,
+                    waiting_kind=str(result.payload.get("waiting_kind") or "external_dependency"),
+                    wake_up_source=wake_source,
+                    wake_up_reference=wake_reference,
+                    resume_checkpoint_id=str(result.payload.get("resume_checkpoint_id") or ""),
+                    resume_operation=str(result.payload.get("resume_operation") or "resume_feature_integration"),
+                )
+                status = "waiting"
+            else:
+                self._lane_coordinator.mark_blocked(
+                    reservation.execution.task_id,
+                    reason=f"{classification}: {result.error}",
+                )
+                status = "blocked"
+                result.payload.update({
+                    "pending_required_work": False,
+                    "resume_required": False,
+                })
+            if wiring_child_task_id:
+                wiring_child = self._lane_coordinator.taskboard.get_task(wiring_child_task_id)
+                if wiring_child.status is not TaskStatus.BLOCKED:
+                    self._lane_coordinator.taskboard.update_status(
+                        wiring_child_task_id,
+                        TaskStatus.BLOCKED,
+                        reason=INCOMPLETE_FEATURE_WIRING,
+                    )
+            result.payload.setdefault("core_implementation_preserved", True)
         elif (
             result.error == "route_unavailable" or decision.route == "capability_error"
         ):
@@ -7984,6 +8140,9 @@ class AgentChatGateway:
         options: dict[str, Any],
     ) -> ChatTurnResult:
         lane_task_id = str(options.get("_lane_task_id") or "")
+        # The lane task owns ordinary route output; integration owns a distinct
+        # coordinator-created wiring child.
+        child_task_id = lane_task_id
         execution_text = text
         resume_context = options.get("_resume_checkpoint_context")
         if isinstance(resume_context, dict):
@@ -8623,6 +8782,7 @@ class AgentChatGateway:
                 else "new",
                 reasoning_summary=decision.reason,
                 verifier_passed=True,
+                runtime_capability_change=decision.runtime_capability_change,
             ),
             "repository": AgentDecision(
                 intent="repo_search",
@@ -8649,6 +8809,24 @@ class AgentChatGateway:
         resolved_index = options.get("index_dir", self._index_dir) or default_index_dir(
             self.root
         )
+        def _save_feature_integration_checkpoint(payload: dict[str, Any]) -> None:
+            state["feature_integration_checkpoint"] = dict(payload)
+            if lane_task_id:
+                self._lane_coordinator.checkpoint(
+                    lane_task_id,
+                    boundary="after_core_implementation",
+                    resume_payload=payload,
+                    completed_steps=["routing", "core_implementation"],
+                    pending_steps=["feature_integration", "verification", "final_response"],
+                )
+
+        integration_parent_task_id = ""
+        if lane_task_id:
+            lane_execution = self._lane_coordinator.inspect_task(lane_task_id)
+            integration_parent_task_id = str(
+                getattr(lane_execution, "taskboard_task_id", "") or lane_task_id
+            )
+
         result = process_chat_turn(
             root=self.root,
             text=text,
@@ -8667,12 +8845,59 @@ class AgentChatGateway:
             agent_decision=mapped,
             coding_workspace_preparer=self._prepare_coding_workspace,
             gateway_task_id=lane_task_id,
+            feature_integration_checkpoint=_save_feature_integration_checkpoint,
+            feature_integration_authority_provider=(
+                lambda: IntegrationAuthority.from_taskboard(
+                    self._lane_coordinator.taskboard, integration_parent_task_id
+                )
+                if integration_parent_task_id
+                else None
+            ),
+            feature_integration_taskboard=self._lane_coordinator.taskboard,
+            feature_integration_parent_task_id=integration_parent_task_id,
+            feature_integration_trigger_turn_id=context.turn_id,
+            feature_integration_execution_supervisor=self._lane_coordinator.execution_supervisor,
+            feature_integration_workspace_root=self.root,
+            feature_integration_queue_manager=None,
+            feature_integration_verification_commands=options.get("feature_integration_verification_commands"),
+            feature_integration_verification_plan=options.get("feature_integration_verification_plan"),
+            feature_integration_verification_executor=(
+                options.get("feature_integration_verification_executor")
+                or MultiAgentVerificationExecutor(
+                    taskboard=self._lane_coordinator.taskboard,
+                    workspace_root=self.root,
+                )
+            ),
+            feature_integration_decision_provider=(
+                options.get("feature_integration_decision_provider")
+                or self._feature_integration_decision_provider(ask_service=ask_service)
+            ),
+            feature_integration_decision=options.get("feature_integration_decision"),
+        )
+        wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
+            self._lane_coordinator.taskboard,
+            integration_parent_task_id,
         )
         # Keep the entry-routing decision distinct from the internal execution path
         # (process_chat_turn sets payload.route to "auto_chat" / coding modes).
         result.payload["entry_route"] = decision.route
         result.payload.setdefault("route", decision.route)
         return result
+
+    def _feature_integration_decision_provider(
+        self,
+        ask_service: Any = None,
+    ) -> FeatureIntegrationDecisionProvider:
+        """Construct the authoritative Gateway-owned Feature Integration decision provider."""
+        llm = (
+            getattr(self._entry_router, "llm", None)
+            or agent_decision_llm(ask_service)
+            or agent_decision_llm(self.get_ask_service())
+        )
+        return FeatureIntegrationDecisionProvider(
+            llm=llm,
+            workspace_root=self.root,
+        )
 
     def _execute_media_route(
         self,

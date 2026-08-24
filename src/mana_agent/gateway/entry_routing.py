@@ -131,6 +131,7 @@ class EntryRoutingDecision:
     media_request: dict[str, Any] = field(default_factory=dict)
     automation_operation: AutomationOperation | str = ""
     source: str = "model"
+    runtime_capability_change: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -222,6 +223,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     automation_operation: Literal[
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
+    runtime_capability_change: bool
 
 
 class EntryRoutingError(RuntimeError):
@@ -444,7 +446,8 @@ Return JSON only:
   "mcp_request": null,
   "artifact_family": "",
   "media_request": null,
-  "automation_operation": ""
+  "automation_operation": "",
+  "runtime_capability_change": false
 }
 
 Examples:
@@ -647,6 +650,11 @@ class EntryRouter:
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 f"Reason: unknown route {route or '<missing>'}."
+            )
+        if route == "coding" and "runtime_capability_change" not in payload:
+            raise EntryRoutingError(
+                "Model decision failed: entry_route. No response was generated. "
+                "Reason: coding route must explicitly declare runtime_capability_change."
             )
         if context is not None and bool(getattr(context, "atomic_child", False)) and route == "multi_task":
             raise EntryRoutingError(
@@ -976,6 +984,7 @@ class EntryRouter:
             artifact_family=artifact_family,
             media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,
+            runtime_capability_change=bool(payload.get("runtime_capability_change")),
         )
 
 

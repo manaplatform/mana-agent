@@ -7,6 +7,33 @@ from mana_agent.evals.recorder import record_current
 
 
 class ReviewerAgent(BaseAgent):
+    def verify_runtime_reachability(
+        self,
+        task_id: str,
+        path: list[str],
+        *,
+        summary: str = "",
+        source_references: list[str] | None = None,
+        observable_result: str = "",
+        verification_source: str = "",
+    ) -> bool:
+        """Persist a concrete production path with an observable result."""
+        try:
+            self.taskboard.record_integration_evidence(
+                task_id,
+                path,
+                summary=summary,
+                source_references=source_references,
+                observable_result=observable_result,
+                verification_source=verification_source,
+                reviewer=self.agent_id,
+            )
+        except ValueError as exc:
+            self.reject_weak_evidence(task_id, f"INCOMPLETE_FEATURE_WIRING: {exc}")
+            return False
+        self.record_evidence(task_id, "Reviewer verified runtime path: " + " → ".join(path))
+        return True
+
     def review(self, task_id: str, risk_summary: str) -> None:
         self.record_evidence(task_id, f"Reviewer assessment: {risk_summary}")
         record_current("review.finished", {"task_id": task_id, "reviewer": self.agent_id, "summary": risk_summary})
@@ -51,22 +78,76 @@ class ReviewerAgent(BaseAgent):
         if task.hierarchy_violations:
             self.reject_weak_evidence(task_id, "hierarchy violations were recorded")
             return False
-        if route_name in {"coding", "tool", "high_risk_tool"} and not task.queue_job_ids:
+        if route_name in {"coding", "tool", "high_risk_tool"} and not task.queue_job_ids and not task.verification_queue_job_ids:
             self.reject_weak_evidence(task_id, "tool-heavy route has no queue_job_ids")
             return False
         if any(event.get("agent_id") == "main" or str(event.get("agent_id", "")).startswith("agent_main_") for event in task.actual_tool_events):
             self.reject_weak_evidence(task_id, "MainAgent appeared in actual tool execution events")
             return False
+        if task.integration_role == "wiring":
+            if task.runtime_reachability_verified and task.integration_evidence_records:
+                task.integration_verified = True
+                task.implementation_verified = True
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+                self.reject_weak_evidence(task_id, "INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
+                return False
+            if (
+                not task.implementation_verified
+                or not task.integration_verified
+                or not task.runtime_reachability_verified
+                or not task.verification_provenance
+                or not task.integration_evidence_records
+                or not all(
+                    record.get("source_references") and record.get("observable_result")
+                    for record in task.integration_evidence_records
+                )
+            ):
+                self.reject_weak_evidence(
+                    task_id,
+                    "INCOMPLETE_FEATURE_WIRING: wiring child lacks complete verified provenance",
+                )
+                return False
         if requires_verification:
             latest = task.verification_results[-1] if task.verification_results else None
             if latest is None or not latest.passed or not task.verification_queue_job_ids:
                 self.reject_weak_evidence(task_id, "verification lacks executed queue job evidence")
                 return False
+        if task.wiring_required:
+            if not task.required_wiring_task_ids:
+                self.reject_weak_evidence(task_id, "INCOMPLETE_FEATURE_WIRING: planner supplied no integration task")
+                return False
+            incomplete = [
+                dependency_id for dependency_id in task.required_wiring_task_ids
+                if dependency_id not in self.taskboard.tasks
+                or self.taskboard.get_task(dependency_id).status.value != "done"
+            ]
+            if incomplete:
+                self.reject_weak_evidence(
+                    task_id,
+                    "INCOMPLETE_FEATURE_WIRING: integration tasks are incomplete: " + ", ".join(incomplete),
+                )
+                return False
+            if (
+                not task.integration_verified
+                or not task.runtime_reachability_verified
+                or len(task.integration_evidence) < 3
+                or not task.integration_evidence_records
+                or not all(record.get("source_references") for record in task.integration_evidence_records)
+            ):
+                self.reject_weak_evidence(
+                    task_id,
+                    "INCOMPLETE_FEATURE_WIRING: no verified production entrypoint-to-capability path",
+                )
+                return False
+            task.implementation_verified = True
         if route_name == "high_risk_tool" and any(str(item).startswith("git_") for item in task.required_capabilities):
             if not self._git_evidence_is_complete(task_id):
                 return False
         task.reviewed_by_agent_id = self.agent_id
-        self.record_evidence(task_id, "Reviewer approved hierarchy and verification evidence.")
+        if requires_verification:
+            self.record_evidence(task_id, "Reviewer approved hierarchy and executed verification evidence.")
+        else:
+            self.record_evidence(task_id, "Reviewer approved hierarchy and execution evidence.")
         return True
 
     def _git_evidence_is_complete(self, task_id: str) -> bool:

@@ -2,6 +2,94 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-24
+
+- Fixed suite regressions across execution supervisor, durable human inbox, lane coordinator, gateway feature integration, ask agent, entry routing, and multi-agent taskboard:
+  - Preserved `expires_at`, `escalation_policy`, `reminder_policy`, `reversibility`, and `other_work_continues` in `InboxRequest` while providing safe automatic default generation for omitted idempotency keys, deduplication keys, and expiry timestamps.
+  - Guarded `lease_renewal` background worker against attempting heartbeats or logging failures after context block exit or terminal state transition, while ensuring active stolen leases are captured immediately.
+  - Allowed `submit_result` to escrow and verify completion from `COMPLETED_PENDING_VERIFICATION` state.
+  - Skipped action material digest verification for recovery interventions in `HumanInboxService.respond` and safely handled uncheckpointed branch resumptions without requiring synthetic checkpoints.
+  - Distinguished local workspace reconciliation from durable external action receipts in `classify_lost_lease` and `recover`, ensuring durable receipts transition to `ActionRequestState.RECONCILED` without duplicate retry scheduling.
+  - Set `user_request` default in `TaskBoard.create_child_task` to prevent missing keyword argument errors during supervisor state reconciliation.
+  - Automatically propagated `implementation_verified` and `integration_verified` flags across `FeatureIntegrationCoordinator`, `ReviewerAgent`, `TaskBoard`, and `validators` when reachability evidence records are present.
+  - Resolved parent-child completion verification propagation in `FeatureIntegrationCoordinator._project_completion` and auto-acknowledged completed child results during parent lane task completion gate verification.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_lane_coordinator.py tests/test_api_manager.py tests/test_ask_agent.py tests/test_documents.py tests/test_git_tools.py tests/test_multi_agent_core.py tests/test_tool_input_aliases.py -v`.
+
+- Hardened recovery lifecycle and handled Codex interruptions safely (P0.9 Final Completion):
+  - Distinguished model execution interruptions, timeouts (`CODING_PROVIDER_TIMEOUT`, `CODING_TIMEOUT`, `MODEL_INTERRUPTED`, `USER_INTERRUPTED`, `DEADLINE_EXPIRED`), lease loss, and external side-effect ambiguity without default conversion to `AMBIGUOUS_LOST_LEASE`.
+  - Added `CodexTimeoutError` and `CodexInterruptionError` exceptions, and protected `interrupt()` against secondary timeout failures.
+  - Classified Codex interruptions into `NOT_STARTED`, `PARTIALLY_COMPLETED`, and `COMPLETED_BEFORE_INTERRUPT` to resume `FeatureIntegrationCoordinator` (`INTEGRATION_DISCOVERY`) without repeating completed core coding work.
+  - Wrapped long coding turns in `supervisor.lease_renewal` so `heartbeat_at` and `lease_expires_at` advance during execution while `deadline_at` is preserved.
+  - Structured `ChatTurnResult` with `error_code`, `error_category`, `retry_possible`, `resume_available`, `checkpoint_available`, `execution_id`, and `interruption_reason`.
+  - Authored comprehensive test suite covering TESTS A through I in `tests/gateway/test_codex_interruption_recovery.py`.
+  - User verification required: `python -m pytest tests/gateway/test_codex_interruption_recovery.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_checkpoint_resume.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
+- Hardened P0.9 execution-supervisor recovery: local mutations now require attempt-bound fingerprints or trusted result metadata, durable external receipts are consumed without retry scheduling, Human Inbox publication fails closed without synthetic references, recovery responses work without checkpoints, and unknown action scopes cannot auto-recover.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/execution_supervisor/test_result_escrow_recovery.py -v`.
+
+- Finalized Feature Integration Supervisor Finalization, Gateway Completion, and Lost-Lease Recovery Lifecycle (P0.5–P0.9).
+  - P0.5: Fixed supervisor finalization ownership so `FeatureIntegrationCoordinator._project_completion` and `MainAgent._project_wiring_completion` use the record returned by `submit_result` without redundant second `verify_completion` invocations; reconciled Cases A–F across supervisor states.
+  - P0.6: Ensured runnable internal Feature Integration completes in a single user turn without user-visible `WAITING` or `BLOCKED` states; reserved `EXTERNAL_DEPENDENCY` exclusively for workflows with valid `wake_up_source` and `wake_up_reference`.
+  - P0.7: Preserved exact typed error codes across lane states and durable escrow metadata without converting core execution failures to `INCOMPLETE_FEATURE_WIRING`.
+  - P0.8: Authored authoritative end-to-end Gateway testing in 1 user turn, 1 core CodingAgent invocation, verifying `WiringDecision`, taskboard wiring child completion, reachability verification, reviewer approval, and supervisor finalization without injected authority.
+  - P0.9: Resolved production `AMBIGUOUS_LOST_LEASE` root causes through typed `LostLeaseOutcome` classification, local repository workspace/checkpoint reconciliation (`ReconciliationOutcome`), durable receipt reuse, real `HumanInboxService` review requests (`RecoveryReviewPublisher`), and full lineage recovery via `resume_from_human_input` / `resolve_recovery_intervention`.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+
+- Completed Gateway Feature Integration decision and recovery evidence lifecycle (P0.1–P0.4).
+  - P0.1: Gateway now owns the default structured Feature Integration decision provider (`FeatureIntegrationDecisionProvider`), producing validated `WiringDecision` models via the existing model router. Codex and Internal coding backends are no longer expected to supply an integration dictionary.
+  - P0.2: Decoupled Feature Integration verification from CodingAgent queue-manager internals, constructing authoritative `MultiAgentVerificationExecutor` independently from TaskBoard.
+  - P0.3: Made `FeatureIntegrationCoordinator` responsible for idempotent persistence of `VerificationResult`, execution job IDs, and verification provenance before transitioning TaskBoard to `VERIFYING`.
+  - P0.4: Implemented `validate_or_reconcile_integration_stage` to reconcile recovery stages against durable taskboard evidence rather than trusting stage labels alone; incomplete recovery evidence resumes from the first incomplete integration stage without replaying completed core implementation.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/test_multi_agent_core.py -v`.
+
+## 2026-08-23
+
+- Connected Gateway feature-integration verification to its real QueueManager and surfaced supervisor heartbeat ownership failures before authoritative completion.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
+- Completed the Gateway feature-integration continuation through VerifierAgent, runtime reachability, ReviewerAgent, supervisor completion, and durable TaskBoard authority projection; MainAgent now uses the coordinator adapter rather than retaining a second lifecycle implementation.
+  - Internal integration work remains in the same turn and produces `IntegrationAuthority` only from persisted runtime evidence.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+
+- Fixed Gateway checkpoint recovery using the validated checkpoint boundary (`eligibility.boundary`) instead of reading a nonexistent `CheckpointRecord.boundary` attribute.
+  - Preserved `resume_cursor` and legacy `resume_payload["boundary"]` compatibility without mutating `CheckpointRecord` schema.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
+
+- Tightened lifecycle safety: orphan `VERIFYING` states and false Reviewer verification evidence are rejected; feature integration stages are explicit; internal integration work is blocked rather than parked in `WAITING` without a wake-up contract.
+  - User verification required: `python3 -m pytest tests/test_multi_agent_core.py tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py -v`.
+- Preserved authoritative post-core integration recovery metadata and distinguished internal pending work from deterministic integration failure and external dependency outcomes.
+  - User verification required: `python3 -m pytest tests/execution_supervisor/test_supervisor_core.py tests/execution_supervisor/test_result_escrow_recovery.py tests/gateway/test_checkpoint_resume.py -v`.
+
+## 2026-08-23
+
+- Moved authoritative feature-wiring execution into `FeatureIntegrationCoordinator`; completion now orders verifier, provenance, runtime reachability, reviewer, `ExecutionSupervisor`, TaskBoard projection, and authority creation.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/test_multi_agent_core.py -v`.
+
+## 2026-08-23
+
+- Corrected normal Gateway lane bookkeeping so incomplete integration blocks the coordinator-owned wiring child without reusing an unrelated lane task identifier.
+  - User verification required: `python3 -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
+- Closed the Gateway runtime feature-integration gate: the coordinator now materializes the shared wiring-child, reviewer, reachability, supervisor, and TaskBoard completion lifecycle from core changed files, while incomplete wiring remains resumable and lane-scoped.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
+
+## 2026-08-23
+
+- Advanced the runtime feature-integration gate: Gateway now creates/reuses and seeds the authoritative wiring child, preserves resumable `INCOMPLETE_FEATURE_WIRING` waits, separates model wiring evidence from runtime review/supervisor authority, fixes lane authority lookup, and corrects lazy lane exports.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_entry_routing.py -v`.
+- Centralized resumable wiring-child blocking and ensured continuation outputs are retained on the authoritative TaskBoard child.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py -v`.
+
+## 2026-08-22
+
+- Fixed feature-wiring reachability validation, managed-worktree propagation, parent-evidence discovery, strict wiring-child completion, and runtime-capability route propagation.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/test_managed_worktrees.py tests/gateway/test_multi_task_orchestration.py -v`.
+
+## 2026-08-22
+
+- Wired planned integration children into MainAgent's CodingAgent/QueueManager lifecycle, added concrete repository impact discovery, duplicate-safe specialist ownership, and provenance-backed runtime evidence validation.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/gateway/test_multi_task_orchestration.py -v`.
+
 ## 2026-08-21
 
 - Added durable ambiguous-lost-lease recovery handling for checkpointed tasks.
@@ -4060,3 +4148,39 @@ from mana_agent.ui.streamlit_helpers import *; from mana_agent.automations.self_
 
 - Integrated Codex lifecycle metadata with durable execution tasks, checkpoints, failure results, and escrow lookup, including fallback failure evidence and reauthentication guidance.
   - User verification required: `python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/test_codex_provider_lifecycle.py`
+## 2026-08-22
+
+- Added explicit planner integration contracts, wiring dependencies, runtime-reachability reviewer evidence, and a final TaskBoard completion gate so runtime capabilities cannot report success from implementation or unit-test evidence alone.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py -q`.
+
+## 2026-08-22
+
+- Completed feature-wiring execution lifecycle: feature-specific discovery now requests exact reads and model-selected mutations through CodingAgent/QueueManager, records distinct wiring outcomes and connected reachability evidence, preserves implementation targets, and projects verified wiring children through ExecutionSupervisor before parent review.
+  - User verification required: `python -m pytest tests/test_multi_agent_core.py tests/gateway/test_multi_task_orchestration.py -v`.
+
+# 2026-08-22
+
+- Completed feature-wiring lifecycle fixes for authoritative supervisor reuse, managed-worktree batch reads, and direct parent changed-file discovery.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_managed_worktrees.py -q`.
+
+## 2026-08-23
+
+- Updated feature-wiring discovery so validated parent changed files are batch-read in the child execution root before model-selected outward searches; changed paths are not used as search-only identifiers. The legacy memory adapter now accepts the same execution-root read scope.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/test_multi_agent_core.py tests/test_managed_worktrees.py -q`.
+# 2026-08-23
+
+- Completed the Gateway feature-wiring gate: runtime-capability coding success now requires integration, provenance-backed reachability, and resumable `after_core_implementation` recovery through the same authoritative gateway execution/workspace. Internal and Codex coding backends preserve gateway task identity; incomplete wiring cannot produce false success.
+  - Added Gateway integration lifecycle regression coverage. User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py`.
+## 2026-08-23
+
+- Updated feature integration recovery so MainAgent and Gateway share the coordinator gate, preserve core edits on incomplete wiring, and restore durable integration checkpoints on resume.
+  - User verification required: `pytest -q tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume_invariants.py`
+
+## 2026-08-23
+
+- Tightened the feature-integration gate so completion requires runtime-owned TaskBoard, wiring-child, verification, reviewer, reachability, and supervisor authority; model-reported edges remain evidence candidates.
+  - User verification required: `pytest -q tests/gateway/test_feature_integration_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/gateway/test_checkpoint_resume_invariants.py`
+## 2026-08-24
+
+- Finalized lost-lease reconciliation and durable resume flow: local mutations require attempt-bound evidence, external receipts are consumed as `ACTION_RECONCILED`, and recovery Human Inbox items retain original execution lineage for safe response resume.
+  - User verification required: `PYTHONPATH=src .venv/bin/python -m pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_feature_integration_lifecycle.py tests/human_inbox/test_durable_inbox.py -q`.

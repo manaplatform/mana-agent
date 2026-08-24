@@ -603,19 +603,28 @@ class MultiAgentMemoryService:
         self.queue_fingerprints[fingerprint] = queue_item_id
         return True, None
 
-    def _file_meta(self, path: str | Path) -> tuple[str, float, str, str]:
-        resolved = (self.root / str(path)).resolve() if not Path(str(path)).is_absolute() else Path(str(path)).resolve()
-        resolved.relative_to(self.root)
+    def _file_meta(self, path: str | Path, *, root: str | Path | None = None) -> tuple[str, float, str, str]:
+        effective_root = Path(root or self.root).resolve()
+        resolved = (effective_root / str(path)).resolve() if not Path(str(path)).is_absolute() else Path(str(path)).resolve()
+        resolved.relative_to(effective_root)
         content = resolved.read_bytes()
         return (
-            normalize_file_path(resolved, root=self.root),
+            normalize_file_path(resolved, root=effective_root),
             hashlib.sha256(content).hexdigest(),
             resolved.stat().st_mtime,
             content.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n"),
         )
 
-    def read_file_with_memory(self, *, file_path: str, task_id: str, agent_id: str) -> tuple[str, FileReadMemoryRecord, bool]:
-        normalized, content_hash, mtime, content = self._file_meta(file_path)
+    def read_file_with_memory(
+        self,
+        *,
+        file_path: str,
+        task_id: str,
+        agent_id: str,
+        execution_repo_root: str | Path | None = None,
+    ) -> tuple[str, FileReadMemoryRecord, bool]:
+        effective_root = Path(execution_repo_root).resolve() if execution_repo_root is not None else self.root
+        normalized, content_hash, mtime, content = self._file_meta(file_path, root=effective_root)
         record = FileReadMemoryRecord(
             file_path=normalized,
             content_hash=content_hash,

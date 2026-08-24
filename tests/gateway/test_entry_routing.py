@@ -74,6 +74,23 @@ class _RouteModel:
                     }
                 )
             )
+        if "feature integration" in str(messages[0].content).lower() or "wiring" in str(messages[0].content).lower():
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "outcome": "already_integrated",
+                        "edges": [
+                            {"from": "ChatGateway", "to": "ModelRouter", "relation": "calls", "source_reference": "gateway.py:10"},
+                            {"from": "ModelRouter", "to": "ProviderFactory", "relation": "selects", "source_reference": "router.py:20"},
+                            {"from": "ProviderFactory", "to": "NewProvider", "relation": "constructs", "source_reference": "factory.py:30"},
+                        ],
+                        "wiring_targets": ["src/provider.py"],
+                        "runtime_entrypoints": ["src/main.py"],
+                        "verification_commands": ["python -m pytest tests/test_provider.py"],
+                        "reason": "Feature is already integrated and verified.",
+                    }
+                )
+            )
         self.payloads.append(json.loads(messages[-1].content))
         route = self.routes.pop(0) if self.routes else "conversation"
         source_by_route = {
@@ -86,6 +103,13 @@ class _RouteModel:
             "artifact": ["artifact"],
             "capability_error": ["gmail"],
         }
+        user_text = str(
+            self.payloads[-1].get("user_input")
+            or self.payloads[-1].get("text")
+            or self.payloads[-1].get("request")
+            or self.payloads[-1].get("message")
+            or ""
+        ).lower()
         return SimpleNamespace(
             content=json.dumps(
                 {
@@ -100,6 +124,7 @@ class _RouteModel:
                     "reuse_active_route": len(self.payloads) > 1,
                     "artifact_family": "pdf" if route == "artifact" else "",
                     "automation_operation": "create" if route == "automation" else "",
+                    "runtime_capability_change": "capability" in user_text or "wiring" in user_text or "provider" in user_text,
                     "mcp_request": {"provider_id": "kaggle"} if route == "mcp" else None,
                 }
             )
@@ -151,7 +176,7 @@ class _CodingAgent:
 
     def generate(self, request: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(request)
-        return {"answer": "coding route", "changed_files": [], "warnings": []}
+        return {"answer": "coding route", "status": "completed", "changed_files": [], "warnings": []}
 
     generate_auto_execute = generate
     generate_dir_mode = generate
@@ -573,8 +598,7 @@ def test_gateway_recovery_handoff_uses_validated_recovery_decisions(
     monkeypatch.setattr(gateway._lane_coordinator, method_name, record_recovery)
 
     result = gateway.process_turn(session_id, "Continue the previous gateway task.")
-
-    assert result.error == ""
+    assert not result.error
     assert recovery_calls[0][0] == prior.execution.task_id
     assert recovery_calls[0][1].decision_id == f"{action}-decision"
     assert recovery_calls[0][1].action.value == (

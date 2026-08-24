@@ -9,6 +9,7 @@ from typing import Iterable
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import RetrySafetyError
 from mana_agent.execution_supervisor.models import (
+    ActionEffectScope,
     ActionRequestState,
     ActionRecord,
     RecoveryAction,
@@ -77,29 +78,39 @@ class RetryPolicy:
                 ActionRequestState.STARTED,
                 ActionRequestState.OUTCOME_UNKNOWN,
             }
+            and action.classification not in {
+                SideEffectClassification.READ_ONLY,
+                SideEffectClassification.IDEMPOTENT,
+            }
+            and action.effect_scope in {ActionEffectScope.EXTERNAL_CONSEQUENTIAL, ActionEffectScope.UNKNOWN}
+            and not action.external_receipt
         ]
         if ambiguous_actions:
             raise RetrySafetyError(
                 "consequential action outcome is ambiguous; reconcile durable action receipts "
                 "before retrying: " + ", ".join(ambiguous_actions)
             )
+        exact_checkpoint_resume = (
+            decision.action == RecoveryAction.RESUME_CHECKPOINT
+            and bool(decision.resume_checkpoint_id or task.checkpoint_id)
+            and not task.irreversible_side_effect_started
+        )
         if classification in {
             SideEffectClassification.NON_IDEMPOTENT,
             SideEffectClassification.UNKNOWN,
         }:
-            exact_checkpoint_resume = (
-                classification == SideEffectClassification.UNKNOWN
-                and decision.action == RecoveryAction.RESUME_CHECKPOINT
-                and bool(decision.resume_checkpoint_id or task.checkpoint_id)
-                and not task.irreversible_side_effect_started
-            )
             model_authorized_same_task_retry = (
                 classification == SideEffectClassification.UNKNOWN
                 and decision.action == RecoveryAction.RETRY
                 and decision.same_task_retry_authorized
                 and not task.irreversible_side_effect_started
             )
-            if not exact_checkpoint_resume and not model_authorized_same_task_retry:
+            lease_loss_no_side_effects = (
+                decision.retry_category == RetryCategory.LEASE_LOSS
+                and not task.irreversible_side_effect_started
+                and not ambiguous_actions
+            )
+            if not exact_checkpoint_resume and not model_authorized_same_task_retry and not lease_loss_no_side_effects:
                 raise RetrySafetyError(
                     f"{classification.value} task may already have produced an external side effect; "
                     "no retry was scheduled"
@@ -109,7 +120,7 @@ class RetryPolicy:
             SideEffectClassification.IDEMPOTENT,
             SideEffectClassification.CONDITIONALLY_IDEMPOTENT,
         }:
-            if not task.idempotency_key:
+            if not task.idempotency_key and decision.retry_category != RetryCategory.LEASE_LOSS and not exact_checkpoint_resume:
                 raise RetrySafetyError(
                     f"{classification.value} retry requires a stable idempotency key"
                 )
@@ -136,8 +147,50 @@ class RetryPolicy:
         return min(self.config.max_backoff_seconds, exponential * (0.75 + 0.5 * jitter_ratio))
 
     def automatic_recovery_decision(
-        self, task: TaskRecord, *, category: RetryCategory, reason: str
+        self,
+        task: TaskRecord,
+        *,
+        category: RetryCategory,
+        reason: str,
+        actions: Iterable[ActionRecord] = (),
+        now: datetime | None = None,
     ) -> RecoveryDecision | None:
+        if task.wall_clock_deadline_exceeded(now):
+            return None
+        if task.retry_budget.remaining(category, task.retry_usage) <= 0:
+            return None
+
+        action_list = list(actions)
+        ambiguous = [
+            action
+            for action in action_list
+            if action.request_state in {ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN}
+            and action.classification not in {
+                SideEffectClassification.READ_ONLY,
+                SideEffectClassification.IDEMPOTENT,
+            }
+            and action.effect_scope in {ActionEffectScope.EXTERNAL_CONSEQUENTIAL, ActionEffectScope.UNKNOWN}
+            and not action.external_receipt
+        ]
+        if ambiguous:
+            return None
+        if task.irreversible_side_effect_started and not task.checkpoint_id:
+            return None
+
+        if category == RetryCategory.LEASE_LOSS or not action_list or not task.irreversible_side_effect_started:
+            if task.side_effect_classification == SideEffectClassification.COMPENSATABLE and not task.compensation_strategy:
+                return None
+            checkpoint = task.checkpoint_id
+            return RecoveryDecision(
+                decision_id=f"policy:{task.task_id}:{task.state_version}:{category.value}",
+                task_id=task.task_id,
+                action=RecoveryAction.RESUME_CHECKPOINT if checkpoint else RecoveryAction.RETRY,
+                retry_category=category,
+                reason=reason,
+                resume_checkpoint_id=checkpoint,
+                safe_to_continue=True,
+            )
+
         if task.side_effect_classification not in SAFE_AUTOMATIC_RETRY:
             return None
         if (
@@ -151,8 +204,7 @@ class RetryPolicy:
             and not task.compensation_strategy
         ):
             return None
-        if task.retry_budget.remaining(category, task.retry_usage) <= 0:
-            return None
+
         checkpoint = task.checkpoint_id
         return RecoveryDecision(
             decision_id=f"policy:{task.task_id}:{task.state_version}:{category.value}",

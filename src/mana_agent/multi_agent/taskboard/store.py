@@ -110,6 +110,7 @@ def queue_job_from_dict(payload: dict[str, Any]) -> QueueJob:
 class JsonStateStore:
     def __init__(self, root: str | Path = ".") -> None:
         self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
         workspaces = WorkspaceService()
         repo = workspaces.register_repository(self.root)
         workspace = workspaces.workspace_for_repository(repo.repository_id)

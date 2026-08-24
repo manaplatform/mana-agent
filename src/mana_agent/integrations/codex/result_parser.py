@@ -96,9 +96,16 @@ def parse_codex_result(
                     warnings.append("codex_model_metadata_fallback")
         if method in {"turn/failed", "error"}:
             status = "failed"
-            errors.append(_format_turn_failure(payload))
+            err = _format_turn_failure(payload)
+            err_code = str(payload.get("error_code") or "")
+            if err_code and err_code not in err:
+                errors.append(f"{err_code}: {err}")
+            else:
+                errors.append(err)
         if method == "turn/cancelled":
             status = "cancelled"
+            reason = str(payload.get("reason") or payload.get("error_code") or "USER_INTERRUPTED")
+            warnings.append(f"interrupted:{reason}")
         if method == "turn/completed":
             raw_usage = payload.get("usage")
             turn = payload.get("turn")
@@ -144,6 +151,35 @@ def parse_codex_result(
     else:
         summary = ""
 
+    interruption_reason = ""
+    for w in warnings:
+        if w.startswith("interrupted:"):
+            interruption_reason = w.split(":", 1)[1]
+            break
+    if not interruption_reason:
+        for e in errors:
+            for candidate_code in (
+                "CODING_PROVIDER_TIMEOUT",
+                "CODING_TIMEOUT",
+                "MODEL_INTERRUPTED",
+                "USER_INTERRUPTED",
+                "DEADLINE_EXPIRED",
+                "PROVIDER_TIMEOUT",
+                "LEASE_LOST_DURING_EXECUTION",
+            ):
+                if candidate_code in e:
+                    interruption_reason = candidate_code
+                    break
+            if interruption_reason:
+                break
+
+    codex_meta = {
+        "interruption_reason": interruption_reason,
+        "mutation_attempted": mutation_attempted,
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+    }
+
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
     return CodingTaskResult(
         task_id=task.task_id,
@@ -161,6 +197,7 @@ def parse_codex_result(
         token_usage=usage,
         thread_id=thread_id,
         turn_id=turn_id,
+        codex_metadata=codex_meta,
     )
 
 

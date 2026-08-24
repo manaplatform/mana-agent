@@ -15,7 +15,13 @@ from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, W
 from mana_agent.integrations.codex.client import AsyncCodexAppServer
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.event_adapter import adapt_codex_event
-from mana_agent.integrations.codex.exceptions import CodexError, CodexExecutionError, CodexUnavailableError
+from mana_agent.integrations.codex.exceptions import (
+    CodexError,
+    CodexExecutionError,
+    CodexInterruptionError,
+    CodexTimeoutError,
+    CodexUnavailableError,
+)
 from mana_agent.integrations.codex.health import check_codex_health
 from mana_agent.integrations.codex.prompt_builder import build_codex_prompt
 from mana_agent.integrations.codex.result_parser import parse_codex_result
@@ -316,11 +322,16 @@ class CodexCodingBackend:
                             "Codex requested approval. Mana-Agent denied the request and did not elevate permissions."
                         )
                     yield event
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, CodexTimeoutError) as exc:
                 if thread_id and turn_id:
-                    await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
+                    try:
+                        await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
+                    except Exception:
+                        pass
+                err_code = getattr(exc, "error_code", "CODING_PROVIDER_TIMEOUT") if isinstance(exc, CodexTimeoutError) else "CODING_TIMEOUT"
+                err_msg = str(exc) if str(exc).strip() else "Codex task timed out"
                 notifications.append(
-                    {"method": "turn/failed", "params": {"message": "Codex task timed out"}}
+                    {"method": "turn/failed", "params": {"message": err_msg, "error_code": err_code, "reason": "timeout"}}
                 )
                 yield AgentEvent(
                     event_type="error",
@@ -329,12 +340,37 @@ class CodexCodingBackend:
                     sequence=sequence + 1,
                     status="failed",
                     title="Codex task timed out",
-                    error="Codex task timed out",
+                    error=err_msg,
                     thread_id=thread_id,
                     turn_id=turn_id,
+                    payload={"error_code": err_code, "error_category": "timeout"},
+                )
+            except CodexInterruptionError as exc:
+                if thread_id and turn_id:
+                    try:
+                        await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
+                    except Exception:
+                        pass
+                err_code = exc.error_code or "MODEL_INTERRUPTED"
+                err_msg = str(exc) or "Codex turn interrupted"
+                notifications.append(
+                    {"method": "turn/cancelled", "params": {"message": err_msg, "error_code": err_code, "reason": exc.reason}}
+                )
+                yield AgentEvent(
+                    event_type="error",
+                    task_id=task.task_id,
+                    backend="codex",
+                    sequence=sequence + 1,
+                    status="cancelled",
+                    title="Codex turn interrupted",
+                    summary=err_msg,
+                    error=err_msg,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    payload={"error_code": err_code, "error_category": "interruption", "interruption_reason": exc.reason},
                 )
             except CodexError as exc:
-                notifications.append({"method": "turn/failed", "params": {"message": str(exc)}})
+                notifications.append({"method": "turn/failed", "params": {"message": str(exc), "error_code": "CODING_AGENT_FAILED"}})
                 yield AgentEvent(
                     event_type="error",
                     task_id=task.task_id,
@@ -346,6 +382,7 @@ class CodexCodingBackend:
                     error=str(exc),
                     thread_id=thread_id,
                     turn_id=turn_id,
+                    payload={"error_code": "CODING_AGENT_FAILED"},
                 )
             finally:
                 if self.context_cost_governor is not None and governor_call_id:

@@ -164,6 +164,13 @@ class InboxItem(StrictModel):
     tenant_id: str = "local"
     project_id: str = "local"
     task_id: str = Field(min_length=1)
+    root_task_id: str = ""
+    execution_id: str = ""
+    attempt_id: str = ""
+    action_id: str = ""
+    intervention_id: str = ""
+    integration_stage: str = ""
+    recovery_reason: str = ""
     branch_id: str = Field(min_length=1)
     parent_task_id: str | None = None
     checkpoint_id: str = ""
@@ -172,6 +179,7 @@ class InboxItem(StrictModel):
     permission_request_id: str = ""
     action_intent_id: str = ""
     action_digest: str = ""
+    recovery_intervention_id: str = ""
     requested_by_agent_id: str = Field(min_length=1)
     assigned_reviewer_type: ReviewerType
     assigned_reviewer_id: str = Field(min_length=1)
@@ -300,6 +308,13 @@ class InboxRequest(StrictModel):
     tenant_id: str = "local"
     project_id: str = "local"
     task_id: str = Field(min_length=1)
+    root_task_id: str = ""
+    execution_id: str = ""
+    attempt_id: str = ""
+    action_id: str = ""
+    intervention_id: str = ""
+    integration_stage: str = ""
+    recovery_reason: str = ""
     branch_id: str = Field(min_length=1)
     parent_task_id: str | None = None
     checkpoint_id: str = ""
@@ -308,6 +323,7 @@ class InboxRequest(StrictModel):
     permission_request_id: str = ""
     action_intent_id: str = ""
     action_digest: str = ""
+    recovery_intervention_id: str = ""
     requested_by_agent_id: str = Field(min_length=1)
     reviewer: ReviewerAssignment
     title: str = Field(min_length=1)
@@ -321,24 +337,54 @@ class InboxRequest(StrictModel):
     disclosed_fields: list[str] = Field(default_factory=list)
     reversibility: str = "unknown"
     other_work_continues: bool = True
-    expires_at: datetime
+    expires_at: datetime | None = None
     escalation_policy: EscalationPolicy = Field(default_factory=EscalationPolicy)
     reminder_policy: ReminderPolicy = Field(default_factory=ReminderPolicy)
-    idempotency_key: str = Field(min_length=1)
-    deduplication_key: str = Field(min_length=1)
+    idempotency_key: str = ""
+    deduplication_key: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_request(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            task_id = data.get("task_id") or "task"
+            req_type = getattr(data.get("request_type"), "value", str(data.get("request_type") or "req"))
+            if not data.get("idempotency_key"):
+                data["idempotency_key"] = f"inbox_req_{task_id}_{req_type}_{uuid4().hex[:12]}"
+            if not data.get("deduplication_key"):
+                data["deduplication_key"] = data["idempotency_key"]
+            if not data.get("expires_at"):
+                data["expires_at"] = datetime.now(timezone.utc) + timedelta(days=7)
+        return data
 
 
 class ResponseSubmission(StrictModel):
     inbox_item_id: str = Field(min_length=1)
     operation: ResponseOperation
-    actor_id: str = Field(min_length=1)
-    channel: str = Field(min_length=1)
-    idempotency_key: str = Field(min_length=1)
+    actor_id: str = ""
+    reviewer_identity_id: str = ""
+    channel: str = "direct"
+    idempotency_key: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
     comment: str = ""
     signed_token: str = ""
     expected_version: int | None = Field(default=None, ge=0)
     current_action_digest: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            actor = str(data.get("actor_id") or data.get("reviewer_identity_id") or "").strip()
+            data["actor_id"] = actor
+            if not data.get("reviewer_identity_id"):
+                data["reviewer_identity_id"] = actor
+            if not data.get("channel"):
+                data["channel"] = "direct"
+            if not data.get("idempotency_key"):
+                item_id = data.get("inbox_item_id") or "item"
+                data["idempotency_key"] = f"resp_{item_id}_{actor}_{uuid4().hex[:12]}"
+        return data
 
 
 class DeliveryAttempt(StrictModel):

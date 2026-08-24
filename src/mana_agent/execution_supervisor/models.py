@@ -62,13 +62,56 @@ class SideEffectClassification(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ActionEffectScope(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    LOCAL_REPOSITORY = "LOCAL_REPOSITORY"
+    LOCAL_PROCESS = "LOCAL_PROCESS"
+    REMOTE_REVERSIBLE = "REMOTE_REVERSIBLE"
+    EXTERNAL_CONSEQUENTIAL = "EXTERNAL_CONSEQUENTIAL"
+
+
+class LostLeaseOutcome(str, Enum):
+    SAFE_AUTOMATIC_RECOVERY = "SAFE_AUTOMATIC_RECOVERY"
+    LOCAL_RECONCILIATION_REQUIRED = "LOCAL_RECONCILIATION_REQUIRED"
+    DURABLE_RESULT_AVAILABLE = "DURABLE_RESULT_AVAILABLE"
+    RETRY_BUDGET_EXHAUSTED = "RETRY_BUDGET_EXHAUSTED"
+    DEADLINE_EXPIRED = "DEADLINE_EXPIRED"
+    POLICY_BLOCKED = "POLICY_BLOCKED"
+    UNKNOWN_EXTERNAL_OUTCOME = "UNKNOWN_EXTERNAL_OUTCOME"
+
+
+class ReconciliationOutcome(str, Enum):
+    NOT_STARTED = "NOT_STARTED"
+    PARTIALLY_APPLIED = "PARTIALLY_APPLIED"
+    ALREADY_APPLIED = "ALREADY_APPLIED"
+    UNKNOWN = "UNKNOWN"
+
+
 class ActionRequestState(str, Enum):
     PREPARED = "prepared"
     STARTED = "started"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     OUTCOME_UNKNOWN = "outcome_unknown"
-    RECONCILED = "reconciled"
+    ACTION_RECONCILED = "action_reconciled"
+    RECONCILED = "action_reconciled"  # backwards-compatible enum name
+
+
+LOCAL_REPOSITORY_TOOLS = frozenset(
+    {
+        "apply_patch",
+        "apply_patch_batch",
+        "edit_file",
+        "multi_edit_file",
+        "write_file",
+        "create_file",
+        "delete_file",
+        "write_to_file",
+        "replace_file_content",
+        "patch",
+        "git_apply",
+    }
+)
 
 
 class ActionRecord(StrictModel):
@@ -80,12 +123,51 @@ class ActionRecord(StrictModel):
     action_fingerprint: str = Field(min_length=1)
     idempotency_key: str = ""
     classification: SideEffectClassification
+    effect_scope: ActionEffectScope = ActionEffectScope.UNKNOWN
     request_state: ActionRequestState = ActionRequestState.PREPARED
     external_receipt: str = ""
     result_reference: str = ""
     verification_state: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_effect_scope(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if "effect_scope" not in data or not data["effect_scope"]:
+            tool = str(data.get("tool_name") or "")
+            classification = data.get("classification")
+            if tool in LOCAL_REPOSITORY_TOOLS:
+                data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY.value
+            elif tool in {
+                "read_file",
+                "view_file",
+                "grep_search",
+                "find_by_name",
+                "list_dir",
+                "directory_list",
+                "file_read",
+            } or classification in {
+                SideEffectClassification.READ_ONLY.value,
+                SideEffectClassification.READ_ONLY,
+            }:
+                data["effect_scope"] = ActionEffectScope.LOCAL_PROCESS.value
+            elif tool in {
+                "cloud_deploy",
+                "send_payment",
+                "send_email",
+                "webhook_trigger",
+                "external_api_call",
+            } or classification in {
+                SideEffectClassification.NON_IDEMPOTENT.value,
+                SideEffectClassification.NON_IDEMPOTENT,
+            }:
+                data["effect_scope"] = ActionEffectScope.EXTERNAL_CONSEQUENTIAL.value
+            else:
+                data["effect_scope"] = ActionEffectScope.UNKNOWN.value
+        return data
 
 
 class RetryCategory(str, Enum):
@@ -374,6 +456,13 @@ class RecoveryInterventionReason(str, Enum):
     AMBIGUOUS_LOST_LEASE = "AMBIGUOUS_LOST_LEASE"
 
 
+class HumanRecoveryDecisionAction(str, Enum):
+    RESUME_WITHOUT_REPLAY = "RESUME_WITHOUT_REPLAY"
+    RETRY_ACTION = "RETRY_ACTION"
+    MARK_ACTION_ALREADY_COMPLETED = "MARK_ACTION_ALREADY_COMPLETED"
+    ABORT_EXECUTION = "ABORT_EXECUTION"
+
+
 class RecoveryInterventionRecord(StrictModel):
     """Durable evidence for recovery that is blocked pending human review."""
 
@@ -381,6 +470,14 @@ class RecoveryInterventionRecord(StrictModel):
     task_id: str
     execution_id: str
     attempt_id: str = ""
+    action_id: str = ""
+    checkpoint_id: str = ""
+    integration_stage: str = ""
+    target_resources: list[str] = Field(default_factory=list)
+    receipt_lookup_state: str = ""
+    reason_details: str = ""
+    inbox_item_id: str = ""
+    side_effect_classification: str = ""
     execution_state: Literal["interrupted"] = "interrupted"
     status: Literal["blocked"] = "blocked"
     reason: RecoveryInterventionReason
@@ -493,11 +590,17 @@ class TaskRecord(StrictModel):
     result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
     waiting_inbox_item_id: str = ""
+    waiting_kind: str = ""
+    wake_up_source: str = ""
+    wake_up_reference: str = ""
+    resume_checkpoint_id: str = ""
+    resume_operation: str = ""
     waiting_reason: Literal[
         "",
         "waiting_for_approval",
         "waiting_for_clarification",
         "waiting_for_connector",
+        "ambiguous_lost_lease",
     ] = ""
     waiting_connector_id: str = ""
     required_connector_ids: list[str] = Field(default_factory=list)

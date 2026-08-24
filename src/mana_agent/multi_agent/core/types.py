@@ -172,6 +172,7 @@ class VerificationResult:
     summary: str
     failures: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
+    execution_job_ids: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
 
 
@@ -246,6 +247,35 @@ class TaskBoardItem:
     evidence: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
+    # Explicit implementation-to-runtime contract. Empty values preserve
+    # compatibility with older persisted TaskBoard records.
+    implementation_targets: list[str] = field(default_factory=list)
+    wiring_targets: list[str] = field(default_factory=list)
+    registration_points: list[str] = field(default_factory=list)
+    runtime_entrypoints: list[str] = field(default_factory=list)
+    configuration_targets: list[str] = field(default_factory=list)
+    export_targets: list[str] = field(default_factory=list)
+    integration_verification: list[str] = field(default_factory=list)
+    wiring_required: bool = False
+    wiring_reason: str | None = None
+    wiring_outcome: str = "incomplete"
+    wiring_outcome_reason: str = ""
+    reachability_edges: list[dict[str, str]] = field(default_factory=list)
+    verification_provenance: dict[str, Any] = field(default_factory=dict)
+    integration_role: str = ""
+    required_wiring_task_ids: list[str] = field(default_factory=list)
+    implementation_verified: bool = False
+    integration_verified: bool = False
+    runtime_reachability_verified: bool = False
+    integration_evidence: list[str] = field(default_factory=list)
+    integration_evidence_records: list[dict[str, Any]] = field(default_factory=list)
+    integration_stage: str = ""
+    waiting_kind: str = ""
+    waiting_reason: str = ""
+    wake_up_source: str = ""
+    wake_up_reference: str = ""
+    resume_checkpoint_id: str = ""
+    resume_operation: str = ""
     discussion_ids: list[str] = field(default_factory=list)
     decision_ids: list[str] = field(default_factory=list)
     handoff_records: list[HandoffRecord] = field(default_factory=list)
@@ -572,6 +602,7 @@ class RouteDecision:
     requires_verification: bool
     risk_level: RiskLevel
     reason_summary: str
+    runtime_capability_change: bool = True
 
 
 @dataclass
@@ -596,3 +627,15 @@ class PlanResult:
     verification_commands: list[str]
     risks: list[str]
     assumptions: list[str]
+    implementation_targets: list[str] = field(default_factory=list)
+    wiring_targets: list[str] = field(default_factory=list)
+    registration_points: list[str] = field(default_factory=list)
+    runtime_entrypoints: list[str] = field(default_factory=list)
+    configuration_targets: list[str] = field(default_factory=list)
+    export_targets: list[str] = field(default_factory=list)
+    integration_verification: list[str] = field(default_factory=list)
+    wiring_required: bool = False
+    wiring_reason: str | None = None
+    wiring_outcome: str = "incomplete"
+    wiring_outcome_reason: str = ""
+    reachability_edges: list[dict[str, str]] = field(default_factory=list)

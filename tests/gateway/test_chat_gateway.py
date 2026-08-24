@@ -26,6 +26,7 @@ from mana_agent.gateway import (
 )
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
 from mana_agent.gateway.lanes import LaneId
+from mana_agent.gateway.feature_integration import IntegrationAuthority
 from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
 from mana_agent.human_inbox.models import (
     InboxRequest,
@@ -119,6 +120,7 @@ class _DummyAskService:
                         "reason_code": "TEST_ROUTE",
                         "error_code": "",
                         "reuse_active_route": False,
+                        "runtime_capability_change": False,
                     }
                 )
             )
@@ -152,6 +154,7 @@ class _DummyCodingAgent:
     def generate(self, request, **kwargs):
         return {
             "answer": f"coding-ok: {request[:40]}",
+            "status": "completed",
             "changed_files": [],
             "warnings": [],
             "flow_id": "flow-test",
@@ -162,6 +165,7 @@ class _DummyCodingAgent:
         readme.write_text("# Updated by the coding-agent test double\n", encoding="utf-8")
         return {
             "answer": f"auto-exec: {request[:40]}",
+            "status": "completed",
             "changed_files": ["README.md"],
             "warnings": [],
             "flow_id": "flow-auto",
@@ -1035,10 +1039,11 @@ def test_gateway_process_turn_coding_path(tmp_path: Path, monkeypatch) -> None:
         selected_tools=["apply_patch"],
         tool_inputs={},
         flow_action="none",
-        reasoning_summary="edit files",
-        confidence=0.95,
-        verifier_passed=True,
-    )
+            reasoning_summary="edit files",
+            confidence=0.95,
+            verifier_passed=True,
+            runtime_capability_change=False,
+        )
     monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.decide_chat_route",
         lambda **kw: fixed,
@@ -1785,3 +1790,834 @@ def test_context_budget_exceeded_finishes_lane_and_charges_budget(tmp_path: Path
     assert task.state == LaneTaskState.BUDGET_EXHAUSTED
     assert task.budget.consumed_tokens > 0
 
+
+def test_gateway_checkpoint_resume_after_core_implementation_no_boundary_attr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway checkpoint recovery consumes eligibility.boundary without accessing CheckpointRecord.boundary."""
+    from mana_agent.execution_supervisor.models import CheckpointRecord
+    from mana_agent.gateway.checkpoint_resume import CheckpointResumeDecision
+    from mana_agent.gateway.followup_classifier import FollowupClassification
+    from mana_agent.gateway.lanes import LaneId
+
+    coding_calls: list[str] = []
+
+    class _TrackingCodingAgent(_DummyCodingAgent):
+        def generate(self, request, **kwargs):
+            coding_calls.append(str(request))
+            return super().generate(request, **kwargs)
+
+        def generate_auto_execute(self, request, **kwargs):
+            coding_calls.append(str(request))
+            return super().generate_auto_execute(request, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    monkeypatch.setattr("mana_agent.gateway.stack.CodingAgent", _TrackingCodingAgent)
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.ToolWorkerClient",
+        lambda **kw: SimpleNamespace(
+            start=lambda: None,
+            health=lambda: True,
+            init_payload_dict=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.QueueManager",
+        lambda **kw: SimpleNamespace(attach_decision_provider=lambda x: None),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.build_tools_executor_with_fallback",
+        lambda **kw: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.CodingMemoryService",
+        lambda **kw: SimpleNamespace(),
+    )
+
+    fixed = AgentDecision(
+        intent="edit",
+        code_editing_needed=True,
+        selected_tools=["apply_patch"],
+        tool_inputs={},
+        flow_action="none",
+        reasoning_summary="resume feature integration",
+        confidence=0.95,
+        verifier_passed=True,
+        runtime_capability_change=True,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.decide_chat_route",
+        lambda **kw: fixed,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.handle_small_direct_edit",
+        lambda root, q: SimpleNamespace(handled=False),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.load_auto_chat_state",
+        lambda root: SimpleNamespace(
+            last_mode="edit",
+            last_task="",
+            relevant_files=[],
+            changed_files=[],
+            verification="",
+            summary="",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.save_auto_chat_state",
+        lambda root, state: None,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.resolve_auto_followup",
+        lambda q, state: q,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
+        lambda q: __import__(
+            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
+        ).AutoChatMode.EDIT,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.is_plan_execution_request",
+        lambda q: False,
+    )
+
+    gw = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+        auto_execute_plan=True,
+    )
+    session_id = gw.create_session(frontend="test")
+
+    reservation = gw._lane_coordinator.reserve(
+        normalized_intent="implement new runtime capability",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gw._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gw._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    task_id = reservation.execution.task_id
+    gw._lane_coordinator.start(reservation)
+
+    resume_payload = {
+        "boundary": "after_core_implementation",
+        "gateway_task_id": task_id,
+        "runtime_capability_change": True,
+        "core_changed_files": ["src/capability.py"],
+        "flow_id": "flow-cap-1",
+        "core_result": {
+            "answer": "core capability implemented",
+            "status": "completed",
+            "changed_files": ["src/capability.py"],
+            "flow_id": "flow-cap-1",
+            "integration": {
+                "wiring_outcome": "already_integrated",
+                "reachability_edges": [
+                    {
+                        "from": "ChatGateway",
+                        "to": "ModelRouter",
+                        "relation": "calls",
+                        "source_reference": "gateway.py:10",
+                        "file": "gateway.py",
+                        "symbol": "ChatGateway",
+                    },
+                    {
+                        "from": "ModelRouter",
+                        "to": "ProviderFactory",
+                        "relation": "selects",
+                        "source_reference": "router.py:20",
+                        "file": "router.py",
+                        "symbol": "ModelRouter",
+                    },
+                    {
+                        "from": "ProviderFactory",
+                        "to": "NewProvider",
+                        "relation": "constructs",
+                        "source_reference": "factory.py:30",
+                        "file": "factory.py",
+                        "symbol": "ProviderFactory",
+                    },
+                ],
+                "verification_evidence": {"verification_id": "v1", "observable_result": "passed"},
+                "reviewer_approval": {"reviewer_id": "r1", "approved": True},
+                "runtime_reachability": {"verified": True},
+                "verification_provenance": {"verification_id": "v1", "observable_result": "passed"},
+                "supervisor_completion": {"state": "completed", "verification_status": "passed", "result_id": "res-1"},
+            },
+        },
+    }
+
+    checkpoint_id = gw._lane_coordinator.checkpoint(
+        task_id,
+        boundary="after_core_implementation",
+        resume_payload=resume_payload,
+    )
+
+    # Verify CheckpointRecord schema: CheckpointRecord has resume_cursor and resume_payload, but NO boundary attribute
+    raw_checkpoint = gw._lane_coordinator.execution_supervisor.store.get_checkpoint(checkpoint_id)
+    assert isinstance(raw_checkpoint, CheckpointRecord)
+    assert not hasattr(raw_checkpoint, "boundary")
+    assert raw_checkpoint.resume_cursor == "after_core_implementation"
+
+    # Verify validate_checkpoint_resume resolves eligibility.boundary
+    eligibility = gw._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+        task_id,
+        checkpoint_id,
+        allow_explicit_retry_seed=True,
+    )
+    assert eligibility.resumable is True
+    assert eligibility.boundary == "after_core_implementation"
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *args, **kwargs: FollowupClassification(
+            decision_id="dec-followup",
+            category="resume_request",
+            related_task_id=task_id,
+            safe_to_continue=True,
+            reason="User requests resuming previous feature implementation",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        lambda *args, **kwargs: CheckpointResumeDecision(
+            decision_id="dec-resume",
+            action="resume_checkpoint",
+            task_id=task_id,
+            checkpoint_id=checkpoint_id,
+            same_work=True,
+            fresh_data_required=False,
+            checkpoint_still_valid=True,
+            side_effects_safe_to_repeat=True,
+            safe_to_continue=True,
+            reason="Resume from exact after_core_implementation checkpoint",
+        ),
+    )
+
+    # Exercise Gateway resume path
+    result = gw.process_turn(session_id, "continue feature implementation")
+
+    assert result.error is None
+    # CodingAgent core generation was not called because after_core_implementation state was restored
+    assert len(coding_calls) == 0
+    # Task checkpoint remains the selected checkpoint
+    task_inspect = gw._lane_coordinator.inspect_task(task_id)
+    assert task_inspect.checkpoint_id == checkpoint_id
+
+
+def test_gateway_checkpoint_resume_legacy_payload_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy CheckpointRecord with empty resume_cursor but boundary in resume_payload resolves correctly."""
+    from mana_agent.execution_supervisor.models import CheckpointRecord
+    from mana_agent.gateway.checkpoint_resume import CheckpointResumeDecision
+    from mana_agent.gateway.followup_classifier import FollowupClassification
+    from mana_agent.gateway.lanes import LaneId
+
+    coding_calls: list[str] = []
+
+    class _TrackingCodingAgent(_DummyCodingAgent):
+        def generate(self, request, **kwargs):
+            coding_calls.append(str(request))
+            return super().generate(request, **kwargs)
+
+        def generate_auto_execute(self, request, **kwargs):
+            coding_calls.append(str(request))
+            return super().generate_auto_execute(request, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    monkeypatch.setattr("mana_agent.gateway.stack.CodingAgent", _TrackingCodingAgent)
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.ToolWorkerClient",
+        lambda **kw: SimpleNamespace(
+            start=lambda: None,
+            health=lambda: True,
+            init_payload_dict=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.QueueManager",
+        lambda **kw: SimpleNamespace(attach_decision_provider=lambda x: None),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.build_tools_executor_with_fallback",
+        lambda **kw: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.CodingMemoryService",
+        lambda **kw: SimpleNamespace(),
+    )
+
+    fixed = AgentDecision(
+        intent="edit",
+        code_editing_needed=True,
+        selected_tools=["apply_patch"],
+        tool_inputs={},
+        flow_action="none",
+        reasoning_summary="resume feature integration",
+        confidence=0.95,
+        verifier_passed=True,
+        runtime_capability_change=True,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.decide_chat_route",
+        lambda **kw: fixed,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.handle_small_direct_edit",
+        lambda root, q: SimpleNamespace(handled=False),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.load_auto_chat_state",
+        lambda root: SimpleNamespace(
+            last_mode="edit",
+            last_task="",
+            relevant_files=[],
+            changed_files=[],
+            verification="",
+            summary="",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.save_auto_chat_state",
+        lambda root, state: None,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.resolve_auto_followup",
+        lambda q, state: q,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
+        lambda q: __import__(
+            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
+        ).AutoChatMode.EDIT,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.is_plan_execution_request",
+        lambda q: False,
+    )
+
+    gw = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+        auto_execute_plan=True,
+    )
+    session_id = gw.create_session(frontend="test")
+
+    reservation = gw._lane_coordinator.reserve(
+        normalized_intent="implement legacy capability",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gw._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gw._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    task_id = reservation.execution.task_id
+    gw._lane_coordinator.start(reservation)
+
+    resume_payload = {
+        "boundary": "after_core_implementation",
+        "gateway_task_id": task_id,
+        "runtime_capability_change": True,
+        "core_changed_files": ["src/legacy_cap.py"],
+        "flow_id": "flow-legacy-1",
+        "core_result": {
+            "answer": "legacy core done",
+            "status": "completed",
+            "changed_files": ["src/legacy_cap.py"],
+            "flow_id": "flow-legacy-1",
+            "integration": {
+                "wiring_outcome": "already_integrated",
+                "reachability_edges": [
+                    {
+                        "from": "ChatGateway",
+                        "to": "ModelRouter",
+                        "relation": "calls",
+                        "source_reference": "gateway.py:10",
+                        "file": "gateway.py",
+                        "symbol": "ChatGateway",
+                    },
+                    {
+                        "from": "ModelRouter",
+                        "to": "ProviderFactory",
+                        "relation": "selects",
+                        "source_reference": "router.py:20",
+                        "file": "router.py",
+                        "symbol": "ModelRouter",
+                    },
+                    {
+                        "from": "ProviderFactory",
+                        "to": "NewProvider",
+                        "relation": "constructs",
+                        "source_reference": "factory.py:30",
+                        "file": "factory.py",
+                        "symbol": "ProviderFactory",
+                    },
+                ],
+                "verification_evidence": {"verification_id": "v1", "observable_result": "passed"},
+                "reviewer_approval": {"reviewer_id": "r1", "approved": True},
+                "runtime_reachability": {"verified": True},
+                "verification_provenance": {"verification_id": "v1", "observable_result": "passed"},
+                "supervisor_completion": {"state": "completed", "verification_status": "passed", "result_id": "res-1"},
+            },
+        },
+    }
+
+    # Create checkpoint initially
+    checkpoint_id = gw._lane_coordinator.checkpoint(
+        task_id,
+        boundary="after_core_implementation",
+        resume_payload=resume_payload,
+    )
+
+    # Force it into a legacy shape: empty resume_cursor, boundary only in resume_payload
+    cp = gw._lane_coordinator.execution_supervisor.store.get_checkpoint(checkpoint_id)
+    assert cp is not None
+    legacy_cp = CheckpointRecord(
+        schema_version=cp.schema_version,
+        checkpoint_id=cp.checkpoint_id,
+        task_id=cp.task_id,
+        attempt_id=cp.attempt_id,
+        state_version=cp.state_version,
+        created_at=cp.created_at,
+        resume_payload=dict(resume_payload),
+        completed_steps=cp.completed_steps,
+        pending_steps=cp.pending_steps,
+        resume_cursor="",  # empty resume_cursor
+    )
+    gw._lane_coordinator.execution_supervisor.store.save_checkpoint(legacy_cp)
+
+    # Verify ExecutionSupervisor resolves boundary to after_core_implementation from resume_payload
+    eligibility = gw._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+        task_id,
+        checkpoint_id,
+        allow_explicit_retry_seed=True,
+    )
+    assert eligibility.resumable is True
+    assert eligibility.boundary == "after_core_implementation"
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *args, **kwargs: FollowupClassification(
+            decision_id="dec-followup",
+            category="resume_request",
+            related_task_id=task_id,
+            safe_to_continue=True,
+            reason="Resume legacy task",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        lambda *args, **kwargs: CheckpointResumeDecision(
+            decision_id="dec-resume",
+            action="resume_checkpoint",
+            task_id=task_id,
+            checkpoint_id=checkpoint_id,
+            same_work=True,
+            fresh_data_required=False,
+            checkpoint_still_valid=True,
+            side_effects_safe_to_repeat=True,
+            safe_to_continue=True,
+            reason="Resume from legacy checkpoint",
+        ),
+    )
+
+    result = gw.process_turn(session_id, "continue legacy feature")
+    assert result.error is None
+    assert len(coding_calls) == 0
+
+
+def test_gateway_checkpoint_resume_other_boundary_does_not_invent_after_core_implementation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When checkpoint boundary is not after_core_implementation, Gateway does not set feature_integration_checkpoint."""
+    from mana_agent.execution_supervisor.models import CheckpointRecord
+    from mana_agent.gateway.checkpoint_resume import CheckpointResumeDecision
+    from mana_agent.gateway.followup_classifier import FollowupClassification
+    from mana_agent.gateway.lanes import LaneId
+
+    coding_calls: list[str] = []
+
+    class _TrackingCodingAgent(_DummyCodingAgent):
+        def generate(self, request, **kwargs):
+            coding_calls.append(str(request))
+            return super().generate(request, **kwargs)
+
+        def generate_auto_execute(self, request, **kwargs):
+            coding_calls.append(str(request))
+            return super().generate_auto_execute(request, **kwargs)
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _DummyAskService(),
+    )
+    monkeypatch.setattr("mana_agent.gateway.stack.CodingAgent", _TrackingCodingAgent)
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.ToolWorkerClient",
+        lambda **kw: SimpleNamespace(
+            start=lambda: None,
+            health=lambda: True,
+            init_payload_dict=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.QueueManager",
+        lambda **kw: SimpleNamespace(attach_decision_provider=lambda x: None),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.build_tools_executor_with_fallback",
+        lambda **kw: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.CodingMemoryService",
+        lambda **kw: SimpleNamespace(),
+    )
+
+    fixed = AgentDecision(
+        intent="edit",
+        code_editing_needed=True,
+        selected_tools=["apply_patch"],
+        tool_inputs={},
+        flow_action="none",
+        reasoning_summary="edit files",
+        confidence=0.95,
+        verifier_passed=True,
+        runtime_capability_change=False,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.decide_chat_route",
+        lambda **kw: fixed,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.handle_small_direct_edit",
+        lambda root, q: SimpleNamespace(handled=False),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.load_auto_chat_state",
+        lambda root: SimpleNamespace(
+            last_mode="edit",
+            last_task="",
+            relevant_files=[],
+            changed_files=[],
+            verification="",
+            summary="",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.save_auto_chat_state",
+        lambda root, state: None,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.resolve_auto_followup",
+        lambda q, state: q,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
+        lambda q: __import__(
+            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
+        ).AutoChatMode.EDIT,
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.turn_engine.is_plan_execution_request",
+        lambda q: False,
+    )
+
+    gw = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+        auto_execute_plan=True,
+    )
+    session_id = gw.create_session(frontend="test")
+
+    reservation = gw._lane_coordinator.reserve(
+        normalized_intent="edit readme",
+        lane_id=LaneId.CODING,
+        session_id=session_id,
+        workspace_id=gw._lane_coordinator.taskboard.store.workspace_id,
+        repository_id=gw._lane_coordinator.taskboard.store.repository_id,
+        requested_input_tokens=10,
+        requested_output_tokens=10,
+    )
+    task_id = reservation.execution.task_id
+    gw._lane_coordinator.start(reservation)
+
+    checkpoint_id = gw._lane_coordinator.checkpoint(
+        task_id,
+        boundary="after_routing",
+        resume_payload={"boundary": "after_routing", "custom_key": "val"},
+    )
+
+    eligibility = gw._lane_coordinator.execution_supervisor.validate_checkpoint_resume(
+        task_id,
+        checkpoint_id,
+        allow_explicit_retry_seed=True,
+    )
+    assert eligibility.resumable is True
+    assert eligibility.boundary == "after_routing"
+    assert eligibility.boundary != "after_core_implementation"
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
+        lambda *args, **kwargs: FollowupClassification(
+            decision_id="dec-followup",
+            category="resume_request",
+            related_task_id=task_id,
+            safe_to_continue=True,
+            reason="Resume routing checkpoint",
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.chat_gateway.CheckpointResumeDecider.decide",
+        lambda *args, **kwargs: CheckpointResumeDecision(
+            decision_id="dec-resume",
+            action="resume_checkpoint",
+            task_id=task_id,
+            checkpoint_id=checkpoint_id,
+            same_work=True,
+            fresh_data_required=False,
+            checkpoint_still_valid=True,
+            side_effects_safe_to_repeat=True,
+            safe_to_continue=True,
+            reason="Resume from after_routing checkpoint",
+        ),
+    )
+
+    result = gw.process_turn(session_id, "continue readme edit")
+    assert result.error is None
+    # Because boundary is after_routing, core implementation does run
+    assert len(coding_calls) > 0
+
+
+def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2E P0.1-P0.4: AgentChatGateway.process_turn executes full feature integration lifecycle.
+
+    - runtime_capability_change is True
+    - coding agent fake has NO queue_manager attribute
+    - coding result has NO 'integration' key
+    - NO injected feature_integration_decision, decision_provider, or authority
+    - Gateway constructs FeatureIntegrationDecisionProvider and MultiAgentVerificationExecutor
+    - Validates core complete -> WiringDecision -> verification -> provenance -> reachability -> Reviewer
+    """
+    from mana_agent.multi_agent.core.types import TaskStatus
+
+    class _CodexLikeCodingAgent:
+        # Deliberately NO queue_manager attribute
+        def __init__(self, **kwargs: Any) -> None:
+            self.repo_root = kwargs.get("repo_root")
+            self.calls = []
+
+        def generate(self, request, **kwargs):
+            self.calls.append(request)
+            if self.repo_root:
+                p = Path(self.repo_root) / "src" / "provider.py"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("class Provider:\n    pass\n", encoding="utf-8")
+            return {
+                "answer": "Provider implemented in src/provider.py",
+                "status": "completed",
+                "changed_files": ["src/provider.py"],
+                "warnings": [],
+                "flow_id": "flow-codex-1",
+            }
+
+        def generate_auto_execute(self, request, **kwargs):
+            return self.generate(request, **kwargs)
+
+        def generate_dir_mode(self, request, **kwargs):
+            return self.generate(request, **kwargs)
+
+        def get_active_flow_id(self):
+            return None
+
+        def reset_flow(self, flow_id: str):
+            return flow_id
+
+        def flow_summary(self, flow_id: str):
+            return None
+
+    class _StructuredEntryModel:
+        def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
+            return self
+
+        def invoke(self, messages, **_kwargs):
+            payload = json.loads(messages[-1].content)
+            if "feature integration decision layer" in str(messages[0].content).lower() or "wiring_targets" in str(payload):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "outcome": "already_integrated",
+                            "patch": "",
+                            "wiring_targets": ["src/provider.py"],
+                            "runtime_entrypoints": ["src/main.py"],
+                            "configuration_targets": [],
+                            "edges": [
+                                {"from": "ChatGateway", "to": "ModelRouter", "relation": "calls", "source_reference": "src/gateway.py:10"},
+                                {"from": "ModelRouter", "to": "ProviderFactory", "relation": "selects", "source_reference": "src/router.py:20"},
+                                {"from": "ProviderFactory", "to": "NewProvider", "relation": "constructs", "source_reference": "src/factory.py:30"},
+                            ],
+                            "verification_commands": ["python -m pytest tests/test_provider.py"],
+                            "reason": "Feature is wired into production entrypoint",
+                        }
+                    )
+                )
+            if "recovery_candidates" in payload:
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "action": "start_fresh",
+                            "task_id": "",
+                            "checkpoint_id": "",
+                            "same_work": False,
+                            "fresh_data_required": False,
+                            "checkpoint_still_valid": False,
+                            "side_effects_safe_to_repeat": False,
+                            "safe_to_continue": True,
+                            "reason": "fresh",
+                        }
+                    )
+                )
+            if "candidates" in payload:
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "action": "classify",
+                            "category": "new_task",
+                            "related_task_id": "",
+                            "safe_to_continue": True,
+                            "reason": "new",
+                        }
+                    )
+                )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "coding",
+                        "confidence": 0.95,
+                        "reason": "add provider capability",
+                        "required_sources": ["repository"],
+                        "target_urls": [],
+                        "requires_live_data": False,
+                        "reason_code": "CODING_ROUTE",
+                        "error_code": "",
+                        "reuse_active_route": False,
+                        "runtime_capability_change": True,
+                    }
+                )
+            )
+
+    class _AskServiceWithStructuredModel:
+        entry_router = SimpleNamespace(llm=_StructuredEntryModel())
+        ask_agent = SimpleNamespace(llm=_StructuredEntryModel(), update_model=lambda m: None, model="dummy")
+        qna_chain = SimpleNamespace(llm=_StructuredEntryModel(), chat=lambda q, **kw: "dummy response")
+
+        def ask(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy response)"})()
+
+        def ask_with_tools(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy tools response)"})()
+
+        def ask_dir_mode(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy dir response)"})()
+
+        def ask_with_tools_dir_mode(self, *args, **kwargs):
+            return type("Resp", (), {"answer": "(dummy dir tools response)"})()
+
+    monkeypatch.setattr(
+        "mana_agent.commands.cli_internal.build_ask_service",
+        lambda *a, **k: _AskServiceWithStructuredModel(),
+    )
+    monkeypatch.setattr("mana_agent.gateway.stack.CodingAgent", _CodexLikeCodingAgent)
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.ToolWorkerClient",
+        lambda **kw: SimpleNamespace(
+            start=lambda: None,
+            health=lambda: True,
+            init_payload_dict=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.QueueManager",
+        lambda **kw: SimpleNamespace(attach_decision_provider=lambda x: None),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.build_tools_executor_with_fallback",
+        lambda **kw: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "mana_agent.gateway.stack.CodingMemoryService",
+        lambda **kw: SimpleNamespace(),
+    )
+
+    gw = AgentChatGateway(
+        tmp_path,
+        coding_agent=True,
+        agent_tools=True,
+    )
+    # Ensure coding agent has NO queue_manager
+    assert not hasattr(gw._coding_agent, "queue_manager")
+
+    session_id = gw.create_session(frontend="test")
+
+    # Mock tool execution in queue manager for verification shell commands so they pass
+    from mana_agent.multi_agent.tools.tool_manager import ToolsManager
+    monkeypatch.setattr(
+        ToolsManager,
+        "execute_job",
+        lambda self, job: SimpleNamespace(ok=True, result={"stdout": "1 passed"}, error=None),
+    )
+
+    result = gw.process_turn(session_id, "add new provider runtime capability")
+
+    # Verify P0.1-P0.4 results:
+    assert result.error is None
+    taskboard = gw._lane_coordinator.taskboard
+    # Find the wiring child task
+    wiring_child = next(
+        (task for task in taskboard.tasks.values() if task.integration_role == "wiring"),
+        None,
+    )
+    assert wiring_child is not None
+    assert wiring_child.wiring_outcome == "already_integrated"
+    assert len(wiring_child.reachability_edges) == 3
+    assert len(wiring_child.verification_results) >= 1
+    assert wiring_child.verification_results[-1].passed is True
+    assert len(wiring_child.verification_queue_job_ids) >= 1
+    assert wiring_child.verification_provenance is not None
+    assert wiring_child.runtime_reachability_verified is True
+    assert wiring_child.reviewed_by_agent_id != ""
+    assert wiring_child.status is TaskStatus.DONE
+    assert wiring_child.implementation_verified is True
+    assert wiring_child.integration_verified is True
+    assert wiring_child.runtime_reachability_verified is True
+    assert wiring_child.supervisor_execution_id
+    assert wiring_child.supervisor_state == "completed"
+    assert wiring_child.verification_status == "passed"
+    assert wiring_child.supervisor_verification_evidence["result_id"]
+    assert wiring_child.supervisor_verification_evidence["verification"]
+    authority = IntegrationAuthority.from_taskboard(taskboard, wiring_child.parent_task_id)
+    assert authority is not None
+    assert authority.is_complete()
+    root_lane = gw._lane_coordinator.inspect_task(result.payload["lane_task_id"])
+    assert root_lane.state.value == "completed"
+    assert result.payload["status"] == "completed"
+    assert result.payload["pending_required_work"] is False
+    assert result.payload.get("resume_required") is not True

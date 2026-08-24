@@ -5,6 +5,7 @@ import threading
 from typing import Any, Callable
 
 from mana_agent.multi_agent.core.ids import new_task_id
+from mana_agent.multi_agent.core.errors import InvalidTaskTransition
 from mana_agent.multi_agent.core.types import (
     DecisionRecord,
     HandoffRecord,
@@ -168,7 +169,7 @@ class TaskBoard:
         parent_task_id: str,
         *,
         title: str,
-        user_request: str,
+        user_request: str = "",
         owner_agent_id: str | None = None,
         acceptance_criteria: list[str] | None = None,
         plan: list[str] | None = None,
@@ -180,16 +181,18 @@ class TaskBoard:
         previous_task_id: str = "",
         parent_memory_principal: MemoryPrincipal | None = None,
         delegated_capsule_ids: list[str] | None = None,
+        integration_role: str = "",
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
         task_id = self._new_task_id()
+        req_text = str(user_request or parent.user_request or title).strip()
         task = TaskBoardItem(
             task_id=task_id,
             parent_task_id=parent_task_id,
             root_task_id=parent.root_task_id,
             title=title,
-            user_request=user_request,
-            normalized_goal=user_request.strip(),
+            user_request=req_text,
+            normalized_goal=req_text,
             status=TaskStatus.NEW,
             priority=parent.priority,
             risk_level=parent.risk_level,
@@ -200,6 +203,12 @@ class TaskBoard:
             previous_task_id=previous_task_id or parent_task_id,
             primary_repository_id=parent.primary_repository_id,
             repository_ids=list(parent.repository_ids),
+            managed_workspace_id=parent.managed_workspace_id,
+            managed_branch=parent.managed_branch,
+            managed_worktree_path=parent.managed_worktree_path,
+            workspace_status=parent.workspace_status,
+            base_revision=parent.base_revision,
+            execution_repo_root=parent.execution_repo_root,
             owner_agent_id=owner_agent_id,
             supervisor_agent_id=parent.owner_agent_id,
             delegated_by_agent_id=parent.owner_agent_id,
@@ -209,6 +218,7 @@ class TaskBoard:
             acceptance_criteria=list(acceptance_criteria or []),
             plan=list(plan or []),
             depends_on=list(depends_on or []),
+            integration_role=integration_role,
             decomposition_local_id=decomposition_local_id,
             preferred_parallelism=preferred_parallelism,
             memory_status={
@@ -222,6 +232,9 @@ class TaskBoard:
         )
         self.tasks[task_id] = task
         _append_unique(parent.child_task_ids, [task_id])
+        if integration_role:
+            _append_unique(parent.depends_on, [task_id])
+            _append_unique(parent.required_wiring_task_ids, [task_id])
         if decomposition_local_id:
             parent.decomposition_id_map[decomposition_local_id] = task_id
         parent.updated_at = utc_now()
@@ -301,6 +314,8 @@ class TaskBoard:
 
     def update_status(self, task_id: str, status: TaskStatus, *, reason: str | None = None) -> None:
         task = self.get_task(task_id)
+        if status == TaskStatus.DONE:
+            self._validate_feature_completion(task)
         validate_transition(task, status, reason=reason)
         task.status = status
         task.updated_at = utc_now()
@@ -308,6 +323,98 @@ class TaskBoard:
             self.add_blocker(task_id, reason, save=False)
         self._record("task.updated", {"task_id": task_id, "status": status.value, "reason": reason})
         self.save()
+
+    def record_integration_evidence(
+        self,
+        task_id: str,
+        path: list[str],
+        *,
+        summary: str = "",
+        source_references: list[str] | None = None,
+        observable_result: str = "",
+        verification_source: str = "",
+        reviewer: str = "",
+    ) -> None:
+        """Record the structured production path proven by ReviewerAgent."""
+        task = self.get_task(task_id)
+        normalized = [str(item).strip() for item in path if str(item).strip()]
+        if len(normalized) < 3:
+            raise ValueError("integration evidence requires an entrypoint, reachable capability, and observable result")
+        sources = [str(item).strip() for item in (source_references or []) if str(item).strip()]
+        if not sources:
+            raise ValueError("integration evidence requires repository or tool source references")
+        if not str(observable_result or summary).strip():
+            raise ValueError("integration evidence requires an observable result")
+        task.integration_evidence = normalized
+        task.integration_evidence_records = [{
+            "entrypoint": normalized[0],
+            "path": normalized,
+            "observable_result": str(observable_result or summary).strip(),
+            "source_references": sources,
+            "verification_source": str(verification_source or "").strip(),
+            "reviewer": str(reviewer or "").strip(),
+            "timestamp": utc_now().isoformat(),
+        }]
+        task.integration_verified = True
+        task.runtime_reachability_verified = True
+        if summary:
+            task.evidence.append(f"Integration verification: {summary}")
+        task.updated_at = utc_now()
+        self._record(
+            "task.integration_verified",
+            {"task_id": task_id, "path": normalized, "sources": sources},
+        )
+        self.save()
+
+    def _validate_feature_completion(self, task: TaskBoardItem) -> None:
+        """Reject false success before the generic supervisor gate runs."""
+        if task.integration_role == "wiring":
+            if task.runtime_reachability_verified and task.integration_evidence_records:
+                task.integration_verified = True
+                task.implementation_verified = True
+            if not task.implementation_verified:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
+            if not task.integration_verified or not task.runtime_reachability_verified:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring runtime reachability evidence is absent")
+            if not task.verification_provenance:
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: child verification provenance is absent")
+            if not task.integration_evidence_records or not all(
+                record.get("source_references") and record.get("observable_result")
+                for record in task.integration_evidence_records
+            ):
+                raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring evidence provenance is absent")
+        if task.implementation_targets and not str(task.wiring_reason or "").strip():
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"
+            )
+        if not task.wiring_required:
+            return
+        if not task.required_wiring_task_ids:
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: wiring is required but no integration task exists"
+            )
+        missing = [
+            dependency_id
+            for dependency_id in task.required_wiring_task_ids
+            if dependency_id not in self.tasks
+            or self.tasks[dependency_id].status is not TaskStatus.DONE
+        ]
+        if missing:
+            raise InvalidTaskTransition(
+                "INCOMPLETE_FEATURE_WIRING: required integration tasks are incomplete: "
+                + ", ".join(missing)
+            )
+        if not task.implementation_verified:
+            raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: implementation verification is absent")
+        if not task.integration_verified or not task.runtime_reachability_verified:
+            raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime reachability evidence is absent")
+        if not task.integration_evidence_records or not all(
+            record.get("source_references") and record.get("observable_result")
+            for record in task.integration_evidence_records
+        ):
+            raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent")
 
     def project_supervisor_completion(
         self,
@@ -324,6 +431,7 @@ class TaskBoard:
         )
         if state != "completed" or verification != "passed":
             raise ValueError("supervisor projection cannot advertise an unverified completion")
+        self._validate_feature_completion(task)
         task.supervisor_execution_id = str(getattr(supervisor_task, "task_id", ""))
         task.supervisor_state = state
         task.supervisor_state_version = int(getattr(supervisor_task, "state_version", 0))
@@ -443,12 +551,14 @@ class TaskBoard:
     def record_tool_event(self, task_id: str, event: dict[str, Any]) -> None:
         task = self.get_task(task_id)
         payload = dict(event)
-        task.actual_tool_events.append(payload)
-        worker_id = str(payload.get("agent_id") or payload.get("executed_by_worker_agent_id") or "")
-        if worker_id:
-            task.executed_by_worker_agent_id = worker_id
+        event_type = str(payload.get("type") or "tool.event")
+        if event_type != "tool.started":
+            task.actual_tool_events.append(payload)
+            worker_id = str(payload.get("agent_id") or payload.get("executed_by_worker_agent_id") or "")
+            if worker_id:
+                task.executed_by_worker_agent_id = worker_id
         task.updated_at = utc_now()
-        self._record(str(payload.get("type") or "tool.event"), {"task_id": task_id, **payload})
+        self._record(event_type, {"task_id": task_id, **payload})
         self.save()
 
     def add_verification_result(self, task_id: str, result: VerificationResult) -> None:

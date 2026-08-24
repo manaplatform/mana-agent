@@ -6,12 +6,20 @@ model-driven routing exist once in the gateway for every frontend.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from mana_agent.integrations.codex.exceptions import (
+    CodexError,
+    CodexInterruptionError,
+    CodexProtocolError,
+    CodexTimeoutError,
+)
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -34,6 +42,13 @@ from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
 from mana_agent.workspaces.preparation import RepositoryPreparationError
+from mana_agent.gateway.feature_integration import (
+    FeatureIntegrationCoordinator,
+    FeatureIntegrationVerificationPlan,
+    IntegrationAuthority,
+    IntegrationVerificationExecutor,
+    WiringDecision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +188,13 @@ class ChatTurnResult:
     trace: list[Any] = field(default_factory=list)
     used_coding_agent: bool = False
     auto_chat_mode: str | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    retry_possible: bool = False
+    resume_available: bool = False
+    checkpoint_available: bool = False
+    execution_id: str | None = None
+    interruption_reason: str | None = None
 
 
 def agent_decision_llm(ask_service: Any) -> Any:
@@ -695,6 +717,20 @@ def process_chat_turn(
     agent_decision: AgentDecision | None = None,
     coding_workspace_preparer: Callable[[], Any] | None = None,
     gateway_task_id: str = "",
+    feature_integration_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    feature_integration_authority: IntegrationAuthority | None = None,
+    feature_integration_authority_provider: Callable[[], IntegrationAuthority | None] | None = None,
+    feature_integration_taskboard: Any | None = None,
+    feature_integration_parent_task_id: str = "",
+    feature_integration_trigger_turn_id: str = "",
+    feature_integration_execution_supervisor: Any | None = None,
+    feature_integration_workspace_root: str | Path | None = None,
+    feature_integration_queue_manager: Any | None = None,
+    feature_integration_verification_commands: list[str] | None = None,
+    feature_integration_verification_plan: FeatureIntegrationVerificationPlan | None = None,
+    feature_integration_verification_executor: IntegrationVerificationExecutor | None = None,
+    feature_integration_decision_provider: Callable[..., WiringDecision | dict[str, Any] | None] | None = None,
+    feature_integration_decision: WiringDecision | dict[str, Any] | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1117,8 +1153,23 @@ def process_chat_turn(
 
         result: dict[str, Any] = {}
         resume_cycles = 0
+        saved_integration_checkpoint = session_state.get("feature_integration_checkpoint")
+        resume_core_result = (
+            saved_integration_checkpoint.get("core_result")
+            if isinstance(saved_integration_checkpoint, dict)
+            and saved_integration_checkpoint.get("boundary") == "after_core_implementation"
+            and bool(saved_integration_checkpoint.get("runtime_capability_change"))
+            and str(saved_integration_checkpoint.get("gateway_task_id") or "") == str(gateway_task_id or "")
+            else None
+        )
         while True:
-            result = _call() or {}
+            if isinstance(resume_core_result, dict):
+                result = dict(resume_core_result)
+                result["changed_files"] = list(saved_integration_checkpoint.get("core_changed_files") or [])
+                result["flow_id"] = saved_integration_checkpoint.get("flow_id") or active_flow_id
+                resume_core_result = None
+            else:
+                result = _call() or {}
             if not (auto_continue and execute_plan_now and isinstance(result, dict)):
                 break
             terminal_reason = str(
@@ -1146,6 +1197,92 @@ def process_chat_turn(
         if isinstance(flow_from, str) and flow_from.strip():
             active_flow_id = flow_from.strip()
             session_state["active_flow_id"] = active_flow_id
+
+        # Check for structured interruption or failure on the coding result
+        run_status = str((result or {}).get("status") or (result or {}).get("run_status") or "").strip().lower()
+        err_code = (result or {}).get("error_code")
+        interruption_reason = (result or {}).get("interruption_reason")
+        is_interrupted = run_status in {"failed", "cancelled"} or bool(err_code) or bool(interruption_reason)
+
+        has_completed_core = (
+            isinstance(saved_integration_checkpoint, dict)
+            and saved_integration_checkpoint.get("boundary") == "after_core_implementation"
+            and bool(saved_integration_checkpoint.get("runtime_capability_change"))
+        ) or (run_status in {"completed", "success"} and not err_code)
+
+        if is_interrupted and not has_completed_core:
+            # Classify: PARTIALLY_COMPLETED vs NOT_STARTED
+            has_partial = bool(changed) or bool(
+                isinstance(saved_integration_checkpoint, dict) and saved_integration_checkpoint.get("core_changed_files")
+            )
+            classified_state = "PARTIALLY_COMPLETED" if has_partial else "NOT_STARTED"
+            resolved_err_code = str(err_code or ("CODING_TIMEOUT" if has_partial else "CODING_PROVIDER_TIMEOUT"))
+            return ChatTurnResult(
+                answer="",
+                error=resolved_err_code,
+                error_code=resolved_err_code,
+                error_category="interruption" if has_partial else "timeout",
+                retry_possible=True,
+                resume_available=has_partial,
+                checkpoint_available=has_partial,
+                execution_id=gateway_task_id,
+                interruption_reason=str(interruption_reason or resolved_err_code or classified_state),
+                mode="coding-agent-interrupted",
+                flow_id=active_flow_id,
+                decision=agent_decision,
+                auto_chat_mode=auto_chat_mode.value,
+                changed_files=changed,
+                payload=dict(result or {}),
+                warnings=warns,
+                used_coding_agent=True,
+            )
+
+        # Runtime-capability changes are not publishable until the shared
+        # integration coordinator has completed its evidence gate.  The
+        # coordinator receives the real post-core changed_files list.
+        integration_result = FeatureIntegrationCoordinator(
+            checkpoint=feature_integration_checkpoint
+        ).run(
+            coding_agent=coding_agent,
+            core_result=result,
+            request=question,
+            gateway_task_id=gateway_task_id,
+            flow_id=active_flow_id,
+            runtime_capability_change=bool(agent_decision.runtime_capability_change),
+            authority=feature_integration_authority,
+            authority_provider=feature_integration_authority_provider,
+            taskboard=feature_integration_taskboard,
+            taskboard_parent_task_id=feature_integration_parent_task_id,
+            trigger_turn_id=feature_integration_trigger_turn_id,
+            execution_supervisor=feature_integration_execution_supervisor,
+            workspace_root=feature_integration_workspace_root,
+            queue_manager=feature_integration_queue_manager,
+            verification_commands=feature_integration_verification_commands,
+            verification_plan=feature_integration_verification_plan,
+            verification_executor=feature_integration_verification_executor,
+            integration_decision_provider=feature_integration_decision_provider,
+            integration_decision=feature_integration_decision,
+        )
+        result = integration_result.result
+        if not integration_result.passed:
+            return ChatTurnResult(
+                answer="",
+                error=integration_result.error_code or "INCOMPLETE_FEATURE_WIRING",
+                error_code=integration_result.error_code or "INCOMPLETE_FEATURE_WIRING",
+                mode="coding-agent-blocked",
+                flow_id=active_flow_id,
+                decision=agent_decision,
+                auto_chat_mode=auto_chat_mode.value,
+                payload=dict(result),
+                warnings=warns,
+                used_coding_agent=True,
+                execution_id=gateway_task_id,
+                checkpoint_available=bool(changed),
+                resume_available=True,
+                retry_possible=True,
+            )
+        answer = str((result or {}).get("answer", "") or "").strip()
+        changed = [str(c) for c in ((result or {}).get("changed_files") or []) if str(c).strip()]
 
         # Clear consumed prechecklist
         if execute_plan_now:
@@ -1176,13 +1313,58 @@ def process_chat_turn(
             payload=dict(result or {}),
             warnings=warns,
             used_coding_agent=True,
+            execution_id=gateway_task_id,
         )
     except Exception as exc:
         logger.exception("gateway coding agent turn failed")
+        exc_text = str(exc)
+        err_code = getattr(exc, "error_code", None)
+        interruption = getattr(exc, "reason", None)
+        err_cat = "execution"
+        if not err_code:
+            lowered = exc_text.lower()
+            if isinstance(exc, (CodexTimeoutError, asyncio.TimeoutError)) or "timed out" in lowered:
+                err_code = "CODING_PROVIDER_TIMEOUT"
+                err_cat = "timeout"
+                interruption = "CODING_TIMEOUT"
+            elif isinstance(exc, CodexInterruptionError) or "interrupted" in lowered:
+                err_code = "MODEL_INTERRUPTED"
+                err_cat = "interruption"
+                interruption = "MODEL_INTERRUPTED"
+            elif "deadline" in lowered:
+                err_code = "DEADLINE_EXPIRED"
+                err_cat = "deadline"
+                interruption = "DEADLINE_EXPIRED"
+            elif "lease" in lowered:
+                err_code = "LEASE_LOST_DURING_EXECUTION"
+                err_cat = "lease"
+                interruption = "LEASE_LOST_DURING_EXECUTION"
+            else:
+                err_code = "CODING_AGENT_FAILED"
+
+        saved_cp = session_state.get("feature_integration_checkpoint")
+        has_cp = bool(isinstance(saved_cp, dict) and saved_cp.get("core_changed_files"))
+
         return ChatTurnResult(
             answer="",
-            error=f"Coding agent failed: {exc}",
+            error=f"Coding agent failed: {exc}" if err_code == "CODING_AGENT_FAILED" else err_code,
+            error_code=err_code,
+            error_category=err_cat,
+            retry_possible=True,
+            resume_available=has_cp,
+            checkpoint_available=has_cp,
+            execution_id=gateway_task_id,
+            interruption_reason=interruption or err_code,
             decision=agent_decision,
             auto_chat_mode=auto_chat_mode.value,
             used_coding_agent=True,
+            payload={
+                "error_code": err_code,
+                "error_category": err_cat,
+                "interruption_reason": interruption or err_code,
+                "retry_possible": True,
+                "resume_available": has_cp,
+                "checkpoint_available": has_cp,
+                "execution_id": gateway_task_id,
+            },
         )

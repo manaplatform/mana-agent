@@ -290,9 +290,24 @@ def _record_multi_agent_request(
     command_scope: bool = False,
     session_id: str | None = None,
 ) -> str:
-    """Record a mandatory MainAgent route before a legacy entrypoint continues."""
+    """Record the mandatory MainAgent route for non-Gateway-owned entrypoints.
+
+    Chat turns are owned end-to-end by AgentChatGateway. Running a second
+    MainAgent lifecycle here for ``entrypoint="chat"`` creates a shadow
+    TaskBoard task without an authoritative execution/supervisor identity and
+    can leave that task orphaned in VERIFYING. Therefore chat routing is a
+    deliberate no-op at this legacy pre-route boundary.
+
+    Non-chat legacy CLI entrypoints keep the existing MainAgent route so their
+    routing/audit behavior remains unchanged.
+    """
     if command_scope and _SKIP_NEXT_COMMAND_ROUTE.get():
         return ""
+
+    normalized_entrypoint = str(entrypoint or "").strip().lower()
+    if normalized_entrypoint == "chat":
+        return ""
+
     from mana_agent.gateway.routing import GatewayRoutingAuthority
 
     routing_authority = GatewayRoutingAuthority(root)
@@ -301,6 +316,7 @@ def _record_multi_agent_request(
     }
     if session_id:
         main_kwargs["session_id"] = session_id
+
     result = MainAgent(root, **main_kwargs).run_user_request(
         request,
         entrypoint=entrypoint,

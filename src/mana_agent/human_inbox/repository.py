@@ -202,7 +202,10 @@ class LocalInboxRepository:
         if query.statuses:
             rows = [item for item in rows if item.status in query.statuses]
         if query.reviewer_id:
-            rows = [item for item in rows if query.reviewer_id in item.eligible_reviewer_ids]
+            rows = [
+                item for item in rows
+                if query.reviewer_id in item.eligible_reviewer_ids or query.reviewer_id == item.assigned_reviewer_id
+            ]
         if query.role:
             rows = [item for item in rows if item.assigned_reviewer_type.value == "role" and item.assigned_reviewer_id == query.role]
         if query.group:

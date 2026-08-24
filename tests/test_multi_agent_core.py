@@ -13,8 +13,10 @@ from mana_agent.commands.cli_internal import _record_multi_agent_request
 from mana_agent.commands import cli_internal
 from mana_agent.config import user_config
 from mana_agent.multi_agent import MainAgent
+from mana_agent.multi_agent.agents.main_agent import connected_wiring_path
 from mana_agent.multi_agent.agents.coding_agent import CodingAgent
 from mana_agent.multi_agent.agents.verifier_agent import VerifierAgent
+from mana_agent.multi_agent.agents.planner_agent import PlannerAgent
 from mana_agent.multi_agent.communication.decision_room import DecisionRoom
 from mana_agent.multi_agent.communication.message_bus import MessageBus
 from mana_agent.multi_agent.core.errors import AgentRegistryError, InvalidTaskTransition, ToolPermissionError
@@ -97,6 +99,7 @@ def _route_payload(
     code_editing_needed: bool = False,
     required_subagents: list[str] | None = None,
     reasoning_summary: str = "Model selected route.",
+    runtime_capability_change: bool | None = None,
 ) -> dict:
     semantic_contract = {
         "answer": ("none", "conversation"),
@@ -111,7 +114,7 @@ def _route_payload(
         "plan": ("none", "conversation"),
     }
     requested_effect, target_surface = semantic_contract[intent]
-    return {
+    payload = {
         "intent": intent,
         "confidence": confidence,
         "selected_tools": selected_tools or [],
@@ -124,6 +127,9 @@ def _route_payload(
         "required_subagents": required_subagents or [],
         "reasoning_summary": reasoning_summary,
     }
+    if runtime_capability_change is not None:
+        payload["runtime_capability_change"] = runtime_capability_change
+    return payload
 
 
 def _git_job_commands(main: MainAgent, task_id: str) -> list[list[str]]:
@@ -196,6 +202,216 @@ def test_taskboard_done_requires_supervisor_projection(tmp_path):
     board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
     with pytest.raises(InvalidTaskTransition, match="supervisor"):
         board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_taskboard_verifying_requires_authoritative_verification_evidence(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Needs evidence", user_request="run the operation")
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    with pytest.raises(InvalidTaskTransition, match="executed verification"):
+        board.update_status(task.task_id, TaskStatus.VERIFYING)
+
+
+def test_taskboard_verifying_rejects_supervisor_projection_reason_without_execution(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Needs supervisor", user_request="run the operation")
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    task.verification_commands = ["echo planned"]
+    with pytest.raises(InvalidTaskTransition, match="without a supervisor execution"):
+        board.update_status(
+            task.task_id,
+            TaskStatus.VERIFYING,
+            reason="Awaiting authoritative supervisor completion projection",
+        )
+
+
+def _prepare_verified_feature(board: TaskBoard):
+    task = board.create_task(title="Capability", user_request="add capability")
+    child = board.create_child_task(
+        task.task_id,
+        title="Wire capability",
+        user_request="wire capability into runtime",
+        integration_role="wiring",
+    )
+    child.status = TaskStatus.DONE
+    task.wiring_required = True
+    task.implementation_verified = True
+    task.supervisor_execution_id = "supervisor-1"
+    task.supervisor_state = "completed"
+    task.verification_status = "passed"
+    task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    task.verification_queue_job_ids = ["verification-job-1"]
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    return task
+
+
+def test_feature_completion_rejects_missing_wiring_task(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Capability", user_request="add capability")
+    task.wiring_required = True
+    task.integration_verified = True
+    task.runtime_reachability_verified = True
+    task.supervisor_execution_id = "supervisor-1"
+    task.supervisor_state = "completed"
+    task.verification_status = "passed"
+    task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
+        board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_feature_completion_rejects_unit_evidence_without_runtime_path(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = _prepare_verified_feature(board)
+    with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
+        board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_connected_wiring_path_accepts_three_edges_and_rejects_disconnected_edges():
+    edges = [
+        {"from": "Gateway", "relation": "calls", "to": "Router"},
+        {"from": "Router", "relation": "selects", "to": "Registry"},
+        {"from": "Registry", "relation": "constructs", "to": "Provider"},
+    ]
+    assert connected_wiring_path(edges) == [
+        "Gateway",
+        "calls Router",
+        "selects Registry",
+        "constructs Provider",
+    ]
+    assert connected_wiring_path([edges[0], edges[2]]) == []
+
+
+def test_wiring_child_cannot_complete_without_reachability_provenance(tmp_path):
+    board = TaskBoard(tmp_path)
+    parent = board.create_task(title="Capability", user_request="add capability")
+    child = board.create_child_task(
+        parent.task_id,
+        title="Wire capability",
+        user_request="wire capability",
+        integration_role="wiring",
+    )
+    child.implementation_verified = True
+    child.wiring_outcome = "already_integrated"
+    child.verification_provenance = {"verification_id": "verification-1"}
+    child.verification_queue_job_ids = ["verification-job-1"]
+    board.update_status(child.task_id, TaskStatus.ROUTED)
+    board.update_status(child.task_id, TaskStatus.IN_PROGRESS)
+    board.update_status(child.task_id, TaskStatus.VERIFYING)
+    with pytest.raises(InvalidTaskTransition, match="INCOMPLETE_FEATURE_WIRING"):
+        board.update_status(child.task_id, TaskStatus.DONE)
+
+
+def test_feature_completion_allows_verified_runtime_path(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = _prepare_verified_feature(board)
+    board.record_integration_evidence(
+        task.task_id,
+        ["CLI entrypoint", "router", "Capability implementation", "observable result"],
+        source_references=["src/cli.py:10", "src/router.py:20"],
+        observable_result="Capability was selected and callable.",
+        verification_source="verification-1",
+    )
+    board.update_status(task.task_id, TaskStatus.VERIFYING)
+    board.update_status(task.task_id, TaskStatus.DONE)
+
+
+def test_integration_evidence_requires_provenance_and_observable_result(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Capability", user_request="add capability")
+    with pytest.raises(ValueError, match="source references"):
+        board.record_integration_evidence(
+            task.task_id,
+            ["entrypoint", "router", "provider", "result"],
+            observable_result="selected",
+        )
+
+
+def test_planner_assigns_one_wiring_child_to_coding_and_reuses_it(tmp_path):
+    board = TaskBoard(tmp_path)
+    registry = AgentRegistry()
+    planner_node = registry.find_by_role(AgentRole.PLANNER)
+    coding_node = registry.find_by_role(AgentRole.CODING)
+    planner = PlannerAgent(
+        agent_id=planner_node.agent_id,
+        role=AgentRole.PLANNER,
+        parent_agent_id=planner_node.parent_agent_id,
+        capabilities=planner_node.capabilities,
+        mailbox=MessageBus(tmp_path),
+        taskboard=board,
+        message_bus=MessageBus(tmp_path),
+        registry=registry,
+    )
+    task = board.create_task(title="Capability", user_request="add capability")
+    planner.plan(task.task_id, task.user_request, "coding")
+    planner.plan(task.task_id, task.user_request, "coding")
+    wiring = [board.get_task(item) for item in task.required_wiring_task_ids]
+    assert len(wiring) == 1
+    assert wiring[0].owner_agent_id == coding_node.agent_id
+
+
+def test_planner_does_not_create_wiring_child_for_read_only_route(tmp_path):
+    board = TaskBoard(tmp_path)
+    registry = AgentRegistry()
+    planner_node = registry.find_by_role(AgentRole.PLANNER)
+    planner = PlannerAgent(
+        agent_id=planner_node.agent_id,
+        role=AgentRole.PLANNER,
+        parent_agent_id=planner_node.parent_agent_id,
+        capabilities=planner_node.capabilities,
+        mailbox=MessageBus(tmp_path),
+        taskboard=board,
+        message_bus=MessageBus(tmp_path),
+        registry=registry,
+    )
+    task = board.create_task(title="Docs", user_request="inspect documentation")
+    result = planner.plan(task.task_id, task.user_request, "repo_search")
+    assert result.wiring_required is False
+    assert task.required_wiring_task_ids == []
+
+
+def test_planner_respects_explicit_runtime_capability_decision(tmp_path):
+    board = TaskBoard(tmp_path)
+    registry = AgentRegistry()
+    planner_node = registry.find_by_role(AgentRole.PLANNER)
+    planner = PlannerAgent(
+        agent_id=planner_node.agent_id,
+        role=AgentRole.PLANNER,
+        parent_agent_id=planner_node.parent_agent_id,
+        capabilities=planner_node.capabilities,
+        mailbox=MessageBus(tmp_path),
+        taskboard=board,
+        message_bus=MessageBus(tmp_path),
+        registry=registry,
+    )
+    task = board.create_task(title="Docs", user_request="update documentation")
+    result = planner.plan(
+        task.task_id,
+        task.user_request,
+        "coding",
+        runtime_capability_change=False,
+    )
+    assert result.wiring_required is False
+    assert task.required_wiring_task_ids == []
+
+
+def test_pure_internal_task_can_complete_without_wiring(tmp_path):
+    board = TaskBoard(tmp_path)
+    task = board.create_task(title="Utility", user_request="refactor internal helper")
+    task.wiring_required = False
+    task.wiring_reason = "Pure internal utility; integration path is unchanged."
+    task.supervisor_execution_id = "supervisor-1"
+    task.supervisor_state = "completed"
+    task.verification_status = "passed"
+    task.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    board.update_status(task.task_id, TaskStatus.ROUTED)
+    board.update_status(task.task_id, TaskStatus.IN_PROGRESS)
+    board.update_status(task.task_id, TaskStatus.VERIFYING)
+    board.update_status(task.task_id, TaskStatus.DONE)
 
 
 def test_taskboard_compaction_is_reversible(tmp_path, monkeypatch):
@@ -549,6 +765,31 @@ def test_router_selects_required_routes():
     assert readme_route.required_subagents == ["repo_inventory", "docs"]
 
 
+def test_router_preserves_false_runtime_capability_change_for_tool_routes():
+    router = Router(
+        decision_engine=AgentDecisionEngine(
+            llm=_RouteModel(
+                {
+                    "browser inspection": _route_payload(
+                        "tool", selected_tools=["browser_open"], runtime_capability_change=False
+                    ),
+                    "git status": _route_payload(
+                        "high_risk_tool", selected_tools=["git"], runtime_capability_change=False
+                    ),
+                }
+            )
+        )
+    )
+    assert router.route(task_id="task-browser", user_request="browser inspection").runtime_capability_change is False
+    assert router.route(task_id="task-git", user_request="git status").runtime_capability_change is False
+
+
+def test_git_intent_route_does_not_require_runtime_wiring(tmp_path):
+    main = MainAgent.__new__(MainAgent)
+    route = main._route_with_git_contract("task-git", GitIntent())
+    assert route.runtime_capability_change is False
+
+
 def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Queue", user_request="run status")
@@ -842,6 +1083,11 @@ def test_verifier_executes_real_verification_queue_job(tmp_path):
     task_after = main.taskboard.get_task(task.task_id)
     assert result.passed is True
     assert task_after.verification_queue_job_ids
+    assert task_after.verification_queue_job_ids == [
+        event["queue_job_id"]
+        for event in task_after.actual_tool_events
+        if event["queue_job_id"] in task_after.verification_queue_job_ids
+    ]
     assert task_after.actual_tool_events[-1]["queue_job_id"] in task_after.verification_queue_job_ids
 
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol, runtime_checkable
 from uuid import uuid4
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
@@ -25,6 +27,7 @@ from mana_agent.execution_supervisor.errors import (
     StaleLeaseError,
 )
 from mana_agent.execution_supervisor.models import (
+    ActionEffectScope,
     AttemptRecord,
     ActionRecord,
     ActionRequestState,
@@ -41,7 +44,11 @@ from mana_agent.execution_supervisor.models import (
     EscrowStatus,
     ExecutionEvent,
     ExecutionState,
+    HumanRecoveryDecisionAction,
+    LOCAL_REPOSITORY_TOOLS,
+    LostLeaseOutcome,
     ParentProgress,
+    ReconciliationOutcome,
     RecoveryAction,
     RecoveryDecision,
     RecoveryInterventionReason,
@@ -66,6 +73,139 @@ from mana_agent.execution_supervisor.verifier import ArtifactVerifier
 
 EventSink = Callable[[str, dict[str, Any]], None]
 Clock = Callable[[], datetime]
+
+
+@runtime_checkable
+class RecoveryReviewPublisher(Protocol):
+    def create_recovery_review(
+        self,
+        *,
+        intervention: RecoveryInterventionRecord,
+        task: TaskRecord,
+        action: ActionRecord | None = None,
+    ) -> str:
+        """Create a real durable Human Inbox item and return its inbox_item_id."""
+        ...
+
+
+class DefaultRecoveryReviewPublisher:
+    """Default publisher creating real durable Human Inbox items for ambiguous lost leases."""
+
+    def __init__(self, inbox_service: Any = None, inbox_root: Path | None = None) -> None:
+        self._inbox_service = inbox_service
+        self._inbox_root = inbox_root
+        self._supervisor: Any = None
+
+    def _get_service(self) -> Any:
+        if self._inbox_service is not None:
+            return self._inbox_service
+        from mana_agent.human_inbox import (
+            HumanInboxService,
+            LocalInboxRepository,
+            StaticIdentityDirectory,
+            ReviewerIdentity,
+            ResponseTokenSigner,
+        )
+        import getpass
+
+        supervisor = self._supervisor
+        if self._inbox_root is not None:
+            root = self._inbox_root
+        elif supervisor is not None and getattr(supervisor, "config", None) is not None and supervisor.config.root:
+            root = supervisor.config.root.parent / "human_inbox"
+        else:
+            from mana_agent.config.settings import mana_home
+
+            root = mana_home() / "inbox"
+
+        username = getpass.getuser()
+        identities = StaticIdentityDirectory([
+            ReviewerIdentity(identity_id=username, tenant_ids={"local"}),
+            ReviewerIdentity(identity_id="operator", tenant_ids={"local"}),
+            ReviewerIdentity(identity_id="admin", tenant_ids={"local"}),
+        ])
+        self._inbox_service = HumanInboxService(
+            repository=LocalInboxRepository(root),
+            identities=identities,
+            token_signer=ResponseTokenSigner(root / "response-signing.key"),
+            branch_controller=supervisor,
+            clock=supervisor.clock if supervisor is not None else utc_now,
+        )
+        return self._inbox_service
+
+    def create_recovery_review(
+        self,
+        *,
+        intervention: RecoveryInterventionRecord,
+        task: TaskRecord,
+        action: ActionRecord | None = None,
+    ) -> str:
+        import getpass
+        from mana_agent.human_inbox.models import (
+            InboxRequest,
+            InboxRequestType,
+            ResponseOperation,
+            ReviewerAssignment,
+            ReviewerType,
+            RiskLevel as InboxRiskLevel,
+        )
+
+        service = self._get_service()
+        username = getpass.getuser()
+        tool_name = action.tool_name if action else "external consequential operation"
+
+        dedup_key = f"recovery_review:{task.task_id}:{task.attempt_id}:{action.action_id if action else ''}:{intervention.intervention_id}"
+        idemp_key = dedup_key
+        for existing_item in service.repository.list():
+            if existing_item.deduplication_key == dedup_key:
+                return existing_item.inbox_item_id
+
+        item = service.create(
+            InboxRequest(
+                request_type=InboxRequestType.APPROVAL,
+                task_id=task.task_id,
+                root_task_id=task.root_task_id or task.task_id,
+                execution_id=intervention.execution_id,
+                attempt_id=intervention.attempt_id,
+                action_id=intervention.action_id,
+                intervention_id=intervention.intervention_id,
+                integration_stage=intervention.integration_stage,
+                recovery_reason=intervention.reason.value,
+                branch_id=task.task_id,
+                checkpoint_id=task.checkpoint_id,
+                execution_attempt_id=task.attempt_id,
+                policy_decision_id=task.routing_decision_id or f"policy:{task.task_id}",
+                action_intent_id=f"recovery:{intervention.intervention_id}",
+                action_digest=intervention.intervention_id,
+                requested_by_agent_id="execution_supervisor",
+                reviewer=ReviewerAssignment(
+                    reviewer_type=ReviewerType.PERSON,
+                    reviewer_id=username,
+                ),
+                title=f"Approve recovery for task {task.task_id}",
+                summary=(
+                    f"A lost lease occurred during execution of task '{task.task_id}' while executing "
+                    f"consequential action '{tool_name}'. Automatic replay is unsafe without human confirmation."
+                ),
+                risk_level=InboxRiskLevel.CRITICAL,
+                allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+                recovery_intervention_id=intervention.intervention_id,
+                minimal_context={
+                    "task_id": task.task_id,
+                    "attempt_id": task.attempt_id,
+                    "action_id": action.action_id if action else "",
+                    "tool_name": tool_name,
+                    "intervention_id": intervention.intervention_id,
+                    "reason": intervention.reason.value,
+                    "receipt_state": intervention.receipt_lookup_state,
+                    "integration_stage": intervention.integration_stage,
+                },
+                expires_at=intervention.created_at + timedelta(days=7),
+                idempotency_key=idemp_key,
+                deduplication_key=dedup_key,
+            )
+        )
+        return item.inbox_item_id
 
 
 def _token_hash(token: str) -> str:
@@ -113,6 +253,7 @@ class ExecutionSupervisor:
         event_sink: EventSink | None = None,
         clock: Clock = utc_now,
         startup_recovery: bool | None = None,
+        recovery_review_publisher: RecoveryReviewPublisher | None = None,
     ) -> None:
         self.config = config or ExecutionSupervisorConfig()
         self.store = store or LocalExecutionStore(self.config.root)
@@ -120,6 +261,9 @@ class ExecutionSupervisor:
         self.retry_policy = RetryPolicy(self.config)
         self.event_sink = event_sink
         self.clock = clock
+        self.recovery_review_publisher = recovery_review_publisher or DefaultRecoveryReviewPublisher()
+        if hasattr(self.recovery_review_publisher, "_supervisor"):
+            self.recovery_review_publisher._supervisor = self
         self._last_live_heartbeat: dict[str, datetime] = {}
         self.startup_recovery_summary: RecoverySummary | None = None
         if (
@@ -210,7 +354,7 @@ class ExecutionSupervisor:
         runtime_provider: str = "",
         workspace_path: str | Path = "",
         routing_decision_id: str,
-        side_effect_classification: SideEffectClassification,
+        side_effect_classification: SideEffectClassification = SideEffectClassification.IDEMPOTENT,
         completion_contract: Iterable[CompletionContract] = (),
         dependency_task_ids: Iterable[str] = (),
         idempotency_key: str = "",
@@ -497,9 +641,10 @@ class ExecutionSupervisor:
                 task.lease_token = ""
                 task.lease_expires_at = None
                 task.retry_not_before = None
-                task.waiting_inbox_item_id = ""
-                task.waiting_reason = ""
-                task.human_wait_started_at = None
+                if target is not ExecutionState.RECOVERY_REVIEW_REQUIRED:
+                    task.waiting_inbox_item_id = ""
+                    task.waiting_reason = ""
+                    task.human_wait_started_at = None
                 if target != ExecutionState.COMPLETED and not task.result_id:
                     result_kind = (
                         "terminal_failure"
@@ -825,7 +970,7 @@ class ExecutionSupervisor:
         lease_token = uuid4().hex
         now = self.clock()
         current = self.store.get_task(task_id)
-        if current.state != ExecutionState.QUEUED:
+        if current.state not in {ExecutionState.QUEUED, ExecutionState.CREATED}:
             raise LeaseConflictError(f"task is not leaseable from state {current.state.value}")
         if current.assigned_worker and worker != current.assigned_worker:
             raise LeaseConflictError(
@@ -837,7 +982,7 @@ class ExecutionSupervisor:
             raise BudgetExceededError("task wall-clock deadline exceeded")
 
         def claim(task: TaskRecord) -> AttemptRecord:
-            if task.state != ExecutionState.QUEUED:
+            if task.state not in {ExecutionState.QUEUED, ExecutionState.CREATED}:
                 raise LeaseConflictError(f"task is not leaseable from state {task.state.value}")
             if task.lease_token and task.lease_expires_at and task.lease_expires_at > now:
                 raise LeaseConflictError("task already holds an active lease")
@@ -959,6 +1104,49 @@ class ExecutionSupervisor:
             self.store.save_attempt(attempt)
         self._emit("heartbeat", task, lease_expires_at=task.lease_expires_at)
         return task
+
+    @contextmanager
+    def lease_renewal(self, task_id: str, *, attempt_id: str, lease_token: str):
+        """Renew a live attempt independently of provider/tool boundaries.
+
+        Callers wrap the complete model, integration, verifier, or reviewer
+        operation in this context. Renewal stops on normal completion,
+        cancellation, a deliberate WAITING transition, or an expired lease.
+        It never extends the immutable execution deadline.
+        """
+        stopped = threading.Event()
+        failure: list[BaseException] = []
+
+        def renew() -> None:
+            while not stopped.is_set():
+                try:
+                    current = self.store.get_task_or_none(task_id)
+                    if (
+                        current is None
+                        or stopped.is_set()
+                        or current.state in TERMINAL_STATES
+                        or current.state is ExecutionState.WAITING
+                        or current.wall_clock_deadline_exceeded(self.clock())
+                    ):
+                        return
+                    self.heartbeat(task_id, attempt_id=attempt_id, lease_token=lease_token)
+                except (StaleLeaseError, LeaseConflictError, BudgetExceededError) as exc:
+                    current = self.store.get_task_or_none(task_id)
+                    if current is not None and current.state in {ExecutionState.RUNNING, ExecutionState.LEASED}:
+                        failure.append(exc)
+                    return
+                if stopped.wait(min(0.02, max(0.005, float(self.config.heartbeat_seconds) / 10))):
+                    break
+
+        worker = threading.Thread(target=renew, name=f"lease-renewal-{task_id}", daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            worker.join(timeout=max(1.0, float(self.config.heartbeat_seconds) + 0.5))
+        if failure:
+            raise failure[0]
 
     def resume_running(
         self,
@@ -1112,6 +1300,11 @@ class ExecutionSupervisor:
             validate_transition(task.state, ExecutionState.WAITING)
             task.state = ExecutionState.WAITING
             task.waiting_inbox_item_id = inbox_item_id
+            task.waiting_kind = "human_review" if request_type == "approval" else "human_input"
+            task.wake_up_source = "human_inbox"
+            task.wake_up_reference = inbox_item_id
+            task.resume_checkpoint_id = checkpoint_id
+            task.resume_operation = "resume_from_human_input"
             task.waiting_reason = f"waiting_for_{request_type}"
             task.human_wait_started_at = task.human_wait_started_at or self.clock()
             task.lease_owner = ""
@@ -1149,17 +1342,69 @@ class ExecutionSupervisor:
     ) -> TaskRecord:
         """Queue one checkpointed branch once for one durable human response."""
         checkpoint = self.store.get_checkpoint(checkpoint_id) if checkpoint_id else None
-        if checkpoint is None or checkpoint.task_id != task_id:
-            raise RetrySafetyError("human response references a missing or foreign checkpoint")
-        branch_snapshot = self.store.get_task(task_id)
+        if checkpoint is None and checkpoint_id:
+            raise RetrySafetyError("human response references a missing checkpoint")
+        if checkpoint is not None and checkpoint.task_id != task_id:
+            raise RetrySafetyError("human response references a foreign checkpoint")
+        branch_snapshot = self.store.get_task_or_none(task_id)
+        if branch_snapshot is None:
+            return None
         ancestor_id = branch_snapshot.parent_task_id
         while ancestor_id:
             ancestor = self.store.get_task(ancestor_id)
-            if ancestor.state in TERMINAL_STATES or ancestor.state is ExecutionState.CANCELLING:
+            if (
+                ancestor.state in TERMINAL_STATES
+                and ancestor.state is not ExecutionState.RECOVERY_REVIEW_REQUIRED
+            ):
                 raise RetrySafetyError(
                     f"human response cannot resume under non-runnable ancestor {ancestor.task_id}"
                 )
             ancestor_id = ancestor.parent_task_id
+
+        if branch_snapshot.recovery_intervention_id:
+            op = str(structured_response.get("operation") or "").lower()
+            comment = str(structured_response.get("comment") or "")
+            ans = structured_response.get("answer") or {}
+            actor_id = str(structured_response.get("actor_id") or "operator")
+            requested_action = str(ans.get("action") or "")
+            if op == "deny" or requested_action == "ABORT_EXECUTION":
+                return self.resolve_recovery_intervention(
+                    branch_snapshot.recovery_intervention_id,
+                    action=HumanRecoveryDecisionAction.ABORT_EXECUTION,
+                    actor_id=actor_id,
+                    comment=comment,
+                    response_data=structured_response,
+                )
+            elif requested_action == "RETRY_ACTION":
+                return self.resolve_recovery_intervention(
+                    branch_snapshot.recovery_intervention_id,
+                    action=HumanRecoveryDecisionAction.RETRY_ACTION,
+                    actor_id=actor_id,
+                    comment=comment,
+                    response_data=structured_response,
+                )
+            elif requested_action == "MARK_ACTION_ALREADY_COMPLETED" or (op == "approve" and not requested_action):
+                return self.resolve_recovery_intervention(
+                    branch_snapshot.recovery_intervention_id,
+                    action=HumanRecoveryDecisionAction.MARK_ACTION_ALREADY_COMPLETED,
+                    actor_id=actor_id,
+                    comment=comment,
+                    response_data=structured_response,
+                )
+            else:
+                intervention = self.store.get_recovery_intervention(branch_snapshot.recovery_intervention_id)
+                action_to_resolve = (
+                    HumanRecoveryDecisionAction.MARK_ACTION_ALREADY_COMPLETED
+                    if intervention and intervention.action_id
+                    else HumanRecoveryDecisionAction.RESUME_WITHOUT_REPLAY
+                )
+                return self.resolve_recovery_intervention(
+                    branch_snapshot.recovery_intervention_id,
+                    action=action_to_resolve,
+                    actor_id=actor_id,
+                    comment=comment,
+                    response_data=structured_response,
+                )
 
         wait_duration = timedelta(0)
 
@@ -1185,6 +1430,11 @@ class ExecutionSupervisor:
                 task.deadline_at += wait_duration
             task.state = ExecutionState.QUEUED
             task.waiting_inbox_item_id = ""
+            task.waiting_kind = ""
+            task.wake_up_source = ""
+            task.wake_up_reference = ""
+            task.resume_checkpoint_id = ""
+            task.resume_operation = ""
             task.waiting_reason = ""
             task.human_wait_started_at = None
             task.lease_owner = ""
@@ -1226,6 +1476,34 @@ class ExecutionSupervisor:
             checkpoint_id=checkpoint_id,
             request_type=request_type,
         )
+
+    def record_external_wait(
+        self,
+        task_id: str,
+        *,
+        waiting_kind: str,
+        wake_up_source: str,
+        wake_up_reference: str,
+        resume_checkpoint_id: str = "",
+        resume_operation: str = "",
+    ) -> TaskRecord:
+        """Persist the wake contract required for a non-human external wait."""
+        if not waiting_kind.strip() or not wake_up_source.strip() or not wake_up_reference.strip():
+            raise ValueError("external waits require kind, wake-up source, and wake-up reference")
+
+        def update(task: TaskRecord) -> None:
+            if task.state is not ExecutionState.WAITING:
+                raise InvalidTransitionError("external wait metadata requires a waiting supervisor task")
+            task.waiting_kind = waiting_kind
+            task.wake_up_source = wake_up_source
+            task.wake_up_reference = wake_up_reference
+            task.resume_checkpoint_id = resume_checkpoint_id
+            task.resume_operation = resume_operation
+            task.updated_at = self.clock()
+
+        task, _ = self.store.update_task(task_id, update)
+        self._emit("external_wait_recorded", task, wake_up_source=wake_up_source)
+        return task
 
     def suspend_for_connector(
         self,
@@ -1275,6 +1553,11 @@ class ExecutionSupervisor:
                 validate_transition(task.state, ExecutionState.WAITING)
             task.state = ExecutionState.WAITING
             task.waiting_reason = "waiting_for_connector"
+            task.waiting_kind = "external_dependency"
+            task.wake_up_source = "connector_health"
+            task.wake_up_reference = connector_id
+            task.resume_checkpoint_id = active_checkpoint
+            task.resume_operation = "resume_from_connector"
             task.waiting_connector_id = connector_id
             task.human_wait_started_at = task.human_wait_started_at or self.clock()
             task.lease_owner = ""
@@ -1327,6 +1610,11 @@ class ExecutionSupervisor:
             task.human_resume_claim_ids.append(resume_claim_id)
             task.state = ExecutionState.QUEUED
             task.waiting_reason = ""
+            task.waiting_kind = ""
+            task.wake_up_source = ""
+            task.wake_up_reference = ""
+            task.resume_checkpoint_id = ""
+            task.resume_operation = ""
             task.waiting_connector_id = ""
             task.human_wait_started_at = None
             task.recovery_reason = "connector_healthy"
@@ -1390,7 +1678,7 @@ class ExecutionSupervisor:
 
         def escrow(task: TaskRecord) -> EscrowResult:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
-            if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
+            if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING, ExecutionState.COMPLETED_PENDING_VERIFICATION}:
                 raise LeaseConflictError(f"task cannot publish a result from state {task.state.value}")
             target_state = (
                 ExecutionState.PENDING_BUDGET_DECISION
@@ -1641,14 +1929,19 @@ class ExecutionSupervisor:
         blocking_children = []
         for child_id in task.child_task_ids:
             child = self.store.get_task(child_id)
+            if child.state is ExecutionState.COMPLETED_PENDING_VERIFICATION:
+                try:
+                    child = self.verify_completion(child_id)
+                except Exception:
+                    pass
             child_result = self.store.get_result(child.result_id) if child.result_id else None
-            if (
-                child.state != ExecutionState.COMPLETED
-                or child_result is None
-                or child_result.acknowledged_at is None
-                or child_result.acknowledged_by != task.task_id
-            ):
+            if child.state != ExecutionState.COMPLETED or child_result is None:
                 blocking_children.append(child_id)
+            elif child_result.acknowledged_at is None:
+                try:
+                    self.acknowledge_result(child_result.result_id, parent_task_id=task.task_id)
+                except Exception:
+                    pass
         unresolved_actions = [
             action.action_id
             for action in self.store.actions_for_task(task_id)
@@ -2561,15 +2854,235 @@ class ExecutionSupervisor:
         self._emit("replan_completed" if current.state == ExecutionState.REPLANNING else "retry_started", task)
         return task
 
-    def _require_ambiguous_lease_review(
-        self, task: TaskRecord, *, now: datetime
-    ) -> RecoveryInterventionRecord:
-        """Persist lost-lease evidence before terminalizing uncertain work.
+    def _reconcile_local_mutation(self, task: TaskRecord, action: ActionRecord) -> ReconciliationOutcome:
+        """Inspect durable workspace and checkpoint evidence for a local repository mutation."""
+        # Every accepted receipt must be attributable to this exact action and
+        # attempt.  A path or a generic success flag is never sufficient.
+        evidence = action.verification_state
+        def matching_identity(candidate: dict[str, Any]) -> bool:
+            return (
+                candidate.get("action_id") == action.action_id
+                and candidate.get("attempt_id") == action.attempt_id
+                and candidate.get("action_fingerprint", candidate.get("patch_fingerprint"))
+                == action.action_fingerprint
+            )
 
-        This deliberately records the intervention before clearing the lease from
-        the task. A restart between those writes can re-use the same record and
-        still terminalize the task without creating a second execution.
-        """
+        if evidence.get("partially_applied") is True and matching_identity(evidence):
+            return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        patch_result = action.verification_state.get("patch_result") or action.verification_state.get("apply_result")
+        if isinstance(patch_result, dict) and matching_identity(patch_result):
+            if patch_result.get("success") is True or patch_result.get("applied") is True:
+                return ReconciliationOutcome.ALREADY_APPLIED
+            if patch_result.get("partially_applied") is True:
+                return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        mutation_receipt = evidence.get("mutation_receipt")
+        if isinstance(mutation_receipt, dict) and matching_identity(mutation_receipt):
+            if mutation_receipt.get("completed") is True:
+                return ReconciliationOutcome.ALREADY_APPLIED
+            if mutation_receipt.get("started") is True:
+                return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        # A pre-existing path is not proof that this attempt produced it.  The
+        # action must carry a fingerprint (or trusted patch result) tied to it.
+        expected = action.verification_state.get("artifact_hashes") or {}
+        artifacts = action.verification_state.get("artifacts") or []
+        if isinstance(artifacts, list):
+            expected = {
+                **expected,
+                **{
+                    str(item["path"]): str(item.get("sha256") or item.get("content_fingerprint"))
+                    for item in artifacts
+                    if isinstance(item, dict) and item.get("path")
+                    and (item.get("sha256") or item.get("content_fingerprint"))
+                },
+            }
+        if isinstance(expected, dict) and expected:
+            workspace = Path(task.workspace_path) if task.workspace_path else None
+            observed = 0
+            matched = 0
+            if workspace is not None:
+                for relative, fingerprint in expected.items():
+                    path = workspace / str(relative)
+                    if not path.is_file():
+                        continue
+                    observed += 1
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    matched += digest == str(fingerprint).removeprefix("sha256:")
+            if matched == len(expected) and matched:
+                return ReconciliationOutcome.ALREADY_APPLIED
+            if observed:
+                return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        checkpoints = self.store.checkpoints_for_task(task.task_id)
+        if checkpoints:
+            latest = checkpoints[-1]
+            for result in latest.tool_results:
+                if not isinstance(result, dict) or result.get("action_id") != action.action_id:
+                    continue
+                metadata = result.get("metadata") or result
+                if (
+                    metadata.get("attempt_id") == action.attempt_id
+                    and metadata.get("action_fingerprint") == action.action_fingerprint
+                    and (metadata.get("patch_applied") or metadata.get("applied") or metadata.get("success"))
+                ):
+                    return ReconciliationOutcome.ALREADY_APPLIED
+                if (
+                    metadata.get("attempt_id") == action.attempt_id
+                    and metadata.get("action_fingerprint", metadata.get("patch_fingerprint")) == action.action_fingerprint
+                    and metadata.get("partially_applied")
+                ):
+                    return ReconciliationOutcome.PARTIALLY_APPLIED
+
+        if action.request_state == ActionRequestState.PREPARED or action.verification_state.get("execution_started") is False:
+            return ReconciliationOutcome.NOT_STARTED
+        return ReconciliationOutcome.UNKNOWN
+
+    def classify_lost_lease(
+        self,
+        task: TaskRecord,
+        *,
+        now: datetime,
+        actions: Iterable[ActionRecord] = (),
+    ) -> tuple[LostLeaseOutcome, dict[str, Any]]:
+        """Classify lost lease into explicit typed outcome based on durable evidence."""
+        human_wait_in_tree = any(
+            candidate.root_task_id == task.root_task_id
+            and candidate.state is ExecutionState.WAITING
+            and bool(candidate.waiting_inbox_item_id)
+            for candidate in self.store.list_tasks(incomplete_only=True)
+        )
+        if task.wall_clock_deadline_exceeded(now) and not human_wait_in_tree:
+            return LostLeaseOutcome.DEADLINE_EXPIRED, {"reason": "task wall-clock deadline exceeded during recovery"}
+
+        results = self.store.results_for_task(task.task_id)
+        if results and any(
+            r.status in {EscrowStatus.AVAILABLE, EscrowStatus.DELIVERED, EscrowStatus.ACKNOWLEDGED}
+            or r.supervisor_state == ExecutionState.COMPLETED.value
+            for r in results
+        ):
+            return LostLeaseOutcome.DURABLE_RESULT_AVAILABLE, {"result": results[-1]}
+
+        if task.retry_budget.remaining(RetryCategory.LEASE_LOSS, task.retry_usage) <= 0:
+            return LostLeaseOutcome.RETRY_BUDGET_EXHAUSTED, {"reason": "lease_loss retry budget is exhausted"}
+
+        action_list = list(actions)
+        local_reconciliation_required = False
+        local_reconciliation_details: dict[str, Any] = {}
+        has_unknown_external = False
+        ambiguous_external_action = None
+
+        for action in action_list:
+            if action.request_state == ActionRequestState.SUCCEEDED and action.external_receipt:
+                continue
+
+            if action.request_state in {ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN}:
+                if action.effect_scope == ActionEffectScope.UNKNOWN:
+                    has_unknown_external = True
+                    ambiguous_external_action = action
+                    break
+                provider_state = action.verification_state.get("provider_state") or task.provider_metadata.get("state")
+                if provider_state == "SUCCEEDED" or action.verification_state.get("succeeded"):
+                    action.request_state = ActionRequestState.SUCCEEDED
+                    action.external_receipt = str(action.verification_state.get("receipt") or "provider_confirmed_success")
+                    action.updated_at = now
+                    self.store.save_action(action)
+                    continue
+                if provider_state == "FAILED" or action.verification_state.get("failed"):
+                    action.request_state = ActionRequestState.FAILED
+                    action.updated_at = now
+                    self.store.save_action(action)
+                    continue
+
+                is_local = (
+                    action.effect_scope == ActionEffectScope.LOCAL_REPOSITORY
+                    or action.tool_name in LOCAL_REPOSITORY_TOOLS
+                )
+                if is_local:
+                    recon = self._reconcile_local_mutation(task, action)
+                    if recon == ReconciliationOutcome.ALREADY_APPLIED:
+                        action.request_state = ActionRequestState.SUCCEEDED
+                        action.external_receipt = "reconciled_from_local_workspace"
+                        action.verification_state["reconciliation_receipt"] = {
+                            "execution_id": action.execution_id,
+                            "attempt_id": action.attempt_id,
+                            "action_id": action.action_id,
+                            "checkpoint_id": task.checkpoint_id,
+                            "evidence": "artifact_fingerprint_or_trusted_patch_result",
+                        }
+                        action.updated_at = now
+                        self.store.save_action(action)
+                    elif recon in {ReconciliationOutcome.PARTIALLY_APPLIED, ReconciliationOutcome.UNKNOWN}:
+                        action.request_state = ActionRequestState.OUTCOME_UNKNOWN
+                        action.verification_state["reconciliation_required"] = True
+                        action.updated_at = now
+                        self.store.save_action(action)
+                        local_reconciliation_required = True
+                        local_reconciliation_details[action.action_id] = recon
+                    elif recon == ReconciliationOutcome.NOT_STARTED:
+                        action.request_state = ActionRequestState.PREPARED
+                        action.updated_at = now
+                        self.store.save_action(action)
+                    continue
+
+                if action.classification in {SideEffectClassification.READ_ONLY, SideEffectClassification.IDEMPOTENT}:
+                    continue
+
+                if not action.external_receipt:
+                    has_unknown_external = True
+                    ambiguous_external_action = action
+                    break
+
+        if has_unknown_external:
+            return LostLeaseOutcome.UNKNOWN_EXTERNAL_OUTCOME, {"action": ambiguous_external_action}
+
+        if local_reconciliation_required:
+            return LostLeaseOutcome.LOCAL_RECONCILIATION_REQUIRED, {"reconciliation": local_reconciliation_details}
+
+        has_external_receipt = any(
+            a.request_state == ActionRequestState.SUCCEEDED
+            and a.external_receipt
+            and a.external_receipt != "reconciled_from_local_workspace"
+            for a in action_list
+        )
+        if has_external_receipt:
+            return LostLeaseOutcome.DURABLE_RESULT_AVAILABLE, {"actions": action_list}
+
+        decision = self.retry_policy.automatic_recovery_decision(
+            task,
+            category=RetryCategory.LEASE_LOSS,
+            reason="active lease expired during execution",
+            actions=action_list,
+            now=now,
+        )
+        if decision is not None:
+            return LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY, {"decision": decision}
+
+        return LostLeaseOutcome.POLICY_BLOCKED, {"reason": "automatic recovery policy blocked continuation"}
+
+    def _require_ambiguous_lease_review(
+        self,
+        task: TaskRecord,
+        *,
+        now: datetime,
+        actions: Iterable[ActionRecord] = (),
+    ) -> RecoveryInterventionRecord:
+        """Persist lost-lease evidence before terminalizing uncertain work."""
+        action_list = list(actions)
+        ambiguous_action = next(
+            (
+                a for a in action_list
+                if a.request_state in {ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN}
+                and a.classification not in {
+                    SideEffectClassification.READ_ONLY,
+                    SideEffectClassification.IDEMPOTENT,
+                }
+                and a.effect_scope in {ActionEffectScope.EXTERNAL_CONSEQUENTIAL, ActionEffectScope.UNKNOWN}
+                and not a.external_receipt
+            ),
+            None,
+        )
         existing = next(
             (
                 item
@@ -2579,24 +3092,93 @@ class ExecutionSupervisor:
             ),
             None,
         )
-        intervention = existing or RecoveryInterventionRecord(
-            task_id=task.task_id,
-            execution_id=task.task_id,
-            attempt_id=task.attempt_id,
-            reason=RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE,
-            last_lease_owner=task.lease_owner,
-            lease_expiry=task.lease_expires_at,
-            external_side_effects_possible=(
-                task.side_effect_classification is not SideEffectClassification.READ_ONLY
-            ),
-            created_at=now,
+        external_possible = (
+            ambiguous_action is not None
+            or task.irreversible_side_effect_started
+            or task.side_effect_classification not in {
+                SideEffectClassification.READ_ONLY,
+                SideEffectClassification.IDEMPOTENT,
+                SideEffectClassification.DEDUPLICATED,
+            }
         )
-        if existing is None:
-            self.store.save_recovery_intervention(intervention)
+        if existing and existing.inbox_item_id:
+            intervention = existing
+        else:
+            intervention = existing or RecoveryInterventionRecord(
+                task_id=task.task_id,
+                execution_id=task.task_id,
+                attempt_id=task.attempt_id,
+                action_id=ambiguous_action.action_id if ambiguous_action else "",
+                checkpoint_id=task.checkpoint_id,
+                integration_stage=getattr(task, "integration_stage", ""),
+                target_resources=[ambiguous_action.tool_name] if ambiguous_action else [],
+                receipt_lookup_state="missing_receipt" if ambiguous_action else "",
+                reason_details=(
+                    "consequential action started with unknown outcome"
+                    if ambiguous_action
+                    else "uncertain side-effect outcome after lease expiry"
+                ),
+                inbox_item_id="",
+                side_effect_classification=str(
+                    task.side_effect_classification.value
+                    if hasattr(task.side_effect_classification, "value")
+                    else task.side_effect_classification
+                ),
+                reason=RecoveryInterventionReason.AMBIGUOUS_LOST_LEASE,
+                last_lease_owner=task.lease_owner,
+                lease_expiry=task.lease_expires_at,
+                external_side_effects_possible=external_possible,
+                created_at=now,
+            )
+            inbox_item_id = ""
+            if self.recovery_review_publisher is not None:
+                if hasattr(self.recovery_review_publisher, "_supervisor"):
+                    self.recovery_review_publisher._supervisor = self
+                try:
+                    inbox_item_id = self.recovery_review_publisher.create_recovery_review(
+                        intervention=intervention,
+                        task=task,
+                        action=ambiguous_action,
+                    )
+                except Exception as exc:
+                    self._emit(
+                        "recovery_review_publication_error",
+                        task,
+                        intervention_id=intervention.intervention_id,
+                        error=str(exc),
+                    )
+                    raise RetrySafetyError(
+                        "RECOVERY_REVIEW_PUBLISH_FAILED: durable Human Inbox creation failed; "
+                        "recovery stopped safely"
+                    ) from exc
+            if not inbox_item_id:
+                self._emit(
+                    "recovery_review_publication_error",
+                    task,
+                    intervention_id=intervention.intervention_id,
+                    error="Human Inbox returned no durable item reference",
+                )
+                raise RetrySafetyError(
+                    "RECOVERY_REVIEW_PUBLISH_FAILED: Human Inbox returned no durable item reference; "
+                    "no fallback inbox reference was created"
+                )
+            intervention.inbox_item_id = inbox_item_id
+            if existing is None:
+                self.store.save_recovery_intervention(intervention)
 
-        if task.recovery_intervention_id != intervention.intervention_id:
+        if (
+            task.recovery_intervention_id != intervention.intervention_id
+            or task.waiting_inbox_item_id != intervention.inbox_item_id
+        ):
             def link(current: TaskRecord) -> None:
                 current.recovery_intervention_id = intervention.intervention_id
+                current.waiting_inbox_item_id = intervention.inbox_item_id
+                current.waiting_kind = "human_review"
+                current.waiting_reason = "ambiguous_lost_lease"
+                current.wake_up_source = "human_inbox"
+                current.wake_up_reference = intervention.inbox_item_id
+                current.resume_checkpoint_id = current.checkpoint_id
+                current.resume_operation = "resolve_recovery_intervention"
                 current.updated_at = now
 
             task, _ = self.store.update_task(task.task_id, link)
@@ -2627,6 +3209,111 @@ class ExecutionSupervisor:
         )
         return intervention
 
+    def resolve_recovery_intervention(
+        self,
+        intervention_id: str,
+        *,
+        action: HumanRecoveryDecisionAction | str,
+        actor_id: str = "operator",
+        comment: str = "",
+        response_data: dict[str, Any] | None = None,
+    ) -> TaskRecord:
+        """Resolve a durable recovery intervention and resume the original execution lineage."""
+        intervention = self.store.get_recovery_intervention(intervention_id)
+        if intervention is None:
+            raise RetrySafetyError(f"recovery intervention not found: {intervention_id}")
+        task = self.store.get_task(intervention.task_id)
+        if intervention.execution_id != task.task_id:
+            raise RetrySafetyError("recovery intervention execution lineage does not match its task")
+        if intervention.attempt_id and intervention.attempt_id != task.attempt_id:
+            raise RetrySafetyError("recovery intervention belongs to a different attempt")
+        if (
+            task.state is not ExecutionState.RECOVERY_REVIEW_REQUIRED
+            and task.state is not ExecutionState.WAITING
+        ):
+            raise RetrySafetyError(
+                f"task is not awaiting recovery review (current state: {task.state.value})"
+            )
+
+        act = action.value if isinstance(action, HumanRecoveryDecisionAction) else str(action)
+        now = self.clock()
+
+        if act in {HumanRecoveryDecisionAction.ABORT_EXECUTION.value, "ABORT_EXECUTION"}:
+            task = self.transition(
+                task.task_id,
+                ExecutionState.CANCELLED,
+                reason=comment or f"aborted by human reviewer {actor_id}",
+                recovery_reason="human review resolution: abort",
+            )
+            self._emit("recovery_intervention_resolved", task, intervention_id=intervention_id, action=act)
+            return task
+
+        if act in {
+            HumanRecoveryDecisionAction.MARK_ACTION_ALREADY_COMPLETED.value,
+            "MARK_ACTION_ALREADY_COMPLETED",
+        }:
+            if intervention.action_id:
+                action_rec = self.store.get_action(intervention.action_id)
+                if action_rec is not None:
+                    if action_rec.execution_id != intervention.execution_id or (
+                        intervention.attempt_id and action_rec.attempt_id != intervention.attempt_id
+                    ):
+                        raise RetrySafetyError("recovery action does not belong to the original execution lineage")
+                    confirmation = str(
+                        (response_data or {}).get("receipt_reference")
+                        or (response_data or {}).get("answer", {}).get("receipt_reference")
+                        or comment
+                    )
+                    if not confirmation:
+                        raise RetrySafetyError("human completion confirmation must include a receipt or reference")
+                    action_rec.request_state = ActionRequestState.SUCCEEDED
+                    action_rec.external_receipt = confirmation
+                    action_rec.verification_state.update({
+                        "human_confirmation": True,
+                        "confirmed_by": actor_id,
+                        "confirmation_reference": confirmation,
+                    })
+                    action_rec.updated_at = now
+                    self.store.save_action(action_rec)
+
+        elif act in {HumanRecoveryDecisionAction.RETRY_ACTION.value, "RETRY_ACTION"}:
+            if intervention.action_id:
+                action_rec = self.store.get_action(intervention.action_id)
+                if action_rec is not None:
+                    action_rec.verification_state["retry_authorized_by"] = actor_id
+                    action_rec.verification_state["prior_state"] = action_rec.request_state.value
+                    action_rec.request_state = ActionRequestState.PREPARED
+                    action_rec.updated_at = now
+                    self.store.save_action(action_rec)
+
+        elif act in {
+            HumanRecoveryDecisionAction.RESUME_WITHOUT_REPLAY.value,
+            "RESUME_WITHOUT_REPLAY",
+        }:
+            pass
+        else:
+            raise RetrySafetyError(f"unsupported human recovery action: {act}")
+
+        def clear_wait(current: TaskRecord) -> None:
+            validate_transition(current.state, ExecutionState.QUEUED)
+            current.state = ExecutionState.QUEUED
+            current.waiting_kind = ""
+            current.waiting_reason = ""
+            current.wake_up_source = ""
+            current.wake_up_reference = ""
+            current.waiting_inbox_item_id = ""
+            current.resume_checkpoint_id = intervention.checkpoint_id or current.checkpoint_id
+            current.resume_operation = intervention.integration_stage or "resume_after_recovery_intervention"
+            current.lease_owner = ""
+            current.lease_token = ""
+            current.lease_expires_at = None
+            current.recovery_reason = f"human review resolved: {act}"
+            current.updated_at = now
+
+        task, _ = self.store.update_task(task.task_id, clear_wait)
+        self._emit("recovery_intervention_resolved", task, intervention_id=intervention_id, action=act)
+        return task
+
     def recover(self) -> RecoverySummary:
         """Recover expired work deterministically; safe to invoke repeatedly."""
         summary = RecoverySummary()
@@ -2645,7 +3332,7 @@ class ExecutionSupervisor:
                     task.recovery_intervention_id
                 )
                 summary.intervention_required.append(task.task_id)
-                if intervention is not None:
+                if intervention is not None and intervention not in summary.intervention_records:
                     summary.intervention_records.append(intervention)
                 continue
             checkpoints = self.store.checkpoints_for_task(task.task_id)
@@ -2737,37 +3424,190 @@ class ExecutionSupervisor:
                 attempt.recovery_reason = "startup recovery"
                 self.store.save_attempt(attempt)
             self._emit("lease_expired", task, lease_owner=task.lease_owner)
-            decision = self.retry_policy.automatic_recovery_decision(
-                task,
-                category=RetryCategory.LEASE_LOSS,
-                reason="active lease expired during execution",
+            actions = self.store.actions_for_task(task.task_id)
+            attempt_actions = (
+                [a for a in actions if a.attempt_id == task.attempt_id]
+                if task.attempt_id
+                else actions
             )
-            if decision is None:
-                intervention = self._require_ambiguous_lease_review(task, now=now)
+
+            outcome, details = self.classify_lost_lease(
+                task,
+                now=now,
+                actions=attempt_actions,
+            )
+
+            if outcome == LostLeaseOutcome.DEADLINE_EXPIRED:
+                if task.state not in TERMINAL_STATES:
+                    task = self.transition(
+                        task.task_id,
+                        ExecutionState.FAILED,
+                        reason="task wall-clock deadline exceeded during recovery",
+                    )
                 summary.intervention_required.append(task.task_id)
-                summary.intervention_records.append(intervention)
                 continue
-            try:
-                task = self.retry(task.task_id, decision)
-            except RetrySafetyError as exc:
-                def fail_invalid_recovery(current: TaskRecord) -> None:
+
+            elif outcome == LostLeaseOutcome.RETRY_BUDGET_EXHAUSTED:
+                if task.state not in TERMINAL_STATES:
+                    def fail_budget(current: TaskRecord) -> None:
+                        validate_transition(current.state, ExecutionState.BUDGET_EXHAUSTED)
+                        current.state = ExecutionState.BUDGET_EXHAUSTED
+                        current.finished_at = current.updated_at = now
+                        current.failure_reason = "lease_loss retry budget is exhausted"
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                    task, _ = self.store.update_task(task.task_id, fail_budget)
+                    self._emit("task_failed", task, reason=task.failure_reason)
+                summary.intervention_required.append(task.task_id)
+                continue
+
+            elif outcome == LostLeaseOutcome.DURABLE_RESULT_AVAILABLE:
+                if "result" in details:
+                    result = details["result"]
+                    if task.result_id != result.result_id:
+                        def set_result(current: TaskRecord) -> None:
+                            current.result_id = result.result_id
+                            current.updated_at = now
+                        task, _ = self.store.update_task(task.task_id, set_result)
+                    try:
+                        recovered = self.verify_completion(task.task_id)
+                        summary.recovered.append(task.task_id)
+                        self._emit("task_recovered", recovered, action="durable_result_consumed")
+                    except Exception:
+                        summary.intervention_required.append(task.task_id)
+                    continue
+                else:
+                    receipt_actions = [
+                        action for action in attempt_actions
+                        if action.request_state == ActionRequestState.SUCCEEDED and action.external_receipt
+                    ]
+                    if not receipt_actions:
+                        summary.intervention_required.append(task.task_id)
+                        continue
+                    for action in receipt_actions:
+                        action.request_state = ActionRequestState.RECONCILED
+                        action.verification_state.update({
+                            "receipt_consumed": True,
+                            "receipt_consumed_at": now.isoformat(),
+                            "receipt_lineage": {
+                                "execution_id": action.execution_id,
+                                "attempt_id": action.attempt_id,
+                                "action_id": action.action_id,
+                                "checkpoint_id": task.checkpoint_id,
+                            },
+                        })
+                        action.updated_at = now
+                        self.store.save_action(action)
+
+                    def resume_after_receipt(current: TaskRecord) -> None:
+                        current.resume_checkpoint_id = str(
+                            receipt_actions[-1].verification_state.get("resume_checkpoint_id")
+                            or current.checkpoint_id
+                        )
+                        current.resume_operation = str(
+                            receipt_actions[-1].verification_state.get("next_stage")
+                            or receipt_actions[-1].verification_state.get("resume_operation")
+                            or "resume_after_durable_action_receipt"
+                        )
+                        current.retry_not_before = now
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                        current.state = ExecutionState.QUEUED
+                        current.updated_at = now
+
+                    task, _ = self.store.update_task(task.task_id, resume_after_receipt)
+                    summary.recovered.append(task.task_id)
+                    self._emit("task_recovered", task, action="durable_action_receipt_consumed")
+                    continue
+
+            elif outcome == LostLeaseOutcome.LOCAL_RECONCILIATION_REQUIRED:
+                def fail_reconciliation(current: TaskRecord) -> None:
                     validate_transition(current.state, ExecutionState.FAILED)
                     current.state = ExecutionState.FAILED
                     current.finished_at = current.updated_at = now
-                    current.failure_reason = (
-                        "automatic recovery decision failed validation; no fallback action "
-                        f"was executed: {exc}"
-                    )
-                    current.recovery_reason = "manual recovery decision required"
+                    current.failure_reason = "local mutation outcome requires manual reconciliation; no replay was scheduled"
+                    current.recovery_reason = "lost lease local mutation evidence was inconclusive"
                     current.lease_owner = ""
                     current.lease_token = ""
                     current.lease_expires_at = None
-                task, _ = self.store.update_task(task.task_id, fail_invalid_recovery)
+                task, _ = self.store.update_task(task.task_id, fail_reconciliation)
+                summary.intervention_required.append(task.task_id)
+                self._emit("recovery_reconciliation_required", task)
+                continue
+
+            elif outcome == LostLeaseOutcome.SAFE_AUTOMATIC_RECOVERY:
+                decision = details.get("decision") or self.retry_policy.automatic_recovery_decision(
+                    task,
+                    category=RetryCategory.LEASE_LOSS,
+                    reason="automatic recovery after inspectable local work / safe lease loss",
+                    actions=attempt_actions,
+                    now=now,
+                )
+                if decision is None:
+                    def fail_policy(current: TaskRecord) -> None:
+                        validate_transition(current.state, ExecutionState.FAILED)
+                        current.state = ExecutionState.FAILED
+                        current.finished_at = current.updated_at = now
+                        current.failure_reason = "automatic recovery policy blocked continuation"
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                    task, _ = self.store.update_task(task.task_id, fail_policy)
+                    self._emit("task_failed", task, reason=task.failure_reason)
+                    summary.intervention_required.append(task.task_id)
+                    continue
+
+                try:
+                    task = self.retry(task.task_id, decision)
+                except RetrySafetyError as exc:
+                    def fail_invalid_recovery(current: TaskRecord) -> None:
+                        validate_transition(current.state, ExecutionState.FAILED)
+                        current.state = ExecutionState.FAILED
+                        current.finished_at = current.updated_at = now
+                        current.failure_reason = (
+                            "automatic recovery decision failed validation; no fallback action "
+                            f"was executed: {exc}"
+                        )
+                        current.recovery_reason = "manual recovery decision required"
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                    task, _ = self.store.update_task(task.task_id, fail_invalid_recovery)
+                    self._emit("task_failed", task, reason=task.failure_reason)
+                    summary.intervention_required.append(task.task_id)
+                    continue
+                self._emit("task_recovered", task, action=decision.action.value)
+                summary.retry_scheduled.append(task.task_id)
+                continue
+
+            elif outcome == LostLeaseOutcome.POLICY_BLOCKED:
+                def fail_policy(current: TaskRecord) -> None:
+                    validate_transition(current.state, ExecutionState.FAILED)
+                    current.state = ExecutionState.FAILED
+                    current.finished_at = current.updated_at = now
+                    current.failure_reason = details.get("reason", "automatic recovery policy blocked continuation")
+                    current.lease_owner = ""
+                    current.lease_token = ""
+                    current.lease_expires_at = None
+                task, _ = self.store.update_task(task.task_id, fail_policy)
                 self._emit("task_failed", task, reason=task.failure_reason)
                 summary.intervention_required.append(task.task_id)
                 continue
-            self._emit("task_recovered", task, action=decision.action.value)
-            summary.retry_scheduled.append(task.task_id)
+
+            elif outcome == LostLeaseOutcome.UNKNOWN_EXTERNAL_OUTCOME:
+                try:
+                    intervention = self._require_ambiguous_lease_review(
+                        task, now=now, actions=attempt_actions
+                    )
+                except RetrySafetyError:
+                    summary.intervention_required.append(task.task_id)
+                    continue
+                summary.intervention_required.append(task.task_id)
+                if intervention not in summary.intervention_records:
+                    summary.intervention_records.append(intervention)
+                continue
         return summary
 
     def parent_progress(self, task_id: str, *, now: datetime | None = None) -> ParentProgress:

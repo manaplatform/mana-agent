@@ -17,6 +17,7 @@ from mana_agent.workspaces.service import WorkspaceService
 class DecisionRoom:
     def __init__(self, root: str | Path, taskboard: TaskBoard, message_bus: MessageBus) -> None:
         self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
         self.taskboard = taskboard
         self.message_bus = message_bus
         self.discussions = DiscussionStore(root)
