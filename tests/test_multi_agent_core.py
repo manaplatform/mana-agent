@@ -306,6 +306,45 @@ def test_wiring_child_cannot_complete_without_reachability_provenance(tmp_path):
         board.update_status(child.task_id, TaskStatus.DONE)
 
 
+def test_wiring_child_failure_propagates_to_parent_and_preserves_linkage(tmp_path):
+    board = TaskBoard(tmp_path)
+    parent = board.create_task(title="Capability", user_request="add capability")
+    child = board.create_child_task(
+        parent.task_id,
+        title="Wire capability",
+        user_request="wire capability",
+        integration_role="wiring",
+    )
+    board.update_status(child.task_id, TaskStatus.FAILED, reason="CORE_EXECUTION_FAILED")
+
+    child_updated = board.get_task(child.task_id)
+    assert child_updated.status is TaskStatus.FAILED
+    assert child_updated.wiring_outcome == "failed"
+    assert child_updated.wiring_outcome_reason == "CORE_EXECUTION_FAILED"
+
+    parent_updated = board.get_task(parent.task_id)
+    assert parent_updated.status is TaskStatus.FAILED
+    assert parent_updated.wiring_outcome == "failed"
+    assert parent_updated.wiring_outcome_reason == "CORE_EXECUTION_FAILED"
+    assert parent_updated.child_task_ids == [child.task_id]
+    assert parent_updated.required_wiring_task_ids == [child.task_id]
+
+
+def test_terminal_tasks_never_remain_incomplete_wiring_outcome(tmp_path):
+    board = TaskBoard(tmp_path)
+    task_not_req = board.create_task(title="Doc task", user_request="doc", wiring_required=False)
+    board.update_status(task_not_req.task_id, TaskStatus.DONE)
+    assert board.get_task(task_not_req.task_id).wiring_outcome == "not_required"
+
+    task_failed = board.create_task(title="Fail task", user_request="fail")
+    board.update_status(task_failed.task_id, TaskStatus.FAILED, reason="Some error")
+    assert board.get_task(task_failed.task_id).wiring_outcome == "failed"
+
+    task_blocked = board.create_task(title="Block task", user_request="block")
+    board.update_status(task_blocked.task_id, TaskStatus.BLOCKED, reason="Blocked dependency")
+    assert board.get_task(task_blocked.task_id).wiring_outcome == "blocked"
+
+
 def test_feature_completion_allows_verified_runtime_path(tmp_path):
     board = TaskBoard(tmp_path)
     task = _prepare_verified_feature(board)

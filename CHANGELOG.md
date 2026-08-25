@@ -2,6 +2,16 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-26
+
+- Fixed wiring lifecycle finalization across TaskBoard, FeatureIntegrationCoordinator, ChatGateway, and Multi-Agent types:
+  - Propagated wiring child terminal failure to parent tasks with `status=failed`, `wiring_outcome="failed"`, and `wiring_outcome_reason=<child failure reason>`, while preserving parent child task linkage (`child_task_ids` and `required_wiring_task_ids`).
+  - Added terminal resolution for `wiring_outcome` (`pending`, `running`, `completed`, `failed`, `blocked`, `not_required`), ensuring terminal tasks never retain `wiring_outcome="incomplete"`.
+  - Updated completion gates in `TaskBoard._validate_feature_completion`, `TaskBoard.update_status`, `TaskBoard.project_supervisor_completion`, and `validators.py` so that `wiring_required=False` resolves to `wiring_outcome="not_required"`, verified required wiring resolves to `wiring_outcome="completed"`, and wiring failures resolve to `wiring_outcome="failed"`.
+  - Updated `FeatureIntegrationCoordinator.run` and `chat_gateway.py` to treat `CORE_EXECUTION_FAILED` as a deterministic terminal failure on the wiring child and parent instead of blocking forever.
+  - Added regression tests covering child wiring task `CORE_EXECUTION_FAILED` failure propagation, `wiring_required=False` resolution to `not_required`, and successful wiring resolution to `completed`.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/test_multi_agent_core.py tests/gateway/test_chat_gateway.py -v`.
+
 ## 2026-08-25
 
 - Added a centralized JSON-safe normalization layer for tool outputs to prevent "Object of type set is not JSON serializable" errors across Gmail/email connectors, execution supervisor, accounting, and chat turn persistence:

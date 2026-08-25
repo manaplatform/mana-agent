@@ -250,7 +250,7 @@ class TaskBoardItem:
     integration_verification: list[str] = field(default_factory=list)
     wiring_required: bool = False
     wiring_reason: str | None = None
-    wiring_outcome: str = "incomplete"
+    wiring_outcome: str = "pending"
     wiring_outcome_reason: str = ""
     reachability_edges: list[dict[str, str]] = field(default_factory=list)
     verification_provenance: dict[str, Any] = field(default_factory=dict)
@@ -628,6 +628,6 @@ class PlanResult:
     integration_verification: list[str] = field(default_factory=list)
     wiring_required: bool = False
     wiring_reason: str | None = None
-    wiring_outcome: str = "incomplete"
+    wiring_outcome: str = "pending"
     wiring_outcome_reason: str = ""
     reachability_edges: list[dict[str, str]] = field(default_factory=list)

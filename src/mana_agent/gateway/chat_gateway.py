@@ -5967,7 +5967,6 @@ class AgentChatGateway:
                             FEATURE_INTEGRATION_REACHABILITY_UNPROVEN,
                             FEATURE_INTEGRATION_REVIEW_REJECTED,
                             FEATURE_INTEGRATION_STATE_INVALID,
-                            CORE_EXECUTION_FAILED,
                         }:
                             # Integration results carry their own typed outcome.
                             # Local failures are terminal; only an explicit
@@ -7592,7 +7591,7 @@ class AgentChatGateway:
                 })
             if wiring_child_task_id:
                 wiring_child = self._lane_coordinator.taskboard.get_task(wiring_child_task_id)
-                if wiring_child.status is not TaskStatus.BLOCKED:
+                if wiring_child.status not in (TaskStatus.BLOCKED, TaskStatus.FAILED):
                     self._lane_coordinator.taskboard.update_status(
                         wiring_child_task_id,
                         TaskStatus.BLOCKED,

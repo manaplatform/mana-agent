@@ -319,8 +319,40 @@ class TaskBoard:
         validate_transition(task, status, reason=reason)
         task.status = status
         task.updated_at = utc_now()
-        if status == TaskStatus.BLOCKED and reason:
-            self.add_blocker(task_id, reason, save=False)
+        if status == TaskStatus.DONE:
+            if not task.wiring_required and task.integration_role != "wiring":
+                task.wiring_outcome = "not_required"
+            else:
+                task.wiring_outcome = "completed"
+        elif status == TaskStatus.FAILED:
+            task.wiring_outcome = "failed"
+            if reason and not task.wiring_outcome_reason:
+                task.wiring_outcome_reason = str(reason)
+            if task.integration_role == "wiring" or (task.parent_task_id and task.parent_task_id in self.tasks):
+                parent = self.tasks.get(task.parent_task_id) if task.parent_task_id else None
+                if parent is not None and (task.integration_role == "wiring" or task.task_id in parent.required_wiring_task_ids):
+                    parent.status = TaskStatus.FAILED
+                    parent.wiring_outcome = "failed"
+                    parent.wiring_outcome_reason = str(reason or task.wiring_outcome_reason or "")
+                    parent.updated_at = utc_now()
+                    self._record(
+                        "task.updated",
+                        {"task_id": parent.task_id, "status": TaskStatus.FAILED.value, "reason": parent.wiring_outcome_reason},
+                    )
+        elif status == TaskStatus.BLOCKED:
+            if reason:
+                self.add_blocker(task_id, reason, save=False)
+            if task.wiring_outcome not in {"completed", "failed"}:
+                task.wiring_outcome = "blocked"
+        elif status in {TaskStatus.IN_PROGRESS, TaskStatus.WAITING_FOR_TOOLS, TaskStatus.NEEDS_REVIEW, TaskStatus.VERIFYING}:
+            if task.wiring_outcome in {"pending", "incomplete"}:
+                task.wiring_outcome = "running"
+        elif status in {TaskStatus.CANCELLED, TaskStatus.SKIPPED}:
+            if task.wiring_outcome in {"incomplete", "pending", "running"}:
+                if not task.wiring_required and task.integration_role != "wiring":
+                    task.wiring_outcome = "not_required"
+                else:
+                    task.wiring_outcome = "failed"
         self._record("task.updated", {"task_id": task_id, "status": status.value, "reason": reason})
         self.save()
 
@@ -374,7 +406,7 @@ class TaskBoard:
                 task.implementation_verified = True
             if not task.implementation_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
-            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed", "running"}:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
             if not task.integration_verified or not task.runtime_reachability_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring runtime reachability evidence is absent")
@@ -390,6 +422,7 @@ class TaskBoard:
                 "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"
             )
         if not task.wiring_required:
+            task.wiring_outcome = "not_required"
             return
         if not task.required_wiring_task_ids:
             raise InvalidTaskTransition(
@@ -415,6 +448,7 @@ class TaskBoard:
             for record in task.integration_evidence_records
         ):
             raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent")
+        task.wiring_outcome = "completed"
 
     def project_supervisor_completion(
         self,
@@ -444,6 +478,10 @@ class TaskBoard:
             task.status = TaskStatus.VERIFYING
         validate_transition(task, TaskStatus.DONE, reason="supervisor completion projected")
         task.status = TaskStatus.DONE
+        if not task.wiring_required and task.integration_role != "wiring":
+            task.wiring_outcome = "not_required"
+        else:
+            task.wiring_outcome = "completed"
         task.updated_at = utc_now()
         self._record(
             "task.supervisor_completion_projected",
@@ -463,6 +501,8 @@ class TaskBoard:
             raise ValueError(f"task {task_id} is not in a reopenable state")
         task.status = TaskStatus.QUEUED
         task.blockers = []
+        task.wiring_outcome = "pending"
+        task.wiring_outcome_reason = ""
         task.updated_at = utc_now()
         self._record("task.reopened", {"task_id": task_id, "reason": reason})
         self.save()
