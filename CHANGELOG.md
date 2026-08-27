@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-27
 
+- Fixed Authoritative Result Escrow Recovery, Stale Task Lifecycle Repair, and Single-Writer Coordination:
+  - Traced incident `task_20260827_000001` and confirmed why `result_778a7987-cd61-4e2b-998b-05cc8065ba3e` existed in escrow while the task remained `status=in_progress` due to an interrupted lifecycle transition after durable atomic result write.
+  - Made persisted result escrow authoritative over stale task lifecycle state in `ExecutionSupervisor.get_verified_execution_result`, automatically repairing task record state (`state=COMPLETED`/terminal, `result_id`, `verification_status`, `completion_artefacts`, `finished_at`, `failure_reason`, and `provider_metadata`) and attempt state.
+  - Updated `ExecutionSupervisor.recover()` to scan and reconcile incomplete tasks against authoritative escrow results without failing on unverified or expired states.
+  - Preserved atomic, write-once escrow semantics in `LocalExecutionStore.save_result` while adding safe idempotent reconciliation for concurrent writer races with identical payloads and rejecting conflicting payloads with `EscrowConflictError`.
+  - Updated `ExecutionSupervisor.transition`, `ExecutionSupervisor.record_terminal_result`, and `LaneCoordinator.finish` to ensure single-writer safety and prevent duplicate terminal result generation when an authoritative result already exists.
+  - Enforced separation between recovery of the same execution and genuinely new execution attempts with distinct task/attempt identities.
+  - Added regression test scenarios N through T in `tests/execution_supervisor/test_result_escrow_recovery.py` covering `task_20260827_000001` recovery, crash-after-result-write, terminal failure crash repair, concurrent writer races, duplicate replay idempotency, retry/resume separation, and forbidden direct-model fallback.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_result_escrow_recovery.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_chat_gateway.py -v`.
+
 - Fixed API Manager OpenAPI reference resolution, identity host-binding, deterministic import source selection, and workflow idempotency:
   - Updated `_LocalReferenceResolver` in `mana_agent/api_manager/documentation.py` to classify reference types and recover missing local parameter definitions (e.g. `#/components/parameters/Accept-Encoding`) from inspected documentation evidence while preserving provenance in `recovered_references`.
   - Configured `UnresolvedSchemaReferenceError` to return structured diagnostic details with `code="openapi_local_ref_unresolved"`, `reference`, `reference_kind`, `reference_name`, `source_reference`, and `recoverable=False`.

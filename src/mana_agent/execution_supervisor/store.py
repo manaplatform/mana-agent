@@ -471,6 +471,18 @@ class LocalExecutionStore:
                     idx = json.loads(exec_path.read_text(encoding="utf-8"))
                     existing_result_id = idx.get("result_id")
                     if existing_result_id and existing_result_id != result.result_id:
+                        try:
+                            existing_res = self.get_result(existing_result_id)
+                        except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                            existing_res = None
+                        if (
+                            existing_res is not None
+                            and existing_res.attempt_id == result.attempt_id
+                            and existing_res.payload == result.payload
+                            and existing_res.result_kind == result.result_kind
+                        ):
+                            # Idempotent reconciliation of identical logical result from concurrent writer race
+                            return
                         raise EscrowConflictError(
                             f"Conflicting result write for execution {exec_id} (existing result_id={existing_result_id})"
                         )

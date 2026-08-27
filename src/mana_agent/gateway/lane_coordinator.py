@@ -1185,7 +1185,13 @@ class LaneCoordinator:
         self._stop_supervisor_heartbeats(task_id)
         verified = False
         if state == LaneTaskState.COMPLETED:
-            contracts: list[CompletionContract] = []
+            lookup = self.execution_supervisor.get_verified_execution_result(task_id)
+            if lookup.status == EscrowLookupStatus.FOUND and lookup.is_verified and lookup.task is not None:
+                supervised = lookup.task
+                verified = supervised.state == SupervisorState.COMPLETED
+                state = LaneTaskState.COMPLETED if verified else LaneTaskState.VERIFYING
+            else:
+                contracts: list[CompletionContract] = []
             for changed in execution.changed_files:
                 path = Path(changed)
                 try:

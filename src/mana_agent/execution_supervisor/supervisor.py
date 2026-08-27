@@ -645,7 +645,15 @@ class ExecutionSupervisor:
                     task.waiting_inbox_item_id = ""
                     task.waiting_reason = ""
                     task.human_wait_started_at = None
-                if target != ExecutionState.COMPLETED and not task.result_id:
+                existing_res = (
+                    self.store.get_result(task.result_id)
+                    if task.result_id
+                    else self.store.get_result_by_execution_id(task.task_id)
+                )
+                if existing_res is not None:
+                    if not task.result_id:
+                        task.result_id = existing_res.result_id
+                elif target != ExecutionState.COMPLETED and not task.result_id:
                     result_kind = (
                         "terminal_failure"
                         if target in {
@@ -824,6 +832,11 @@ class ExecutionSupervisor:
                     changed = True
             if changed:
                 self.store.save_result(existing_result)
+            if not task.result_id or task.result_id != existing_result.result_id:
+                def link_existing(curr: TaskRecord) -> None:
+                    curr.result_id = existing_result.result_id
+                    curr.updated_at = self.clock()
+                self.store.update_task(task.task_id, link_existing)
             return existing_result
 
         result_kind = (
@@ -2092,72 +2105,6 @@ class ExecutionSupervisor:
         exec_id = str(execution_id).strip()
         task = self.store.get_task_or_none(exec_id)
 
-        if task is not None and task.state in {
-            ExecutionState.QUEUED,
-            ExecutionState.LEASED,
-            ExecutionState.RUNNING,
-            ExecutionState.CHECKPOINTING,
-            ExecutionState.RETRY_SCHEDULED,
-            ExecutionState.REPLANNING,
-            ExecutionState.CANCELLING,
-        }:
-            return VerifiedExecutionResultLookup(
-                status=EscrowLookupStatus.EXECUTION_STILL_RUNNING,
-                execution_id=exec_id,
-                task=task,
-                error_code="EXECUTION_STILL_RUNNING",
-                error_message=f"Execution {exec_id} is active ({task.state.value})",
-            )
-
-        if task is not None and task.state is ExecutionState.WAITING:
-            try:
-                escrow_res = self.store.get_result_by_execution_id(exec_id)
-            except (EscrowCorruptError, EscrowIncompatibleVersionError) as exc:
-                return VerifiedExecutionResultLookup(
-                    status=(
-                        EscrowLookupStatus.CORRUPT
-                        if isinstance(exc, EscrowCorruptError)
-                        else EscrowLookupStatus.INCOMPATIBLE_VERSION
-                    ),
-                    execution_id=exec_id,
-                    task=task,
-                    error_code=getattr(exc, "code", "RESULT_CORRUPT"),
-                    error_message=str(exc),
-                )
-            ack = (
-                self.store.get_acknowledgement(escrow_res.result_id)
-                if escrow_res
-                else None
-            )
-            return VerifiedExecutionResultLookup(
-                status=(
-                    EscrowLookupStatus.FOUND
-                    if escrow_res
-                    else EscrowLookupStatus.EXECUTION_STILL_RUNNING
-                ),
-                execution_id=exec_id,
-                result=escrow_res,
-                task=task,
-                acknowledgement=ack,
-                is_resumable=True,
-                requires_action=True,
-                error_code="ACTION_REQUIRED" if not escrow_res else "",
-                error_message=task.waiting_reason
-                or "Execution is waiting for approval/input",
-            )
-
-        if (
-            task is not None
-            and task.state is ExecutionState.COMPLETED_PENDING_VERIFICATION
-        ):
-            return VerifiedExecutionResultLookup(
-                status=EscrowLookupStatus.UNVERIFIED,
-                execution_id=exec_id,
-                task=task,
-                error_code="RESULT_NOT_VERIFIED",
-                error_message=f"Execution {exec_id} is pending completion verification",
-            )
-
         try:
             result = self.store.get_result_by_execution_id(exec_id)
             if result is None and task is not None and task.result_id:
@@ -2180,7 +2127,6 @@ class ExecutionSupervisor:
             )
 
         if result is not None:
-            ack = self.store.get_acknowledgement(result.result_id)
             is_term = (
                 result.supervisor_state
                 in {
@@ -2192,25 +2138,143 @@ class ExecutionSupervisor:
                 }
                 or (task is not None and task.state in TERMINAL_STATES)
             )
+            is_ver = (
+                result.verification_status == VerificationStatus.PASSED
+                or (task is not None and task.state == ExecutionState.COMPLETED)
+            )
             is_resumable = bool(
                 result.result_kind == "resumable_wait"
                 or result.error_metadata.get("is_resumable")
                 or (task is not None and task.state is ExecutionState.WAITING)
             )
-            is_ver = (
-                result.verification_status == VerificationStatus.PASSED
-                or (task is not None and task.state == ExecutionState.COMPLETED)
-            )
+
+            # Repair stale task record if authoritative result is terminal or verified
+            if task is not None and (is_term or is_ver):
+                if (
+                    task.state not in TERMINAL_STATES
+                    or task.result_id != result.result_id
+                    or task.verification_status != result.verification_status
+                ):
+                    target_state = (
+                        ExecutionState.COMPLETED
+                        if (is_ver or result.supervisor_state == ExecutionState.COMPLETED.value)
+                        else (
+                            ExecutionState(result.supervisor_state)
+                            if result.supervisor_state in {s.value for s in TERMINAL_STATES}
+                            else ExecutionState.COMPLETED
+                        )
+                    )
+                    def repair_task(current: TaskRecord) -> None:
+                        current.result_id = result.result_id
+                        current.state = target_state
+                        current.verification_status = (
+                            VerificationStatus.PASSED
+                            if target_state == ExecutionState.COMPLETED
+                            else result.verification_status
+                        )
+                        if result.artifacts:
+                            current.completion_artefacts = list(result.artifacts)
+                        if target_state in TERMINAL_STATES:
+                            current.finished_at = result.completed_at or current.finished_at or self.clock()
+                            current.lease_owner = ""
+                            current.lease_token = ""
+                            current.lease_expires_at = None
+                            current.retry_not_before = None
+                        if result.error_metadata:
+                            if result.error_metadata.get("reason"):
+                                current.failure_reason = str(result.error_metadata["reason"])
+                            if result.error_metadata.get("recovery_reason"):
+                                current.recovery_reason = str(result.error_metadata["recovery_reason"])
+                        if result.provider_metadata:
+                            current.provider_metadata = {**current.provider_metadata, **result.provider_metadata}
+                        current.updated_at = self.clock()
+                    try:
+                        task, _ = self.store.update_task(task.task_id, repair_task)
+                        if task.attempt_id:
+                            attempt = self.store.get_attempt(task.attempt_id)
+                            if attempt is not None:
+                                attempt.state = target_state.value
+                                attempt.finished_at = task.finished_at
+                                self.store.save_attempt(attempt)
+                    except Exception:
+                        pass
+
+            ack = self.store.get_acknowledgement(result.result_id)
+            if is_term or is_ver or is_resumable:
+                return VerifiedExecutionResultLookup(
+                    status=EscrowLookupStatus.FOUND,
+                    execution_id=exec_id,
+                    result=result,
+                    task=task,
+                    acknowledgement=ack,
+                    is_terminal=is_term,
+                    is_resumable=is_resumable,
+                    is_verified=is_ver,
+                    requires_action=is_resumable,
+                )
+
+            if (
+                task is not None
+                and task.state is ExecutionState.COMPLETED_PENDING_VERIFICATION
+            ):
+                return VerifiedExecutionResultLookup(
+                    status=EscrowLookupStatus.UNVERIFIED,
+                    execution_id=exec_id,
+                    task=task,
+                    result=result,
+                    acknowledgement=ack,
+                    error_code="RESULT_NOT_VERIFIED",
+                    error_message=f"Execution {exec_id} is pending completion verification",
+                )
+
             return VerifiedExecutionResultLookup(
-                status=EscrowLookupStatus.FOUND,
+                status=EscrowLookupStatus.EXECUTION_STILL_RUNNING,
                 execution_id=exec_id,
-                result=result,
                 task=task,
-                acknowledgement=ack,
-                is_terminal=is_term,
-                is_resumable=is_resumable,
-                is_verified=is_ver,
-                requires_action=is_resumable,
+                result=result,
+                error_code="EXECUTION_STILL_RUNNING",
+                error_message=f"Execution {exec_id} is active",
+            )
+
+        if task is not None and task.state in {
+            ExecutionState.QUEUED,
+            ExecutionState.LEASED,
+            ExecutionState.RUNNING,
+            ExecutionState.CHECKPOINTING,
+            ExecutionState.RETRY_SCHEDULED,
+            ExecutionState.REPLANNING,
+            ExecutionState.CANCELLING,
+        }:
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.EXECUTION_STILL_RUNNING,
+                execution_id=exec_id,
+                task=task,
+                error_code="EXECUTION_STILL_RUNNING",
+                error_message=f"Execution {exec_id} is active ({task.state.value})",
+            )
+
+        if task is not None and task.state is ExecutionState.WAITING:
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.EXECUTION_STILL_RUNNING,
+                execution_id=exec_id,
+                task=task,
+                is_resumable=True,
+                requires_action=True,
+                error_code="ACTION_REQUIRED",
+                error_message=task.waiting_reason
+                or "Execution is waiting for approval/input",
+            )
+
+        if (
+            task is not None
+            and task.state is ExecutionState.COMPLETED_PENDING_VERIFICATION
+        ):
+            return VerifiedExecutionResultLookup(
+                status=EscrowLookupStatus.UNVERIFIED,
+                execution_id=exec_id,
+                task=task,
+                error_code="RESULT_NOT_VERIFIED",
+                error_message=f"Execution {exec_id} is pending completion verification",
             )
 
         if task is not None and task.state in TERMINAL_STATES:
@@ -3350,32 +3414,90 @@ class ExecutionSupervisor:
                         checkpoint_id=latest.checkpoint_id,
                         action="relinked_after_interrupted_atomic_write",
                     )
-            if not task.result_id and task.attempt_id and task.lease_token:
-                orphaned_results = [
-                    result
-                    for result in self.store.results_for_task(task.task_id)
-                    if result.attempt_id == task.attempt_id
-                    and hmac.compare_digest(result.lease_token_hash, task.lease_token)
-                ]
-                if orphaned_results:
-                    recovered_result = orphaned_results[-1]
+            escrow_result = (
+                self.store.get_result(task.result_id)
+                if task.result_id
+                else self.store.get_result_by_execution_id(task.task_id)
+            )
+            if escrow_result is None:
+                task_results = self.store.results_for_task(task.task_id)
+                if task_results:
+                    escrow_result = task_results[-1]
+
+            if escrow_result is not None:
+                if (
+                    escrow_result.supervisor_state == ExecutionState.COMPLETED.value
+                    or escrow_result.verification_status == VerificationStatus.PASSED
+                ):
+                    def repair_completed(current: TaskRecord) -> None:
+                        current.result_id = escrow_result.result_id
+                        current.state = ExecutionState.COMPLETED
+                        current.verification_status = VerificationStatus.PASSED
+                        if escrow_result.artifacts:
+                            current.completion_artefacts = list(escrow_result.artifacts)
+                        current.finished_at = escrow_result.completed_at or current.finished_at or now
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                        current.retry_not_before = None
+                        if escrow_result.provider_metadata:
+                            current.provider_metadata = {**current.provider_metadata, **escrow_result.provider_metadata}
+                        current.updated_at = now
+                    task, _ = self.store.update_task(task.task_id, repair_completed)
+                    if task.attempt_id:
+                        attempt = self.store.get_attempt(task.attempt_id)
+                        if attempt:
+                            attempt.state = "completed"
+                            attempt.finished_at = task.finished_at
+                            self.store.save_attempt(attempt)
+                    summary.recovered.append(task.task_id)
+                    self._emit("task_recovered", task, action="repaired_from_authoritative_escrow")
+                    continue
+                elif escrow_result.supervisor_state in {s.value for s in TERMINAL_STATES}:
+                    target_term = ExecutionState(escrow_result.supervisor_state)
+                    def repair_term(current: TaskRecord) -> None:
+                        current.result_id = escrow_result.result_id
+                        current.state = target_term
+                        current.verification_status = escrow_result.verification_status
+                        current.finished_at = escrow_result.completed_at or current.finished_at or now
+                        current.lease_owner = ""
+                        current.lease_token = ""
+                        current.lease_expires_at = None
+                        current.retry_not_before = None
+                        if escrow_result.error_metadata:
+                            if escrow_result.error_metadata.get("reason"):
+                                current.failure_reason = str(escrow_result.error_metadata["reason"])
+                            if escrow_result.error_metadata.get("recovery_reason"):
+                                current.recovery_reason = str(escrow_result.error_metadata["recovery_reason"])
+                        if escrow_result.provider_metadata:
+                            current.provider_metadata = {**current.provider_metadata, **escrow_result.provider_metadata}
+                        current.updated_at = now
+                    task, _ = self.store.update_task(task.task_id, repair_term)
+                    if task.attempt_id:
+                        attempt = self.store.get_attempt(task.attempt_id)
+                        if attempt:
+                            attempt.state = target_term.value
+                            attempt.finished_at = task.finished_at
+                            self.store.save_attempt(attempt)
+                    summary.recovered.append(task.task_id)
+                    self._emit("task_recovered", task, action="repaired_from_authoritative_escrow")
+                    continue
+                elif (
+                    escrow_result.status in {EscrowStatus.STORED, EscrowStatus.AVAILABLE, EscrowStatus.DELIVERED, EscrowStatus.ACKNOWLEDGED}
+                    and (not task.result_id or task.state in {ExecutionState.RUNNING, ExecutionState.LEASED, ExecutionState.COMPLETED_PENDING_VERIFICATION})
+                ):
                     def relink_result(current: TaskRecord) -> None:
-                        if current.attempt_id != recovered_result.attempt_id:
-                            raise StaleLeaseError("interrupted result belongs to a stale attempt")
-                        validate_transition(
-                            current.state,
-                            ExecutionState.COMPLETED_PENDING_VERIFICATION,
-                        )
-                        current.result_id = recovered_result.result_id
+                        current.result_id = escrow_result.result_id
                         current.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
                         current.updated_at = now
                     task, _ = self.store.update_task(task.task_id, relink_result)
-                    self._emit(
-                        "result_escrow_recovered",
-                        task,
-                        result_id=recovered_result.result_id,
-                        action="relinked_after_interrupted_atomic_write",
-                    )
+                    try:
+                        recovered = self.verify_completion(task.task_id)
+                        summary.recovered.append(task.task_id)
+                        self._emit("task_recovered", recovered, action="completion_reverified")
+                    except Exception:
+                        summary.intervention_required.append(task.task_id)
+                    continue
             if task.state == ExecutionState.CANCELLING:
                 self.cancel(task.task_id, reason=task.cancellation_reason or "recovered pending cancellation")
                 summary.recovered.append(task.task_id)
@@ -3470,12 +3592,47 @@ class ExecutionSupervisor:
                             current.result_id = result.result_id
                             current.updated_at = now
                         task, _ = self.store.update_task(task.task_id, set_result)
-                    try:
-                        recovered = self.verify_completion(task.task_id)
+                    if (
+                        result.supervisor_state == ExecutionState.COMPLETED.value
+                        or result.verification_status == VerificationStatus.PASSED
+                    ):
+                        def finish_recovered(current: TaskRecord) -> None:
+                            current.state = ExecutionState.COMPLETED
+                            current.verification_status = VerificationStatus.PASSED
+                            if result.artifacts:
+                                current.completion_artefacts = list(result.artifacts)
+                            current.finished_at = result.completed_at or current.finished_at or now
+                            current.lease_owner = ""
+                            current.lease_token = ""
+                            current.lease_expires_at = None
+                            current.updated_at = now
+                        task, _ = self.store.update_task(task.task_id, finish_recovered)
                         summary.recovered.append(task.task_id)
-                        self._emit("task_recovered", recovered, action="durable_result_consumed")
-                    except Exception:
-                        summary.intervention_required.append(task.task_id)
+                        self._emit("task_recovered", task, action="durable_result_consumed")
+                    elif result.supervisor_state in {s.value for s in TERMINAL_STATES}:
+                        term_target = ExecutionState(result.supervisor_state)
+                        def term_recovered(current: TaskRecord) -> None:
+                            current.state = term_target
+                            current.verification_status = result.verification_status
+                            current.finished_at = result.completed_at or current.finished_at or now
+                            current.lease_owner = ""
+                            current.lease_token = ""
+                            current.lease_expires_at = None
+                            current.updated_at = now
+                        task, _ = self.store.update_task(task.task_id, term_recovered)
+                        summary.recovered.append(task.task_id)
+                        self._emit("task_recovered", task, action="durable_result_consumed")
+                    else:
+                        def prep_verify(current: TaskRecord) -> None:
+                            current.state = ExecutionState.COMPLETED_PENDING_VERIFICATION
+                            current.updated_at = now
+                        task, _ = self.store.update_task(task.task_id, prep_verify)
+                        try:
+                            recovered = self.verify_completion(task.task_id)
+                            summary.recovered.append(task.task_id)
+                            self._emit("task_recovered", recovered, action="durable_result_consumed")
+                        except Exception:
+                            summary.intervention_required.append(task.task_id)
                     continue
                 else:
                     receipt_actions = [
