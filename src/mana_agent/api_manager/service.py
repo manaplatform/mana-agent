@@ -733,7 +733,10 @@ def safe_result(operation: Any) -> dict[str, Any]:
     try:
         return {"ok": True, "result": operation()}
     except ApiManagerError as exc:
-        return {"ok": False, **exc.to_dict()}
+        data = exc.to_dict()
+        if isinstance(exc.details, dict) and "refresh_integration_id" in exc.details:
+            data["refresh_integration_id"] = exc.details["refresh_integration_id"]
+        return {"ok": False, **data}
     except (ValueError, PermissionError) as exc:
         return {
             "ok": False,

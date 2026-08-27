@@ -1132,6 +1132,20 @@ class LaneCoordinator:
             # Coding adapters expose provider evidence under this typed result
             # field; only that explicit field is promoted to supervisor escrow.
             effective_provider_metadata = verification_state.get("codex_metadata")
+            if effective_provider_metadata is None and "api_workflow" in verification_state:
+                meta = {"api_workflow": verification_state["api_workflow"]}
+                if "actual_tool_events" in verification_state:
+                    meta["actual_tool_events"] = verification_state["actual_tool_events"]
+                effective_provider_metadata = meta
+            elif effective_provider_metadata is None and "chat_result" in verification_state and isinstance(verification_state["chat_result"], Mapping):
+                chat_payload = verification_state["chat_result"].get("payload", {})
+                if isinstance(chat_payload, Mapping) and "api_workflow" in chat_payload:
+                    meta = {"api_workflow": chat_payload["api_workflow"]}
+                    if "actual_tool_events" in chat_payload:
+                        meta["actual_tool_events"] = chat_payload["actual_tool_events"]
+                    elif "workflow_completion" in chat_payload and isinstance(chat_payload["workflow_completion"], Mapping) and "actual_tool_events" in chat_payload["workflow_completion"]:
+                        meta["actual_tool_events"] = chat_payload["workflow_completion"]["actual_tool_events"]
+                    effective_provider_metadata = meta
         with self._condition:
             execution = self._executions[task_id]
             if state == LaneTaskState.COMPLETED and execution.heartbeat_failure:
@@ -1329,12 +1343,26 @@ class LaneCoordinator:
                 )
         else:
             if effective_provider_metadata is not None:
+                chat_res = verification_state.get("chat_result") if isinstance(verification_state, Mapping) else {}
+                fail_payload = {
+                    "lane_state": state.value,
+                    "verification_state": dict(verification_state or {}),
+                    "chat_result": dict(chat_res or {}),
+                    "api_workflow": effective_provider_metadata.get("api_workflow") or {},
+                }
                 self.execution_supervisor.record_terminal_result(
                     task_id,
                     state=ExecutionState.FAILED,
                     reason=error or f"lane execution ended as {state.value}",
+                    payload=fail_payload,
                     provider_metadata=effective_provider_metadata,
                 )
+            if execution.taskboard_task_id and effective_provider_metadata and "actual_tool_events" in effective_provider_metadata:
+                for ev in effective_provider_metadata["actual_tool_events"]:
+                    try:
+                        self.taskboard.record_tool_event(execution.taskboard_task_id, ev)
+                    except Exception:
+                        pass
             supervised = self.execution_supervisor.store.get_task(task_id)
             if supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
                 self.execution_supervisor.transition(

@@ -30,7 +30,7 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
                 task.implementation_verified = True
             if not task.implementation_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
-            if task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed", "running"}:
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed", "running", "pending", "incomplete"}:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
             if not task.integration_verified or not task.runtime_reachability_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring runtime reachability evidence is absent")

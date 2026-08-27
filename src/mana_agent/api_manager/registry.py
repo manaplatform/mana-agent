@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from mana_agent.api_manager.errors import IntegrationNotFoundError, OperationNotFoundError
+from mana_agent.api_manager.errors import (
+    IntegrationAlreadyExistsError,
+    IntegrationNotFoundError,
+    OperationNotFoundError,
+)
 from mana_agent.api_manager.models import ApiIntegration, ApiOperation
 from mana_agent.config.settings import mana_home
 
@@ -50,9 +54,13 @@ class ApiIntegrationRegistry:
         target = self._path(integration.integration_id)
         with self._lock:
             if target.exists() and not replace:
-                raise ValueError(
+                raise IntegrationAlreadyExistsError(
                     f"Integration {integration.integration_id!r} already exists; retry the "
-                    "documentation import with that exact refresh_integration_id."
+                    "documentation import with that exact refresh_integration_id.",
+                    details={
+                        "refresh_integration_id": integration.integration_id,
+                        "integration_id": integration.integration_id,
+                    },
                 )
             self.path.mkdir(parents=True, exist_ok=True)
             os.chmod(self.path, 0o700)

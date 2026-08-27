@@ -1541,3 +1541,55 @@ def test_api_approval_denial_does_not_execute_http(
     assert denied["status"] == "denied"
 
 
+def test_duplicate_import_raises_integration_already_exists_and_refresh_succeeds(tmp_path: Path) -> None:
+    from mana_agent.api_manager.errors import IntegrationAlreadyExistsError
+    from mana_agent.api_manager.service import ApiManagerService, safe_result
+
+    registry = ApiIntegrationRegistry(path=tmp_path / "integrations")
+    service = ApiManagerService(tmp_path, registry=registry)
+
+    # First import
+    res1 = service.import_documentation(
+        name="Acme API",
+        text=json.dumps(OPENAPI),
+        source_decision_id="dec-1",
+        save=True,
+    )
+    integration_id = res1["integration"]["integration_id"]
+    assert res1["saved"] is True
+
+    # Second import without refresh_integration_id -> IntegrationAlreadyExistsError
+    with pytest.raises(IntegrationAlreadyExistsError) as exc_info:
+        service.import_documentation(
+            name="Acme API",
+            text=json.dumps(OPENAPI),
+            source_decision_id="dec-2",
+            save=True,
+        )
+    assert exc_info.value.code == "integration_already_exists"
+    assert exc_info.value.details["refresh_integration_id"] == integration_id
+
+    # Test safe_result wrapper
+    safe_out = safe_result(lambda: service.import_documentation(
+        name="Acme API",
+        text=json.dumps(OPENAPI),
+        source_decision_id="dec-3",
+        save=True,
+    ))
+    assert safe_out["ok"] is False
+    assert safe_out["error_code"] == "integration_already_exists"
+    assert safe_out["refresh_integration_id"] == integration_id
+
+    # Retry with refresh_integration_id succeeds
+    refreshed = service.import_documentation(
+        name="Acme API",
+        text=json.dumps(OPENAPI),
+        source_decision_id="dec-4",
+        save=True,
+        refresh_integration_id=integration_id,
+    )
+    assert refreshed["saved"] is True
+    assert refreshed["integration"]["integration_id"] == integration_id
+
+
+

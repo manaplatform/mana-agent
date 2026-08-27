@@ -2316,6 +2316,8 @@ class AskAgent:
             except Exception:
                 return
 
+        api_refresh_attempts: dict[str, int] = defaultdict(int)
+
         for step_idx in range(max_steps):
             if capability_registry is not None:
                 capability_registry.unload_idle(
@@ -2415,6 +2417,127 @@ class AskAgent:
                     forced_write_done = True
                     messages.append(HumanMessage(content=_FORCED_WRITE_INSTRUCTION))
                     continue
+
+                has_api_decision = bool(
+                    traces
+                    and (
+                        (hasattr(traces[0], "tool_name") and traces[0].tool_name == "api_workflow_decide")
+                        or (isinstance(traces[0], dict) and traces[0].get("tool_name") == "api_workflow_decide")
+                    )
+                )
+                if has_api_decision:
+                    from mana_agent.api_manager.workflow import evaluate_api_workflow_completion
+
+                    serialized_traces = [t.to_dict() if hasattr(t, "to_dict") else t for t in traces]
+                    wf_state = evaluate_api_workflow_completion(serialized_traces)
+
+                    if wf_state.get("valid"):
+                        final_answer = self._extract_model_text(ai_msg.content) or str(ai_msg.content)
+                        break
+
+                    if wf_state.get("stalled"):
+                        final_answer = self._extract_model_text(ai_msg.content) or str(ai_msg.content)
+                        break
+
+                    if wf_state.get("error_code") != "api_workflow_decision_missing":
+                        last_trace = traces[-1] if traces else None
+                        last_trace_dict = (
+                            last_trace.to_dict()
+                            if hasattr(last_trace, "to_dict")
+                            else (last_trace if isinstance(last_trace, dict) else {})
+                        )
+                        last_payload: dict[str, Any] = {}
+                        for k in ("result", "output_preview", "error"):
+                            v = last_trace_dict.get(k)
+                            if isinstance(v, dict):
+                                last_payload = v
+                                break
+                            elif isinstance(v, str) and v.strip():
+                                try:
+                                    d = json.loads(v)
+                                    if isinstance(d, dict):
+                                        last_payload = d
+                                        break
+                                except Exception:
+                                    pass
+
+                        last_error_code = str(last_payload.get("error_code") or "")
+                        details = (
+                            last_payload.get("details")
+                            if isinstance(last_payload.get("details"), dict)
+                            else {}
+                        )
+
+                        is_approval_pending = (
+                            last_error_code in {"permission_required", "approval_required"}
+                            or (
+                                str(details.get("permission_scope") or "") == "api.request.execute"
+                                and bool(details.get("permission_request_id"))
+                            )
+                        )
+                        is_terminal_condition = (
+                            wf_state.get("terminal_outcome") == "unsupported_documentation"
+                            or is_approval_pending
+                            or last_error_code
+                            in {
+                                "documentation_authorization_required",
+                                "missing_credential",
+                                "credential_required",
+                                "policy_blocked",
+                                "ssrf_policy_violation",
+                                "blocked_host",
+                            }
+                        )
+
+                        missing_actions = wf_state.get("missing_actions") or []
+                        if not is_terminal_condition and missing_actions and remaining_steps > 1:
+                            continuation_prompt = wf_state.get("continuation_prompt") or ""
+                            if not continuation_prompt:
+                                next_action = missing_actions[0]
+                                continuation_prompt = (
+                                    f"API workflow continuation: The declared action {next_action!r} is required. "
+                                    f"Call the corresponding API tool. Do not answer in prose."
+                                )
+
+                            # Prevent documentation and context amplification by compacting prior large ToolMessages
+                            for msg in messages:
+                                if getattr(msg, "tool_call_id", None) or type(msg).__name__ == "ToolMessage":
+                                    c_str = str(getattr(msg, "content", ""))
+                                    if len(c_str) > 600:
+                                        try:
+                                            p = json.loads(c_str)
+                                            if isinstance(p, dict):
+                                                if "documentation_ref" in p and "text" in p:
+                                                    p_compact = {
+                                                        "ok": True,
+                                                        "documentation_ref": p.get("documentation_ref"),
+                                                        "truncated": p.get("truncated", False),
+                                                        "bytes": p.get("bytes", len(c_str)),
+                                                    }
+                                                    msg.content = json.dumps(p_compact)
+                                                elif "integration" in p and isinstance(p["integration"], dict):
+                                                    p_compact = {
+                                                        "ok": True,
+                                                        "saved": p.get("saved", True),
+                                                        "operation_count": p.get("operation_count", 0),
+                                                        "integration_id": p["integration"].get("integration_id"),
+                                                    }
+                                                    msg.content = json.dumps(p_compact)
+                                        except Exception:
+                                            pass
+
+                            # Remove any prior continuation prompts from messages
+                            messages = [
+                                m for m in messages
+                                if not (
+                                    isinstance(m, HumanMessage)
+                                    and ("API Workflow State:" in str(m.content) or "API workflow continuation:" in str(m.content) or "The integration already exists. Retry" in str(m.content))
+                                )
+                            ]
+
+                            messages.append(HumanMessage(content=continuation_prompt))
+                            continue
+
                 final_answer = self._extract_model_text(ai_msg.content) or str(ai_msg.content)
                 break
 
@@ -2856,6 +2979,8 @@ class AskAgent:
                             "capability_search",
                             "capability_load",
                             "capability_unload",
+                            "api_docs_import",
+                            "api_docs_import_semantic",
                         }:
                             stagnant_steps += 1
                     else:

@@ -2,6 +2,19 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-27
+
+- Fixed API Workflow progress/stall loop and replaced generic model continuation with deterministic state machine controller:
+  - Replaced generic prompt loops with `ApiWorkflowController` in `src/mana_agent/api_manager/workflow.py`, tracking explicit lifecycle actions (`required_actions`, `completed_actions`, `waived_actions`, `current_action`, `attempts_by_action`, `last_progress_at`, `consecutive_no_progress`, `last_error_by_action`, `actual_tool_events`).
+  - Added strict lifecycle order validation (`documentation_inspection` → `integration_import` → `integration_configuration` → `operation_search` → `request_preview` → `request_execution`).
+  - Added progress fingerprinting and loop guards (`max_attempts_per_action`, `max_consecutive_no_progress`) to immediately fail with `api_workflow_stalled` upon repeated no-progress passes rather than burning model passes.
+  - Fixed duplicate import recovery: `integration_already_exists` errors capture `refresh_integration_id` top-level and direct the exact retry prompt to import with `refresh_integration_id` without re-discovering or failing.
+  - Prevented documentation context amplification: compacted large `ToolMessage` payloads (e.g. `api_docs_inspect`) in message history and pruned prior continuation prompts to ensure minimal structured state injection across continuation iterations.
+  - Added `actual_tool_events` field to `TaskRecord` in `src/mana_agent/execution_supervisor/models.py`, `supervisor.py`, and `lane_coordinator.py` to persist structured lifecycle events into durable storage before task failure.
+  - Updated `_execute_api_route` in `chat_gateway.py` to handle `route-api-stalled` and emit `api.workflow.stalled` events.
+  - Added regression tests covering Quran API duplicate refresh import recovery, stalling on repeated no-progress, and durable supervisor event persistence.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
 ## 2026-08-26
 
 - Fixed wiring lifecycle finalization across TaskBoard, FeatureIntegrationCoordinator, ChatGateway, and Multi-Agent types:

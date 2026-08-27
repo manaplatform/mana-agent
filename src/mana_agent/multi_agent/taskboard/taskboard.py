@@ -83,6 +83,11 @@ class TaskBoard:
         trigger_turn_id: str = "",
         relation_type: str = "independent",
         previous_task_id: str = "",
+        wiring_required: bool = False,
+        wiring_reason: str | None = None,
+        wiring_outcome: str = "pending",
+        wiring_outcome_reason: str = "",
+        integration_role: str = "",
     ) -> TaskBoardItem:
         task_id = self._new_task_id()
         goal = normalized_goal or user_request.strip()
@@ -143,6 +148,11 @@ class TaskBoard:
             owner_agent_id=owner_agent_id,
             supervisor_agent_id=owner_agent_id,
             delegated_by_agent_id=owner_agent_id,
+            wiring_required=wiring_required,
+            wiring_reason=wiring_reason,
+            wiring_outcome=wiring_outcome,
+            wiring_outcome_reason=wiring_outcome_reason,
+            integration_role=integration_role,
             approved_by_agent_id=owner_agent_id,
             budget_reserved_tokens=0,
             budget_remaining_tokens=0,
@@ -406,7 +416,7 @@ class TaskBoard:
                 task.implementation_verified = True
             if not task.implementation_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring implementation verification is absent")
-            if task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed", "running"}:
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed", "running", "pending", "incomplete"}:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
             if not task.integration_verified or not task.runtime_reachability_verified:
                 raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: wiring runtime reachability evidence is absent")

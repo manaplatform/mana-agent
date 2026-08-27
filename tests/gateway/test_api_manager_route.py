@@ -1075,3 +1075,901 @@ def test_api_workflow_rejects_unsupported_terminal_before_complete_inspection() 
 
     assert completion["terminal_outcome"] == ""
     assert completion["terminal_evidence"] == {}
+
+
+def test_regression_case_a_full_import_and_call_lifecycle(tmp_path: Path) -> None:
+    doc_ref = "urn:mana:doc:test_case_a"
+    response = SimpleNamespace(
+        answer="Operation executed successfully.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-a",
+                            "task_intent": "import and call",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Complete declared lifecycle.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "documentation_ref": doc_ref,
+                            "offset": 0,
+                            "text": "openapi spec content",
+                            "truncated": False,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_import",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "saved": True,
+                            "integration": {"integration_id": "api_integration_a"},
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "op_get_data"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"risk_level": "read_only"},
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                            "integration_id": "api_integration_a",
+                            "operation_id": "op_get_data",
+                            "method": "GET",
+                            "redacted_url": "https://api.example.com/data",
+                        },
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    assert completion["valid"] is True
+    assert completion["error_code"] == ""
+    assert completion["missing_actions"] == []
+    assert completion["completed_actions"] == [
+        "documentation_inspection",
+        "integration_import",
+        "operation_search",
+        "request_execution",
+        "request_preview",
+    ]
+    assert completion["execution_evidence"]["executed"] is True
+    assert completion["execution_evidence"]["status_code"] == 200
+
+
+def test_regression_case_b_existing_integration_refresh_succeeds(tmp_path: Path) -> None:
+    doc_ref = "urn:mana:doc:test_case_b"
+    response = SimpleNamespace(
+        answer="Refreshed and executed.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-b",
+                            "task_intent": "refresh and call",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Refresh workflow.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "documentation_ref": doc_ref,
+                            "offset": 0,
+                            "text": "openapi spec content",
+                            "truncated": False,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_import",
+                "status": "error",
+                "output_preview": json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": "integration_already_exists",
+                        "refresh_integration_id": "api_existing_123",
+                        "message": "Integration 'api_existing_123' already exists.",
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_import",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "saved": True,
+                            "integration": {"integration_id": "api_existing_123"},
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "op_test"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"risk_level": "read_only"},
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                        },
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    assert completion["valid"] is True
+    assert "integration_import" in completion["completed_actions"]
+    assert completion["missing_actions"] == []
+
+
+def test_regression_case_c_refresh_not_completed_fails_incomplete(tmp_path: Path) -> None:
+    doc_ref = "urn:mana:doc:test_case_c"
+    response = SimpleNamespace(
+        answer="Skipped import after duplicate error.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-c",
+                            "task_intent": "import and call",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Declared import.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "documentation_ref": doc_ref,
+                            "offset": 0,
+                            "text": "openapi spec content",
+                            "truncated": False,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_import",
+                "status": "error",
+                "output_preview": json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": "integration_already_exists",
+                        "refresh_integration_id": "api_dup_456",
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "op_test"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"risk_level": "read_only"},
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"executed": True, "upstream_ok": True, "status_code": 200},
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_incomplete"
+    assert "integration_import" in completion["missing_actions"]
+
+
+def test_regression_case_d_read_only_without_preview_fails_incomplete(tmp_path: Path) -> None:
+    response = SimpleNamespace(
+        answer="Executed GET directly without preview.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-d",
+                            "task_intent": "read only get",
+                            "required_actions": [
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Read-only GET call.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "op_get"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"executed": True, "upstream_ok": True, "status_code": 200},
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_incomplete"
+    assert "request_preview" in completion["missing_actions"]
+    assert "request_execution" not in completion["completed_actions"]
+
+
+def test_regression_case_e_read_only_with_preview_succeeds(tmp_path: Path) -> None:
+    response = SimpleNamespace(
+        answer="Executed GET with preview.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-e",
+                            "task_intent": "read only get with preview",
+                            "required_actions": [
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Read-only GET call with preview.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "op_get"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"risk_level": "read_only"},
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"executed": True, "upstream_ok": True, "status_code": 200},
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    assert completion["valid"] is True
+    assert completion["error_code"] == ""
+    assert completion["missing_actions"] == []
+
+
+def test_regression_case_f_waiting_approval_yields_awaiting_approval_mode(tmp_path: Path) -> None:
+    class ModelToolExecutor:
+        def run(self, **kwargs):
+            return SimpleNamespace(
+                answer="Waiting for user approval.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "source_decision_id": "dec-f",
+                                    "task_intent": "mutate API",
+                                    "required_actions": [
+                                        "operation_search",
+                                        "request_preview",
+                                        "request_execution",
+                                    ],
+                                    "reason": "Mutation requires preview and execute.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": [{"operation_id": "op_post_data"}],
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "error",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": False,
+                                "error_code": "permission_required",
+                                "message": "Approval required for API mutation.",
+                                "details": {
+                                    "permission_scope": "api.request.execute",
+                                    "permission_request_id": "perm_req_789",
+                                },
+                            }
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Mutate via API.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            turn_id="turn-f",
+            session_id="session-f",
+            conversation_id="session-f",
+        ),
+        text="Update API record.",
+        ask_service=SimpleNamespace(ask_agent=ModelToolExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api-awaiting-approval"
+    assert result.error is None
+    assert len(result.payload["permission_requests"]) > 0
+
+
+def test_regression_case_g_diagnostic_durability_and_projection(tmp_path: Path) -> None:
+    response = SimpleNamespace(
+        answer="Stopped early.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-g",
+                            "task_intent": "inspect and call",
+                            "required_actions": [
+                                "documentation_inspection",
+                                "integration_import",
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Complete lifecycle.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_docs_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "documentation_ref": "urn:mana:doc:g",
+                            "offset": 0,
+                            "text": "docs",
+                            "truncated": False,
+                        },
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_incomplete"
+    assert completion["workflow_decision_id"] == "dec-g"
+    assert completion["last_successful_action"] == "documentation_inspection"
+    assert completion["last_api_tool"] == "api_docs_inspect"
+    assert completion["completed_actions"] == ["documentation_inspection"]
+    assert completion["missing_actions"] == [
+        "integration_import",
+        "operation_search",
+        "request_preview",
+        "request_execution",
+    ]
+
+
+def test_regression_case_h_no_secret_leakage(tmp_path: Path) -> None:
+    secret_key = "sk-super-secret-token-12345"
+    response = SimpleNamespace(
+        answer="Executed with headers.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "source_decision_id": "dec-h",
+                            "task_intent": "call api",
+                            "required_actions": [
+                                "operation_search",
+                                "request_preview",
+                                "request_execution",
+                            ],
+                            "reason": "Call API.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "op_h"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_preview",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"risk_level": "read_only"},
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                            "authorization": f"Bearer {secret_key}",
+                            "api_key": secret_key,
+                            "headers": {"Authorization": f"Bearer {secret_key}"},
+                        },
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+    evidence = completion["execution_evidence"]
+    dumped = json.dumps(evidence)
+    assert secret_key not in dumped
+    assert evidence.get("authorization") == "[REDACTED]" or "authorization" not in evidence
+
+
+def test_regression_quran_api_duplicate_import_and_lifecycle_recovery() -> None:
+    """Test full Quran API reproduction: duplicate import recovery, search, preview, and execution."""
+    from mana_agent.api_manager.workflow import ApiWorkflowController
+
+    controller = ApiWorkflowController()
+
+    # Step 1: Workflow decision
+    controller.record_tool_trace({
+        "tool_name": "api_workflow_decide",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": {
+                "source_decision_id": "dec-quran-001",
+                "task_intent": "fetch surah list from quran api",
+                "required_actions": [
+                    "documentation_inspection",
+                    "integration_import",
+                    "operation_search",
+                    "request_preview",
+                    "request_execution",
+                ],
+                "safe_to_continue": True,
+            },
+        },
+    })
+    assert controller.next_required_action() == "documentation_inspection"
+    prompt_1 = controller.format_continuation_prompt()
+    assert "documentation_inspection" in prompt_1
+
+    # Step 2: Documentation inspection
+    controller.record_tool_trace({
+        "tool_name": "api_docs_inspect",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": {
+                "documentation_ref": "https://api.quran.com/docs/v4",
+                "offset": 0,
+                "text": "Quran.com API v4 documentation contents...",
+                "truncated": False,
+            },
+        },
+    })
+    assert controller.completed_actions == {"documentation_inspection"}
+    assert controller.next_required_action() == "integration_import"
+
+    # Step 3: Duplicate import attempt returns integration_already_exists with refresh_integration_id
+    controller.record_tool_trace({
+        "tool_name": "api_docs_import_semantic",
+        "status": "error",
+        "result": {
+            "ok": False,
+            "error_code": "integration_already_exists",
+            "details": {
+                "refresh_integration_id": "quran_v4_api",
+            },
+        },
+    })
+    assert controller.refresh_integration_id == "quran_v4_api"
+    assert "integration_import" not in controller.completed_actions
+    assert controller.next_required_action() == "integration_import"
+    prompt_retry = controller.format_continuation_prompt()
+    assert "refresh_integration_id='quran_v4_api'" in prompt_retry or "quran_v4_api" in prompt_retry
+
+    # Step 4: Refresh import succeeds
+    controller.record_tool_trace({
+        "tool_name": "api_docs_import_semantic",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": {
+                "integration": {
+                    "integration_id": "quran_v4_api",
+                    "name": "Quran API v4",
+                },
+                "operation_count": 15,
+            },
+        },
+    })
+    assert "integration_import" in controller.completed_actions
+    assert controller.integration_id == "quran_v4_api"
+    assert controller.next_required_action() == "operation_search"
+
+    # Step 5: Operation search succeeds
+    controller.record_tool_trace({
+        "tool_name": "api_operations_search",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": [
+                {
+                    "operation_id": "get_chapters",
+                    "integration_id": "quran_v4_api",
+                    "summary": "Get list of chapters",
+                }
+            ],
+        },
+    })
+    assert "operation_search" in controller.completed_actions
+    assert controller.operation_id == "get_chapters"
+    assert controller.next_required_action() == "request_preview"
+
+    # Step 6: Request preview succeeds (mandatory before execution)
+    controller.record_tool_trace({
+        "tool_name": "api_request_preview",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": {
+                "operation_id": "get_chapters",
+                "integration_id": "quran_v4_api",
+                "method": "GET",
+                "url": "https://api.quran.com/api/v4/chapters",
+            },
+        },
+    })
+    assert "request_preview" in controller.completed_actions
+    assert controller.next_required_action() == "request_execution"
+
+    # Step 7: Request execution succeeds
+    controller.record_tool_trace({
+        "tool_name": "api_request_execute",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": {
+                "executed": True,
+                "upstream_ok": True,
+                "status_code": 200,
+                "integration_id": "quran_v4_api",
+                "operation_id": "get_chapters",
+                "method": "GET",
+                "redacted_url": "https://api.quran.com/api/v4/chapters",
+            },
+        },
+    })
+    assert "request_execution" in controller.completed_actions
+    assert controller.next_required_action() is None
+
+    result = controller.evaluate()
+    assert result["valid"] is True
+    assert result["error_code"] == ""
+    assert len(result["actual_tool_events"]) >= 6
+    assert any(ev["error_code"] == "integration_already_exists" for ev in result["actual_tool_events"])
+
+
+def test_regression_api_workflow_stalled_on_repeated_no_progress() -> None:
+    """Test that repeated no-progress attempts terminate as api_workflow_stalled instead of continuing."""
+    from mana_agent.api_manager.workflow import ApiWorkflowController
+
+    controller = ApiWorkflowController()
+    controller.record_tool_trace({
+        "tool_name": "api_workflow_decide",
+        "status": "ok",
+        "result": {
+            "ok": True,
+            "result": {
+                "source_decision_id": "dec-stall-001",
+                "task_intent": "stall reproduction",
+                "required_actions": [
+                    "documentation_inspection",
+                    "integration_import",
+                    "operation_search",
+                    "request_preview",
+                    "request_execution",
+                ],
+                "safe_to_continue": True,
+            },
+        },
+    })
+
+    # 3 repeated failing attempts with no progress
+    for _ in range(3):
+        controller.record_tool_trace({
+            "tool_name": "api_docs_inspect",
+            "status": "error",
+            "result": {
+                "ok": False,
+                "error_code": "network_timeout",
+            },
+        })
+
+    assert controller.is_stalled is True
+    assert controller.stalled_action == "documentation_inspection"
+    evaluation = controller.evaluate()
+    assert evaluation["valid"] is False
+    assert evaluation["error_code"] == "api_workflow_stalled"
+    assert evaluation["stalled"] is True
+    assert "stalled at action 'documentation_inspection'" in evaluation["message"]
+
+
+def test_regression_supervisor_persists_api_workflow_and_actual_tool_events(tmp_path: Path) -> None:
+    """Test that ExecutionSupervisor and TaskRecord accurately preserve actual_tool_events and api_workflow."""
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+    from mana_agent.execution_supervisor.models import ExecutionState, SideEffectClassification
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+
+    supervisor = ExecutionSupervisor(config=ExecutionSupervisorConfig(root=tmp_path / "supervisor"))
+    task = supervisor.create_task(
+        routing_decision_id="dec-task-001",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+    )
+
+    metadata = {
+        "api_workflow": {
+            "decision_id": "dec-task-001",
+            "completed_actions": ["documentation_inspection"],
+            "missing_actions": ["integration_import"],
+        },
+        "actual_tool_events": [
+            {
+                "type": "api_tool_event",
+                "tool_name": "api_docs_inspect",
+                "action": "documentation_inspection",
+                "status": "ok",
+                "timestamp": "2026-08-27T19:00:00Z",
+            }
+        ],
+    }
+
+    supervisor.persist_provider_metadata(task.task_id, metadata)
+    stored_task = supervisor.store.get_task(task.task_id)
+    assert stored_task.api_workflow["decision_id"] == "dec-task-001"
+    assert len(stored_task.actual_tool_events) == 1
+    assert stored_task.actual_tool_events[0]["tool_name"] == "api_docs_inspect"
+
+    escrow = supervisor.record_terminal_result(
+        task.task_id,
+        state=ExecutionState.FAILED,
+        reason="api_workflow_incomplete",
+        provider_metadata=metadata,
+    )
+    assert escrow.payload["api_workflow"]["decision_id"] == "dec-task-001"

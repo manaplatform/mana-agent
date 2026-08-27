@@ -811,6 +811,19 @@ class ExecutionSupervisor:
                 if merged_provider_metadata != existing_result.provider_metadata:
                     existing_result.provider_metadata = merged_provider_metadata
                     changed = True
+                if "api_workflow" in merged_provider_metadata or "actual_tool_events" in merged_provider_metadata:
+                    def update_task_meta(t: TaskRecord) -> None:
+                        if "api_workflow" in merged_provider_metadata and isinstance(merged_provider_metadata["api_workflow"], dict):
+                            t.api_workflow = dict(merged_provider_metadata["api_workflow"])
+                        if "actual_tool_events" in merged_provider_metadata and isinstance(merged_provider_metadata["actual_tool_events"], list):
+                            t.actual_tool_events = list(merged_provider_metadata["actual_tool_events"])
+                        t.updated_at = self.clock()
+                    self.store.update_task(task_id, update_task_meta)
+            if payload:
+                merged_payload = {**existing_result.payload, **payload}
+                if merged_payload != existing_result.payload:
+                    existing_result.payload = merged_payload
+                    changed = True
             effective_error_metadata = error_metadata
             if effective_error_metadata is None and task.provider_metadata.get("state") == "AUTH_REQUIRED":
                 effective_error_metadata = {"state": "AUTH_REQUIRED", "action": "reauthenticate"}
@@ -846,6 +859,16 @@ class ExecutionSupervisor:
                 else VerificationStatus.NOT_SUPPORTED
             )
         )
+        normalized_provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
+        if "api_workflow" in normalized_provider_metadata or "actual_tool_events" in normalized_provider_metadata:
+            def update_task_meta_new(t: TaskRecord) -> None:
+                if "api_workflow" in normalized_provider_metadata and isinstance(normalized_provider_metadata["api_workflow"], dict):
+                    t.api_workflow = dict(normalized_provider_metadata["api_workflow"])
+                if "actual_tool_events" in normalized_provider_metadata and isinstance(normalized_provider_metadata["actual_tool_events"], list):
+                    t.actual_tool_events = list(normalized_provider_metadata["actual_tool_events"])
+                t.updated_at = self.clock()
+            self.store.update_task(task_id, update_task_meta_new)
+
         result_payload = payload or {
             "status": state.value,
             "reason": reason or task.failure_reason,
@@ -861,8 +884,10 @@ class ExecutionSupervisor:
                     "status": state.value,
                     "terminal_failure": not is_resumable,
                     "is_resumable": is_resumable,
+                    "api_workflow": normalized_provider_metadata.get("api_workflow") or task.api_workflow,
                 },
             },
+            "api_workflow": normalized_provider_metadata.get("api_workflow") or task.api_workflow,
         }
         err_meta = error_metadata or {
             "state": state.value,
@@ -870,7 +895,6 @@ class ExecutionSupervisor:
             "recovery_reason": task.recovery_reason,
             "is_resumable": is_resumable,
         }
-        normalized_provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
         if normalized_provider_metadata.get("state") == "AUTH_REQUIRED":
             err_meta = {"state": "AUTH_REQUIRED", "action": "reauthenticate", **err_meta}
         result = EscrowResult(
@@ -928,6 +952,10 @@ class ExecutionSupervisor:
 
         def update(task: TaskRecord) -> None:
             task.provider_metadata = {**task.provider_metadata, **incoming}
+            if "api_workflow" in incoming and isinstance(incoming["api_workflow"], dict):
+                task.api_workflow = dict(incoming["api_workflow"])
+            if "actual_tool_events" in incoming and isinstance(incoming["actual_tool_events"], list):
+                task.actual_tool_events = list(incoming["actual_tool_events"])
             task.updated_at = self.clock()
 
         task, _ = self.store.update_task(task_id, update)

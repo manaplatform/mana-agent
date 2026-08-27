@@ -36,6 +36,10 @@ class IntegrationNotFoundError(ApiManagerError):
     code = "integration_not_found"
 
 
+class IntegrationAlreadyExistsError(ApiManagerError, ValueError):
+    code = "integration_already_exists"
+
+
 class OperationNotFoundError(ApiManagerError):
     code = "operation_not_found"
 

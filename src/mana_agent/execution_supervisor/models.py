@@ -598,6 +598,8 @@ class TaskRecord(StrictModel):
     delegated_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     result_capsule_revisions: dict[str, int] = Field(default_factory=dict)
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    api_workflow: dict[str, Any] = Field(default_factory=dict)
+    actual_tool_events: list[dict[str, Any]] = Field(default_factory=list)
     waiting_inbox_item_id: str = ""
     waiting_kind: str = ""
     wake_up_source: str = ""

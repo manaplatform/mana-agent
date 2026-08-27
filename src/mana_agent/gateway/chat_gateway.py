@@ -406,519 +406,10 @@ _API_WORKFLOW_EVIDENCE = {
 
 def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     """Validate exact successful tool evidence against the model workflow decision."""
+    from mana_agent.api_manager.workflow import evaluate_api_workflow_completion
+
     traces = _serialize_tool_traces(response)
-
-    if not traces or traces[0].get("tool_name") != "api_workflow_decide":
-        return {
-            "valid": False,
-            "error_code": "api_workflow_decision_missing",
-            "message": (
-                "Model decision failed: api_workflow. The first API-route tool call "
-                "was not a validated workflow decision. No completion was recorded."
-            ),
-            "required_actions": [],
-            "completed_actions": [],
-            "missing_actions": [],
-            "unexpected_actions": [],
-            "execution_evidence": {},
-            "waived_actions": [],
-            "terminal_outcome": "",
-            "terminal_evidence": {},
-        }
-
-    def payload(trace: dict[str, Any]) -> dict[str, Any]:
-        """Return the authoritative structured tool payload when available.
-
-        Prefer the actual tool result over UI-oriented previews/summaries.
-        """
-        for key in (
-            "result",
-            "output_preview",
-            "result_summary",
-            "error",
-        ):
-            value: Any = trace.get(key)
-
-            if isinstance(value, dict):
-                return value
-
-            if isinstance(value, str) and value.strip():
-                try:
-                    decoded = json.loads(value)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-
-                if isinstance(decoded, dict):
-                    return decoded
-
-        return {}
-
-    def raw_payload(trace: dict[str, Any]) -> Any:
-        """Return the first available raw result representation."""
-        for key in (
-            "result",
-            "output_preview",
-            "result_summary",
-        ):
-            value = trace.get(key)
-            if value not in (None, ""):
-                return value
-        return None
-
-    decision_index = -1
-    decision: dict[str, Any] | None = None
-
-    for idx, trace in enumerate(traces):
-        tool_name = str(trace.get("tool_name") or "")
-
-        if tool_name == "api_workflow_decide":
-            result = payload(trace)
-
-            if result.get("ok") is True and isinstance(result.get("result"), dict):
-                candidate = result["result"]
-
-                if candidate.get("safe_to_continue") is True:
-                    decision = candidate
-                    decision_index = idx
-                    break
-
-        elif (
-            tool_name in _API_WORKFLOW_EVIDENCE
-            or tool_name == "api_workflow_terminal"
-        ):
-            # An operational/terminal API tool ran before the validated
-            # workflow decision.
-            break
-
-    if (
-        decision_index < 0
-        or not isinstance(decision, dict)
-        or decision.get("safe_to_continue") is not True
-    ):
-        return {
-            "valid": False,
-            "error_code": "api_workflow_decision_invalid",
-            "message": (
-                "Model decision failed: api_workflow. The workflow decision was "
-                "invalid or unsafe. No completion was recorded."
-            ),
-            "required_actions": [],
-            "completed_actions": [],
-            "missing_actions": [],
-            "unexpected_actions": [],
-            "execution_evidence": {},
-            "waived_actions": [],
-            "terminal_outcome": "",
-            "terminal_evidence": {},
-        }
-
-    required = [
-        str(item)
-        for item in decision.get("required_actions") or []
-        if str(item).strip()
-    ]
-
-    completed: set[str] = set()
-    execution_evidence: dict[str, Any] = {}
-
-    # Tracks contiguous api_docs_inspect evidence by immutable artifact ref.
-    inspection_progress: dict[str, dict[str, Any]] = {}
-
-    terminal_attempted = False
-    terminal_valid = False
-    terminal_evidence: dict[str, Any] = {}
-    terminal_failure_reason = ""
-
-    for trace in traces[decision_index + 1:]:
-        tool_name = str(trace.get("tool_name") or "")
-
-        result = payload(trace)
-        trace_succeeded = str(trace.get("status") or "").lower() == "ok"
-        result_succeeded = result.get("ok") is True
-
-        # --------------------------------------------------------------
-        # Track complete contiguous api_docs_inspect evidence.
-        #
-        # A successful api_docs_inspect result is not sufficient when
-        # truncated=true. Completion requires:
-        #
-        #   offset=0
-        #       -> contiguous next_offset pages
-        #       -> final truncated=false
-        #
-        # All pages must use the same documentation_ref.
-        # --------------------------------------------------------------
-        if (
-            tool_name == "api_docs_inspect"
-            and trace_succeeded
-            and result_succeeded
-            and isinstance(result.get("result"), dict)
-        ):
-            inspected = result["result"]
-
-            documentation_ref = str(
-                inspected.get("documentation_ref") or ""
-            ).strip()
-
-            if documentation_ref:
-                try:
-                    offset = max(
-                        0,
-                        int(inspected.get("offset") or 0),
-                    )
-                except (TypeError, ValueError):
-                    offset = -1
-
-                text_value = str(inspected.get("text") or "")
-
-                observed_end = (
-                    offset + len(text_value)
-                    if offset >= 0
-                    else -1
-                )
-
-                progress = inspection_progress.setdefault(
-                    documentation_ref,
-                    {
-                        "next_offset": 0,
-                        "complete": False,
-                    },
-                )
-
-                if (
-                    not progress["complete"]
-                    and offset == progress["next_offset"]
-                ):
-                    truncated = bool(
-                        inspected.get("truncated", False)
-                    )
-
-                    if truncated:
-                        next_offset = inspected.get("next_offset")
-
-                        if (
-                            isinstance(next_offset, int)
-                            and next_offset == observed_end
-                            and next_offset > offset
-                        ):
-                            progress["next_offset"] = next_offset
-
-                    else:
-                        progress["next_offset"] = observed_end
-                        progress["complete"] = True
-                        completed.add("documentation_inspection")
-
-        # --------------------------------------------------------------
-        # Evidence-backed terminal outcome.
-        #
-        # This never becomes valid merely because import/search failed.
-        # It requires a completely consumed api_docs_inspect artifact.
-        # --------------------------------------------------------------
-        if tool_name == "api_workflow_terminal":
-            terminal_attempted = True
-
-            if (
-                trace_succeeded
-                and result_succeeded
-                and isinstance(result.get("result"), dict)
-            ):
-                terminal = result["result"]
-
-                outcome = str(
-                    terminal.get("outcome") or ""
-                ).strip()
-
-                documentation_ref = str(
-                    terminal.get("documentation_ref") or ""
-                ).strip()
-
-                progress = inspection_progress.get(
-                    documentation_ref
-                )
-
-                if outcome != "unsupported_documentation":
-                    terminal_failure_reason = (
-                        "Unsupported API workflow terminal outcome."
-                    )
-
-                elif (
-                    not progress
-                    or progress.get("complete") is not True
-                ):
-                    terminal_failure_reason = (
-                        "Terminal unsupported_documentation requires "
-                        "complete contiguous documentation inspection."
-                    )
-
-                elif "documentation_inspection" not in required:
-                    terminal_failure_reason = (
-                        "Terminal unsupported_documentation requires "
-                        "documentation_inspection in the workflow decision."
-                    )
-
-                else:
-                    terminal_valid = True
-                    terminal_evidence = {
-                        "outcome": outcome,
-                        "documentation_ref": documentation_ref,
-                        "reason": str(
-                            terminal.get("reason") or ""
-                        ),
-                    }
-
-            else:
-                terminal_failure_reason = (
-                    "API workflow terminal declaration did not return "
-                    "successful structured evidence."
-                )
-
-            continue
-
-        action = _API_WORKFLOW_EVIDENCE.get(tool_name)
-
-        if not action:
-            continue
-
-        raw_result = raw_payload(trace)
-
-        clipped_success_evidence = (
-            action != "request_execution"
-            and trace_succeeded
-            and isinstance(raw_result, str)
-            and len(raw_result) >= 4000
-            and not result
-        )
-
-        # --------------------------------------------------------------
-        # Request execution requires authoritative structured evidence.
-        #
-        # Never infer execution success merely from:
-        # - tool status == ok
-        # - a clipped result
-        # - a textual model claim
-        # --------------------------------------------------------------
-        if action == "request_execution":
-            executed = (
-                result.get("result")
-                if isinstance(result.get("result"), dict)
-                else result
-            )
-
-            if not isinstance(executed, dict):
-                continue
-
-            if (
-                executed.get("executed") is not True
-                or executed.get("upstream_ok") is not True
-                or not isinstance(executed.get("status_code"), int)
-            ):
-                continue
-
-            completed.add(action)
-
-            execution_evidence = {
-                key: executed.get(key)
-                for key in (
-                    "integration_id",
-                    "operation_id",
-                    "method",
-                    "redacted_url",
-                    "status_code",
-                    "content_type",
-                    "body_kind",
-                    "json_body",
-                    "text_body",
-                    "file_reference",
-                    "latency_ms",
-                    "upstream_ok",
-                    "executed",
-                )
-                if executed.get(key) not in (None, "")
-            }
-
-            continue
-
-        # --------------------------------------------------------------
-        # Preview may legitimately stop before execution because trusted
-        # local approval is required.
-        # --------------------------------------------------------------
-        if action == "request_preview":
-            if result_succeeded:
-                preview_result = result.get("result")
-
-                if isinstance(preview_result, dict):
-                    completed.add(action)
-                    continue
-
-            # Compatibility with older permission-required result shape.
-            if (
-                result.get("error_code") == "permission_required"
-                and isinstance(result.get("details"), dict)
-                and str(
-                    result["details"].get("permission_scope") or ""
-                ) == "api.request.execute"
-                and str(
-                    result["details"].get(
-                        "permission_request_id"
-                    )
-                    or ""
-                ).strip()
-            ):
-                completed.add(action)
-                continue
-
-        # --------------------------------------------------------------
-        # api_docs_inspect completion is handled exclusively by the
-        # contiguous pagination logic above.
-        #
-        # In particular:
-        #
-        #   api_docs_inspect + truncated=true
-        #
-        # MUST NOT complete documentation_inspection.
-        #
-        # browser_inspect still uses the legacy generic successful
-        # evidence behavior below.
-        # --------------------------------------------------------------
-        if (
-            action == "documentation_inspection"
-            and tool_name == "api_docs_inspect"
-        ):
-            continue
-
-        # --------------------------------------------------------------
-        # Ordinary non-execution lifecycle evidence.
-        # --------------------------------------------------------------
-        if result_succeeded or clipped_success_evidence:
-            completed.add(action)
-
-    # ------------------------------------------------------------------
-    # Terminal waiver processing.
-    # ------------------------------------------------------------------
-    waived: list[str] = []
-
-    if terminal_valid:
-        # unsupported_documentation cannot coexist with successful
-        # downstream lifecycle work.
-        conflicting_actions = sorted(
-            completed
-            & {
-                "integration_import",
-                "integration_configuration",
-                "operation_search",
-                "request_preview",
-                "request_execution",
-            }
-        )
-
-        if conflicting_actions:
-            terminal_valid = False
-            terminal_failure_reason = (
-                "unsupported_documentation contradicts already completed "
-                "downstream actions: "
-                + ", ".join(conflicting_actions)
-                + "."
-            )
-
-        else:
-            waivable_actions = {
-                "integration_import",
-                "integration_configuration",
-                "operation_search",
-                "request_preview",
-                "request_execution",
-            }
-
-            waived = [
-                action
-                for action in required
-                if (
-                    action in waivable_actions
-                    and action not in completed
-                )
-            ]
-
-    missing = [
-        action
-        for action in required
-        if action not in completed
-        and action not in waived
-    ]
-
-    unexpected = sorted(
-        action
-        for action in completed
-        if action not in required
-    )
-
-    if terminal_attempted and not terminal_valid:
-        error_code = "api_workflow_terminal_invalid"
-        message = (
-            "API workflow terminal evidence is invalid"
-            + (
-                f": {terminal_failure_reason}"
-                if terminal_failure_reason
-                else "."
-            )
-        )
-
-    elif unexpected:
-        error_code = "api_workflow_action_not_selected"
-        message = (
-            "API tools executed actions absent from the workflow decision: "
-            + ", ".join(unexpected)
-            + "."
-        )
-
-    elif missing:
-        error_code = "api_workflow_incomplete"
-        message = (
-            "API workflow is incomplete; missing successful evidence for: "
-            + ", ".join(missing)
-            + "."
-        )
-
-    else:
-        error_code = ""
-
-        message = (
-            "API workflow terminated with evidence-backed "
-            "unsupported documentation."
-            if terminal_valid
-            else "API workflow completion evidence is valid."
-        )
-
-    return {
-        "valid": (
-            not missing
-            and not unexpected
-            and not (
-                terminal_attempted
-                and not terminal_valid
-            )
-        ),
-        "error_code": error_code,
-        "message": message,
-        "task_intent": str(
-            decision.get("task_intent") or ""
-        ),
-        "required_actions": required,
-        "completed_actions": sorted(completed),
-        "waived_actions": waived,
-        "missing_actions": missing,
-        "unexpected_actions": unexpected,
-        "execution_evidence": execution_evidence,
-        "terminal_outcome": (
-            terminal_evidence.get("outcome", "")
-            if terminal_valid
-            else ""
-        ),
-        "terminal_evidence": (
-            terminal_evidence
-            if terminal_valid
-            else {}
-        ),
-    }
+    return evaluate_api_workflow_completion(traces)
 class _RoutePreflightComplete(RuntimeError):
     """Internal control flow for a truthful pre-dispatch capability response."""
 
@@ -7612,6 +7103,19 @@ class AgentChatGateway:
                 reservation.execution.task_id,
                 state=LaneTaskState.FAILED,
                 changed_files=result.changed_files,
+                verification_state={
+                    "mode": result.mode,
+                    "status": "failed",
+                    "error": result.error,
+                    "api_workflow": result.payload.get("api_workflow") or {},
+                    "chat_result": {
+                        "status": "failed",
+                        "route": str(result.payload.get("route") or ""),
+                        "answer": result.answer,
+                        "changed_files": list(result.changed_files),
+                        "payload": dict(result.payload),
+                    },
+                },
                 error=str(result.error),
             )
         elif result.payload.get("goal_satisfied") is False:
@@ -7645,6 +7149,7 @@ class AgentChatGateway:
                         "mode": result.mode,
                         "status": "completed",
                         "error": result.error,
+                        "api_workflow": result.payload.get("api_workflow") or {},
                         "chat_result": {
                             "status": "completed",
                             "route": str(result.payload.get("route") or ""),
@@ -10022,6 +9527,30 @@ class AgentChatGateway:
             )
         permission_requests = _api_permission_requests_from_trace(response)
         workflow_completion = _api_workflow_completion_from_trace(response)
+        from mana_agent.api_manager.redaction import redact_mapping
+
+        api_workflow = dict(workflow_completion.get("api_workflow") or {})
+        if not api_workflow:
+            api_workflow = {
+                "error_code": str(workflow_completion.get("error_code") or ""),
+                "required_actions": list(workflow_completion.get("required_actions") or []),
+                "completed_actions": list(workflow_completion.get("completed_actions") or []),
+                "missing_actions": list(workflow_completion.get("missing_actions") or []),
+                "waived_actions": list(workflow_completion.get("waived_actions") or []),
+                "unexpected_actions": list(workflow_completion.get("unexpected_actions") or []),
+                "terminal_outcome": str(workflow_completion.get("terminal_outcome") or ""),
+                "last_successful_action": str(workflow_completion.get("last_successful_action") or ""),
+                "last_api_tool": str(workflow_completion.get("last_api_tool") or ""),
+                "last_api_error_code": str(workflow_completion.get("last_api_error_code") or ""),
+                "workflow_decision_id": str(workflow_completion.get("workflow_decision_id") or ""),
+                "execution_evidence": redact_mapping(workflow_completion.get("execution_evidence") or {}),
+                "stalled": bool(workflow_completion.get("stalled", False)),
+                "stalled_action": str(workflow_completion.get("stalled_action") or ""),
+            }
+        else:
+            api_workflow["execution_evidence"] = redact_mapping(api_workflow.get("execution_evidence") or {})
+
+        actual_tool_events = list(workflow_completion.get("actual_tool_events") or [])
         required_actions = set(workflow_completion.get("required_actions") or [])
         missing_actions = set(workflow_completion.get("missing_actions") or [])
         waiting_for_execution_approval = (
@@ -10029,6 +9558,8 @@ class AgentChatGateway:
             and missing_actions.issubset({"request_execution"})
             and "request_execution" in required_actions
         )
+        is_stalled = bool(workflow_completion.get("stalled", False)) or workflow_completion.get("error_code") == "api_workflow_stalled"
+
         if lane_task_id and waiting_for_execution_approval:
             try:
                 self._lane_coordinator.transition(
@@ -10053,6 +9584,34 @@ class AgentChatGateway:
                     )
                 except Exception:
                     logger.debug("API approval status event failed", exc_info=True)
+            if workflow_completion["valid"]:
+                self._event_sink(
+                    "api.workflow.completed",
+                    "API workflow completed successfully",
+                    metadata=api_workflow,
+                )
+            elif waiting_for_execution_approval:
+                self._event_sink(
+                    "api.workflow.action.pending",
+                    "API workflow waiting for execution approval",
+                    metadata={
+                        **api_workflow,
+                        "action": "request_execution",
+                        "reason": "waiting for approval",
+                    },
+                )
+            elif is_stalled:
+                self._event_sink(
+                    "api.workflow.stalled",
+                    "API workflow stalled",
+                    metadata=api_workflow,
+                )
+            else:
+                self._event_sink(
+                    "api.workflow.incomplete",
+                    "API workflow incomplete",
+                    metadata=api_workflow,
+                )
         model_answer = str(getattr(response, "answer", response) or "").strip()
         validated_execution = workflow_completion.get("execution_evidence") or {}
         if validated_execution:
@@ -10082,16 +9641,19 @@ class AgentChatGateway:
             else workflow_completion["message"]
             + (f"\n\nModel summary:\n{model_answer}" if model_answer else "")
         )
+        mode = (
+            "route-api-awaiting-approval"
+            if waiting_for_execution_approval
+            else "route-api"
+            if workflow_completion["valid"]
+            else "route-api-stalled"
+            if is_stalled
+            else "route-api-incomplete"
+        )
         return ChatTurnResult(
             answer=answer,
             sources=list(getattr(response, "sources", []) or []),
-            mode=(
-                "route-api-awaiting-approval"
-                if waiting_for_execution_approval
-                else "route-api"
-                if workflow_completion["valid"]
-                else "route-api-incomplete"
-            ),
+            mode=mode,
             error=(
                 None
                 if workflow_completion["valid"] or waiting_for_execution_approval
@@ -10104,6 +9666,8 @@ class AgentChatGateway:
                 "route": "api",
                 "permission_requests": permission_requests,
                 "workflow_completion": workflow_completion,
+                "api_workflow": api_workflow,
+                "actual_tool_events": actual_tool_events,
             },
         )
 
