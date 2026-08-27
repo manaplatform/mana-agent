@@ -2,6 +2,18 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-27
+
+- Fixed API Manager OpenAPI reference resolution, identity host-binding, deterministic import source selection, and workflow idempotency:
+  - Updated `_LocalReferenceResolver` in `mana_agent/api_manager/documentation.py` to classify reference types and recover missing local parameter definitions (e.g. `#/components/parameters/Accept-Encoding`) from inspected documentation evidence while preserving provenance in `recovered_references`.
+  - Configured `UnresolvedSchemaReferenceError` to return structured diagnostic details with `code="openapi_local_ref_unresolved"`, `reference`, `reference_kind`, `reference_name`, `source_reference`, and `recoverable=False`.
+  - Host-bound `source_decision_id` and `session_id` in `mana_agent/api_manager/runtime_tools.py`, normalizing model-provided suffixes (`<id>:api-entry-decision`) to authoritative host IDs while rejecting cross-session or disparate execution references.
+  - Made documentation import source binding deterministic by having the runtime controller supply authoritative sources from inspection evidence and discover canonical OpenAPI spec URLs in HTML/documentation.
+  - Bound narrow `api_*` tools directly without requiring lazy capability discovery (`capability_search`/`capability_load`) during the API route lifecycle in `mana_agent/gateway/chat_gateway.py`.
+  - Added import fingerprinting and result caching in `mana_agent/api_manager/service.py` to guarantee idempotent imports and monotonic workflow completion.
+  - Added regression test suite in `tests/test_api_manager.py` and `tests/gateway/test_api_manager_route.py`.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py -v`.
+
 ## 2026-08-26
 
 - Fixed wiring lifecycle finalization across TaskBoard, FeatureIntegrationCoordinator, ChatGateway, and Multi-Agent types:

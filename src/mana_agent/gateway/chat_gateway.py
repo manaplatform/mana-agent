@@ -528,6 +528,8 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
     terminal_valid = False
     terminal_evidence: dict[str, Any] = {}
     terminal_failure_reason = ""
+    last_tool_error_code = ""
+    last_tool_error_message = ""
 
     for trace in traces[decision_index + 1:]:
         tool_name = str(trace.get("tool_name") or "")
@@ -535,6 +537,13 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         result = payload(trace)
         trace_succeeded = str(trace.get("status") or "").lower() == "ok"
         result_succeeded = result.get("ok") is True
+
+        if not trace_succeeded or not result_succeeded:
+            err_code = str(result.get("error_code") or trace.get("error_code") or "").strip()
+            err_msg = str(result.get("error") or result.get("message") or trace.get("error") or "").strip()
+            if err_code:
+                last_tool_error_code = err_code
+                last_tool_error_message = err_msg
 
         # --------------------------------------------------------------
         # Track complete contiguous api_docs_inspect evidence.
@@ -871,12 +880,23 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         )
 
     elif missing:
-        error_code = "api_workflow_incomplete"
-        message = (
-            "API workflow is incomplete; missing successful evidence for: "
-            + ", ".join(missing)
-            + "."
-        )
+        if last_tool_error_code == "openapi_local_ref_unresolved" or (
+            "integration_import" in missing
+            and last_tool_error_code in {"openapi_local_ref_unresolved", "malformed_specification", "unsupported_documentation"}
+        ):
+            error_code = last_tool_error_code
+            message = (
+                f"API import failed ({last_tool_error_code}): {last_tool_error_message}"
+                if last_tool_error_message
+                else f"API import failed: {last_tool_error_code}"
+            )
+        else:
+            error_code = "api_workflow_incomplete"
+            message = (
+                "API workflow is incomplete; missing successful evidence for: "
+                + ", ".join(missing)
+                + "."
+            )
 
     else:
         error_code = ""
@@ -9900,10 +9920,8 @@ class AgentChatGateway:
             "an inspect-import-and-call workflow must include documentation_inspection, "
             "integration_import, operation_search, request_preview, and request_execution; include "
             "integration_configuration when the model determines it is also required. Every workflow "
-            "containing request_execution must declare and successfully "
+            "Every workflow containing request_execution must declare and successfully "
             "perform operation_search and request_preview first, including read-only requests. "
-            "After api_workflow_decide, use capability_search and capability_load to load only the "
-            "next authorized API or browser capability needed by that workflow before calling it. "
             "The following is the current redacted saved-integration snapshot, collected before "
             "your workflow decision: "
             + json.dumps(saved_integration_snapshot, ensure_ascii=False, sort_keys=True)
@@ -10002,8 +10020,6 @@ class AgentChatGateway:
                 system_prompt=system_prompt,
                 tool_policy={
                     "allowed_tools": allowed_tools,
-                    "capability_discovery_required": True,
-                    "initial_tools": ["api_workflow_decide"],
                     "disable_external_search": True,
                     "require_initial_tool_call": True,
                 },

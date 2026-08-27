@@ -20,6 +20,7 @@ from mana_agent.api_manager.errors import (
     RequestValidationError,
     ResponseTooLargeError,
     SsrfPolicyViolationError,
+    UnresolvedSchemaReferenceError,
     UnsupportedDocumentationError,
     UpstreamApiError,
 )
@@ -1539,5 +1540,229 @@ def test_api_approval_denial_does_not_execute_http(
     assert denied["approved"] is False
     assert denied["executed"] is False
     assert denied["status"] == "denied"
+
+
+AL_QURAN_OPENAPI: dict[str, Any] = {
+    "openapi": "3.0.3",
+    "info": {"title": "Al Quran Cloud API", "version": "1.0", "description": "Quran API"},
+    "servers": [{"url": "https://api.alquran.cloud/v1"}],
+    "paths": {
+        "/surah": {
+            "get": {
+                "operationId": "getSurahs",
+                "summary": "Get all surahs",
+                "parameters": [
+                    {"$ref": "#/components/parameters/Accept-Encoding"}
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Surah list",
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object"}
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    },
+}
+
+AL_QURAN_INSPECTED_DOCS = """
+# Al Quran Cloud API Documentation
+## Global Headers
+- name: Accept-Encoding
+  location: header
+  type: string
+  description: compression/content encoding
+  supported values: gzip or zstd
+  required: false
+"""
+
+
+def test_al_quran_openapi_parameter_resolution_and_recovery() -> None:
+    # Case A — Definition exists in complete OpenAPI: resolver must resolve normally.
+    openapi_complete = json.loads(json.dumps(AL_QURAN_OPENAPI))
+    openapi_complete["components"] = {
+        "parameters": {
+            "Accept-Encoding": {
+                "name": "Accept-Encoding",
+                "in": "header",
+                "required": False,
+                "description": "compression/content encoding",
+                "schema": {"type": "string"},
+            }
+        }
+    }
+    importer = DocumentationImporter()
+    integration_a = importer.from_text(
+        json.dumps(openapi_complete),
+        name="Al Quran Cloud",
+        source_decision_id="decision-quran-a",
+    )
+    assert len(integration_a.operations) == 1
+    param_a = integration_a.operations[0].parameters[0]
+    assert param_a.name == "Accept-Encoding"
+    assert param_a.location is ParameterLocation.HEADER
+    assert param_a.required is False
+    assert param_a.schema_["type"] == "string"
+
+    # Case B — Local component is missing, but authorized inspected documentation explicitly defines Accept-Encoding.
+    evidence_ref = "sha256:" + "a" * 64
+    integration_b = importer.from_text(
+        json.dumps(AL_QURAN_OPENAPI),
+        name="Al Quran Cloud",
+        source_decision_id="decision-quran-b",
+        evidence_text=AL_QURAN_INSPECTED_DOCS,
+        evidence_documentation_ref=evidence_ref,
+    )
+    assert len(integration_b.operations) == 1
+    param_b = integration_b.operations[0].parameters[0]
+    assert param_b.name == "Accept-Encoding"
+    assert param_b.location is ParameterLocation.HEADER
+    assert param_b.required is False
+    assert param_b.schema_["type"] == "string"
+
+    # Provenance records the recovery
+    recovered = integration_b.metadata.get("recovered_references")
+    assert recovered is not None
+    assert len(recovered) == 1
+    assert recovered[0]["reference"] == "#/components/parameters/Accept-Encoding"
+    assert recovered[0]["evidence_documentation_ref"] == evidence_ref
+    assert recovered[0]["recovery_type"] == "documented_parameter"
+
+
+def test_unresolved_schema_ref_fails_closed() -> None:
+    openapi_malformed = {
+        "openapi": "3.0.3",
+        "info": {"title": "Test API", "version": "1.0"},
+        "servers": [{"url": "https://api.example.com"}],
+        "paths": {
+            "/items": {
+                "get": {
+                    "operationId": "getItems",
+                    "responses": {
+                        "200": {
+                            "description": "OK",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/DoesNotExist"}
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+        },
+    }
+    importer = DocumentationImporter()
+    with pytest.raises(UnresolvedSchemaReferenceError) as exc_info:
+        importer.from_text(
+            json.dumps(openapi_malformed),
+            name="Malformed API",
+            source_decision_id="decision-malformed",
+        )
+    assert exc_info.value.code == "openapi_local_ref_unresolved"
+    details = exc_info.value.details
+    assert details["error_code"] == "openapi_local_ref_unresolved"
+    assert details["reference"] == "#/components/schemas/DoesNotExist"
+    assert details["reference_kind"] == "schema"
+    assert details["reference_name"] == "DoesNotExist"
+    assert details["recoverable"] is False
+
+
+def test_import_source_selection_is_authoritative_over_model_conflicts(tmp_path: Path) -> None:
+    from mana_agent.api_manager.runtime_tools import (
+        ApiToolExecutionContext,
+        build_api_manager_langchain_tools,
+    )
+
+    service = ApiManagerService(tmp_path)
+    # Inspect a documentation source
+    inspect_result = service.inspect_documentation(
+        text=json.dumps(OPENAPI),
+        session_id="session-source-test",
+    )
+    doc_ref = inspect_result["documentation_ref"]
+    assert doc_ref.startswith("sha256:")
+
+    context = ApiToolExecutionContext(
+        session_id="session-source-test",
+        source_decision_id="turn-source:decision",
+    )
+    tools = build_api_manager_langchain_tools(tmp_path, service=service, context=context)
+    tool_map = {t.name: t for t in tools}
+
+    # Model emits conflicting source fields (both text and path and url)
+    raw = tool_map["api_docs_import"].invoke({
+        "name": "Acme CRM from Inspection",
+        "text": "conflicting-pasted-text",
+        "path": str(tmp_path / "conflicting-path.json"),
+        "url": "https://conflicting.example.com/spec.json",
+    })
+    res = json.loads(raw)
+    assert res["ok"] is True
+    assert res["result"]["saved"] is True
+    assert res["result"]["operation_count"] > 0
+
+
+def test_identity_resolution_accepts_model_suffixes_and_blocks_cross_session(tmp_path: Path) -> None:
+    from mana_agent.api_manager.runtime_tools import (
+        ApiToolExecutionContext,
+        build_api_manager_langchain_tools,
+    )
+
+    context = ApiToolExecutionContext(
+        session_id="host-session-123",
+        source_decision_id="exec_08bb7d218fd84027",
+    )
+    tools = build_api_manager_langchain_tools(tmp_path, context=context)
+    tool_map = {t.name: t for t in tools}
+
+    # 1. Model emits a generated suffix on the authoritative host decision ID
+    raw = tool_map["api_workflow_decide"].invoke({
+        "source_decision_id": "exec_08bb7d218fd84027:api-entry-decision",
+        "session_id": "host-session-123",
+        "task_intent": "inspect documentation",
+        "required_actions": ["documentation_inspection"],
+        "reason": "Inspecting docs.",
+        "safe_to_continue": True,
+    })
+    res = json.loads(raw)
+    assert res["ok"] is True
+    assert res["result"]["source_decision_id"] == "exec_08bb7d218fd84027"
+
+    # 2. Model emits a cross-execution ID -> blocked
+    with pytest.raises(PermissionError) as exc_info:
+        tool_map["api_workflow_decide"].invoke({
+            "source_decision_id": "exec_completely_different_id",
+            "session_id": "host-session-123",
+            "task_intent": "inspect documentation",
+            "required_actions": ["documentation_inspection"],
+            "reason": "Inspecting docs.",
+            "safe_to_continue": True,
+        })
+    assert "does not match host-bound source decision" in str(exc_info.value)
+
+
+def test_import_documentation_is_idempotent(tmp_path: Path) -> None:
+    service = ApiManagerService(tmp_path)
+    res1 = service.import_documentation(
+        name="Acme CRM Idempotent",
+        text=json.dumps(OPENAPI),
+        source_decision_id="decision-idem-1",
+    )
+    assert res1["saved"] is True
+
+    # Same import call again
+    res2 = service.import_documentation(
+        name="Acme CRM Idempotent",
+        text=json.dumps(OPENAPI),
+        source_decision_id="decision-idem-1",
+    )
+    assert res2["saved"] is True
+    assert res2["integration"]["integration_id"] == res1["integration"]["integration_id"]
+
 
 

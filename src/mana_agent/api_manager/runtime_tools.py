@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -256,14 +257,38 @@ def build_api_manager_langchain_tools(
             or raw_decision_id
             or "api-turn-decision"
         )
-        if (
-            raw_decision_id
-            and bound_context.source_decision_id
-            and raw_decision_id != bound_context.source_decision_id
-        ):
-            raise PermissionError(
-                f"Model-provided source_decision_id {raw_decision_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+        if raw_decision_id and bound_context.source_decision_id:
+            is_valid_suffix = (
+                raw_decision_id == bound_context.source_decision_id
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}:")
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}/")
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}-")
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}_")
             )
+            if not is_valid_suffix:
+                raise PermissionError(
+                    f"Model-provided source_decision_id {raw_decision_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+                )
+
+        values["session_id"] = authoritative_session_id
+        values["source_decision_id"] = authoritative_decision_id
+
+        if "routing_decision" in values and isinstance(values["routing_decision"], dict):
+            rd_raw_id = str(values["routing_decision"].get("source_decision_id") or "").strip()
+            if rd_raw_id and bound_context.source_decision_id:
+                is_valid_rd_suffix = (
+                    rd_raw_id == bound_context.source_decision_id
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}:")
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}/")
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}-")
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}_")
+                )
+                if not is_valid_rd_suffix:
+                    raise PermissionError(
+                        f"Model-provided routing_decision.source_decision_id {rd_raw_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+                    )
+            values["routing_decision"]["source_decision_id"] = authoritative_decision_id
+
         return authoritative_session_id, authoritative_decision_id
 
     def encode(operation: Any, *, session_id: str, source_decision_id: str) -> str:
@@ -273,12 +298,40 @@ def build_api_manager_langchain_tools(
             session_id=session_id,
             source_decision_id=source_decision_id,
         )
-        
 
     def import_docs(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
+
+        last_inspection = manager.get_last_inspection(session_id)
+        if last_inspection is not None:
+            canonical_spec = last_inspection.get("canonical_spec_url")
+            if canonical_spec:
+                values["url"] = str(canonical_spec)
+                values["text"] = ""
+                values["path"] = ""
+                values["documentation_ref"] = ""
+            elif last_inspection.get("url") or (
+                last_inspection.get("reference")
+                and urlsplit(str(last_inspection.get("reference") or "")).scheme in {"http", "https"}
+            ):
+                values["url"] = str(last_inspection.get("url") or last_inspection.get("reference"))
+                values["text"] = ""
+                values["path"] = ""
+                values["documentation_ref"] = ""
+            elif last_inspection.get("path") or (
+                last_inspection.get("reference")
+                and Path(str(last_inspection.get("reference") or "")).is_file()
+            ):
+                values["path"] = str(last_inspection.get("path") or last_inspection.get("reference"))
+                values["text"] = ""
+                values["url"] = ""
+                values["documentation_ref"] = ""
+            elif last_inspection.get("documentation_ref"):
+                values["documentation_ref"] = str(last_inspection["documentation_ref"])
+                values["text"] = ""
+                values["path"] = ""
+                values["url"] = ""
+
         request = _Import(**values)
         return _json(
             lambda: manager.import_documentation(
@@ -301,8 +354,6 @@ def build_api_manager_langchain_tools(
 
     def import_semantic_docs(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
         request = _SemanticImport(**values)
         return _json(
             lambda: manager.import_documentation(
@@ -323,8 +374,6 @@ def build_api_manager_langchain_tools(
 
     def preview(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
         request = _Request(**values)
         if (
             request.routing_decision.source_decision_id
@@ -347,8 +396,6 @@ def build_api_manager_langchain_tools(
 
     def execute(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
         request = _Execute(**values)
         if (
             request.routing_decision.source_decision_id

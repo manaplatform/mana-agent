@@ -313,6 +313,7 @@ class ApiIntegration(StrictModel):
         description: str = "",
         authentication: list[AuthenticationConfig] | None = None,
         ephemeral: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> "ApiIntegration":
         digest = documentation_source.content_sha256 or hashlib.sha256(
             json.dumps([item.model_dump(mode="json", by_alias=True) for item in operations], sort_keys=True).encode()
@@ -327,6 +328,7 @@ class ApiIntegration(StrictModel):
             documentation_sources=(documentation_source,),
             versions=(IntegrationVersion(number=1, source_sha256=digest),),
             ephemeral=ephemeral,
+            metadata=metadata or {},
         )
 
 

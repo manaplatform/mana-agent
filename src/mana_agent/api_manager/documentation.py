@@ -71,6 +71,8 @@ class DocumentationImporter:
         name: str,
         source_decision_id: str,
         semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+        evidence_text: str = "",
+        evidence_documentation_ref: str = "",
     ) -> ApiIntegration:
         resolved = Path(path).expanduser().resolve()
         if self.allowed_file_roots and not any(
@@ -93,6 +95,8 @@ class DocumentationImporter:
             format_hint=hint,
             source_decision_id=source_decision_id,
             semantic_definition=semantic_definition,
+            evidence_text=evidence_text,
+            evidence_documentation_ref=evidence_documentation_ref,
         )
 
     def from_url(
@@ -102,6 +106,8 @@ class DocumentationImporter:
         name: str,
         source_decision_id: str,
         semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+        evidence_text: str = "",
+        evidence_documentation_ref: str = "",
     ) -> ApiIntegration:
         if self.fetcher is None:
             raise UnsupportedDocumentationError(
@@ -126,6 +132,8 @@ class DocumentationImporter:
             format_hint=hint,
             source_decision_id=source_decision_id,
             semantic_definition=semantic_definition,
+            evidence_text=evidence_text,
+            evidence_documentation_ref=evidence_documentation_ref,
         )
 
     def from_text(
@@ -136,6 +144,8 @@ class DocumentationImporter:
         source_decision_id: str,
         reference: str = "pasted-text",
         semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+        evidence_text: str = "",
+        evidence_documentation_ref: str = "",
     ) -> ApiIntegration:
         return self.from_bytes(
             content.encode("utf-8"),
@@ -145,6 +155,8 @@ class DocumentationImporter:
             format_hint="text",
             source_decision_id=source_decision_id,
             semantic_definition=semantic_definition,
+            evidence_text=evidence_text or content,
+            evidence_documentation_ref=evidence_documentation_ref,
         )
 
     def from_bytes(
@@ -157,6 +169,8 @@ class DocumentationImporter:
         format_hint: str,
         source_decision_id: str,
         semantic_definition: SemanticDefinition | dict[str, Any] | None = None,
+        evidence_text: str = "",
+        evidence_documentation_ref: str = "",
     ) -> ApiIntegration:
         if len(content) > 10 * 1024 * 1024:
             raise UnsupportedDocumentationError("Documentation exceeds the 10 MiB import limit.")
@@ -172,6 +186,8 @@ class DocumentationImporter:
                 source_decision_id=source_decision_id,
                 content_sha256=digest,
                 source_format=formal_format,
+                evidence_text=evidence_text or text,
+                evidence_documentation_ref=evidence_documentation_ref,
             )
             source = integration.documentation_sources[0].model_copy(update={"type": detected_type})
             return integration.model_copy(update={"documentation_sources": (source,)})
@@ -227,6 +243,164 @@ class DocumentationImporter:
         return None
 
 
+def _classify_reference(reference: str) -> tuple[str, str]:
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        return "external", str(reference)
+    path = reference[2:]
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in path.split("/")]
+    if len(tokens) >= 3 and tokens[0] == "components":
+        if tokens[1] == "parameters":
+            return "parameter", tokens[2]
+        elif tokens[1] == "schemas":
+            return "schema", tokens[2]
+        elif tokens[1] == "requestBodies":
+            return "requestBody", tokens[2]
+        elif tokens[1] == "responses":
+            return "response", tokens[2]
+        elif tokens[1] == "securitySchemes":
+            return "securityScheme", tokens[2]
+        elif tokens[1] == "headers":
+            return "header", tokens[2]
+        return tokens[1], tokens[2]
+    elif len(tokens) >= 2:
+        if tokens[0] == "parameters":
+            return "parameter", tokens[1]
+        elif tokens[0] == "definitions":
+            return "schema", tokens[1]
+        elif tokens[0] == "responses":
+            return "response", tokens[1]
+        elif tokens[0] == "securityDefinitions":
+            return "securityScheme", tokens[1]
+        return tokens[0], tokens[1]
+    return "other", tokens[-1] if tokens else ""
+
+
+def _extract_documented_parameter(name: str, evidence_text: str) -> dict[str, Any] | None:
+    if not evidence_text or not name:
+        return None
+    escaped_name = re.escape(name)
+    pattern = re.compile(rf"\b{escaped_name}\b", re.IGNORECASE)
+    if not pattern.search(evidence_text):
+        return None
+
+    lines = evidence_text.splitlines()
+    target_block = []
+    for idx, line in enumerate(lines):
+        if pattern.search(line):
+            start = max(0, idx - 2)
+            end = min(len(lines), idx + 20)
+            target_block = lines[start:end]
+            break
+
+    block_text = "\n".join(target_block) if target_block else evidence_text
+
+    location = None
+    loc_match = re.search(
+        r"(?:location|in|param(?:eter)?\s*type|placed\s*in)\s*[:=\-]?\s*['\"]?(header|query|path|cookie)['\"]?",
+        block_text,
+        re.IGNORECASE,
+    )
+    if loc_match:
+        location = loc_match.group(1).lower()
+    elif re.search(r"\bheader\b", block_text, re.IGNORECASE):
+        location = "header"
+    elif re.search(r"\bquery\b", block_text, re.IGNORECASE):
+        location = "query"
+    elif re.search(r"\bpath\b", block_text, re.IGNORECASE):
+        location = "path"
+    elif re.search(r"\bcookie\b", block_text, re.IGNORECASE):
+        location = "cookie"
+    else:
+        if name.lower() in {
+            "accept-encoding",
+            "accept",
+            "authorization",
+            "content-type",
+            "user-agent",
+            "x-api-key",
+        }:
+            location = "header"
+        else:
+            location = "query"
+
+    required = False
+    req_match = re.search(
+        r"\brequired\s*[:=\-]?\s*(true|yes|1|required|mandatory)\b",
+        block_text,
+        re.IGNORECASE,
+    )
+    if req_match and not re.search(
+        r"\b(?:optional|not\s*required|required\s*[:=\-]?\s*(?:false|no|0))\b",
+        block_text,
+        re.IGNORECASE,
+    ):
+        required = True
+
+    param_type = "string"
+    type_match = re.search(
+        r"(?:type|data\s*type|schema)\s*[:=\-]?\s*['\"]?(string|integer|int|boolean|bool|number|float)['\"]?",
+        block_text,
+        re.IGNORECASE,
+    )
+    if type_match:
+        raw_type = type_match.group(1).lower()
+        param_type = (
+            "integer"
+            if raw_type in {"int", "integer"}
+            else "boolean"
+            if raw_type in {"bool", "boolean"}
+            else "number"
+            if raw_type in {"number", "float"}
+            else "string"
+        )
+
+    description = ""
+    desc_match = re.search(
+        r"(?:description|desc|summary|about)\s*[:=\-]?\s*['\"]?([^\n\r]+)",
+        block_text,
+        re.IGNORECASE,
+    )
+    if desc_match:
+        description = desc_match.group(1).strip().strip("'\"")
+    else:
+        for line in target_block:
+            cleaned = line.strip()
+            if (
+                cleaned
+                and not pattern.search(cleaned)
+                and not any(
+                    kw in cleaned.lower()
+                    for kw in ("type:", "location:", "in:", "required:")
+                )
+            ):
+                description = cleaned
+                break
+
+    schema: dict[str, Any] = {"type": param_type}
+    enum_match = re.search(
+        r"(?:supported\s*values?|values?|enum)\s*[:=\-]?\s*([^\n\r]+)",
+        block_text,
+        re.IGNORECASE,
+    )
+    if enum_match:
+        raw_enum = enum_match.group(1).strip()
+        enum_tokens = [
+            t.strip().strip("'\"[]")
+            for t in re.split(r"[,/|]|\bor\b|\band\b", raw_enum)
+            if t.strip().strip("'\"[]")
+        ]
+        if enum_tokens and len(enum_tokens) <= 20:
+            schema["enum"] = enum_tokens
+
+    return {
+        "name": name,
+        "in": location,
+        "required": required,
+        "description": description or f"Documented parameter {name}",
+        "schema": schema,
+    }
+
+
 def normalize_openapi(
     document: dict[str, Any],
     *,
@@ -235,6 +409,8 @@ def normalize_openapi(
     source_decision_id: str,
     content_sha256: str,
     source_format: str = "",
+    evidence_text: str = "",
+    evidence_documentation_ref: str = "",
 ) -> tuple[ApiIntegration, DocumentationSourceType]:
     openapi_version = str(document.get("openapi") or "")
     swagger_version = str(document.get("swagger") or "")
@@ -244,7 +420,12 @@ def normalize_openapi(
         raise UnsupportedDocumentationError(f"Unsupported Swagger version: {swagger_version}")
     if not openapi_version and not swagger_version:
         raise MalformedSpecificationError("The document is not OpenAPI or Swagger.")
-    resolver = _LocalReferenceResolver(document)
+    resolver = _LocalReferenceResolver(
+        document,
+        evidence_text=evidence_text,
+        evidence_documentation_ref=evidence_documentation_ref,
+        source_reference=reference,
+    )
     is_swagger = bool(swagger_version)
     servers = _servers(document, is_swagger=is_swagger, reference=reference)
     security_schemes = _security_schemes(document, resolver=resolver, is_swagger=is_swagger)
@@ -313,6 +494,11 @@ def normalize_openapi(
         content_sha256=content_sha256,
         source_decision_id=source_decision_id,
     )
+    metadata = (
+        {"recovered_references": resolver.recovered_references}
+        if resolver.recovered_references
+        else {}
+    )
     integration = ApiIntegration.create(
         name=name,
         description=description,
@@ -320,13 +506,25 @@ def normalize_openapi(
         operations=operations,
         authentication=list(security_schemes.values()),
         documentation_source=source,
+        metadata=metadata,
     )
     return integration, source_type
 
 
 class _LocalReferenceResolver:
-    def __init__(self, document: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        document: dict[str, Any],
+        *,
+        evidence_text: str = "",
+        evidence_documentation_ref: str = "",
+        source_reference: str = "",
+    ) -> None:
         self.document = document
+        self.evidence_text = evidence_text
+        self.evidence_documentation_ref = evidence_documentation_ref
+        self.source_reference = source_reference
+        self.recovered_references: list[dict[str, Any]] = []
 
     def resolve_object(self, value: Any, *, context: str) -> dict[str, Any]:
         resolved = self.resolve(value, seen=(), context=context)
@@ -344,21 +542,63 @@ class _LocalReferenceResolver:
             if not isinstance(reference, str) or not reference.startswith("#/"):
                 raise UnresolvedSchemaReferenceError(
                     "Only local OpenAPI references are allowed.",
-                    details={"reference": reference, "context": context},
+                    details={
+                        "error_code": "openapi_local_ref_unresolved",
+                        "reference": str(reference),
+                        "reference_kind": "external",
+                        "reference_name": "",
+                        "context": context,
+                        "source_reference": self.source_reference,
+                        "recoverable": False,
+                    },
                 )
             if reference in seen:
                 # Keep recursive schemas as local references rather than recursing forever.
                 return {"$ref": reference}
             target: Any = self.document
+            ref_kind, ref_name = _classify_reference(reference)
             try:
                 for token in reference[2:].split("/"):
                     token = token.replace("~1", "/").replace("~0", "~")
                     target = target[token]
             except (KeyError, TypeError) as exc:
-                raise UnresolvedSchemaReferenceError(
-                    f"Local schema reference could not be resolved: {reference}",
-                    details={"reference": reference, "context": context},
-                ) from exc
+                if ref_kind == "parameter" and self.evidence_text:
+                    recovered = _extract_documented_parameter(ref_name, self.evidence_text)
+                    if recovered is not None:
+                        self.recovered_references.append(
+                            {
+                                "reference": reference,
+                                "evidence_documentation_ref": self.evidence_documentation_ref,
+                                "recovery_type": "documented_parameter",
+                            }
+                        )
+                        target = recovered
+                    else:
+                        raise UnresolvedSchemaReferenceError(
+                            f"Local schema reference could not be resolved: {reference}",
+                            details={
+                                "error_code": "openapi_local_ref_unresolved",
+                                "reference": reference,
+                                "reference_kind": ref_kind,
+                                "reference_name": ref_name,
+                                "context": context,
+                                "source_reference": self.source_reference,
+                                "recoverable": False,
+                            },
+                        ) from exc
+                else:
+                    raise UnresolvedSchemaReferenceError(
+                        f"Local schema reference could not be resolved: {reference}",
+                        details={
+                            "error_code": "openapi_local_ref_unresolved",
+                            "reference": reference,
+                            "reference_kind": ref_kind,
+                            "reference_name": ref_name,
+                            "context": context,
+                            "source_reference": self.source_reference,
+                            "recoverable": False,
+                        },
+                    ) from exc
             merged = dict(self.resolve(target, seen=(*seen, reference), context=context))
             merged.update({key: item for key, item in value.items() if key != "$ref"})
             value = merged
