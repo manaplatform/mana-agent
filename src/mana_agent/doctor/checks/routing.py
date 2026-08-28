@@ -28,8 +28,23 @@ def model_routing(context: DoctorContext) -> list[DoctorFinding]:
     verifier_keys = [item.key for item in profiles if item.available and item.can_verify and ("verifier" in item.supported_roles or "*" in item.supported_roles)]
     author_keys = [item.key for item in profiles if item.available and item.can_patch]
     independent = any(verifier != author for verifier in verifier_keys for author in author_keys)
-    git_result = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=context.repository, capture_output=True, text=True, check=False)
-    isolation = bool(settings.mana_managed_worktrees_enabled and git_result.returncode == 0 and git_result.stdout.strip() == "true")
+    isolation = False
+    if context.repository and context.repository.is_dir():
+        try:
+            git_result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=context.repository,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            isolation = bool(
+                settings.mana_managed_worktrees_enabled
+                and git_result.returncode == 0
+                and git_result.stdout.strip() == "true"
+            )
+        except (OSError, ValueError):
+            isolation = False
     incomplete = [
         item.key for item in profiles
         if item.context_window <= 0 or not item.supported_roles or not item.can_structured_output

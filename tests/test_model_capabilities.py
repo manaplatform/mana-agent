@@ -331,10 +331,10 @@ def test_case_d_read_only_coding_request_admitted_when_read_supported():
     assert decision.selected_model == "read-only-model"
 
 
-def test_separate_agent_permission_and_model_capability():
+def test_separate_agent_permission_and_model_capability(tmp_path: Path):
     """Rule 9: Agent permission (workspaceWrite) does NOT imply model transport capability."""
     shim = CodexCodingAgentShim(
-        repo_root=Path("/tmp"),
+        repo_root=tmp_path,
         codex_settings=CodexSettings(enabled=True),
         repository_id="test_repo",
     )
@@ -349,7 +349,7 @@ def test_separate_agent_permission_and_model_capability():
     assert "model capabilities are unknown" in str(exc_info.value)
 
 
-def test_exact_deepseek_openrouter_direct_responses_reproduction():
+def test_exact_deepseek_openrouter_direct_responses_reproduction(tmp_path: Path):
     """Verify that deepseek/deepseek-v4-flash on OpenRouter direct_responses is validated fail-closed."""
     # When no capability metadata is provided, resolution returns unknown
     desc = resolve_model_capability("openrouter", "deepseek/deepseek-v4-flash", "direct_responses")
@@ -358,7 +358,7 @@ def test_exact_deepseek_openrouter_direct_responses_reproduction():
     assert desc.supports_repository_write is False
 
     shim = CodexCodingAgentShim(
-        repo_root=Path("/tmp"),
+        repo_root=tmp_path,
         codex_settings=CodexSettings(enabled=True),
         repository_id="test_repo",
     )

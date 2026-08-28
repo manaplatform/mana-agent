@@ -107,6 +107,22 @@ def test_repository_metadata_is_cached_by_fingerprint_and_sensitive_changes_rais
     assert decision.candidate_competition is True
 
 
+def test_repository_metadata_inspector_nonexistent_or_non_directory_root(tmp_path: Path) -> None:
+    inspector = RepositoryMetadataInspector()
+    nonexistent = tmp_path / "does_not_exist_xyz"
+    metadata = inspector.inspect(nonexistent)
+    assert metadata.file_count == 0
+    assert metadata.languages == ()
+    assert metadata.changed_files == ()
+    assert len(metadata.fingerprint) == 20
+
+    file_path = tmp_path / "regular_file.txt"
+    file_path.write_text("not a dir")
+    metadata_file = inspector.inspect(file_path)
+    assert metadata_file.file_count == 0
+    assert metadata_file.languages == ()
+
+
 def test_budget_rejects_expensive_candidate_and_reserves_verification() -> None:
     priced = replace(STRONG, input_cost_per_million=1.0, output_cost_per_million=1.0, context_window=1_000_000)
     req = request(

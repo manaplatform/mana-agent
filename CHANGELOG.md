@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-28
 
+- Fixed Windows CI Test Failures in Model Capabilities and Repository Metadata Inspection:
+  - Updated `RepositoryMetadataInspector._git_lines()` in `src/mana_agent/model_routing/repository.py` to guard git subprocess execution with `root.is_dir()` and catch `(OSError, ValueError)`, preventing `NotADirectoryError: [WinError 267]` on Windows and non-existent root paths.
+  - Guarded git worktree probing in `src/mana_agent/doctor/checks/routing.py` with directory existence check and exception handling.
+  - Replaced hardcoded `Path("/tmp")` in `test_separate_agent_permission_and_model_capability` and `test_exact_deepseek_openrouter_direct_responses_reproduction` in `tests/test_model_capabilities.py` with pytest's `tmp_path` fixture.
+  - Added regression test `test_repository_metadata_inspector_nonexistent_or_non_directory_root` in `tests/test_model_routing.py`.
+  - User verification required: `pytest tests/test_model_capabilities.py tests/test_model_routing.py -v`.
+
 - Resolved Test Suite Regressions Across Gateway, Taskboard, Execution Supervisor, and Model Capabilities:
   - Updated model capability routing fallbacks in `src/mana_agent/gateway/routing.py` and `router.py` to default non-write capabilities to `True` for read/conversational routing while keeping `can_patch=False` (fail-closed for repo writes), and made `AgentRole.CODING`/`AgentRole.PLANNER` conditional on `--no-coding-agent` in `stack.py`.
   - Added `wiring_required` and `wiring_reason` to `TaskBoard.create_task()` and updated `_validate_feature_completion`, `project_supervisor_completion`, and `validators.py` to correctly distinguish child wiring tasks from parent feature tasks, allowing `wiring_required=False` tasks to resolve to `not_required` and verified integration tasks to resolve to `completed` or `already_integrated`.

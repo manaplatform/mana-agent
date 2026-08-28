@@ -80,16 +80,21 @@ class RepositoryMetadataInspector:
 
     @staticmethod
     def _git_lines(root: Path, args: list[str]) -> list[str]:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=root,
-            text=True,
-            encoding="utf-8",
-            errors="surrogateescape",
-            capture_output=True,
-            check=False,
-        )
-        return result.stdout.splitlines() if result.returncode == 0 else []
+        if not root.is_dir():
+            return []
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                text=True,
+                encoding="utf-8",
+                errors="surrogateescape",
+                capture_output=True,
+                check=False,
+            )
+            return result.stdout.splitlines() if result.returncode == 0 else []
+        except (OSError, ValueError):
+            return []
 
     def _tracked_files(self, root: Path) -> list[Path]:
         lines = self._git_lines(root, ["ls-files"])
