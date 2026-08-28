@@ -333,6 +333,14 @@ def test_wiring_child_failure_propagates_to_parent_and_preserves_linkage(tmp_pat
 def test_terminal_tasks_never_remain_incomplete_wiring_outcome(tmp_path):
     board = TaskBoard(tmp_path)
     task_not_req = board.create_task(title="Doc task", user_request="doc", wiring_required=False)
+    task_not_req.supervisor_execution_id = "supervisor-1"
+    task_not_req.supervisor_state = "completed"
+    task_not_req.verification_status = "passed"
+    task_not_req.supervisor_verification_evidence = {"verification": "passed", "result_id": "result-1"}
+    task_not_req.verification_queue_job_ids = ["verification-job-1"]
+    board.update_status(task_not_req.task_id, TaskStatus.ROUTED)
+    board.update_status(task_not_req.task_id, TaskStatus.IN_PROGRESS)
+    board.update_status(task_not_req.task_id, TaskStatus.VERIFYING)
     board.update_status(task_not_req.task_id, TaskStatus.DONE)
     assert board.get_task(task_not_req.task_id).wiring_outcome == "not_required"
 

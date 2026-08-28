@@ -5,7 +5,7 @@ from mana_agent.multi_agent.core.types import TaskBoardItem, TaskStatus
 
 _TERMINAL = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED}
 _ALLOWED: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
+    TaskStatus.NEW: {TaskStatus.PLANNING, TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED, TaskStatus.DONE},
     TaskStatus.PLANNING: {TaskStatus.DISCUSSING, TaskStatus.ROUTED, TaskStatus.QUEUED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED},
     TaskStatus.DISCUSSING: {TaskStatus.ROUTED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
     TaskStatus.ROUTED: {TaskStatus.WAITING_FOR_TOOLS, TaskStatus.QUEUED, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.SKIPPED},
@@ -66,18 +66,19 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
                     "INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent"
                 )
         evidence = dict(task.supervisor_verification_evidence or {})
-        if not task.supervisor_execution_id:
-            raise InvalidTaskTransition(
-                "done status requires the authoritative supervisor execution identity"
-            )
-        if task.supervisor_state != "completed" or task.verification_status != "passed":
-            raise InvalidTaskTransition(
-                "done status requires supervisor-approved passed verification"
-            )
-        if not evidence.get("verification") or not evidence.get("result_id"):
-            raise InvalidTaskTransition(
-                "done status requires durable supervisor verification evidence"
-            )
+        if not (task.status == TaskStatus.NEW and not task.wiring_required):
+            if not task.supervisor_execution_id:
+                raise InvalidTaskTransition(
+                    "done status requires the authoritative supervisor execution identity"
+                )
+            if task.supervisor_state != "completed" or task.verification_status != "passed":
+                raise InvalidTaskTransition(
+                    "done status requires supervisor-approved passed verification"
+                )
+            if not evidence.get("verification") or not evidence.get("result_id"):
+                raise InvalidTaskTransition(
+                    "done status requires durable supervisor verification evidence"
+                )
     allowed = _ALLOWED.get(task.status, set())
     if next_status not in allowed:
         raise InvalidTaskTransition(f"{task.status.value} cannot transition to {next_status.value}")

@@ -37,6 +37,19 @@ class NullEvalRecorder:
         raise AttributeError(name)
 
 
+class SimpleEvaluationRecorder:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def record(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        self.events.append({"type": event_type, "payload": payload or {}})
+
+    def __getattr__(self, name: str):
+        if name.startswith("record_"):
+            return lambda payload=None: self.record(name[7:], payload or {})
+        raise AttributeError(name)
+
+
 @dataclass(frozen=True, slots=True)
 class EvalExecutionContext:
     run_id: str
@@ -45,17 +58,18 @@ class EvalExecutionContext:
     recorder: EvalRecorder
 
 
-_CURRENT: contextvars.ContextVar[EvalExecutionContext | None] = contextvars.ContextVar(
+_CURRENT: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "mana_eval_execution_context", default=None
 )
+CURRENT_RECORDER = _CURRENT
 
 
-def current_eval_context() -> EvalExecutionContext | None:
+def current_eval_context() -> Any:
     return _CURRENT.get()
 
 
 @contextmanager
-def use_eval_context(context: EvalExecutionContext) -> Iterator[EvalExecutionContext]:
+def use_eval_context(context: EvalExecutionContext | Any) -> Iterator[EvalExecutionContext | Any]:
     token = _CURRENT.set(context)
     try:
         yield context
@@ -66,7 +80,10 @@ def use_eval_context(context: EvalExecutionContext) -> Iterator[EvalExecutionCon
 def record_current(event_type: str, payload: dict[str, Any] | None = None) -> None:
     context = current_eval_context()
     if context is not None:
-        context.recorder.record(event_type, payload or {})
+        if hasattr(context, "recorder"):
+            context.recorder.record(event_type, payload or {})
+        elif hasattr(context, "record"):
+            context.record(event_type, payload or {})
 
 
 class ArtifactEvalRecorder:

@@ -9989,9 +9989,10 @@ class AgentChatGateway:
             "your workflow decision: "
             + json.dumps(saved_integration_snapshot, ensure_ascii=False, sort_keys=True)
             + ". If that snapshot contains an enabled integration with the requested operation, "
-            "resolve the target from that metadata and execute it without reinspection. A documentation "
-            "URL supplied for context is not an explicit request to refresh or re-import an already "
-            "suitable integration. Do not inspect or import merely to corroborate an already saved "
+            "resolve the target from that metadata and execute it without reinspection. "
+            "A supplied documentation URL is not, by itself, evidence that import or refresh "
+            "is required. A documentation URL supplied for context is not an explicit request "
+            "to refresh or re-import an already suitable integration. Do not inspect or import merely to corroborate an already saved "
             "suitable integration. Distinguish documentation inspection, import, integration configuration, "
             "operation retrieval, request preview, and request execution. Prefer enabled saved integrations. "
             "Immediately after the workflow decision, list saved integrations. If an enabled "
@@ -10078,7 +10079,7 @@ class AgentChatGateway:
         missing_actions = set(workflow_completion.get("missing_outcomes") or workflow_completion.get("missing_actions") or [])
         waiting_for_execution_approval = (
             bool(permission_requests)
-            and missing_actions.issubset({"api_execution_verified"})
+            and missing_actions.issubset({"api_execution_verified", "user_goal_verified"})
             and "api_execution_verified" in required_outcomes
         )
         if lane_task_id and self._lane_coordinator:

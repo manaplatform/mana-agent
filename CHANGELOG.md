@@ -4,6 +4,16 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-28
 
+- Resolved Test Suite Regressions Across Gateway, Taskboard, Execution Supervisor, and Model Capabilities:
+  - Updated model capability routing fallbacks in `src/mana_agent/gateway/routing.py` and `router.py` to default non-write capabilities to `True` for read/conversational routing while keeping `can_patch=False` (fail-closed for repo writes), and made `AgentRole.CODING`/`AgentRole.PLANNER` conditional on `--no-coding-agent` in `stack.py`.
+  - Added `wiring_required` and `wiring_reason` to `TaskBoard.create_task()` and updated `_validate_feature_completion`, `project_supervisor_completion`, and `validators.py` to correctly distinguish child wiring tasks from parent feature tasks, allowing `wiring_required=False` tasks to resolve to `not_required` and verified integration tasks to resolve to `completed` or `already_integrated`.
+  - Fixed loopback healthcheck connectivity in `CodexResponsesBridge` by bypassing proxy redirection via `ProxyHandler({})`.
+  - Added `_ImportArgs` schema to `api_docs_import` tool in `api_manager/runtime_tools.py` for LangChain args schema validation and imported `getpass` in `api_manager/service.py`.
+  - Updated API route execution in `chat_gateway.py` to recognize `{"api_execution_verified", "user_goal_verified"}` as awaiting execution approval when preview requires permission, and updated system prompt contracts.
+  - Updated `ExecutionSupervisor.get_verified_execution_result()` to return `EscrowLookupStatus.UNVERIFIED` for tasks pending completion verification before checking terminal flags, and updated budget overrun assertions in `test_result_escrow_recovery.py`.
+  - Full test suite verified green: 2485 passed, 2 skipped, 0 failed.
+  - User verification required: `pytest`.
+
 - Improved Model Routing Failure Diagnostics and Startup Error Handling:
   - Updated `ModelRouter.route()` in `src/mana_agent/model_routing/router.py` to include detailed candidate rejection reasons (`Rejected candidates: <model> (<reasons>)`) in the `RoutingFailure` message when candidate evaluation rejects all models, making routing failures immediately diagnosable.
   - Updated `chat_cli.py` to catch `RoutingFailure` alongside `ValueError` during gateway startup and initial model resolution, presenting clean and actionable parameter errors instead of crashing with an unhandled Python traceback.

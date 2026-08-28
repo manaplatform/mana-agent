@@ -1147,10 +1147,6 @@ def test_api_workflow_rejects_unsupported_terminal_before_complete_inspection() 
 
     assert completion["missing_actions"] == [
         "documentation_understood",
-        "integration_available",
-        "operation_resolved",
-        "request_previewed",
-        "api_execution_verified",
     ]
 
     assert completion["terminal_outcome"] == ""

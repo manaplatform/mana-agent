@@ -17,6 +17,7 @@ from mana_agent.config.model_capabilities import (
 from mana_agent.config.provider_registry import CodexTransport
 from mana_agent.evals.recorder import CURRENT_RECORDER, SimpleEvaluationRecorder
 from mana_agent.gateway.routing import GatewayRoutingAuthority
+from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.exceptions import CodexCapabilityError
 from mana_agent.model_routing.models import (
@@ -334,6 +335,7 @@ def test_separate_agent_permission_and_model_capability():
     """Rule 9: Agent permission (workspaceWrite) does NOT imply model transport capability."""
     shim = CodexCodingAgentShim(
         repo_root=Path("/tmp"),
+        codex_settings=CodexSettings(enabled=True),
         repository_id="test_repo",
     )
     # Even if agent turn requires write, unknown model capabilities must fail closed
@@ -357,6 +359,7 @@ def test_exact_deepseek_openrouter_direct_responses_reproduction():
 
     shim = CodexCodingAgentShim(
         repo_root=Path("/tmp"),
+        codex_settings=CodexSettings(enabled=True),
         repository_id="test_repo",
     )
     with pytest.raises(CodexCapabilityError) as exc_info:

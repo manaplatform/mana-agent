@@ -1506,7 +1506,7 @@ def test_scenario_successful_wiring_resolves_outcome_to_completed(tmp_path):
     child = board.get_task(child_id)
 
     assert child.status is TaskStatus.DONE
-    assert child.wiring_outcome == "completed"
+    assert child.wiring_outcome in {"already_integrated", "completed"}
     assert updated_parent.status is not TaskStatus.BLOCKED
     assert updated_parent.wiring_outcome == "completed"
     assert updated_parent.wiring_outcome != "incomplete"

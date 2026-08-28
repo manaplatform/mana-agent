@@ -83,6 +83,8 @@ class TaskBoard:
         trigger_turn_id: str = "",
         relation_type: str = "independent",
         previous_task_id: str = "",
+        wiring_required: bool = False,
+        wiring_reason: str | None = None,
     ) -> TaskBoardItem:
         task_id = self._new_task_id()
         goal = normalized_goal or user_request.strip()
@@ -148,6 +150,8 @@ class TaskBoard:
             budget_remaining_tokens=0,
             budget_reserved_ms=120_000,
             blockers=[],
+            wiring_required=wiring_required,
+            wiring_reason=wiring_reason,
             memory_status={
                 "duplicate_checked": True,
                 "duplicate_of": duplicate_of,
@@ -315,6 +319,10 @@ class TaskBoard:
     def update_status(self, task_id: str, status: TaskStatus, *, reason: str | None = None) -> None:
         task = self.get_task(task_id)
         if status == TaskStatus.DONE:
+            if not task.wiring_required and task.integration_role != "wiring":
+                task.wiring_outcome = "not_required"
+            elif task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed"}:
+                task.wiring_outcome = "completed"
             self._validate_feature_completion(task)
         validate_transition(task, status, reason=reason)
         task.status = status
@@ -322,7 +330,7 @@ class TaskBoard:
         if status == TaskStatus.DONE:
             if not task.wiring_required and task.integration_role != "wiring":
                 task.wiring_outcome = "not_required"
-            else:
+            elif task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed"}:
                 task.wiring_outcome = "completed"
         elif status == TaskStatus.FAILED:
             task.wiring_outcome = "failed"
@@ -367,7 +375,6 @@ class TaskBoard:
         verification_source: str = "",
         reviewer: str = "",
     ) -> None:
-        """Record the structured production path proven by ReviewerAgent."""
         task = self.get_task(task_id)
         normalized = [str(item).strip() for item in path if str(item).strip()]
         if len(normalized) < 3:
@@ -378,28 +385,28 @@ class TaskBoard:
         if not str(observable_result or summary).strip():
             raise ValueError("integration evidence requires an observable result")
         task.integration_evidence = normalized
-        task.integration_evidence_records = [{
+        record = {
             "entrypoint": normalized[0],
+            "evidence_path": normalized,
             "path": normalized,
-            "observable_result": str(observable_result or summary).strip(),
+            "summary": summary,
             "source_references": sources,
-            "verification_source": str(verification_source or "").strip(),
-            "reviewer": str(reviewer or "").strip(),
-            "timestamp": utc_now().isoformat(),
-        }]
+            "observable_result": str(observable_result or summary).strip(),
+            "verification_source": verification_source,
+            "reviewer": reviewer,
+            "recorded_at": utc_now().isoformat(),
+        }
+        task.integration_evidence_records.append(record)
         task.integration_verified = True
         task.runtime_reachability_verified = True
         if summary:
             task.evidence.append(f"Integration verification: {summary}")
         task.updated_at = utc_now()
-        self._record(
-            "task.integration_verified",
-            {"task_id": task_id, "path": normalized, "sources": sources},
-        )
+        self._record("task.integration_evidence_recorded", {"task_id": task_id, "record": record})
         self.save()
 
     def _validate_feature_completion(self, task: TaskBoardItem) -> None:
-        """Reject false success before the generic supervisor gate runs."""
+        """Enforce strict implementation-to-runtime completion invariants."""
         if task.integration_role == "wiring":
             if task.runtime_reachability_verified and task.integration_evidence_records:
                 task.integration_verified = True
@@ -421,6 +428,8 @@ class TaskBoard:
             raise InvalidTaskTransition(
                 "INCOMPLETE_FEATURE_WIRING: planner did not explain why wiring is unnecessary"
             )
+        if task.integration_role == "wiring":
+            return
         if not task.wiring_required:
             task.wiring_outcome = "not_required"
             return
@@ -459,28 +468,37 @@ class TaskBoard:
     ) -> None:
         """Project one already-persisted supervisor completion into TaskBoard."""
         task = self.get_task(task_id)
-        state = str(getattr(getattr(supervisor_task, "state", ""), "value", ""))
-        verification = str(
-            getattr(getattr(supervisor_task, "verification_status", ""), "value", "")
-        )
+        raw_state = getattr(supervisor_task, "state", "")
+        state = str(getattr(raw_state, "value", raw_state))
+        raw_verification = getattr(supervisor_task, "verification_status", "")
+        verification = str(getattr(raw_verification, "value", raw_verification))
+        if verification in {"succeeded", "completed"}:
+            verification = "passed"
         if state != "completed" or verification != "passed":
             raise ValueError("supervisor projection cannot advertise an unverified completion")
-        self._validate_feature_completion(task)
-        task.supervisor_execution_id = str(getattr(supervisor_task, "task_id", ""))
+        task.supervisor_execution_id = str(
+            getattr(supervisor_task, "execution_id", "")
+            or getattr(supervisor_task, "task_id", "")
+        )
         task.supervisor_state = state
         task.supervisor_state_version = int(getattr(supervisor_task, "state_version", 0))
         task.supervisor_verification_evidence = dict(verification_evidence)
         task.verification_status = verification
+        if not task.wiring_required and task.integration_role != "wiring":
+            task.wiring_outcome = "not_required"
+        elif task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed"}:
+            task.wiring_outcome = "completed"
         # Projection repair may replace a stale terminal TaskBoard status after
         # a crash. This is not an independent task transition: the durable
         # supervisor record supplied above is authoritative.
         if task.status is not TaskStatus.VERIFYING:
             task.status = TaskStatus.VERIFYING
+        self._validate_feature_completion(task)
         validate_transition(task, TaskStatus.DONE, reason="supervisor completion projected")
         task.status = TaskStatus.DONE
         if not task.wiring_required and task.integration_role != "wiring":
             task.wiring_outcome = "not_required"
-        else:
+        elif task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
             task.wiring_outcome = "completed"
         task.updated_at = utc_now()
         self._record(

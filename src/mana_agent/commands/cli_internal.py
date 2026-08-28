@@ -1619,11 +1619,14 @@ async def _spawn_command(cmd: list[str]) -> tuple[int, str, str]:
 # Helper utilities
 # ---------------------------------------------------------------------------
 
-def setup_logging(verbose: bool = False, log_dir: Path | None = None) -> Path | None:
+def setup_logging(verbose: bool = False, log_dir: Path | str | None = None) -> Path | None:
     log_level = logging.DEBUG if verbose else logging.INFO
 
-    effective_log_dir = log_dir or default_logs_dir(Path.cwd())
-    effective_log_dir.mkdir(parents=True, exist_ok=True)
+    effective_log_dir = Path(log_dir) if log_dir is not None else default_logs_dir(Path.cwd())
+    try:
+        effective_log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     # Use a per-day tag (not per-second) so every run appends to the same
     # daily log file instead of creating a new file each invocation.
     date_tag = datetime.now().strftime("%Y%m%d")
@@ -1635,12 +1638,15 @@ def setup_logging(verbose: bool = False, log_dir: Path | None = None) -> Path | 
     )
 
     if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(
-            logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
-        )
-        logging.getLogger().addHandler(file_handler)
+        try:
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(
+                logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
+            )
+            logging.getLogger().addHandler(file_handler)
+        except Exception:
+            pass
 
     return log_file
 

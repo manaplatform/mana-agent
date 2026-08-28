@@ -123,7 +123,7 @@ class _WorkflowTerminal(_Decision):
         pattern=r"^sha256:[a-f0-9]{64}$",
     )
     reason: str = Field(min_length=1)
-class _Import(_Decision):
+class _ImportArgs(_Decision):
     name: str = Field(min_length=1, max_length=160)
     text: str = Field(default="", max_length=10 * 1024 * 1024)
     path: str = ""
@@ -136,6 +136,8 @@ class _Import(_Decision):
         default="", pattern=r"^(|api_[a-f0-9]{24})$"
     )
 
+
+class _Import(_ImportArgs):
     @model_validator(mode="after")
     def exactly_one_source(self) -> "_Import":
         if sum(bool(item) for item in (self.text, self.path, self.url, self.documentation_ref)) != 1:
@@ -583,7 +585,7 @@ def build_api_manager_langchain_tools(
                 "documentation must use api_docs_import_semantic so its typed semantic definition "
                 "cannot be omitted. Never executes documentation content."
             ),
-            args_schema=_Import,
+            args_schema=_ImportArgs,
             func=import_docs,
             metadata={"transactional_adapter": "api_integration"},
         ),

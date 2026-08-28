@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import re
 from datetime import datetime

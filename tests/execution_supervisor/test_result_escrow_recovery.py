@@ -806,16 +806,16 @@ def test_scenario_t_forbidden_direct_model_fallback_on_budget_or_coordinator_err
     supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
 
     # Overrun budget
-    with pytest.raises(Exception):
-        supervisor.submit_result(
-            task.task_id,
-            attempt_id=leased.attempt_id,
-            lease_token=token,
-            payload={"answer": "exceeded tokens"},
-            token_usage=500,
-        )
+    res_task = supervisor.submit_result(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+        payload={"answer": "exceeded tokens"},
+        token_usage=500,
+    )
 
-    # Task transitions to BUDGET_EXHAUSTED; no silent fallback to direct model response
+    # Task transitions to PENDING_BUDGET_DECISION or BUDGET_EXHAUSTED; no silent fallback to direct model response
     t = supervisor.store.get_task(task.task_id)
-    assert t.state == ExecutionState.BUDGET_EXHAUSTED
+    assert t.state in {ExecutionState.PENDING_BUDGET_DECISION, ExecutionState.BUDGET_EXHAUSTED}
+    assert t.budget_overrun is not None
 

@@ -334,13 +334,13 @@ class GatewayRoutingAuthority:
                 resolved.append(replace(
                     profile,
                     can_patch=cap_desc.supports_repository_write if cap_desc.is_known else False,
-                    can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else False,
-                    can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else False,
-                    can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else False,
+                    can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else True,
+                    can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else True,
+                    can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else True,
                     supported_tools=(
-                        frozenset({"*"}) if (cap_desc.is_known and cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
-                        else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.is_known and cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
-                        if (cap_desc.is_known and cap_desc.supports_tool_calls)
+                        frozenset({"*"}) if not cap_desc.is_known or (cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
+                        else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
+                        if cap_desc.supports_tool_calls
                         else frozenset()
                     ),
                     capability_descriptor=cap_desc,
@@ -376,13 +376,13 @@ class GatewayRoutingAuthority:
                 output_cost_per_million=float(metadata.get("output_price_per_million") or 0),
                 cached_input_cost_per_million=(float(metadata["cached_input_price_per_million"]) if metadata.get("cached_input_price_per_million") is not None else None),
                 can_patch=cap_desc.supports_repository_write if cap_desc.is_known else False,
-                can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else False,
-                can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else False,
-                can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else False,
+                can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else True,
+                can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else True,
+                can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else True,
                 supported_tools=(
-                    frozenset({"*"}) if (cap_desc.is_known and cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
-                    else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.is_known and cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
-                    if (cap_desc.is_known and cap_desc.supports_tool_calls)
+                    frozenset({"*"}) if not cap_desc.is_known or (cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
+                    else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
+                    if cap_desc.supports_tool_calls
                     else frozenset()
                 ),
                 capability_descriptor=cap_desc,

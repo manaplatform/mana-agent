@@ -59,9 +59,9 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
             continue
         try:
             desc = resolve_model_capability(provider, model_id)
-            can_tool = bool(raw["can_tool_call"]) if "can_tool_call" in raw else (desc.supports_tool_calls if desc.is_known else False)
+            can_tool = bool(raw["can_tool_call"]) if "can_tool_call" in raw else (desc.supports_tool_calls if desc.is_known else True)
             can_p = bool(raw["can_patch"]) if "can_patch" in raw else (desc.supports_repository_write if desc.is_known else False)
-            can_struct = bool(raw["can_structured_output"]) if "can_structured_output" in raw else (desc.supports_structured_output if desc.is_known else False)
+            can_struct = bool(raw["can_structured_output"]) if "can_structured_output" in raw else (desc.supports_structured_output if desc.is_known else True)
             can_v = bool(raw["can_verify"]) if "can_verify" in raw else (can_tool or can_struct)
             if "supported_tools" in raw:
                 tools = frozenset(str(item) for item in raw.get("supported_tools") or [])
@@ -69,6 +69,8 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
                 tools = frozenset({"*"})
             elif desc.is_known and desc.supports_tool_calls:
                 tools = frozenset({"repository_read", "test_execution", "shell"} if desc.supports_repository_read else set())
+            elif not desc.is_known:
+                tools = frozenset({"*"})
             else:
                 tools = frozenset()
 
@@ -188,11 +190,11 @@ def profiles_for_pinned_models(
             else:
                 tools = frozenset()
         else:
-            can_tool = False
+            can_tool = True
             can_p = False
-            can_struct = False
-            can_v = False
-            tools = frozenset()
+            can_struct = True
+            can_v = True
+            tools = frozenset({"*"})
 
         profiles.append(ModelProfile(
             provider=provider,
@@ -286,11 +288,11 @@ def profiles_from_legacy_configuration(
             else:
                 tools = frozenset()
         else:
-            can_tool = False
+            can_tool = True
             can_p = False
-            can_struct = False
-            can_v = False
-            tools = frozenset()
+            can_struct = True
+            can_v = True
+            tools = frozenset({"*"})
 
         profiles.append(ModelProfile(
             provider=provider,

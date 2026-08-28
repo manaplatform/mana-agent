@@ -2245,6 +2245,22 @@ class ExecutionSupervisor:
             )
 
         if result is not None:
+            is_pending_ver = (
+                (task is not None and task.state is ExecutionState.COMPLETED_PENDING_VERIFICATION)
+                or (result.verification_status == VerificationStatus.PENDING
+                    and (task is None or task.state not in TERMINAL_STATES))
+            )
+            ack = self.store.get_acknowledgement(result.result_id)
+            if is_pending_ver and result.verification_status != VerificationStatus.PASSED:
+                return VerifiedExecutionResultLookup(
+                    status=EscrowLookupStatus.UNVERIFIED,
+                    execution_id=exec_id,
+                    task=task,
+                    result=result,
+                    acknowledgement=ack,
+                    error_code="RESULT_NOT_VERIFIED",
+                    error_message=f"Execution {exec_id} is pending completion verification",
+                )
             is_term = (
                 result.supervisor_state
                 in {

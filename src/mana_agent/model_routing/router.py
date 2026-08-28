@@ -117,8 +117,7 @@ class ModelRouter:
             scored.append(item)
         if not scored:
             is_write_task = (
-                request.task_type == "coding"
-                or "repository_write" in request.required_tools
+                "repository_write" in request.required_tools
                 or "patch" in request.required_capabilities
                 or "repository_write" in request.required_capabilities
             )
@@ -246,8 +245,13 @@ class ModelRouter:
             reasons.append(resource.reason or "provider resource is unavailable")
         if request.role not in profile.supported_roles and "*" not in profile.supported_roles:
             reasons.append(f"role {request.role!r} is unsupported")
+        is_write_task = (
+            "repository_write" in request.required_tools
+            or "patch" in request.required_capabilities
+            or "repository_write" in request.required_capabilities
+        )
         desc = getattr(profile, "capability_descriptor", None)
-        if desc is not None and not desc.is_known:
+        if is_write_task and desc is not None and not desc.is_known:
             reasons.append(
                 f"model capabilities are unknown (provider={profile.provider!r}, model={profile.model_id!r}, transport={desc.transport!r})"
             )
