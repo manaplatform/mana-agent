@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-28
 
+- Fixed Coding Agent Model-Capability Admission Failure and Multi-Transport Resolution:
+  - Resolved `Write-required Codex turn rejected: model capabilities are unknown` by implementing authoritative transport-level capability resolution keyed by `(provider, model, transport)`.
+  - Added `ModelCapabilityDescriptor` and `ModelCapabilityRegistry` in `src/mana_agent/config/model_capabilities.py` representing explicit capability dimensions (`supports_tool_calls`, `supports_repository_read`, `supports_repository_write`, `supports_shell`, `supports_structured_output`, `supports_streaming`, `supports_parallel_tools`, `capability_confidence`, `capability_source`).
+  - Normalized OpenRouter model IDs to preserve organization namespaces (e.g. `deepseek/deepseek-v4-flash`, `anthropic/claude-3.7-sonnet`) and avoid treating OpenRouter models as bare OpenAI-native models.
+  - Updated candidate evaluation in `ModelRouter.route()` and `GatewayRoutingAuthority` to filter unknown or incompatible model candidates before selection, enabling automatic fallback to alternative verified write-capable candidates without failing the user turn.
+  - Enforced fail-closed behavior with typed `NoWriteCapableModelAvailableError` (`no_write_capable_model_available`) containing candidate diagnostics when no candidate is write/tool capable.
+  - Separated agent permissions (`CodingAgent` workspace write permission) from model transport capabilities in `CodexCodingAgentShim._validate_write_transport_capability`.
+  - Added structured routing diagnostic events (`model.capability.resolved`, `model.capability.unknown`, `model.candidate.rejected`, `model.candidate.selected`).
+  - Added regression test suite in `tests/test_model_capabilities.py` covering Cases A, B, C, D, E, exact DeepSeek OpenRouter reproduction, caching/invalidation, and diagnostic events.
+  - User verification required: `python -m pytest tests/test_model_capabilities.py tests/test_model_routing.py tests/gateway/test_routing_authority.py tests/test_openrouter_provider.py tests/test_codex_integration.py -v`.
+
 - Fixed Checkpoint Lifecycle Race and Terminal State Transition Bug:
   - Resolved `Gateway execution failed: task cannot checkpoint from state failed` by centralizing checkpoint transition authority in `ExecutionSupervisor.can_checkpoint()` and enforcing durable supervisor state over stale in-memory task projections.
   - Updated `ExecutionSupervisor.checkpoint()` and `LocalExecutionStore.update_task_and_checkpoint()` with atomic compare-and-set semantics that safely skip checkpointing with typed diagnostics (`checkpoint.skipped` event with reason `checkpoint_skipped_terminal_state`) when an execution is already terminal (`failed`, `cancelled`, `completed`, `budget_exhausted`, `recovery_review_required`).

@@ -346,7 +346,7 @@ class CodexCodingAgentShim:
             task_type="coding" if requires_repository_write else "planning",
             complexity=Complexity.MEDIUM,
             risk=RiskLevel.MEDIUM if requires_repository_write else RiskLevel.LOW,
-            required_capabilities=frozenset({"patch", "tool_calls"} if requires_repository_write else {"structured_output"}),
+            required_capabilities=frozenset({"patch", "tool_calls", "repository_write"} if requires_repository_write else {"structured_output", "repository_read"}),
             required_tools=frozenset({"repository_read", "repository_write", "test_execution"} if requires_repository_write else {"repository_read"}),
             latency_requirement=LatencyClass.STANDARD,
             budgets=routing_budgets,
@@ -591,28 +591,30 @@ class CodexCodingAgentShim:
                 f"Codex transport (provider={provider!r}, model={model!r}). "
                 "No fallback coding backend was executed."
             )
-        # Catalog capability after routing. When Mana knows the model and it
-        # lacks tool_calling, refuse the write. Unknown models fail closed for
-        # write turns (no silent degraded path). Bridge conversion still
-        # fail-fasts if Codex tools cannot be represented mid-request.
         try:
-            from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
+            from mana_agent.config.model_capabilities import resolve_model_capability
 
-            caps = normalize_capabilities(provider, model)
+            desc = resolve_model_capability(provider, model, transport=transport_value)
         except Exception as exc:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model capability metadata is unavailable. "
                 f"provider={provider!r} model={model!r}. No fallback was executed."
             ) from exc
-        if not caps:
+        if not desc.is_known:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model capabilities are unknown "
                 f"(provider={provider!r}, model={model!r}, transport={transport_value!r}). "
                 "Refusing to claim write/tool support without explicit capability metadata."
             )
-        if ModelCapability.TOOL_CALLING not in caps:
+        if not desc.supports_tool_calls:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model does not declare tool_calling "
+                f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
+                "No silent degraded write path was started."
+            )
+        if not desc.supports_repository_write:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model does not declare repository write "
                 f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
                 "No silent degraded write path was started."
             )

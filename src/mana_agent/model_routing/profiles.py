@@ -4,6 +4,7 @@ from collections import defaultdict
 import json
 from typing import Any
 
+from mana_agent.config.model_capabilities import resolve_model_capability
 from mana_agent.config.provider_registry import split_qualified_model_id
 from mana_agent.config.user_config import get_setting
 from mana_agent.model_routing.models import LatencyClass, ModelProfile, sanitize_configuration
@@ -57,11 +58,30 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
             errors.append(f"profile {index} requires provider, model_id, and supported_roles")
             continue
         try:
+            desc = resolve_model_capability(provider, model_id)
+            can_tool = bool(raw["can_tool_call"]) if "can_tool_call" in raw else (desc.supports_tool_calls if desc.is_known else False)
+            can_p = bool(raw["can_patch"]) if "can_patch" in raw else (desc.supports_repository_write if desc.is_known else False)
+            can_struct = bool(raw["can_structured_output"]) if "can_structured_output" in raw else (desc.supports_structured_output if desc.is_known else False)
+            can_v = bool(raw["can_verify"]) if "can_verify" in raw else (can_tool or can_struct)
+            if "supported_tools" in raw:
+                tools = frozenset(str(item) for item in raw.get("supported_tools") or [])
+            elif desc.is_known and desc.supports_tool_calls and desc.supports_repository_write:
+                tools = frozenset({"*"})
+            elif desc.is_known and desc.supports_tool_calls:
+                tools = frozenset({"repository_read", "test_execution", "shell"} if desc.supports_repository_read else set())
+            else:
+                tools = frozenset()
+
+            config = sanitize_configuration(dict(raw.get("configuration") or {}))
+            config.setdefault("capability_source", desc.capability_source)
+            config.setdefault("capability_confidence", desc.capability_confidence)
+            config.setdefault("capability_descriptor", desc.to_dict())
+
             profiles.append(ModelProfile(
                 provider=provider,
                 model_id=model_id,
                 supported_roles=roles,
-                supported_tools=frozenset(str(item) for item in raw.get("supported_tools") or []),
+                supported_tools=tools,
                 reasoning_settings=frozenset(str(item) for item in raw.get("reasoning_settings") or ["none"]),
                 context_window=int(raw.get("context_window") or 0),
                 max_output_tokens=int(raw.get("max_output_tokens") or raw.get("max_completion_tokens") or 0),
@@ -76,13 +96,14 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
                 reliability_score=float(raw.get("reliability_score", 0.8)),
                 supported_languages=frozenset(str(item).lower() for item in raw.get("supported_languages") or []),
                 benchmark_scores={str(key): float(score) for key, score in dict(raw.get("benchmark_scores") or {}).items()},
-                can_patch=bool(raw.get("can_patch", True)),
-                can_structured_output=bool(raw.get("can_structured_output", True)),
-                can_tool_call=bool(raw.get("can_tool_call", True)),
-                can_verify=bool(raw.get("can_verify", True)),
+                can_patch=can_p,
+                can_structured_output=can_struct,
+                can_tool_call=can_tool,
+                can_verify=can_v,
                 available=bool(raw.get("available", True)),
-                configuration=sanitize_configuration(dict(raw.get("configuration") or {})),
+                configuration=config,
                 source_level=str(raw.get("source_level") or "configured"),
+                capability_descriptor=desc,
             ))
         except (TypeError, ValueError) as exc:
             errors.append(f"profile {index}: {exc}")
@@ -154,11 +175,30 @@ def profiles_for_pinned_models(
         window = int(maintained[0] if maintained else context_window)
         output = int(maintained[1] if maintained else max_output_tokens)
         output = min(window, max(1, output))
+        desc = resolve_model_capability(provider, model_id)
+        if desc.is_known:
+            can_tool = desc.supports_tool_calls
+            can_p = desc.supports_repository_write
+            can_struct = desc.supports_structured_output
+            can_v = desc.supports_tool_calls or desc.supports_structured_output
+            if desc.supports_tool_calls and desc.supports_repository_write:
+                tools = frozenset({"*"})
+            elif desc.supports_tool_calls:
+                tools = frozenset({"repository_read", "test_execution", "shell"} if desc.supports_repository_read else set())
+            else:
+                tools = frozenset()
+        else:
+            can_tool = False
+            can_p = False
+            can_struct = False
+            can_v = False
+            tools = frozenset()
+
         profiles.append(ModelProfile(
             provider=provider,
             model_id=model_id,
             supported_roles=_ALL_ROLES,
-            supported_tools=frozenset({"*"}),
+            supported_tools=tools,
             reasoning_settings=frozenset(reasoning_settings),
             context_window=window,
             max_output_tokens=output,
@@ -166,14 +206,19 @@ def profiles_for_pinned_models(
             logical_cost_per_1k_tokens=logical_cost,
             reliability_score=reliability,
             benchmark_scores=benchmarks or dict(_LEVEL_BENCHMARKS[strongest]),
+            can_patch=can_p,
+            can_structured_output=can_struct,
+            can_tool_call=can_tool,
+            can_verify=can_v,
             source_level="pinned",
             configuration={
                 "source_levels": ("pinned", *sorted(set(levels))),
                 "token_profile_confidence": "high" if maintained else "low",
-                "capability_source": (
-                    "maintained-token-limits" if maintained else "configured-unknown-model-policy"
-                ),
+                "capability_source": desc.capability_source if desc.is_known else ("maintained-token-limits" if maintained else "configured-unknown-model-policy"),
+                "capability_confidence": desc.capability_confidence,
+                "capability_descriptor": desc.to_dict(),
             },
+            capability_descriptor=desc,
         ))
     return tuple(profiles)
 
@@ -228,11 +273,30 @@ def profiles_from_legacy_configuration(
         )
         if window > 0 and output > 0:
             output = min(window, output)
+        desc = resolve_model_capability(provider, model_id)
+        if desc.is_known:
+            can_tool = desc.supports_tool_calls
+            can_p = desc.supports_repository_write
+            can_struct = desc.supports_structured_output
+            can_v = desc.supports_tool_calls or desc.supports_structured_output
+            if desc.supports_tool_calls and desc.supports_repository_write:
+                tools = frozenset({"*"})
+            elif desc.supports_tool_calls:
+                tools = frozenset({"repository_read", "test_execution", "shell"} if desc.supports_repository_read else set())
+            else:
+                tools = frozenset()
+        else:
+            can_tool = False
+            can_p = False
+            can_struct = False
+            can_v = False
+            tools = frozenset()
+
         profiles.append(ModelProfile(
             provider=provider,
             model_id=model_id,
             supported_roles=_ALL_ROLES,
-            supported_tools=frozenset({"*"}),
+            supported_tools=tools,
             reasoning_settings=reasoning,
             context_window=window,
             max_output_tokens=output,
@@ -240,14 +304,19 @@ def profiles_from_legacy_configuration(
             logical_cost_per_1k_tokens=logical_cost,
             reliability_score=reliability,
             benchmark_scores=dict(_LEVEL_BENCHMARKS[strongest]),
+            can_patch=can_p,
+            can_structured_output=can_struct,
+            can_tool_call=can_tool,
+            can_verify=can_v,
             source_level=strongest,
             configuration={
                 "source_levels": tuple(sorted(levels)),
                 "token_profile_confidence": "high" if maintained else "low",
-                "capability_source": (
-                    "maintained-token-limits" if maintained else "configured-unknown-model-policy"
-                ),
+                "capability_source": desc.capability_source if desc.is_known else ("maintained-token-limits" if maintained else "configured-unknown-model-policy"),
+                "capability_confidence": desc.capability_confidence,
+                "capability_descriptor": desc.to_dict(),
             },
+            capability_descriptor=desc,
         ))
     return tuple(profiles)
 

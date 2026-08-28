@@ -53,6 +53,8 @@ INTERNAL_MODEL_CONFIGURATION_KEYS = frozenset(
         "source_levels",
         "source_level",
         "capability_source",
+        "capability_confidence",
+        "capability_descriptor",
         "token_profile_confidence",
     }
 )
@@ -214,6 +216,7 @@ class ModelProfile:
     available: bool = True
     configuration: dict[str, Any] = field(default_factory=dict, compare=False)
     source_level: str = ""
+    capability_descriptor: Any = None
 
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.model_id.strip() or not self.supported_roles:
@@ -399,6 +402,27 @@ class RoutingFailure(RuntimeError):
             "rejected_candidates": [asdict(item) for item in self.rejected],
             "fallback_executed": False,
         }
+
+
+class NoWriteCapableModelAvailableError(RoutingFailure):
+    """Raised when no configured candidate has verified write and tool capabilities."""
+
+    def __init__(
+        self,
+        message: str = "no_write_capable_model_available: No configured model satisfies the required write and tool capabilities.",
+        *,
+        rejected: tuple[CandidateRejection, ...] = (),
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, rejected=rejected)
+        self.error_code = "no_write_capable_model_available"
+        self.diagnostics = diagnostics or {}
+
+    def as_dict(self) -> dict[str, Any]:
+        base = super().as_dict()
+        base["error_code"] = self.error_code
+        base["diagnostics"] = self.diagnostics
+        return base
 
 
 @dataclass(frozen=True, slots=True)
