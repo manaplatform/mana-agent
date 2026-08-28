@@ -86,7 +86,7 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
     )
     openrouter_http_referer: str = Field(
-        default="https://github.com/mana-agent/mana-agent",
+        default="https://github.com/manaplatform/mana-agent",
         alias="OPENROUTER_HTTP_REFERER",
     )
     openrouter_title: str = Field(default="Mana-Agent", alias="OPENROUTER_TITLE")
