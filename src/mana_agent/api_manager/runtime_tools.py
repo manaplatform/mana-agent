@@ -39,25 +39,56 @@ class _Decision(BaseModel):
     session_id: str = Field(default="", min_length=0)
 
 
+ApiWorkflowOutcome = Literal[
+    "api_target_resolved",
+    "api_execution_verified",
+    "user_goal_verified",
+    "documentation_understood",
+    "integration_available",
+    "operation_resolved",
+    "request_previewed",
+    "approval_obtained",
+]
+
+
 class _WorkflowDecision(_Decision):
     task_intent: str = Field(min_length=1)
-    required_actions: tuple[
-        Literal[
-            "documentation_inspection",
-            "integration_import",
-            "integration_configuration",
-            "operation_search",
-            "request_preview",
-            "request_execution",
-        ],
-        ...,
-    ] = Field(min_length=1)
+    required_outcomes: tuple[ApiWorkflowOutcome, ...] = Field(min_length=1)
+    optional_outcomes: tuple[ApiWorkflowOutcome, ...] = ()
     reason: str = Field(min_length=1)
     safe_to_continue: bool
 
-    @field_validator("required_actions", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _normalize_required_actions(cls, v: Any) -> Any:
+    def _normalize_actions_and_outcomes(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            values = dict(values)
+            if "required_outcomes" not in values and "required_actions" in values:
+                action_map = {
+                    "documentation_inspection": "documentation_understood",
+                    "integration_import": "integration_available",
+                    "integration_configuration": "integration_available",
+                    "operation_search": "operation_resolved",
+                    "request_preview": "request_previewed",
+                    "request_execution": "api_execution_verified",
+                }
+                raw_actions = values.pop("required_actions")
+                if isinstance(raw_actions, str):
+                    raw_actions = [raw_actions]
+                mapped = []
+                for action in raw_actions:
+                    mapped.append(action_map.get(str(action), str(action)))
+                if "request_execution" in raw_actions or "api_execution_verified" in raw_actions:
+                    if "api_target_resolved" not in mapped:
+                        mapped.insert(0, "api_target_resolved")
+                values["required_outcomes"] = tuple(dict.fromkeys(mapped))
+            elif "required_actions" in values:
+                values.pop("required_actions", None)
+        return values
+
+    @field_validator("required_outcomes", "optional_outcomes", mode="before")
+    @classmethod
+    def _normalize_outcomes(cls, v: Any) -> Any:
         if isinstance(v, str):
             return (v,)
         if isinstance(v, (list, set)):
@@ -65,37 +96,16 @@ class _WorkflowDecision(_Decision):
         return v
 
     @model_validator(mode="after")
-    def validate_action_dependencies(self) -> "_WorkflowDecision":
-        actions = self.required_actions
-        if len(set(actions)) != len(actions):
-            raise ValueError("required_actions must not contain duplicates")
-        canonical_order = {
-            "documentation_inspection": 0,
-            "integration_import": 1,
-            "integration_configuration": 2,
-            "operation_search": 3,
-            "request_preview": 4,
-            "request_execution": 5,
-        }
-        if list(actions) != sorted(actions, key=canonical_order.__getitem__):
-            raise ValueError("required_actions must follow the declared API lifecycle order")
-        if "request_execution" in actions:
-            missing = [
-                action
-                for action in ("operation_search", "request_preview")
-                if action not in actions
-            ]
-            if missing:
-                raise ValueError(
-                    "request_execution requires declared actions: " + ", ".join(missing)
-                )
-        if "request_preview" in actions and "operation_search" not in actions:
-            raise ValueError("request_preview requires a declared operation_search action")
-        if "integration_import" in actions and "documentation_inspection" not in actions:
-            raise ValueError(
-                "integration_import requires a declared documentation_inspection action"
-            )
+    def validate_outcomes(self) -> "_WorkflowDecision":
+        outcomes = (*self.required_outcomes, *self.optional_outcomes)
+        if len(set(outcomes)) != len(outcomes):
+            raise ValueError("workflow outcomes must not contain duplicates")
         return self
+
+    @property
+    def required_actions(self) -> tuple[str, ...]:
+        """Backward compatibility property returning required outcomes as actions."""
+        return self.required_outcomes
 
 
 class _WorkflowTerminal(_Decision):
@@ -526,8 +536,8 @@ def build_api_manager_langchain_tools(
         StructuredTool.from_function(
             name="api_workflow_decide",
             description=(
-                "Record the model's strict ordered API workflow decision. This must be the first "
-                "API-route tool call; completion is validated against its required_actions."
+                "Record the model's API workflow outcome requirements. This must be the first "
+                "API-route tool call; completion is validated against evidence, not tool names."
             ),
             args_schema=_WorkflowDecision,
             func=workflow_decide,

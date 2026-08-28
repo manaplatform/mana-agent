@@ -74,6 +74,17 @@ from mana_agent.execution_supervisor.verifier import ArtifactVerifier
 EventSink = Callable[[str, dict[str, Any]], None]
 Clock = Callable[[], datetime]
 
+VALID_CHECKPOINT_STATES = frozenset(
+    {
+        ExecutionState.RUNNING,
+        ExecutionState.CHECKPOINTING,
+        ExecutionState.COMPLETED_PENDING_VERIFICATION,
+        ExecutionState.PENDING_BUDGET_DECISION,
+        ExecutionState.WAITING,
+    }
+)
+
+
 
 @runtime_checkable
 class RecoveryReviewPublisher(Protocol):
@@ -1218,21 +1229,92 @@ class ExecutionSupervisor:
         resume_cursor: str = "",
         capsule_revisions: dict[str, int] | None = None,
         provider_metadata: dict[str, Any] | Any | None = None,
-    ) -> CheckpointRecord:
-        original_state = self.store.get_task(task_id).state
-        if original_state not in {ExecutionState.RUNNING, ExecutionState.WAITING}:
-            raise LeaseConflictError(f"task cannot checkpoint from state {original_state.value}")
+        caller: str = "",
+    ) -> CheckpointRecord | None:
+        boundary = str(
+            resume_cursor
+            or (resume_payload.get("boundary") if isinstance(resume_payload, dict) else "")
+            or ""
+        )
+        task_before = self.store.get_task(task_id)
+        current_state = task_before.state
+        self._emit(
+            "checkpoint.requested",
+            task_before,
+            checkpoint_boundary=boundary,
+            current_state=current_state.value,
+            expected_state=ExecutionState.RUNNING.value,
+            attempt_id=attempt_id,
+            caller=caller,
+        )
+
+        if current_state in TERMINAL_STATES:
+            self._emit(
+                "checkpoint.skipped",
+                task_before,
+                checkpoint_boundary=boundary,
+                current_state=current_state.value,
+                expected_state=ExecutionState.RUNNING.value,
+                terminal_reason=task_before.failure_reason,
+                attempt_id=attempt_id,
+                caller=caller,
+                reason="checkpoint_skipped_terminal_state",
+            )
+            return None
+
+        if current_state not in VALID_CHECKPOINT_STATES:
+            self._emit(
+                "checkpoint.rejected",
+                task_before,
+                checkpoint_boundary=boundary,
+                current_state=current_state.value,
+                expected_state=ExecutionState.RUNNING.value,
+                attempt_id=attempt_id,
+                caller=caller,
+                reason=f"task cannot checkpoint from state {current_state.value}",
+            )
+            raise LeaseConflictError(f"task cannot checkpoint from state {current_state.value}")
+
+        self._emit(
+            "checkpoint.allowed",
+            task_before,
+            checkpoint_boundary=boundary,
+            current_state=current_state.value,
+            expected_state=ExecutionState.RUNNING.value,
+            attempt_id=attempt_id,
+            caller=caller,
+        )
+
+        original_state = current_state
 
         def begin(task: TaskRecord) -> None:
+            if task.state in TERMINAL_STATES:
+                return
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             validate_transition(task.state, ExecutionState.CHECKPOINTING)
             task.state = ExecutionState.CHECKPOINTING
             task.updated_at = self.clock()
 
         checkpointing, _ = self.store.update_task(task_id, begin)
+        if checkpointing.state in TERMINAL_STATES:
+            self._emit(
+                "checkpoint.skipped",
+                checkpointing,
+                checkpoint_boundary=boundary,
+                current_state=checkpointing.state.value,
+                expected_state=ExecutionState.RUNNING.value,
+                terminal_reason=checkpointing.failure_reason,
+                attempt_id=attempt_id,
+                caller=caller,
+                reason="checkpoint_skipped_terminal_state",
+            )
+            return None
+
         self._emit("task_checkpointing", checkpointing)
 
-        def persist(task: TaskRecord) -> CheckpointRecord:
+        def persist(task: TaskRecord) -> CheckpointRecord | None:
+            if task.state in TERMINAL_STATES:
+                return None
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             if task.state != ExecutionState.CHECKPOINTING:
                 raise LeaseConflictError(f"task cannot checkpoint from state {task.state.value}")
@@ -1271,13 +1353,49 @@ class ExecutionSupervisor:
             task.state = original_state
             task.updated_at = self.clock()
             return checkpoint
+
         task, checkpoint = self.store.update_task_and_checkpoint(task_id, persist)
+        if checkpoint is None:
+            self._emit(
+                "checkpoint.skipped",
+                task,
+                checkpoint_boundary=boundary,
+                current_state=task.state.value,
+                expected_state=ExecutionState.RUNNING.value,
+                terminal_reason=task.failure_reason,
+                attempt_id=attempt_id,
+                caller=caller,
+                reason="checkpoint_skipped_terminal_state",
+            )
+            return None
+
         attempt = self.store.get_attempt(attempt_id)
         if attempt:
             attempt.checkpoint_id = checkpoint.checkpoint_id
             self.store.save_attempt(attempt)
-        self._emit("checkpoint_saved", task, checkpoint_id=checkpoint.checkpoint_id)
+        self._emit(
+            "checkpoint_saved",
+            task,
+            checkpoint_id=checkpoint.checkpoint_id,
+            checkpoint_boundary=boundary,
+        )
+        self._emit(
+            "checkpoint.saved",
+            task,
+            checkpoint_id=checkpoint.checkpoint_id,
+            checkpoint_boundary=boundary,
+        )
         return checkpoint
+
+    def can_checkpoint(self, task_id: str) -> bool:
+        """Check whether the authoritative durable state of the task permits checkpointing."""
+        try:
+            task = self.store.get_task(task_id)
+        except Exception:
+            return False
+        if task is None:
+            return False
+        return task.state in VALID_CHECKPOINT_STATES and task.state not in TERMINAL_STATES
 
     def suspend_for_human_input(
         self,
@@ -3483,7 +3601,13 @@ class ExecutionSupervisor:
                     self._emit("task_recovered", task, action="repaired_from_authoritative_escrow")
                     continue
                 elif (
-                    escrow_result.status in {EscrowStatus.STORED, EscrowStatus.AVAILABLE, EscrowStatus.DELIVERED, EscrowStatus.ACKNOWLEDGED}
+                    escrow_result.status in {
+                        EscrowStatus.PRODUCED,
+                        EscrowStatus.STORED,
+                        EscrowStatus.AVAILABLE,
+                        EscrowStatus.DELIVERED,
+                        EscrowStatus.ACKNOWLEDGED,
+                    }
                     and (not task.result_id or task.state in {ExecutionState.RUNNING, ExecutionState.LEASED, ExecutionState.COMPLETED_PENDING_VERIFICATION})
                 ):
                     def relink_result(current: TaskRecord) -> None:

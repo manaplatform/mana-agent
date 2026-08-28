@@ -2,6 +2,30 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-28
+
+- Fixed Checkpoint Lifecycle Race and Terminal State Transition Bug:
+  - Resolved `Gateway execution failed: task cannot checkpoint from state failed` by centralizing checkpoint transition authority in `ExecutionSupervisor.can_checkpoint()` and enforcing durable supervisor state over stale in-memory task projections.
+  - Updated `ExecutionSupervisor.checkpoint()` and `LocalExecutionStore.update_task_and_checkpoint()` with atomic compare-and-set semantics that safely skip checkpointing with typed diagnostics (`checkpoint.skipped` event with reason `checkpoint_skipped_terminal_state`) when an execution is already terminal (`failed`, `cancelled`, `completed`, `budget_exhausted`, `recovery_review_required`).
+  - Guaranteed that late/stale callbacks from cleanup handlers, feature integration, verification preparation, or post-processing never overwrite the original task failure reason, result escrow, verification state, or terminal metadata.
+  - Ensured checkpoint failures for active `RUNNING` executions (e.g. invalid lease tokens or uncommitted store writes) continue to surface as real errors.
+  - Enforced strict state machine transitions in `state_machine.py` so that direct `FAILED -> CHECKPOINTING` is rejected and recovery from failed executions strictly follows explicit state transitions (`FAILED -> RETRY_SCHEDULED -> QUEUED -> LEASED -> RUNNING -> CHECKPOINTING`).
+  - Added structured lifecycle instrumentation events (`checkpoint.requested`, `checkpoint.allowed`, `checkpoint.skipped`, `checkpoint.rejected`) with diagnostic metadata (`task_id`, `execution_id`, `current_state`, `expected_state`, `caller`, `checkpoint_boundary`, `terminal_reason`, `attempt_id`).
+  - Updated `LaneCoordinator.checkpoint()` and `chat_gateway.py` to guard checkpoint calls with `can_checkpoint` checks and handle skipped checkpoints without crashing.
+  - Added comprehensive regression test suite in `tests/execution_supervisor/test_checkpoint_lifecycle_races.py` covering failure-before-checkpoint, concurrent failure races, normal checkpoint lifecycle, completed execution late callbacks, recovery transitions, original error preservation, restart reconciliation, running task invalid lease rejection, and lane coordinator terminal handling.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_checkpoint_lifecycle_races.py tests/gateway/test_checkpoint_resume_invariants.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py -v`.
+
+- Made API Workflow Validation Evidence-Based Instead of Tool-Name-Based:
+  - Removed mandatory fixed tool-name sequence requirements (`documentation_inspection`, `request_preview`, `request_execution`) on the `api` route.
+  - Refactored `_WorkflowDecision` schema in `src/mana_agent/api_manager/runtime_tools.py` to declare outcome requirements (`required_outcomes` and `optional_outcomes`) with support for `api_target_resolved`, `api_execution_verified`, `user_goal_verified`, `documentation_understood`, `integration_available`, `operation_resolved`, `request_previewed`, and `approval_obtained`. Added backward compatibility validator and property for legacy `required_actions`.
+  - Refactored `_api_workflow_completion_from_trace` in `src/mana_agent/gateway/chat_gateway.py` to validate outcome-based evidence instead of tool-name sequences, normalizing execution results from any authorized execution capability (`api_request_execute`, browser executors, connectors, HTTP runtimes) into a standard `api_execution_evidence` contract.
+  - Separated `actual_tool_events` (observability trace) from authoritative workflow completion evidence.
+  - Made request preview policy-based rather than universally mandatory: safe read-only operations (`GET`, `HEAD`, `OPTIONS`) may skip preview, while mutations (`POST`, `PUT`, `PATCH`, `DELETE`) continue to enforce preview and approval before execution.
+  - Made documentation inspection optional when the operation/integration is already saved or directly executable. Allowed documentation to be inspected via `api_docs_inspect` or `browser_inspect`.
+  - Updated API route system prompt instructions in `chat_gateway.py`, documentation in `docs/api-manager.md`, and skill instructions in `skills/api-manager/SKILL.md`.
+  - Updated test suite in `tests/test_api_manager.py` and `tests/gateway/test_api_manager_route.py` with comprehensive regression coverage for read-only execution without preview/docs, browser documentation with connector execution, saved integration execution without reinspection, mutation preview enforcement, and tool trace separation.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
 ## 2026-08-27
 
 - Fixed Authoritative Result Escrow Recovery, Stale Task Lifecycle Repair, and Single-Writer Coordination:

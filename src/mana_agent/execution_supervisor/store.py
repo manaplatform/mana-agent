@@ -89,8 +89,8 @@ class ExecutionStore(Protocol):
         self, task_id: str, updater: Callable[[TaskRecord], AttemptRecord]
     ) -> tuple[TaskRecord, AttemptRecord]: ...
     def update_task_and_checkpoint(
-        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord]
-    ) -> tuple[TaskRecord, CheckpointRecord]: ...
+        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord | None]
+    ) -> tuple[TaskRecord, CheckpointRecord | None]: ...
     def update_task_and_result(
         self, task_id: str, updater: Callable[[TaskRecord], EscrowResult]
     ) -> tuple[TaskRecord, EscrowResult]: ...
@@ -303,18 +303,19 @@ class LocalExecutionStore:
             return task, attempt
 
     def update_task_and_checkpoint(
-        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord]
-    ) -> tuple[TaskRecord, CheckpointRecord]:
+        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord | None]
+    ) -> tuple[TaskRecord, CheckpointRecord | None]:
         with self.locked():
             task = self.get_task(task_id)
             version = task.state_version
             checkpoint = updater(task)
-            task.state_version = version + 1
-            self._atomic_write(
-                self.root / "checkpoints" / f"{checkpoint.checkpoint_id}.json",
-                checkpoint.model_dump(mode="json"),
-            )
-            self._atomic_write(self._task_path(task_id), task.model_dump(mode="json"))
+            if checkpoint is not None:
+                task.state_version = version + 1
+                self._atomic_write(
+                    self.root / "checkpoints" / f"{checkpoint.checkpoint_id}.json",
+                    checkpoint.model_dump(mode="json"),
+                )
+                self._atomic_write(self._task_path(task_id), task.model_dump(mode="json"))
             return task, checkpoint
 
     def update_task_and_result(

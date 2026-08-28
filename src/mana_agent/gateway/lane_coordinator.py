@@ -1050,6 +1050,10 @@ class LaneCoordinator:
         if heartbeat_thread is not None and heartbeat_thread is not threading.current_thread():
             heartbeat_thread.join(timeout=min(5.0, self.execution_supervisor.config.lease_seconds / 2))
 
+    def can_checkpoint(self, task_id: str) -> bool:
+        """Check whether the authoritative execution supervisor permits checkpointing."""
+        return self.execution_supervisor.can_checkpoint(task_id)
+
     def checkpoint(
         self,
         task_id: str,
@@ -1059,7 +1063,9 @@ class LaneCoordinator:
         completed_steps: Sequence[str] = (),
         pending_steps: Sequence[str] = (),
     ) -> str:
-        execution = self._executions[task_id]
+        execution = self._executions.get(task_id)
+        if execution is None:
+            return ""
         checkpoint = self.execution_supervisor.checkpoint(
             task_id,
             attempt_id=execution.supervisor_attempt_id,
@@ -1078,7 +1084,19 @@ class LaneCoordinator:
             ],
             budget_snapshot=asdict(execution.budget),
             resume_cursor=boundary,
+            caller="lane_coordinator",
         )
+        if checkpoint is None:
+            self.emit(
+                "checkpoint.skipped",
+                task_id=task_id,
+                lane_id=execution.owning_lane,
+                checkpoint_id=execution.checkpoint_id,
+                boundary=boundary,
+                status="skipped",
+            )
+            return execution.checkpoint_id or ""
+
         execution.checkpoint_id = checkpoint.checkpoint_id
         execution.updated_at = _iso()
         with self._condition:

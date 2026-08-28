@@ -14,6 +14,95 @@ from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDeci
 from mana_agent.gateway.turn_engine import _serialize_tool_traces
 
 
+def _outcome_trace(executor: str = "api_request_execute", *, method: str = "GET") -> SimpleNamespace:
+    return SimpleNamespace(
+        answer="The API returned a result.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps({
+                    "ok": True,
+                    "result": {
+                        "task_intent": "look up the requested resource",
+                        "required_outcomes": [
+                            "api_target_resolved",
+                            "api_execution_verified",
+                        ],
+                        "reason": "A live response is required.",
+                        "safe_to_continue": True,
+                    },
+                }),
+            },
+            {
+                "tool_name": executor,
+                "status": "ok",
+                "output_preview": json.dumps({
+                    "ok": True,
+                    "result": {
+                        "executed": True,
+                        "upstream_ok": True,
+                        "status_code": 200,
+                        "method": method,
+                        "redacted_url": "https://api.example.test/resource",
+                        "response_received": True,
+                        "json_body": {"value": "result"},
+                    },
+                }),
+            },
+        ],
+    )
+
+
+def test_api_workflow_read_only_execution_needs_no_preview_or_documentation() -> None:
+    completion = _api_workflow_completion_from_trace(_outcome_trace())
+
+    assert completion["valid"] is True
+    assert completion["missing_actions"] == []
+    assert completion["execution_evidence"]["execution_verified"] is True
+    assert completion["execution_evidence"]["executor"] == "api_request_execute"
+
+
+def test_api_workflow_accepts_authorized_non_api_manager_executor() -> None:
+    completion = _api_workflow_completion_from_trace(
+        _outcome_trace("authorized_http_connector")
+    )
+
+    assert completion["valid"] is True
+    assert completion["execution_evidence"]["executor"] == "authorized_http_connector"
+
+
+def test_api_workflow_requires_preview_for_mutations() -> None:
+    completion = _api_workflow_completion_from_trace(_outcome_trace(method="POST"))
+
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_incomplete"
+    assert "api_execution_verified" in completion["missing_actions"]
+
+
+def test_api_workflow_does_not_count_documentation_or_model_claim_as_execution() -> None:
+    response = _outcome_trace()
+    response.trace = response.trace[:1] + [
+        {
+            "tool_name": "api_docs_inspect",
+            "status": "ok",
+            "output_preview": '{"ok":true,"result":{"text":"GET /resource"}}',
+        },
+    ]
+    response.answer = "The API returned HTTP 200."
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is False
+    assert completion["execution_evidence"] == {}
+    assert completion["missing_actions"] == [
+        "api_target_resolved",
+        "api_execution_verified",
+    ]
+
+
 def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
     class ModelToolExecutor:
         def run(self, *, question: str, system_prompt: str, tool_policy: dict, **kwargs):
@@ -37,7 +126,7 @@ def test_api_route_uses_only_narrow_manager_tools(tmp_path: Path) -> None:
             assert "retry the same import" in system_prompt
             assert "refresh_integration_id" in system_prompt
             assert "redacted saved-integration snapshot" in system_prompt
-            assert "declare only operation_search, request_preview, and request_execution" in system_prompt
+            assert "api_target_resolved, api_execution_verified" in system_prompt
             assert "Never type, submit forms, sign in" in system_prompt
             assert "Never claim an API call succeeded" in system_prompt
             assert "explicit risk=read_only declaration" in system_prompt
@@ -194,10 +283,10 @@ def test_api_route_treats_documentation_url_as_optional_when_integration_is_save
     )
 
     assert result.mode == "route-api"
-    assert result.payload["workflow_completion"]["required_actions"] == [
-        "operation_search",
-        "request_preview",
-        "request_execution",
+    assert result.payload["workflow_completion"]["required_outcomes"] == [
+        "operation_resolved",
+        "request_previewed",
+        "api_execution_verified",
     ]
 
 
@@ -378,9 +467,9 @@ def test_api_route_does_not_complete_without_required_execution_evidence(
     assert result.mode == "route-api-incomplete"
     assert result.error == "api_workflow_incomplete"
     assert result.payload["workflow_completion"]["missing_actions"] == [
-        "operation_search",
-        "request_preview",
-        "request_execution",
+        "operation_resolved",
+        "request_previewed",
+        "api_execution_verified",
     ]
 
 
@@ -472,7 +561,7 @@ def test_api_route_surfaces_valid_execution_when_import_remains_incomplete(
 
     assert result.mode == "route-api-incomplete"
     assert result.payload["workflow_completion"]["missing_actions"] == [
-        "integration_import"
+        "integration_available"
     ]
     assert "overall workflow remains incomplete" in result.answer
     assert '"city": "Shiraz"' in result.answer
@@ -551,7 +640,7 @@ def test_api_workflow_rejects_unparseable_non_clipped_evidence() -> None:
                         "ok": True,
                         "result": {
                             "task_intent": "inspect API documentation",
-                            "required_actions": ["documentation_inspection"],
+                            "required_outcomes": ["documentation_understood"],
                             "reason": "Documentation evidence is required.",
                             "safe_to_continue": True,
                         },
@@ -569,7 +658,7 @@ def test_api_workflow_rejects_unparseable_non_clipped_evidence() -> None:
     completion = _api_workflow_completion_from_trace(response)
 
     assert completion["valid"] is False
-    assert completion["missing_actions"] == ["documentation_inspection"]
+    assert completion["missing_actions"] == ["documentation_understood"]
 
 
 def test_api_workflow_recovers_when_workflow_decision_retried_after_validation_error() -> None:
@@ -579,8 +668,8 @@ def test_api_workflow_recovers_when_workflow_decision_retried_after_validation_e
                 "tool_name": "api_workflow_decide",
                 "status": "error",
                 "output_preview": (
-                    "1 validation error for _WorkflowDecision\nrequired_actions\n"
-                    "  Input should be a valid tuple [type=tuple_type, input_value='operation_search', input_type=str]"
+                    "1 validation error for _WorkflowDecision\nrequired_outcomes\n"
+                    "  Input should be a valid tuple [type=tuple_type, input_value='operation_resolved', input_type=str]"
                 ),
             },
             {
@@ -591,7 +680,7 @@ def test_api_workflow_recovers_when_workflow_decision_retried_after_validation_e
                         "ok": True,
                         "result": {
                             "task_intent": "search available operations",
-                            "required_actions": ["operation_search"],
+                            "required_outcomes": ["operation_resolved"],
                             "reason": "Search is required to discover matching operations.",
                             "safe_to_continue": True,
                         },
@@ -618,7 +707,7 @@ def test_api_workflow_recovers_when_workflow_decision_retried_after_validation_e
     assert completion["valid"] is True
     assert completion["error_code"] == ""
     assert completion["missing_actions"] == []
-    assert completion["completed_actions"] == ["operation_search"]
+    assert "operation_resolved" in completion["completed_outcomes"]
 
 
 def test_api_workflow_rejects_when_first_tool_is_not_workflow_decide() -> None:
@@ -667,11 +756,11 @@ def test_api_workflow_accepts_execution_evidence_when_output_preview_is_truncate
             "integration_id": "api_9de895d68869da96eaf42393",
             "operation_id": "21dc79663be7391405e98eefd6599f93",
             "method": "GET",
-            "redacted_url": "https://api.alquran.cloud/v1/search/joined/all/en.sahih",
+            "redacted_url": "https://dummyjson.com/products/search?q=phone",
             "status_code": 200,
             "executed": True,
             "upstream_ok": True,
-            "json_body": {"count": 100, "matches": [{"text": "sample"}] * 100},
+            "json_body": {"total": 100, "products": [{"title": "sample"}] * 100},
         },
     }
 
@@ -689,7 +778,7 @@ def test_api_workflow_accepts_execution_evidence_when_output_preview_is_truncate
                     {
                         "ok": True,
                         "result": {
-                            "task_intent": "search text and execute API request",
+                            "task_intent": "search products and execute API request",
                             "required_actions": [
                                 "operation_search",
                                 "request_preview",
@@ -734,7 +823,7 @@ def test_api_workflow_accepts_execution_evidence_when_output_preview_is_truncate
     assert "request_execution" in completion["completed_actions"]
     assert completion["execution_evidence"]["status_code"] == 200
     assert completion["execution_evidence"]["operation_id"] == "21dc79663be7391405e98eefd6599f93"
-
+    
 
 def test_tool_invocation_trace_preserves_structured_result_in_serialization() -> None:
     trace = ToolInvocationTrace(
@@ -964,17 +1053,7 @@ def test_api_workflow_accepts_unsupported_terminal_after_complete_inspection() -
     assert completion["valid"] is True
     assert completion["error_code"] == ""
 
-    assert completion["completed_actions"] == [
-        "documentation_inspection"
-    ]
-
-    assert completion["waived_actions"] == [
-        "integration_import",
-        "operation_search",
-        "request_preview",
-        "request_execution",
-    ]
-
+    assert "documentation_understood" in completion["completed_outcomes"]
     assert completion["missing_actions"] == []
     assert completion["unexpected_actions"] == []
 
@@ -984,7 +1063,8 @@ def test_api_workflow_accepts_unsupported_terminal_after_complete_inspection() -
         completion["terminal_evidence"]["outcome"]
         == "unsupported_documentation"
     )
-    
+
+
 def test_api_workflow_rejects_unsupported_terminal_before_complete_inspection() -> None:
     documentation_ref = "sha256:" + ("b" * 64)
 
@@ -1019,19 +1099,16 @@ def test_api_workflow_rejects_unsupported_terminal_before_complete_inspection() 
                 "status": "ok",
                 "output_preview": json.dumps(
                     {
-                        "ok": True,
-                        "result": {
-                            "reference": "https://example.test/docs",
-                            "documentation_ref": documentation_ref,
-                            "content_type": "text/html",
-                            "bytes": 8000,
-                            "text": "A" * 2000,
-                            "offset": 0,
-                            "limit": 2000,
-                            "next_offset": 2000,
-                            "truncated": True,
-                            "more_available": True,
-                        },
+                        "reference": "https://example.test/docs",
+                        "documentation_ref": documentation_ref,
+                        "content_type": "text/html",
+                        "bytes": 8000,
+                        "text": "A" * 2000,
+                        "offset": 0,
+                        "limit": 2000,
+                        "next_offset": 2000,
+                        "truncated": True,
+                        "more_available": True,
                     }
                 ),
             },
@@ -1066,12 +1143,311 @@ def test_api_workflow_rejects_unsupported_terminal_before_complete_inspection() 
     assert completion["waived_actions"] == []
 
     assert completion["missing_actions"] == [
-        "documentation_inspection",
-        "integration_import",
-        "operation_search",
-        "request_preview",
-        "request_execution",
+        "documentation_understood",
+        "integration_available",
+        "operation_resolved",
+        "request_previewed",
+        "api_execution_verified",
     ]
 
     assert completion["terminal_outcome"] == ""
     assert completion["terminal_evidence"] == {}
+
+
+def test_api_workflow_dummyjson_search_evidence_satisfies_goal() -> None:
+    response = SimpleNamespace(
+        answer="Found products matching 'phone' in the catalog.",
+        sources=[],
+        warnings=[],
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "search products matching 'phone'",
+                            "required_outcomes": [
+                                "api_target_resolved",
+                                "api_execution_verified",
+                                "user_goal_verified",
+                            ],
+                            "reason": "Real API execution is required to retrieve product results.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "search_products", "path": "/products/search"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                            "method": "GET",
+                            "redacted_url": "https://dummyjson.com/products/search?q=phone",
+                            "response_received": True,
+                            "json_body": {
+                                "total": 15,
+                                "products": [{"title": "iPhone 9", "description": "An apple mobile phone"}],
+                            },
+                        },
+                    }
+                ),
+            },
+        ],
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["goal_satisfied"] is True
+    assert completion["missing_actions"] == []
+    assert completion["execution_evidence"]["execution_verified"] is True
+    assert completion["execution_evidence"]["target_origin"] == "https://dummyjson.com"
+    assert completion["execution_evidence"]["status_code"] == 200
+    assert len(completion["actual_tool_events"]) == 2
+
+def test_api_workflow_browser_docs_with_authorized_executor() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect docs and call endpoint",
+                            "required_outcomes": [
+                                "documentation_understood",
+                                "api_execution_verified",
+                            ],
+                            "reason": "Inspect documentation and execute request.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "browser_inspect",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "text": "Endpoint: GET /v1/data. Status: 200 OK.",
+                    }
+                ),
+            },
+            {
+                "tool_name": "authorized_http_connector",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                            "method": "GET",
+                            "redacted_url": "https://api.example.test/v1/data",
+                            "response_received": True,
+                            "json_body": {"items": [1, 2, 3]},
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["goal_satisfied"] is True
+    assert completion["missing_actions"] == []
+    assert "documentation_understood" in completion["completed_outcomes"]
+    assert completion["execution_evidence"]["executor"] == "authorized_http_connector"
+    assert completion["execution_evidence"]["status_code"] == 200
+
+
+def test_api_workflow_saved_integration_without_reinspection() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "call saved integration",
+                            "required_outcomes": [
+                                "operation_resolved",
+                                "api_execution_verified",
+                            ],
+                            "reason": "Saved operation is already available.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": [{"operation_id": "lookup_user"}],
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                            "method": "GET",
+                            "redacted_url": "https://api.crm.test/users/42",
+                            "response_received": True,
+                            "json_body": {"id": 42, "name": "Alice"},
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert completion["missing_actions"] == []
+    assert "operation_resolved" in completion["completed_outcomes"]
+    assert "api_execution_verified" in completion["completed_outcomes"]
+    assert completion["execution_evidence"]["status_code"] == 200
+
+
+def test_api_workflow_mutation_without_preview_fails_policy() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "create user record",
+                            "required_outcomes": [
+                                "api_target_resolved",
+                                "api_execution_verified",
+                            ],
+                            "reason": "POST mutation request.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 201,
+                            "method": "POST",
+                            "redacted_url": "https://api.crm.test/users",
+                            "response_received": True,
+                            "json_body": {"id": 100},
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    # Mutation without preview or approval fails the preview policy
+    assert completion["valid"] is False
+    assert completion["error_code"] == "api_workflow_incomplete"
+    assert "api_execution_verified" in completion["missing_actions"]
+
+
+def test_api_workflow_separates_actual_tool_events_from_evidence() -> None:
+    response = SimpleNamespace(
+        trace=[
+            {
+                "tool_name": "api_workflow_decide",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "task_intent": "inspect and call",
+                            "required_outcomes": [
+                                "api_target_resolved",
+                                "api_execution_verified",
+                            ],
+                            "reason": "Execution required.",
+                            "safe_to_continue": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "tool_name": "api_operations_search",
+                "status": "ok",
+                "output_preview": '{"ok":true,"result":[{"operation_id":"op1"}]}',
+            },
+            {
+                "tool_name": "api_request_execute",
+                "status": "ok",
+                "output_preview": json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "executed": True,
+                            "upstream_ok": True,
+                            "status_code": 200,
+                            "method": "GET",
+                            "redacted_url": "https://api.test/data",
+                            "response_received": True,
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    completion = _api_workflow_completion_from_trace(response)
+
+    assert completion["valid"] is True
+    assert isinstance(completion["actual_tool_events"], list)
+    assert len(completion["actual_tool_events"]) == 2
+    assert completion["actual_tool_events"][0]["tool_name"] == "api_operations_search"
+    assert completion["actual_tool_events"][1]["tool_name"] == "api_request_execute"
+    assert completion["execution_evidence"]["execution_verified"] is True
+    assert completion["execution_evidence"]["executor"] == "api_request_execute"

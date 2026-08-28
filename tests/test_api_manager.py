@@ -1118,30 +1118,23 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
     assert "base_url" not in properties
 
 
-def test_api_workflow_execution_requires_declared_search_and_preview() -> None:
-    with pytest.raises(ValueError, match="request_execution requires declared actions"):
-        _WorkflowDecision(
-            source_decision_id="decision-api",
-            session_id="session-api",
-            task_intent="execute saved operation",
-            required_actions=("request_execution",),
-            reason="The user requested a live API call.",
-            safe_to_continue=True,
-        )
-
+def test_api_workflow_decision_supports_outcomes_and_legacy_actions() -> None:
     decision = _WorkflowDecision(
         source_decision_id="decision-api",
         session_id="session-api",
         task_intent="execute saved operation",
-        required_actions=("operation_search", "request_preview", "request_execution"),
-        reason="Search, preview, and execute the selected operation.",
+        required_outcomes=("api_target_resolved", "api_execution_verified"),
+        reason="Target resolution and execution are required.",
         safe_to_continue=True,
     )
 
+    assert decision.required_outcomes == (
+        "api_target_resolved",
+        "api_execution_verified",
+    )
     assert decision.required_actions == (
-        "operation_search",
-        "request_preview",
-        "request_execution",
+        "api_target_resolved",
+        "api_execution_verified",
     )
 
 
@@ -1150,21 +1143,31 @@ def test_api_workflow_decision_normalizes_string_and_list_inputs() -> None:
         source_decision_id="decision-api",
         session_id="session-api",
         task_intent="search operations",
-        required_actions="operation_search",
+        required_outcomes="api_target_resolved",
         reason="Search is required.",
         safe_to_continue=True,
     )
-    assert single_string.required_actions == ("operation_search",)
+    assert single_string.required_outcomes == ("api_target_resolved",)
 
     from_list = _WorkflowDecision(
         source_decision_id="decision-api",
         session_id="session-api",
         task_intent="search and preview",
-        required_actions=["operation_search", "request_preview"],
+        required_outcomes=["api_target_resolved", "request_previewed"],
         reason="Search and preview are required.",
         safe_to_continue=True,
     )
-    assert from_list.required_actions == ("operation_search", "request_preview")
+    assert from_list.required_outcomes == ("api_target_resolved", "request_previewed")
+
+    legacy = _WorkflowDecision(
+        source_decision_id="decision-api",
+        session_id="session-api",
+        task_intent="execute saved operation",
+        required_actions=["operation_search", "request_execution"],
+        reason="Execute operation.",
+        safe_to_continue=True,
+    )
+    assert "api_execution_verified" in legacy.required_outcomes
 
 
 def test_api_route_decision_normalizes_risk_reason_and_tuple_fields() -> None:
@@ -1545,7 +1548,7 @@ def test_api_approval_denial_does_not_execute_http(
 AL_QURAN_OPENAPI: dict[str, Any] = {
     "openapi": "3.0.3",
     "info": {"title": "Al Quran Cloud API", "version": "1.0", "description": "Quran API"},
-    "servers": [{"url": "https://api.alquran.cloud/v1"}],
+    "servers": [{"url": "https://api.thecatapi.com/v1"}],
     "paths": {
         "/surah": {
             "get": {
