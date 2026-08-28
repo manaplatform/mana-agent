@@ -134,7 +134,14 @@ class ModelRouter:
                     rejected=tuple(rejected),
                     diagnostics=diagnostics,
                 )
-            raise RoutingFailure("No configured model satisfies the routing capability, reliability, latency, and budget constraints. No fallback action was executed.", rejected=tuple(rejected))
+            rejection_details = "; ".join(
+                f"{item.model} ({', '.join(item.reasons)})" for item in rejected
+            )
+            msg = "No configured model satisfies the routing capability, reliability, latency, and budget constraints."
+            if rejection_details:
+                msg = f"{msg} Rejected candidates: {rejection_details}."
+            msg = f"{msg} No fallback action was executed."
+            raise RoutingFailure(msg, rejected=tuple(rejected))
         scored.sort(key=lambda item: (-item.score, item.estimated_cost is None, item.estimated_cost or 0.0, item.profile.key))
         winner = scored[0]
         winner_desc = getattr(winner.profile, "capability_descriptor", None)

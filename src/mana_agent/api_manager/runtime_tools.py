@@ -51,40 +51,47 @@ ApiWorkflowOutcome = Literal[
 ]
 
 
+def migrate_legacy_workflow_decision(data: dict[str, Any]) -> dict[str, Any]:
+    """Explicit versioned migration for historical API workflow decision dictionaries.
+
+    Migrates historical `required_actions` declarations into modern semantic outcomes
+    (api_execution_verified, user_goal_verified) without turning optional implementation
+    steps into mandatory requirements.
+    """
+    data = dict(data)
+    if "required_outcomes" in data:
+        return data
+    raw_actions = data.pop("required_actions", None) or ()
+    if isinstance(raw_actions, str):
+        raw_actions = [raw_actions]
+    actions_set = set(str(a).strip() for a in raw_actions if str(a).strip())
+    if "request_execution" in actions_set or "api_execution_verified" in actions_set:
+        data["required_outcomes"] = ("api_execution_verified", "user_goal_verified")
+        data["optional_outcomes"] = tuple(
+            item
+            for item in (
+                "documentation_understood" if "documentation_inspection" in actions_set else None,
+                "integration_available" if ("integration_import" in actions_set or "integration_configuration" in actions_set) else None,
+                "operation_resolved" if "operation_search" in actions_set else None,
+                "request_previewed" if "request_preview" in actions_set else None,
+            )
+            if item is not None
+        )
+    elif "documentation_inspection" in actions_set:
+        data["required_outcomes"] = ("documentation_understood",)
+        data["optional_outcomes"] = ()
+    else:
+        data["required_outcomes"] = ("api_execution_verified", "user_goal_verified")
+        data["optional_outcomes"] = ()
+    return data
+
+
 class _WorkflowDecision(_Decision):
     task_intent: str = Field(min_length=1)
     required_outcomes: tuple[ApiWorkflowOutcome, ...] = Field(min_length=1)
     optional_outcomes: tuple[ApiWorkflowOutcome, ...] = ()
     reason: str = Field(min_length=1)
     safe_to_continue: bool
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_actions_and_outcomes(cls, values: Any) -> Any:
-        if isinstance(values, dict):
-            values = dict(values)
-            if "required_outcomes" not in values and "required_actions" in values:
-                action_map = {
-                    "documentation_inspection": "documentation_understood",
-                    "integration_import": "integration_available",
-                    "integration_configuration": "integration_available",
-                    "operation_search": "operation_resolved",
-                    "request_preview": "request_previewed",
-                    "request_execution": "api_execution_verified",
-                }
-                raw_actions = values.pop("required_actions")
-                if isinstance(raw_actions, str):
-                    raw_actions = [raw_actions]
-                mapped = []
-                for action in raw_actions:
-                    mapped.append(action_map.get(str(action), str(action)))
-                if "request_execution" in raw_actions or "api_execution_verified" in raw_actions:
-                    if "api_target_resolved" not in mapped:
-                        mapped.insert(0, "api_target_resolved")
-                values["required_outcomes"] = tuple(dict.fromkeys(mapped))
-            elif "required_actions" in values:
-                values.pop("required_actions", None)
-        return values
 
     @field_validator("required_outcomes", "optional_outcomes", mode="before")
     @classmethod

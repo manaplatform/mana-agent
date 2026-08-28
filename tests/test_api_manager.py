@@ -1159,15 +1159,32 @@ def test_api_workflow_decision_normalizes_string_and_list_inputs() -> None:
     )
     assert from_list.required_outcomes == ("api_target_resolved", "request_previewed")
 
-    legacy = _WorkflowDecision(
-        source_decision_id="decision-api",
-        session_id="session-api",
-        task_intent="execute saved operation",
-        required_actions=["operation_search", "request_execution"],
-        reason="Execute operation.",
-        safe_to_continue=True,
-    )
-    assert "api_execution_verified" in legacy.required_outcomes
+    # Historical decision with only required_actions is rejected unless migrated explicitly
+    with pytest.raises(Exception):
+        _WorkflowDecision.model_validate({
+            "source_decision_id": "decision-api",
+            "session_id": "session-api",
+            "task_intent": "execute saved operation",
+            "required_actions": ["operation_search", "request_execution"],
+            "reason": "Execute operation.",
+            "safe_to_continue": True,
+        })
+
+    from mana_agent.api_manager.runtime_tools import migrate_legacy_workflow_decision
+
+    migrated = migrate_legacy_workflow_decision({
+        "source_decision_id": "decision-api",
+        "session_id": "session-api",
+        "task_intent": "execute saved operation",
+        "required_actions": ["operation_search", "request_execution"],
+        "reason": "Execute operation.",
+        "safe_to_continue": True,
+    })
+    assert migrated["required_outcomes"] == ("api_execution_verified", "user_goal_verified")
+    assert "operation_resolved" in migrated["optional_outcomes"]
+    decision = _WorkflowDecision(**migrated)
+    assert "api_execution_verified" in decision.required_outcomes
+    assert "user_goal_verified" in decision.required_outcomes
 
 
 def test_api_route_decision_normalizes_risk_reason_and_tuple_fields() -> None:
@@ -1360,7 +1377,7 @@ def test_api_tool_execution_context_binds_session_authoritatively(tmp_path: Path
     # Calling api_workflow_decide without passing session_id uses host session
     raw = tool_map["api_workflow_decide"].invoke({
         "task_intent": "inspect documentation",
-        "required_actions": ["documentation_inspection"],
+        "required_outcomes": ["documentation_understood"],
         "reason": "Inspecting docs.",
         "safe_to_continue": True,
     })
@@ -1385,7 +1402,7 @@ def test_api_tool_execution_context_rejects_session_mismatch(tmp_path: Path) -> 
             "session_id": "malicious-session-override",
             "source_decision_id": "turn-789:decision",
             "task_intent": "inspect documentation",
-            "required_actions": ["documentation_inspection"],
+            "required_outcomes": ["documentation_understood"],
             "reason": "Inspecting docs.",
             "safe_to_continue": True,
         })
@@ -1728,7 +1745,7 @@ def test_identity_resolution_accepts_model_suffixes_and_blocks_cross_session(tmp
         "source_decision_id": "exec_08bb7d218fd84027:api-entry-decision",
         "session_id": "host-session-123",
         "task_intent": "inspect documentation",
-        "required_actions": ["documentation_inspection"],
+        "required_outcomes": ["documentation_understood"],
         "reason": "Inspecting docs.",
         "safe_to_continue": True,
     })
@@ -1742,7 +1759,7 @@ def test_identity_resolution_accepts_model_suffixes_and_blocks_cross_session(tmp
             "source_decision_id": "exec_completely_different_id",
             "session_id": "host-session-123",
             "task_intent": "inspect documentation",
-            "required_actions": ["documentation_inspection"],
+            "required_outcomes": ["documentation_understood"],
             "reason": "Inspecting docs.",
             "safe_to_continue": True,
         })

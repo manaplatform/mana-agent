@@ -4,6 +4,22 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-28
 
+- Improved Model Routing Failure Diagnostics and Startup Error Handling:
+  - Updated `ModelRouter.route()` in `src/mana_agent/model_routing/router.py` to include detailed candidate rejection reasons (`Rejected candidates: <model> (<reasons>)`) in the `RoutingFailure` message when candidate evaluation rejects all models, making routing failures immediately diagnosable.
+  - Updated `chat_cli.py` to catch `RoutingFailure` alongside `ValueError` during gateway startup and initial model resolution, presenting clean and actionable parameter errors instead of crashing with an unhandled Python traceback.
+  - User verification required: `python -m pytest tests/test_model_routing.py tests/test_model_capabilities.py tests/gateway/test_routing_authority.py -v`.
+
+- Fixed API Workflow Completion Evidence Contract and Removed Legacy Required Actions Authority:
+  - Removed legacy `required_actions` fallback as runtime authority from `_api_workflow_completion_from_trace()` in `src/mana_agent/gateway/chat_gateway.py`.
+  - Removed legacy action normalization validator from `_WorkflowDecision` in `src/mana_agent/api_manager/runtime_tools.py`, requiring explicit `required_outcomes` and adding `migrate_legacy_workflow_decision()` for explicit versioned migrations of historical decision dictionaries.
+  - Ensured read-only API tasks use verified external execution (`api_execution_verified`) and user-goal evidence (`user_goal_verified`) as the primary completion contract without turning optional implementation steps (`documentation_inspection`, `integration_import`, `operation_search`, `request_preview`) into mandatory workflow gates.
+  - Made `missing_outcomes` a canonical field reporting semantic outcomes instead of tool names, while preserving `missing_actions` as a backward-compatibility alias.
+  - Independently evaluated `user_goal_verified` based on upstream payload satisfaction and failure flags.
+  - Preserved mutation risk policies (POST, PUT, PATCH, DELETE require preview/approval before execution verification is credited).
+  - Updated API route execution in `chat_gateway.py` to project normalized workflow evidence (`required_outcomes`, `completed_outcomes`, `missing_outcomes`, `execution_evidence`, `goal_satisfied`, `actual_tool_events`) to durable lane task and taskboard records.
+  - Updated test fixtures in `tests/test_api_manager.py` and `tests/gateway/test_api_manager_route.py`, and added comprehensive regression test cases covering Quran reproduction, saved integrations, docs-only tasks, unexecuted API tasks, mutation preview policy, legacy decision rejection, goal satisfaction verification, and durable task projection.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
 - Fixed Coding Agent Model-Capability Admission Failure and Multi-Transport Resolution:
   - Resolved `Write-required Codex turn rejected: model capabilities are unknown` by implementing authoritative transport-level capability resolution keyed by `(provider, model, transport)`.
   - Added `ModelCapabilityDescriptor` and `ModelCapabilityRegistry` in `src/mana_agent/config/model_capabilities.py` representing explicit capability dimensions (`supports_tool_calls`, `supports_repository_read`, `supports_repository_write`, `supports_shell`, `supports_structured_output`, `supports_streaming`, `supports_parallel_tools`, `capability_confidence`, `capability_source`).

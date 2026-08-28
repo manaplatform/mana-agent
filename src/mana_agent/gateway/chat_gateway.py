@@ -452,6 +452,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             "required_outcomes": [],
             "optional_outcomes": [],
             "completed_outcomes": [],
+            "missing_outcomes": [],
             "completed_actions": [],
             "required_actions": [],
             "missing_actions": [],
@@ -532,6 +533,8 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         decision_index < 0
         or not isinstance(decision, dict)
         or decision.get("safe_to_continue") is not True
+        or "required_outcomes" not in decision
+        or not decision.get("required_outcomes")
     ):
         return {
             "valid": False,
@@ -544,6 +547,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             "required_outcomes": [],
             "optional_outcomes": [],
             "completed_outcomes": [],
+            "missing_outcomes": [],
             "completed_actions": [],
             "required_actions": [],
             "missing_actions": [],
@@ -555,29 +559,21 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
             "terminal_evidence": {},
         }
 
-    raw_required = decision.get("required_outcomes") or decision.get("required_actions") or []
+    raw_required = decision.get("required_outcomes") or []
     if isinstance(raw_required, str):
         raw_required = [raw_required]
-    action_map = {
-        "documentation_inspection": "documentation_understood",
-        "integration_import": "integration_available",
-        "integration_configuration": "integration_available",
-        "operation_search": "operation_resolved",
-        "request_preview": "request_previewed",
-        "request_execution": "api_execution_verified",
-    }
     required: list[str] = []
     for item in raw_required:
-        norm = action_map.get(str(item).strip(), str(item).strip())
+        norm = str(item).strip()
         if norm and norm not in required:
             required.append(norm)
 
-    raw_optional = decision.get("optional_outcomes") or decision.get("optional_actions") or []
+    raw_optional = decision.get("optional_outcomes") or []
     if isinstance(raw_optional, str):
         raw_optional = [raw_optional]
     optional: list[str] = []
     for item in raw_optional:
-        norm = action_map.get(str(item).strip(), str(item).strip())
+        norm = str(item).strip()
         if norm and norm not in optional:
             optional.append(norm)
 
@@ -875,11 +871,31 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                 completed.add("api_target_resolved")
                 completed.add("operation_search")
 
+    support_outcomes = {
+        "documentation_understood",
+        "integration_available",
+        "operation_resolved",
+        "request_previewed",
+        "approval_obtained",
+    }
+
+    if "api_execution_verified" in completed:
+        # Verified external execution was achieved.
+        # Implementation/support stages are optional for workflow completion.
+        effective_required = [
+            outcome for outcome in required
+            if outcome not in support_outcomes
+        ]
+        if "api_execution_verified" not in effective_required:
+            effective_required.insert(0, "api_execution_verified")
+    else:
+        effective_required = list(required)
+
     waived: list[str] = []
 
     missing = [
         outcome
-        for outcome in required
+        for outcome in effective_required
         if outcome not in completed
         and outcome not in waived
     ]
@@ -966,6 +982,7 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         "required_outcomes": required,
         "optional_outcomes": optional,
         "completed_outcomes": sorted(completed),
+        "missing_outcomes": missing,
         "observed_actions": sorted(observed_actions),
         "completed_actions": sorted(completed),
         "required_actions": required,
@@ -10058,21 +10075,49 @@ class AgentChatGateway:
         permission_requests = _api_permission_requests_from_trace(response)
         workflow_completion = _api_workflow_completion_from_trace(response)
         required_outcomes = set(workflow_completion.get("required_outcomes") or [])
-        missing_actions = set(workflow_completion.get("missing_actions") or [])
+        missing_actions = set(workflow_completion.get("missing_outcomes") or workflow_completion.get("missing_actions") or [])
         waiting_for_execution_approval = (
             bool(permission_requests)
             and missing_actions.issubset({"api_execution_verified"})
             and "api_execution_verified" in required_outcomes
         )
-        if lane_task_id and waiting_for_execution_approval:
+        if lane_task_id and self._lane_coordinator:
             try:
-                self._lane_coordinator.transition(
+                if waiting_for_execution_approval:
+                    self._lane_coordinator.transition(
+                        lane_task_id,
+                        LaneTaskState.WAITING,
+                        reason="API request waiting for trusted local approval",
+                    )
+                self._lane_coordinator.attach_evidence(
                     lane_task_id,
-                    LaneTaskState.WAITING,
-                    reason="API request waiting for trusted local approval",
+                    {
+                        "required_outcomes": workflow_completion.get("required_outcomes", []),
+                        "completed_outcomes": workflow_completion.get("completed_outcomes", []),
+                        "missing_outcomes": workflow_completion.get("missing_outcomes", []),
+                        "execution_evidence": workflow_completion.get("execution_evidence", {}),
+                        "goal_satisfied": workflow_completion.get("goal_satisfied", False),
+                        "actual_tool_events": workflow_completion.get("actual_tool_events", []),
+                    },
                 )
+                if getattr(self._lane_coordinator, "taskboard", None):
+                    execution = self._lane_coordinator.inspect_task(lane_task_id)
+                    board_task_id = getattr(execution, "taskboard_task_id", "") or lane_task_id
+                    if board_task_id in self._lane_coordinator.taskboard.tasks:
+                        task = self._lane_coordinator.taskboard.get_task(board_task_id)
+                        for event in workflow_completion.get("actual_tool_events", []):
+                            task.actual_tool_events.append(event)
+                        task.integration_evidence_records.append({
+                            "required_outcomes": workflow_completion.get("required_outcomes", []),
+                            "completed_outcomes": workflow_completion.get("completed_outcomes", []),
+                            "missing_outcomes": workflow_completion.get("missing_outcomes", []),
+                            "execution_evidence": workflow_completion.get("execution_evidence", {}),
+                            "goal_satisfied": workflow_completion.get("goal_satisfied", False),
+                            "actual_tool_events": workflow_completion.get("actual_tool_events", []),
+                        })
+                        self._lane_coordinator.taskboard.save()
             except Exception:
-                pass
+                logger.debug("API durable task evidence projection failed", exc_info=True)
         if callable(self._event_sink):
             for permission in permission_requests:
                 preview = permission.get("preview") or {}
