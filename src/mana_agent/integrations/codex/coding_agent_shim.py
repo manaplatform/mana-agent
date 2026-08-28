@@ -22,6 +22,7 @@ from mana_agent.coding.event_visibility import (
 )
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.coding.live_events import publish_coding_event
+from mana_agent.config.model_capabilities import normalize_reasoning_request_overrides
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexCapabilityError
@@ -373,6 +374,12 @@ class CodexCodingAgentShim:
         request_overrides = provider_request_overrides_from_configuration(
             getattr(routing_decision, "model_configuration", None),
             for_http_body=True,
+        )
+        request_overrides = normalize_reasoning_request_overrides(
+            routing_decision.provider,
+            routing_decision.selected_model,
+            routed_settings.codex_transport,
+            request_overrides,
         )
         self.codex_settings = self.codex_settings.model_copy(
             update={

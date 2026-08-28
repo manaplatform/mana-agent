@@ -143,6 +143,19 @@ class CompatibleChatOpenAI(ChatOpenAI):
 
     def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        from mana_agent.config.model_capabilities import (
+            normalize_reasoning_request_overrides,
+            resolve_model_request_policy,
+        )
+
+        provider = self.selected_provider
+        if not provider or provider == "unknown":
+            base = str(getattr(self, "openai_api_base", None) or getattr(self, "base_url", "") or "").rstrip("/").lower()
+            if base in {"https://api.openai.com/v1", "https://api.openai.com"}:
+                provider = "openai"
+            elif self.model_name.startswith("openrouter/"):
+                provider = "openrouter"
+        policy = resolve_model_request_policy(provider, self.model_name)
         needs_chat_reasoning_normalization = (
             self.compatibility_force_reasoning_none
             or (
@@ -152,16 +165,17 @@ class CompatibleChatOpenAI(ChatOpenAI):
             )
         )
         if _has_tools(payload) and needs_chat_reasoning_normalization:
-            # Chat Completions providers disagree on whether ``none`` is
-            # accepted. The documented OpenAI-compatible form is used here;
-            # explicit overrides can instead select Responses API support.
-            payload.pop("reasoning", None)
-            payload["reasoning_effort"] = "none"
-            logger.info(
-                "llm.compatibility_adjustment api_mode=chat_completions model=%s "
-                "reasoning_effort=none reason=tools_with_reasoning_unsupported",
-                self.model_name,
-            )
+            if not policy.reasoning_required:
+                # Chat Completions providers disagree on whether ``none`` is
+                # accepted. The documented OpenAI-compatible form is used here;
+                # explicit overrides can instead select Responses API support.
+                payload.pop("reasoning", None)
+                payload["reasoning_effort"] = "none"
+                logger.info(
+                    "llm.compatibility_adjustment api_mode=chat_completions model=%s "
+                    "reasoning_effort=none reason=tools_with_reasoning_unsupported",
+                    self.model_name,
+                )
         # NVIDIA DeepSeek V4 requires chat_template_kwargs. The OpenAI Python
         # SDK / LangChain path must nest provider fields under ``extra_body``;
         # Completions.create() rejects top-level ``chat_template_kwargs``.
@@ -170,18 +184,23 @@ class CompatibleChatOpenAI(ChatOpenAI):
         from mana_agent.config.user_config import get_setting as _get_setting
 
         default_effort = str(_get_setting("MANA_LLM_REASONING_EFFORT", "") or "").strip() or "high"
-        if self.compatibility_force_reasoning_none:
+        if self.compatibility_force_reasoning_none and not policy.reasoning_required:
             # Mark effort explicitly so NVIDIA shaping overrides init defaults
             # already nested under extra_body from create_chat_model.
             default_effort = "none"
             payload["reasoning_effort"] = "none"
         apply_nvidia_chat_completion_shaping(
             payload,
-            provider=self.selected_provider,
+            provider=provider,
             model=self.model_name,
             default_effort=default_effort,
             nest_under_extra_body=True,
         )
+        normalized_payload = normalize_reasoning_request_overrides(
+            provider, self.model_name, overrides=payload
+        )
+        payload.clear()
+        payload.update(normalized_payload)
         extra_body = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
         template = extra_body.get("chat_template_kwargs") if isinstance(extra_body.get("chat_template_kwargs"), dict) else {}
         if not template and isinstance(payload.get("chat_template_kwargs"), dict):
@@ -513,13 +532,24 @@ def create_chat_model(
     if str(provider or "").strip().lower() == "nvidia" and api_mode == "auto":
         if not capabilities.supports_responses_api:
             api_mode = "chat_completions"
+    resolved_provider = str(provider or "").strip().lower()
+    if not resolved_provider or resolved_provider == "unknown":
+        normalized_url = str(base_url or "https://api.openai.com/v1").rstrip("/").lower()
+        if normalized_url in {"https://api.openai.com/v1", "https://api.openai.com"}:
+            resolved_provider = "openai"
+        elif model.startswith("openrouter/"):
+            resolved_provider = "openrouter"
+        elif "/" in model:
+            from mana_agent.config.provider_registry import split_qualified_model_id
+            resolved_provider, _ = split_qualified_model_id(model)
+
     reasoning_effort = str(get_setting("MANA_LLM_REASONING_EFFORT", "") or "").strip() or None
     init_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "model": model,
         "compatibility_api_mode": api_mode,
         "compatibility_capabilities": capabilities,
-        "selected_provider": str(provider or "unknown"),
+        "selected_provider": str(resolved_provider or "unknown"),
         **kwargs,
     }
     if base_url:
@@ -534,7 +564,13 @@ def create_chat_model(
         is_nvidia_deepseek_model,
     )
 
-    if is_nvidia_deepseek_model(provider=provider, model=model):
+    from mana_agent.config.model_capabilities import resolve_model_request_policy
+
+    policy = resolve_model_request_policy(resolved_provider or "unknown", model)
+    if reasoning_effort and policy.reasoning_required and not policy.reasoning_effort_configurable:
+        reasoning_effort = None
+
+    if is_nvidia_deepseek_model(provider=resolved_provider, model=model):
         template = deepseek_chat_template_kwargs(reasoning_effort or "high")
         extra_body = dict(init_kwargs.get("extra_body") or {})
         nested = dict(extra_body.get("chat_template_kwargs") or {})

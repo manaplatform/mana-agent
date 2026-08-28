@@ -86,9 +86,19 @@ _MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
     "o3": (200_000, 100_000),
     "o3-mini": (200_000, 100_000),
     "o4-mini": (200_000, 100_000),
+    # x-AI Grok 4.6 (500k context window)
+    "x-ai/grok-4.6": (500_000, 65_536),
     # NVIDIA NIM / integrate.api DeepSeek V4 (1M context; max_tokens soft cap 65_536).
     "deepseek-ai/deepseek-v4-flash": (1_000_000, 65_536),
     "deepseek-ai/deepseek-v4-pro": (1_000_000, 65_536),
+    # OpenRouter multi-tenant catalog defaults
+    "deepseek/deepseek-v4-flash": (1_000_000, 65_536),
+    "deepseek/deepseek-r1": (163_840, 65_536),
+    "google/gemini-2.5-pro": (1_000_000, 16_384),
+    "google/gemini-2.5-flash": (1_000_000, 16_384),
+    "qwen/qwen-2.5-coder-32b-instruct": (128_000, 32_768),
+    "mistralai/mistral-large-2411": (128_000, 32_768),
+    "meta-llama/llama-3.3-70b-instruct": (128_000, 16_384),
 }
 
 
@@ -106,6 +116,8 @@ def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | N
         if lowered.startswith(key.casefold()):
             return limits
     provider_id = str(provider or "").strip().casefold()
+    if "grok" in lowered or "x-ai" in lowered:
+        return (500_000, 65_536)
     if "claude" in lowered or provider_id == "anthropic":
         return (200_000, 16_384)
     if "gemini" in lowered or provider_id == "google":
@@ -116,10 +128,16 @@ def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | N
         return (1_047_576, 32_768)
     if provider_id == "openai" and lowered.startswith("gpt-4o"):
         return (128_000, 16_384)
-    if "deepseek-v4-flash" in lowered or "deepseek-v4-pro" in lowered:
+    if "deepseek" in lowered:
         return (1_000_000, 65_536)
-    if provider_id == "nvidia" and "deepseek" in lowered:
-        return (1_000_000, 65_536)
+    if "qwen" in lowered:
+        return (128_000, 32_768)
+    if "mistral" in lowered or "mixtral" in lowered:
+        return (128_000, 32_768)
+    if "llama" in lowered:
+        return (128_000, 16_384)
+    if "command" in lowered or "cohere" in lowered:
+        return (128_000, 8_192)
     return None
 
 
@@ -135,6 +153,15 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/llama-3.2-nv-embedqa-1b-v2": frozenset({ModelCapability.EMBEDDING}),
+    "x-ai/grok-4.6": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
     # Known NVIDIA Build / NIM text models used as agent baselines. Tool
     # calling is OpenAI-compatible on these hosted models; unknown catalog
     # entries remain unclassified until Advanced/manual selection.
@@ -150,6 +177,61 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
         {
             ModelCapability.TEXT_GENERATION,
             ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "deepseek/deepseek-v4-flash": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "deepseek/deepseek-r1": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "google/gemini-2.5-pro": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "google/gemini-2.5-flash": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "qwen/qwen-2.5-coder-32b-instruct": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "mistralai/mistral-large-2411": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.CODE,
+            ModelCapability.TOOL_CALLING,
+        }
+    ),
+    "meta-llama/llama-3.3-70b-instruct": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
             ModelCapability.CODE,
             ModelCapability.TOOL_CALLING,
         }
@@ -220,6 +302,24 @@ def normalize_capabilities(
         if any(marker in lowered for marker in markers):
             return frozenset({capability})
     provider_id = str(provider or "").strip().lower()
+    if provider_id == "openrouter":
+        if "grok" in lowered:
+            return frozenset(
+                {
+                    ModelCapability.TEXT_GENERATION,
+                    ModelCapability.REASONING,
+                    ModelCapability.CODE,
+                    ModelCapability.TOOL_CALLING,
+                }
+            )
+        if any(marker in lowered for marker in ("claude", "gpt-", "o1", "o3", "o4", "gemini", "deepseek", "qwen", "mistral", "llama")):
+            return frozenset(
+                {
+                    ModelCapability.TEXT_GENERATION,
+                    ModelCapability.CODE,
+                    ModelCapability.TOOL_CALLING,
+                }
+            )
     # Conservative name-based text detection only. Do not invent tool-calling
     # or reasoning capability solely because a model is an LLM; unknown models
     # remain unclassified and stay usable via Advanced/manual entry.

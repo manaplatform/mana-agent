@@ -2,10 +2,26 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-29
+
+- Fixed Grok 4.6, OpenRouter Multi-Provider Model Metadata, Reasoning Policy Resolution, and Chat Model Compatibility:
+  - Added authoritative capability descriptors and token limits for `x-ai/grok-4.6` and OpenRouter model families (`anthropic/`, `deepseek/`, `google/`, `qwen/`, `mistralai/`, `meta-llama/`) across `direct_responses` and `responses_bridge` transports.
+  - Implemented `ReasoningEffortPolicy` (`DISABLED`, `OPTIONAL`, `REQUIRED`, `REQUIRED_UNCONFIGURABLE`), `ModelRequestPolicy`, and `normalize_reasoning_request_overrides` in `src/mana_agent/config/model_capabilities.py`.
+  - Prevented sending reasoning disable instructions (`reasoning_effort="none"`, `reasoning={"enabled": false}`, `thinking=False`) to reasoning-required models, and omitted unconfigurable effort parameters for models such as Grok 4.6 and DeepSeek R1.
+  - Updated `create_chat_model` and `CompatibleChatOpenAI` in `src/mana_agent/multi_agent/runtime/compatibility.py` to preserve configured `reasoning_effort` unless explicitly unconfigurable, infer OpenAI providers from standard base URLs, and accurately apply chat completions tool-reasoning normalization.
+  - Fixed `profiles_for_pinned_models` in `src/mana_agent/model_routing/profiles.py` to resolve model capability descriptors before inspecting `reasoning_required`, fixing `UnboundLocalError`.
+  - Ensured explicitly passed `catalog_records` take precedence in `ModelCapabilityRegistry.resolve()`.
+  - Kept NVIDIA-specific DeepSeek chat template kwargs and reasoning shaping strictly scoped to NVIDIA DeepSeek models.
+  - Updated `_mana_model_capability_bridge` to accept flexible positional and keyword arguments (`provider`, `model`, `transport`, `*args`, `**kwargs`) and inspect resolved capabilities and context lengths so OpenRouter models configure appropriate context windows and token limits.
+  - Enhanced gateway lane coordinator recovery in `src/mana_agent/gateway/chat_gateway.py` to evaluate retry budget exhaustion alongside deadline gates in `force_new_task_for_dead` / `force_new_multi_task`, and safely fall back to reserving fresh tasks when same-task retry or replan validation fails.
+  - Added structured diagnostic events (`model.reasoning_policy.resolved`, `codex.request.reasoning_normalized`, `codex.request.override_removed`).
+  - Added regression test suites in `tests/test_model_capabilities.py`, `tests/test_codex_responses_bridge.py`, and `tests/test_codex_coding_visibility.py`.
+  - User verification required: `pytest tests/test_llm_compatibility.py tests/test_model_capabilities.py tests/test_model_routing.py tests/test_tui_user_config.py tests/test_codex_responses_bridge.py tests/test_codex_coding_visibility.py -v`.
+
 ## 2026-08-28
 
 - Fixed Windows CI Test Failures in Model Capabilities and Repository Metadata Inspection:
-  - Updated `RepositoryMetadataInspector._git_lines()` in `src/mana_agent/model_routing/repository.py` to guard git subprocess execution with `root.is_dir()` and catch `(OSError, ValueError)`, preventing `NotADirectoryError: [WinError 267]` on Windows and non-existent root paths.
+  - Updated `RepositoryMetadataInspector.inspect()` and `_git_lines()` in `src/mana_agent/model_routing/repository.py` to guard `root.resolve()`, directory existence checks, and git subprocess execution with `(OSError, ValueError, RuntimeError)` handling, preventing `NotADirectoryError: [WinError 267]` on Windows and non-existent root paths.
   - Guarded git worktree probing in `src/mana_agent/doctor/checks/routing.py` with directory existence check and exception handling.
   - Replaced hardcoded `Path("/tmp")` in `test_separate_agent_permission_and_model_capability` and `test_exact_deepseek_openrouter_direct_responses_reproduction` in `tests/test_model_capabilities.py` with pytest's `tmp_path` fixture.
   - Added regression test `test_repository_metadata_inspector_nonexistent_or_non_directory_root` in `tests/test_model_routing.py`.

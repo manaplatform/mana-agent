@@ -1005,3 +1005,62 @@ def test_bridge_strips_catalog_model_object_fields_from_request_overrides() -> N
     # Nested catalog junk was stripped from extra_body; template kwargs kept.
     assert chat["chat_template_kwargs"]["thinking"] is False
     assert chat["chat_template_kwargs"]["reasoning_effort"] == "none"
+
+
+def test_bridge_openrouter_grok_4_6_omits_reasoning_effort_and_does_not_disable() -> None:
+    """Verify that x-ai/grok-4.6 on OpenRouter bridge never sends disable reasoning instructions."""
+    upstream = BridgeUpstreamConfig(
+        provider="openrouter",
+        display_name="OpenRouter",
+        api_key="or-key",
+        base_url="https://openrouter.ai/api/v1",
+        model="x-ai/grok-4.6",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "x-ai/grok-4.6",
+            "input": "write a function",
+            "stream": True,
+            "reasoning": {"effort": "none"},
+            "reasoning_effort": "none",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "run a shell command",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        upstream=upstream,
+    )
+    assert chat["model"] == "x-ai/grok-4.6"
+    assert "reasoning_effort" not in chat
+    assert "reasoning" not in chat
+    assert "chat_template_kwargs" not in chat
+    assert "thinking" not in chat
+    assert chat["tools"]
+
+
+def test_bridge_openrouter_deepseek_r1_mandatory_reasoning() -> None:
+    """Verify that deepseek/deepseek-r1 on OpenRouter bridge preserves mandatory reasoning."""
+    upstream = BridgeUpstreamConfig(
+        provider="openrouter",
+        display_name="OpenRouter",
+        api_key="or-key",
+        base_url="https://openrouter.ai/api/v1",
+        model="deepseek/deepseek-r1",
+    )
+    chat = convert_responses_request_to_chat(
+        {
+            "model": "deepseek/deepseek-r1",
+            "input": "explain quantum computing",
+            "stream": False,
+            "reasoning_effort": "none",
+        },
+        upstream=upstream,
+    )
+    assert chat["model"] == "deepseek/deepseek-r1"
+    assert "reasoning_effort" not in chat
+    assert "chat_template_kwargs" not in chat
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import threading
 from typing import Any, Iterable
 
@@ -9,6 +10,15 @@ from mana_agent.config.provider_registry import (
     PROVIDERS,
 )
 from mana_agent.evals.recorder import record_current
+
+
+class ReasoningEffortPolicy(str, Enum):
+    """Reasoning configuration policy for a model candidate."""
+
+    DISABLED = "disabled"
+    OPTIONAL = "optional"
+    REQUIRED = "required"
+    REQUIRED_UNCONFIGURABLE = "required_unconfigurable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,11 +37,37 @@ class ModelCapabilityDescriptor:
     supports_parallel_tools: bool = False
     capability_confidence: str = "unknown"  # "high", "medium", "low", "unknown"
     capability_source: str = "unknown"  # "catalog", "provider_metadata", "maintained", "override", "probing", "unknown"
+    reasoning_policy: str = "disabled"  # "disabled", "optional", "required", "required_unconfigurable"
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
     def is_known(self) -> bool:
         return self.capability_confidence != "unknown" and self.capability_source != "unknown"
+
+    @property
+    def supports_reasoning(self) -> bool:
+        return self.reasoning_policy != ReasoningEffortPolicy.DISABLED.value
+
+    @property
+    def reasoning_required(self) -> bool:
+        return self.reasoning_policy in {
+            ReasoningEffortPolicy.REQUIRED.value,
+            ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
+        }
+
+    @property
+    def reasoning_can_disable(self) -> bool:
+        return self.reasoning_policy in {
+            ReasoningEffortPolicy.DISABLED.value,
+            ReasoningEffortPolicy.OPTIONAL.value,
+        }
+
+    @property
+    def reasoning_effort_configurable(self) -> bool:
+        return self.reasoning_policy in {
+            ReasoningEffortPolicy.OPTIONAL.value,
+            ReasoningEffortPolicy.REQUIRED.value,
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +83,11 @@ class ModelCapabilityDescriptor:
             "supports_parallel_tools": self.supports_parallel_tools,
             "capability_confidence": self.capability_confidence,
             "capability_source": self.capability_source,
+            "reasoning_policy": self.reasoning_policy,
+            "supports_reasoning": self.supports_reasoning,
+            "reasoning_required": self.reasoning_required,
+            "reasoning_can_disable": self.reasoning_can_disable,
+            "reasoning_effort_configurable": self.reasoning_effort_configurable,
         }
 
 
@@ -102,6 +143,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openai", "gpt-4.1-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -116,6 +158,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openai", "gpt-4.1-nano", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -130,6 +173,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openai", "gpt-4o", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -144,6 +188,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openai", "gpt-4o-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -158,6 +203,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openai", "gpt-5", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -172,6 +218,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
     ),
     ("openai", "gpt-5-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -186,6 +233,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
     ),
     ("openai", "o3", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -200,6 +248,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED.value,
     ),
     ("openai", "o3-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -214,6 +263,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED.value,
     ),
     ("openai", "o4-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openai",
@@ -228,6 +278,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED.value,
     ),
     # NVIDIA NIM hosted models via responses_bridge
     ("nvidia", "deepseek-ai/deepseek-v4-flash", "responses_bridge"): ModelCapabilityDescriptor(
@@ -243,6 +294,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
     ),
     ("nvidia", "deepseek-ai/deepseek-v4-pro", "responses_bridge"): ModelCapabilityDescriptor(
         provider="nvidia",
@@ -257,6 +309,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
     ),
     ("nvidia", "nvidia/nemotron-3-nano-30b-a3b", "responses_bridge"): ModelCapabilityDescriptor(
         provider="nvidia",
@@ -271,8 +324,39 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     # OpenRouter maintained entries
+    ("openrouter", "x-ai/grok-4.6", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="x-ai/grok-4.6",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
+    ),
+    ("openrouter", "x-ai/grok-4.6", "responses_bridge"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="x-ai/grok-4.6",
+        transport="responses_bridge",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
+    ),
     ("openrouter", "anthropic/claude-3.7-sonnet", "direct_responses"): ModelCapabilityDescriptor(
         provider="openrouter",
         model="anthropic/claude-3.7-sonnet",
@@ -286,6 +370,22 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
+    ("openrouter", "anthropic/claude-3.7-sonnet", "responses_bridge"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="anthropic/claude-3.7-sonnet",
+        transport="responses_bridge",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
     ),
     ("openrouter", "anthropic/claude-3.5-sonnet", "direct_responses"): ModelCapabilityDescriptor(
         provider="openrouter",
@@ -300,6 +400,82 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
+    ),
+    ("openrouter", "anthropic/claude-3.5-sonnet", "responses_bridge"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="anthropic/claude-3.5-sonnet",
+        transport="responses_bridge",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
+    ),
+    ("openrouter", "deepseek/deepseek-v4-flash", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="deepseek/deepseek-v4-flash",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
+    ("openrouter", "deepseek/deepseek-v4-flash", "responses_bridge"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="deepseek/deepseek-v4-flash",
+        transport="responses_bridge",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
+    ("openrouter", "deepseek/deepseek-r1", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="deepseek/deepseek-r1",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
+    ),
+    ("openrouter", "deepseek/deepseek-r1", "responses_bridge"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="deepseek/deepseek-r1",
+        transport="responses_bridge",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
     ),
     ("openrouter", "openai/gpt-4.1", "direct_responses"): ModelCapabilityDescriptor(
         provider="openrouter",
@@ -314,6 +490,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openrouter", "openai/gpt-4.1-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openrouter",
@@ -328,6 +505,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openrouter", "openai/gpt-4o", "direct_responses"): ModelCapabilityDescriptor(
         provider="openrouter",
@@ -342,6 +520,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
     ("openrouter", "openai/gpt-4o-mini", "direct_responses"): ModelCapabilityDescriptor(
         provider="openrouter",
@@ -356,6 +535,82 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_parallel_tools=True,
         capability_confidence="high",
         capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
+    ),
+    ("openrouter", "google/gemini-2.5-pro", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="google/gemini-2.5-pro",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
+    ("openrouter", "google/gemini-2.5-flash", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="google/gemini-2.5-flash",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
+    ("openrouter", "qwen/qwen-2.5-coder-32b-instruct", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="qwen/qwen-2.5-coder-32b-instruct",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
+    ),
+    ("openrouter", "mistralai/mistral-large-2411", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="mistralai/mistral-large-2411",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
+    ),
+    ("openrouter", "meta-llama/llama-3.3-70b-instruct", "direct_responses"): ModelCapabilityDescriptor(
+        provider="openrouter",
+        model="meta-llama/llama-3.3-70b-instruct",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
 }
 
@@ -405,7 +660,7 @@ class ModelCapabilityRegistry:
         cache_key = (provider_id, normalized_model, transport_id)
 
         with self._lock:
-            if cache_key in self._cache:
+            if catalog_records is None and cache_key in self._cache:
                 return self._cache[cache_key]
 
         descriptor = self._resolve_uncached(
@@ -462,7 +717,26 @@ class ModelCapabilityRegistry:
             if key in self._overrides:
                 return self._overrides[key]
 
-        # 2. Maintained entries (exact match or family prefix match)
+        # 2. Explicitly supplied catalog records take precedence
+        if catalog_records is not None:
+            for record in catalog_records:
+                rec_id = ""
+                rec_dict: dict[str, Any] = {}
+                if isinstance(record, dict):
+                    rec_id = str(record.get("id") or "").strip()
+                    rec_dict = record
+                elif hasattr(record, "id"):
+                    rec_id = str(getattr(record, "id") or "").strip()
+                    rec_dict = getattr(record, "metadata", {}) or {}
+                if not rec_id:
+                    continue
+                normalized_rec_id = normalize_model_lookup_id(provider, rec_id)
+                if normalized_rec_id == model or rec_id == model:
+                    return self._descriptor_from_catalog_record(
+                        provider, model, transport, rec_dict
+                    )
+
+        # 3. Maintained entries (exact match or family prefix match)
         if key in _MAINTAINED_DESCRIPTORS:
             return _MAINTAINED_DESCRIPTORS[key]
 
@@ -485,13 +759,11 @@ class ModelCapabilityRegistry:
                         supports_parallel_tools=m_desc.supports_parallel_tools,
                         capability_confidence=m_desc.capability_confidence,
                         capability_source="maintained",
+                        reasoning_policy=m_desc.reasoning_policy,
                     )
 
-        # 3. Catalog records (supplied or from cached catalog)
-        records = catalog_records
-        if records is None:
-            records = self._load_cached_catalog_records(provider)
-
+        # 4. Cached catalog records from disk
+        records = self._load_cached_catalog_records(provider)
         if records:
             for record in records:
                 rec_id = ""
@@ -510,7 +782,75 @@ class ModelCapabilityRegistry:
                         provider, model, transport, rec_dict
                     )
 
-        # 4. Unknown fail-closed descriptor
+        # 4. OpenRouter family prefix fallback for known provider namespaces
+        if provider == "openrouter":
+            lowered = model.lower()
+            if "grok" in lowered:
+                return ModelCapabilityDescriptor(
+                    provider=provider,
+                    model=model,
+                    transport=transport,
+                    supports_tool_calls=True,
+                    supports_repository_read=True,
+                    supports_repository_write=True,
+                    supports_shell=True,
+                    supports_structured_output=True,
+                    supports_streaming=True,
+                    supports_parallel_tools=True,
+                    capability_confidence="high",
+                    capability_source="maintained",
+                    reasoning_policy=ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
+                )
+            if "claude-3.7" in lowered or "claude-3-7" in lowered:
+                return ModelCapabilityDescriptor(
+                    provider=provider,
+                    model=model,
+                    transport=transport,
+                    supports_tool_calls=True,
+                    supports_repository_read=True,
+                    supports_repository_write=True,
+                    supports_shell=True,
+                    supports_structured_output=True,
+                    supports_streaming=True,
+                    supports_parallel_tools=True,
+                    capability_confidence="high",
+                    capability_source="maintained",
+                    reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+                )
+            if "deepseek-r1" in lowered:
+                return ModelCapabilityDescriptor(
+                    provider=provider,
+                    model=model,
+                    transport=transport,
+                    supports_tool_calls=True,
+                    supports_repository_read=True,
+                    supports_repository_write=True,
+                    supports_shell=True,
+                    supports_structured_output=True,
+                    supports_streaming=True,
+                    supports_parallel_tools=True,
+                    capability_confidence="high",
+                    capability_source="maintained",
+                    reasoning_policy=ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value,
+                )
+            if "deepseek" in lowered:
+                return ModelCapabilityDescriptor(
+                    provider=provider,
+                    model=model,
+                    transport=transport,
+                    supports_tool_calls=True,
+                    supports_repository_read=True,
+                    supports_repository_write=True,
+                    supports_shell=True,
+                    supports_structured_output=True,
+                    supports_streaming=True,
+                    supports_parallel_tools=True,
+                    capability_confidence="high",
+                    capability_source="maintained",
+                    reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+                )
+
+        # 5. Unknown fail-closed descriptor
         return ModelCapabilityDescriptor(
             provider=provider,
             model=model,
@@ -524,6 +864,7 @@ class ModelCapabilityRegistry:
             supports_parallel_tools=False,
             capability_confidence="unknown",
             capability_source="unknown",
+            reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
         )
 
     def _descriptor_from_catalog_record(
@@ -573,8 +914,24 @@ class ModelCapabilityRegistry:
                 supports_parallel_tools=False,
                 capability_confidence="high",
                 capability_source="catalog",
+                reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
                 metadata=record,
             )
+
+        # Classify reasoning capability / policy from catalog record & model identifiers
+        has_reasoning = bool(
+            supported_lower & {"reasoning", "reasoning_effort", "thinking", "include_reasoning", "max_thinking_tokens"}
+            or (isinstance(caps, list) and any("reasoning" in str(c).lower() or "thinking" in str(c).lower() for c in caps))
+        )
+        lowered_model = model.lower()
+        if any(marker in lowered_model for marker in ("grok-4.6", "deepseek-r1", "o1", "o3")) and not any(marker in lowered_model for marker in ("o3-mini", "o4-mini")):
+            reasoning_policy = ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value
+        elif any(marker in lowered_model for marker in ("o3-mini", "o4-mini")):
+            reasoning_policy = ReasoningEffortPolicy.REQUIRED.value
+        elif has_reasoning or any(marker in lowered_model for marker in ("claude-3.7", "deepseek-v4", "gpt-5")):
+            reasoning_policy = ReasoningEffortPolicy.OPTIONAL.value
+        else:
+            reasoning_policy = ReasoningEffortPolicy.DISABLED.value
 
         # If tools or parameters were explicitly reported in the catalog:
         if supported_params or record.get("capabilities"):
@@ -591,6 +948,7 @@ class ModelCapabilityRegistry:
                 supports_parallel_tools=supports_parallel,
                 capability_confidence="high",
                 capability_source="catalog",
+                reasoning_policy=reasoning_policy,
                 metadata=record,
             )
 
@@ -608,6 +966,7 @@ class ModelCapabilityRegistry:
             supports_parallel_tools=False,
             capability_confidence="unknown",
             capability_source="unknown",
+            reasoning_policy=reasoning_policy,
             metadata=record,
         )
 
@@ -626,6 +985,12 @@ class ModelCapabilityRegistry:
                         result.append(item)
                     elif isinstance(item, str):
                         result.append({"id": item})
+                    elif hasattr(item, "id"):
+                        meta = getattr(item, "metadata", {}) or {}
+                        if isinstance(meta, dict):
+                            result.append({"id": getattr(item, "id"), **meta})
+                        else:
+                            result.append({"id": getattr(item, "id")})
                 return result
         except Exception:
             pass
@@ -663,13 +1028,196 @@ def clear_model_capability_overrides() -> None:
     _CAPABILITY_REGISTRY.clear_overrides()
 
 
+@dataclass(frozen=True, slots=True)
+class ModelRequestPolicy:
+    """Normalized request compatibility policy for (provider, model, transport)."""
+
+    provider: str
+    model: str
+    transport: str
+    reasoning_policy: str
+    reasoning_required: bool
+    reasoning_can_disable: bool
+    reasoning_effort_configurable: bool
+    supports_tool_calls: bool
+    supports_structured_output: bool
+    supports_repository_write: bool
+    capability_source: str
+    capability_confidence: str
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "transport": self.transport,
+            "reasoning_policy": self.reasoning_policy,
+            "reasoning_required": self.reasoning_required,
+            "reasoning_can_disable": self.reasoning_can_disable,
+            "reasoning_effort_configurable": self.reasoning_effort_configurable,
+            "supports_tool_calls": self.supports_tool_calls,
+            "supports_structured_output": self.supports_structured_output,
+            "supports_repository_write": self.supports_repository_write,
+            "capability_source": self.capability_source,
+            "capability_confidence": self.capability_confidence,
+        }
+
+
+def resolve_model_request_policy(
+    provider: str,
+    model: str,
+    transport: str | CodexTransport | None = None,
+    *,
+    catalog_records: Iterable[dict[str, Any] | Any] | None = None,
+) -> ModelRequestPolicy:
+    """Resolve request compatibility policy for (provider, model, transport)."""
+    desc = resolve_model_capability(
+        provider, model, transport, catalog_records=catalog_records
+    )
+    policy = ModelRequestPolicy(
+        provider=desc.provider,
+        model=desc.model,
+        transport=desc.transport,
+        reasoning_policy=desc.reasoning_policy,
+        reasoning_required=desc.reasoning_required,
+        reasoning_can_disable=desc.reasoning_can_disable,
+        reasoning_effort_configurable=desc.reasoning_effort_configurable,
+        supports_tool_calls=desc.supports_tool_calls,
+        supports_structured_output=desc.supports_structured_output,
+        supports_repository_write=desc.supports_repository_write,
+        capability_source=desc.capability_source,
+        capability_confidence=desc.capability_confidence,
+        metadata=dict(desc.metadata),
+    )
+    record_current(
+        "model.reasoning_policy.resolved",
+        {
+            "provider": policy.provider,
+            "model": policy.model,
+            "transport": policy.transport,
+            "reasoning_required": policy.reasoning_required,
+            "reasoning_configurable": policy.reasoning_effort_configurable,
+            "requested_reasoning": "",
+            "effective_reasoning": policy.reasoning_policy,
+            "metadata_source": policy.capability_source,
+        },
+    )
+    return policy
+
+
+def normalize_reasoning_request_overrides(
+    provider: str,
+    model: str,
+    transport: str | CodexTransport | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate and normalize request overrides against authoritative reasoning policy."""
+    if not isinstance(overrides, dict) or not overrides:
+        return {}
+    policy = resolve_model_request_policy(provider, model, transport)
+    normalized = dict(overrides)
+    if not policy.reasoning_required:
+        return normalized
+
+    # For reasoning-required models, remove disable flags and unconfigurable effort
+    removed: list[tuple[str, Any]] = []
+
+    # Check top-level reasoning_effort
+    if "reasoning_effort" in normalized:
+        effort_val = str(normalized.get("reasoning_effort") or "").strip().lower()
+        if effort_val in {"none", "off", "0", "false", "disabled"} or not policy.reasoning_effort_configurable:
+            val = normalized.pop("reasoning_effort")
+            removed.append(("reasoning_effort", val))
+
+    # Check top-level reasoning dict or boolean
+    if "reasoning" in normalized:
+        r_val = normalized.get("reasoning")
+        if r_val is False or r_val == "disabled":
+            val = normalized.pop("reasoning")
+            removed.append(("reasoning", val))
+        elif isinstance(r_val, dict):
+            if r_val.get("enabled") is False or str(r_val.get("effort") or "").strip().lower() in {"none", "off", "0", "false", "disabled"}:
+                val = normalized.pop("reasoning")
+                removed.append(("reasoning", val))
+            elif not policy.reasoning_effort_configurable:
+                val = normalized.pop("reasoning")
+                removed.append(("reasoning", val))
+
+    # Check enable_thinking / thinking
+    for key in ("enable_thinking", "thinking"):
+        if key in normalized:
+            val = normalized.pop(key)
+            removed.append((key, val))
+
+    # Check nested chat_template_kwargs
+    if "chat_template_kwargs" in normalized and isinstance(normalized["chat_template_kwargs"], dict):
+        ctk = dict(normalized["chat_template_kwargs"])
+        ctk_changed = False
+        if ctk.get("thinking") is False:
+            ctk.pop("thinking", None)
+            ctk_changed = True
+            removed.append(("chat_template_kwargs.thinking", False))
+        if str(ctk.get("reasoning_effort") or "").strip().lower() in {"none", "off", "0"}:
+            val = ctk.pop("reasoning_effort", None)
+            ctk_changed = True
+            removed.append(("chat_template_kwargs.reasoning_effort", val))
+        if ctk_changed:
+            if ctk:
+                normalized["chat_template_kwargs"] = ctk
+            else:
+                normalized.pop("chat_template_kwargs", None)
+
+    # Check nested extra_body
+    if "extra_body" in normalized and isinstance(normalized["extra_body"], dict):
+        extra = dict(normalized["extra_body"])
+        cleaned_extra = normalize_reasoning_request_overrides(
+            provider, model, transport, extra
+        )
+        if cleaned_extra != extra:
+            normalized["extra_body"] = cleaned_extra
+
+    if removed:
+        for r_key, r_val in removed:
+            record_current(
+                "codex.request.override_removed",
+                {
+                    "provider": policy.provider,
+                    "model": policy.model,
+                    "transport": policy.transport,
+                    "reasoning_required": policy.reasoning_required,
+                    "reasoning_configurable": policy.reasoning_effort_configurable,
+                    "requested_reasoning": f"{r_key}={r_val!r}",
+                    "effective_reasoning": "omitted" if not policy.reasoning_effort_configurable else policy.reasoning_policy,
+                    "metadata_source": policy.capability_source,
+                },
+            )
+            record_current(
+                "codex.request.reasoning_normalized",
+                {
+                    "provider": policy.provider,
+                    "model": policy.model,
+                    "transport": policy.transport,
+                    "reasoning_required": policy.reasoning_required,
+                    "reasoning_configurable": policy.reasoning_effort_configurable,
+                    "requested_reasoning": f"{r_key}={r_val!r}",
+                    "effective_reasoning": "default",
+                    "metadata_source": policy.capability_source,
+                },
+            )
+    return normalized
+
+
 __all__ = [
     "ModelCapabilityDescriptor",
     "ModelCapabilityRegistry",
+    "ModelRequestPolicy",
+    "ReasoningEffortPolicy",
     "clear_capability_cache",
     "clear_model_capability_overrides",
     "normalize_model_lookup_id",
+    "normalize_reasoning_request_overrides",
     "register_model_capability_override",
     "resolve_model_capability",
+    "resolve_model_request_policy",
     "resolve_transport_name",
 ]

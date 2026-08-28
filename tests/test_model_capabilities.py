@@ -7,11 +7,15 @@ import pytest
 
 from mana_agent.config.model_capabilities import (
     ModelCapabilityDescriptor,
+    ModelRequestPolicy,
+    ReasoningEffortPolicy,
     clear_capability_cache,
     clear_model_capability_overrides,
     normalize_model_lookup_id,
+    normalize_reasoning_request_overrides,
     register_model_capability_override,
     resolve_model_capability,
+    resolve_model_request_policy,
     resolve_transport_name,
 )
 from mana_agent.config.provider_registry import CodexTransport
@@ -349,10 +353,82 @@ def test_separate_agent_permission_and_model_capability(tmp_path: Path):
     assert "model capabilities are unknown" in str(exc_info.value)
 
 
-def test_exact_deepseek_openrouter_direct_responses_reproduction(tmp_path: Path):
-    """Verify that deepseek/deepseek-v4-flash on OpenRouter direct_responses is validated fail-closed."""
-    # When no capability metadata is provided, resolution returns unknown
-    desc = resolve_model_capability("openrouter", "deepseek/deepseek-v4-flash", "direct_responses")
+def test_grok_4_6_openrouter_authoritative_metadata(tmp_path: Path):
+    """Verify that x-ai/grok-4.6 on OpenRouter has authoritative metadata and admits write turns."""
+    desc = resolve_model_capability("openrouter", "x-ai/grok-4.6", "direct_responses")
+    assert desc.is_known is True
+    assert desc.supports_tool_calls is True
+    assert desc.supports_repository_write is True
+    assert desc.supports_repository_read is True
+    assert desc.supports_structured_output is True
+    assert desc.capability_source == "maintained"
+    assert desc.reasoning_policy == ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value
+    assert desc.reasoning_required is True
+    assert desc.reasoning_can_disable is False
+    assert desc.reasoning_effort_configurable is False
+
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        repository_id="test_repo",
+    )
+    # Must NOT raise CodexCapabilityError because grok-4.6 is known and write-capable
+    shim._validate_write_transport_capability(
+        requires_repository_write=True,
+        model="x-ai/grok-4.6",
+        provider="openrouter",
+        transport="direct_responses",
+    )
+
+
+def test_openrouter_providers_catalog_and_maintained_resolution():
+    """Verify OpenRouter models across providers resolve with accurate capabilities and reasoning policies."""
+    providers_and_models = [
+        ("openrouter", "x-ai/grok-4.6", True, True, ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value),
+        ("openrouter", "anthropic/claude-3.7-sonnet", True, True, ReasoningEffortPolicy.OPTIONAL.value),
+        ("openrouter", "deepseek/deepseek-v4-flash", True, True, ReasoningEffortPolicy.OPTIONAL.value),
+        ("openrouter", "deepseek/deepseek-r1", True, True, ReasoningEffortPolicy.REQUIRED_UNCONFIGURABLE.value),
+        ("openrouter", "google/gemini-2.5-pro", True, True, ReasoningEffortPolicy.OPTIONAL.value),
+        ("openrouter", "qwen/qwen-2.5-coder-32b-instruct", True, True, ReasoningEffortPolicy.DISABLED.value),
+        ("openrouter", "mistralai/mistral-large-2411", True, True, ReasoningEffortPolicy.DISABLED.value),
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct", True, True, ReasoningEffortPolicy.DISABLED.value),
+    ]
+    for provider, model, exp_tools, exp_write, exp_reasoning in providers_and_models:
+        desc = resolve_model_capability(provider, model, "direct_responses")
+        assert desc.is_known is True
+        assert desc.supports_tool_calls == exp_tools
+        assert desc.supports_repository_write == exp_write
+        assert desc.reasoning_policy == exp_reasoning
+
+
+def test_normalize_reasoning_request_overrides_for_grok(reset_capabilities_and_recorder):
+    """Verify that normalize_reasoning_request_overrides strips disable parameters for grok-4.6."""
+    recorder = reset_capabilities_and_recorder
+    overrides = {
+        "reasoning_effort": "none",
+        "reasoning": {"enabled": False, "effort": "none"},
+        "thinking": False,
+        "chat_template_kwargs": {"thinking": False, "reasoning_effort": "none"},
+        "temperature": 0.2,
+    }
+    cleaned = normalize_reasoning_request_overrides(
+        "openrouter", "x-ai/grok-4.6", "direct_responses", overrides
+    )
+    assert "reasoning_effort" not in cleaned
+    assert "reasoning" not in cleaned
+    assert "thinking" not in cleaned
+    assert "chat_template_kwargs" not in cleaned
+    assert cleaned.get("temperature") == 0.2
+
+    # Verify diagnostic events were recorded
+    events = [e for e in recorder.events if e.get("type") in {"codex.request.reasoning_normalized", "codex.request.override_removed"}]
+    assert len(events) >= 1
+    assert any(e["payload"]["model"] == "x-ai/grok-4.6" for e in events)
+
+
+def test_unknown_openrouter_model_fail_closed_validation(tmp_path: Path):
+    """Verify that an unknown unverified model on OpenRouter direct_responses fails closed."""
+    desc = resolve_model_capability("openrouter", "custom-org/unknown-model-xyz", "direct_responses")
     assert desc.is_known is False
     assert desc.supports_tool_calls is False
     assert desc.supports_repository_write is False
@@ -365,13 +441,13 @@ def test_exact_deepseek_openrouter_direct_responses_reproduction(tmp_path: Path)
     with pytest.raises(CodexCapabilityError) as exc_info:
         shim._validate_write_transport_capability(
             requires_repository_write=True,
-            model="deepseek/deepseek-v4-flash",
+            model="custom-org/unknown-model-xyz",
             provider="openrouter",
             transport="direct_responses",
         )
     assert "model capabilities are unknown" in str(exc_info.value)
     assert "provider='openrouter'" in str(exc_info.value)
-    assert "model='deepseek/deepseek-v4-flash'" in str(exc_info.value)
+    assert "model='custom-org/unknown-model-xyz'" in str(exc_info.value)
     assert "transport='direct_responses'" in str(exc_info.value)
 
 

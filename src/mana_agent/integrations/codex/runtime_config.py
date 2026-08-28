@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from mana_agent.config.model_capabilities import normalize_reasoning_request_overrides
 from mana_agent.config.provider_registry import CodexTransport
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.provider import CodexExecutionMode
@@ -219,6 +220,12 @@ class CodexRuntimeConfigBuilder:
             # * Codex stream reconnect: only after HTTP 200 SSE accepted.
             # * Invalid request / auth / model retired: no retry at any layer.
             # * Task-level recovery: Resilient Execution Supervisor only.
+            request_overrides = normalize_reasoning_request_overrides(
+                provider,
+                model,
+                transport,
+                settings.model_request_overrides,
+            )
             upstream = BridgeUpstreamConfig(
                 provider=provider,
                 display_name=settings.provider_display_name or provider,
@@ -226,7 +233,7 @@ class CodexRuntimeConfigBuilder:
                 base_url=str(settings.base_url or "").rstrip("/"),
                 model=model,
                 headers=dict(settings.http_headers or {}),
-                request_overrides=dict(settings.model_request_overrides or {}),
+                request_overrides=request_overrides,
                 transport_max_attempts=1,
             )
             if not upstream.base_url:
@@ -257,6 +264,7 @@ class CodexRuntimeConfigBuilder:
         context_window, auto_compact, supports_tools = _mana_model_capability_bridge(
             provider=provider,
             model=model,
+            transport=transport,
         )
         return CodexRuntimeConfig(
             provider=provider,
@@ -296,16 +304,23 @@ class CodexRuntimeConfigBuilder:
 
 
 def _mana_model_capability_bridge(
-    *,
-    provider: str,
-    model: str,
+    provider: str = "",
+    model: str = "",
+    transport: str | CodexTransport | None = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> tuple[int | None, int | None, bool | None]:
     """Translate Mana catalog limits/capabilities into Codex runtime knobs.
 
     Provider-neutral: no hard-coded model-id branches beyond the shared catalog
     lookup. Returns (context_window, auto_compact_token_limit, supports_tool_calls).
     """
+    provider_val = str(provider or kwargs.get("provider", "") or "").strip()
+    model_val = str(model or kwargs.get("model", "") or "").strip()
+    transport_val = transport if transport is not None else kwargs.get("transport", None)
+
     try:
+        from mana_agent.config.model_capabilities import resolve_model_capability
         from mana_agent.config.model_catalog import (
             ModelCapability,
             maintained_token_limits,
@@ -314,21 +329,34 @@ def _mana_model_capability_bridge(
     except Exception:
         return None, None, None
 
-    limits = maintained_token_limits(provider, model)
+    desc = resolve_model_capability(provider_val, model_val, transport=transport_val)
+    limits = maintained_token_limits(provider_val, model_val)
     context_window: int | None = None
     auto_compact: int | None = None
     if limits is not None:
         context_window = int(limits[0])
+    elif desc.metadata:
+        raw_ctx = desc.metadata.get("context_length") or desc.metadata.get("context_window")
+        if raw_ctx is not None:
+            try:
+                context_window = int(raw_ctx)
+            except (ValueError, TypeError):
+                pass
+
+    if context_window is not None and context_window > 0:
         # Compact before the hard window; keep headroom for tool payloads.
         auto_compact = max(1024, int(context_window * 0.85))
 
     supports_tools: bool | None = None
-    try:
-        caps = normalize_capabilities(provider, model)
-        if caps:
-            supports_tools = ModelCapability.TOOL_CALLING in caps
-    except Exception:
-        supports_tools = None
+    if desc.is_known:
+        supports_tools = desc.supports_tool_calls
+    else:
+        try:
+            caps = normalize_capabilities(provider_val, model_val)
+            if caps:
+                supports_tools = ModelCapability.TOOL_CALLING in caps
+        except Exception:
+            supports_tools = None
     return context_window, auto_compact, supports_tools
 
 

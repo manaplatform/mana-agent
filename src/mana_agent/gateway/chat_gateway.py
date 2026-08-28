@@ -5629,19 +5629,29 @@ class AgentChatGateway:
                             recovery_target_id,
                             session_id,
                         )
-                    # Deterministic recovery gate: a wall-clock-dead task cannot be
-                    # requeued. Create a new task with a fresh deadline instead.
+                    # Deterministic recovery gate: a wall-clock-dead task or exhausted-retry task cannot be
+                    # requeued. Create a new task with a fresh deadline and budget instead.
                     force_new_task_for_dead = bool(
                         recovery_target_id
                         and resume_decision.action
                         in {"resume_checkpoint", "retry_task", "replan_task"}
-                        and self._task_wall_clock_deadline_exceeded(recovery_target_id)
+                        and (
+                            self._task_wall_clock_deadline_exceeded(recovery_target_id)
+                            or (
+                                resume_decision.action == "retry_task"
+                                and self._task_retry_budget_exhausted(recovery_target_id, RetryCategory.MODEL)
+                            )
+                            or (
+                                resume_decision.action == "replan_task"
+                                and self._task_retry_budget_exhausted(recovery_target_id, RetryCategory.REPLAN)
+                            )
+                        )
                     )
                     if force_new_task_for_dead:
                         if callable(sink):
                             sink(
                                 "task_deadline_dead",
-                                "Prior task deadline exceeded; creating a new task",
+                                "Prior task deadline or retry budget exhausted; creating a new task",
                                 metadata={
                                     "turn_id": turn_id,
                                     "user_message_id": user_message_id,
@@ -5805,13 +5815,32 @@ class AgentChatGateway:
                             same_task_retry_authorized=True,
                             safe_to_continue=resume_decision.safe_to_continue,
                         )
-                        reservation = self._lane_coordinator.retry_task(
-                            resume_decision.task_id,
-                            decision=recovery_decision,
-                            session_id=session_id,
-                        )
-                        self._prepare_multi_task_job_restart(resume_decision.task_id)
-                        recovered_task = True
+                        try:
+                            reservation = self._lane_coordinator.retry_task(
+                                resume_decision.task_id,
+                                decision=recovery_decision,
+                                session_id=session_id,
+                            )
+                            self._prepare_multi_task_job_restart(resume_decision.task_id)
+                            recovered_task = True
+                        except LaneCoordinatorError:
+                            reservation = self._lane_coordinator.reserve(
+                                normalized_intent=text,
+                                lane_id=lane_id,
+                                session_id=session_id,
+                                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                                target_files=target_files,
+                                model=f"{execution_decision.provider}/{execution_decision.selected_model}",
+                                requested_input_tokens=execution_estimate.input_tokens,
+                                requested_output_tokens=execution_estimate.output_tokens,
+                                estimated_cost=(None if execution_estimate.estimated_cost is None else float(execution_estimate.estimated_cost)),
+                                routing_decision_id=execution_decision.decision_id,
+                                parent_task_id=parent_task_id,
+                                previous_execution_id=resume_decision.task_id,
+                                relation_type="retry",
+                            )
+                            recovered_task = False
                     elif resume_decision.action == "replan_task" and not force_new_task_for_dead:
                         recovery_decision = RecoveryDecision(
                             decision_id=resume_decision.decision_id,
@@ -5825,13 +5854,32 @@ class AgentChatGateway:
                             ),
                             safe_to_continue=resume_decision.safe_to_continue,
                         )
-                        reservation = self._lane_coordinator.replan_task(
-                            resume_decision.task_id,
-                            decision=recovery_decision,
-                            session_id=session_id,
-                        )
-                        self._prepare_multi_task_job_restart(resume_decision.task_id)
-                        recovered_task = True
+                        try:
+                            reservation = self._lane_coordinator.replan_task(
+                                resume_decision.task_id,
+                                decision=recovery_decision,
+                                session_id=session_id,
+                            )
+                            self._prepare_multi_task_job_restart(resume_decision.task_id)
+                            recovered_task = True
+                        except LaneCoordinatorError:
+                            reservation = self._lane_coordinator.reserve(
+                                normalized_intent=text,
+                                lane_id=lane_id,
+                                session_id=session_id,
+                                workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
+                                repository_id=self._lane_coordinator.taskboard.store.repository_id,
+                                target_files=target_files,
+                                model=f"{execution_decision.provider}/{execution_decision.selected_model}",
+                                requested_input_tokens=execution_estimate.input_tokens,
+                                requested_output_tokens=execution_estimate.output_tokens,
+                                estimated_cost=(None if execution_estimate.estimated_cost is None else float(execution_estimate.estimated_cost)),
+                                routing_decision_id=execution_decision.decision_id,
+                                parent_task_id=parent_task_id,
+                                previous_execution_id=resume_decision.task_id,
+                                relation_type="replan",
+                            )
+                            recovered_task = False
                     else:
                         previous_execution_id = (
                             recovery_target_id
@@ -6700,11 +6748,25 @@ class AgentChatGateway:
                 options=options,
             )
         recovery_target = resume_decision.task_id
-        if self._task_wall_clock_deadline_exceeded(recovery_target):
+        force_new_multi_task = bool(
+            recovery_target
+            and (
+                self._task_wall_clock_deadline_exceeded(recovery_target)
+                or (
+                    resume_decision.action == "retry_task"
+                    and self._task_retry_budget_exhausted(recovery_target, RetryCategory.MODEL)
+                )
+                or (
+                    resume_decision.action == "replan_task"
+                    and self._task_retry_budget_exhausted(recovery_target, RetryCategory.REPLAN)
+                )
+            )
+        )
+        if force_new_multi_task:
             if callable(sink):
                 sink(
                     "task_deadline_dead",
-                    "Prior multi-task deadline exceeded; creating a new compound root",
+                    "Prior multi-task deadline or retry budget exhausted; creating a new compound root",
                     metadata={
                         "turn_id": turn_id,
                         "user_message_id": user_message_id,
@@ -6760,12 +6822,23 @@ class AgentChatGateway:
                 same_task_retry_authorized=True,
                 safe_to_continue=resume_decision.safe_to_continue,
             )
-            self._lane_coordinator.retry_task(
-                recovery_target,
-                decision=recovery_decision,
-                session_id=context.session_id,
-            )
-            self._prepare_multi_task_job_restart(recovery_target)
+            try:
+                self._lane_coordinator.retry_task(
+                    recovery_target,
+                    decision=recovery_decision,
+                    session_id=context.session_id,
+                )
+                self._prepare_multi_task_job_restart(recovery_target)
+            except LaneCoordinatorError:
+                return self._execute_multi_task_route(
+                    decision=decision,
+                    context=context,
+                    text=text,
+                    state=state,
+                    ask_service=ask_service,
+                    sink=sink,
+                    options=options,
+                )
         else:
             recovery_decision = RecoveryDecision(
                 decision_id=resume_decision.decision_id,
@@ -6776,12 +6849,23 @@ class AgentChatGateway:
                 selected_model=selected_model,
                 safe_to_continue=resume_decision.safe_to_continue,
             )
-            self._lane_coordinator.replan_task(
-                recovery_target,
-                decision=recovery_decision,
-                session_id=context.session_id,
-            )
-            self._prepare_multi_task_job_restart(recovery_target)
+            try:
+                self._lane_coordinator.replan_task(
+                    recovery_target,
+                    decision=recovery_decision,
+                    session_id=context.session_id,
+                )
+                self._prepare_multi_task_job_restart(recovery_target)
+            except LaneCoordinatorError:
+                return self._execute_multi_task_route(
+                    decision=decision,
+                    context=context,
+                    text=text,
+                    state=state,
+                    ask_service=ask_service,
+                    sink=sink,
+                    options=options,
+                )
         if callable(sink):
             sink(
                 "multi_task_recovered",
@@ -7937,6 +8021,15 @@ class AgentChatGateway:
         if task is None:
             return False
         return task.wall_clock_deadline_exceeded()
+
+    def _task_retry_budget_exhausted(self, task_id: str, category: RetryCategory = RetryCategory.MODEL) -> bool:
+        """Return True when the durable task has exhausted its retry budget for category."""
+        if not task_id:
+            return False
+        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
+        if task is None:
+            return False
+        return task.retry_budget.remaining(category, task.retry_usage) <= 0
 
     def _canonical_task_request(self, task_id: str, session_id: str) -> str:
         """Load the exact user request that created a durable task."""

@@ -84,7 +84,7 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
                 model_id=model_id,
                 supported_roles=roles,
                 supported_tools=tools,
-                reasoning_settings=frozenset(str(item) for item in raw.get("reasoning_settings") or ["none"]),
+                reasoning_settings=frozenset(str(item) for item in raw.get("reasoning_settings") or (["default"] if desc.reasoning_required else ["none"])),
                 context_window=int(raw.get("context_window") or 0),
                 max_output_tokens=int(raw.get("max_output_tokens") or raw.get("max_completion_tokens") or 0),
                 tokenizer=str(raw.get("tokenizer") or "") or None,
@@ -165,19 +165,21 @@ def profiles_for_pinned_models(
             if "MODEL_LEVEL_1_FAST_TOOL" in levels
             else _LEVEL_METADATA[strongest][2]
         )
+        desc = resolve_model_capability(provider, model_id)
         # Union reasoning settings and benchmarks across assigned levels.
         reasoning_settings: set[str] = set()
         benchmarks: dict[str, float] = {}
         for level in levels:
             reasoning_settings |= set(_LEVEL_METADATA[level][3])
             benchmarks.update(_LEVEL_BENCHMARKS.get(level, {}))
-        if not reasoning_settings:
+        if desc.reasoning_required:
+            reasoning_settings = {"default"}
+        elif not reasoning_settings:
             reasoning_settings = set(reasoning)
         maintained = maintained_token_limits(provider, model_id)
         window = int(maintained[0] if maintained else context_window)
         output = int(maintained[1] if maintained else max_output_tokens)
         output = min(window, max(1, output))
-        desc = resolve_model_capability(provider, model_id)
         if desc.is_known:
             can_tool = desc.supports_tool_calls
             can_p = desc.supports_repository_write
@@ -294,12 +296,14 @@ def profiles_from_legacy_configuration(
             can_v = True
             tools = frozenset({"*"})
 
+        profile_reasoning = frozenset({"default"}) if desc.reasoning_required else reasoning
+
         profiles.append(ModelProfile(
             provider=provider,
             model_id=model_id,
             supported_roles=_ALL_ROLES,
             supported_tools=tools,
-            reasoning_settings=reasoning,
+            reasoning_settings=profile_reasoning,
             context_window=window,
             max_output_tokens=output,
             latency_class=latency,
