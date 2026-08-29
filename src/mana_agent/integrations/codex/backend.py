@@ -370,7 +370,29 @@ class CodexCodingBackend:
                     payload={"error_code": err_code, "error_category": "interruption", "interruption_reason": exc.reason},
                 )
             except CodexError as exc:
-                notifications.append({"method": "turn/failed", "params": {"message": str(exc), "error_code": "CODING_AGENT_FAILED"}})
+                err_code = getattr(exc, "error_code", "") or "CODING_AGENT_FAILED"
+                http_status = getattr(exc, "http_status", None)
+                orig_err = getattr(exc, "original_error", "") or str(exc)
+                provider = getattr(exc, "provider", "") or self.settings.provider
+                model = getattr(exc, "model", "") or (self.settings.model or "app-server-default")
+                transport = getattr(exc, "transport", "")
+                if not transport and hasattr(self.settings, "codex_transport"):
+                    transport = getattr(self.settings.codex_transport, "value", str(self.settings.codex_transport))
+
+                notifications.append(
+                    {
+                        "method": "turn/failed",
+                        "params": {
+                            "message": str(exc),
+                            "error_code": err_code,
+                            "http_status": http_status,
+                            "original_error": orig_err,
+                            "provider": provider,
+                            "model": model,
+                            "transport": transport,
+                        },
+                    }
+                )
                 yield AgentEvent(
                     event_type="error",
                     task_id=task.task_id,
@@ -382,7 +404,14 @@ class CodexCodingBackend:
                     error=str(exc),
                     thread_id=thread_id,
                     turn_id=turn_id,
-                    payload={"error_code": "CODING_AGENT_FAILED"},
+                    payload={
+                        "error_code": err_code,
+                        "http_status": http_status,
+                        "original_error": orig_err,
+                        "provider": provider,
+                        "model": model,
+                        "transport": transport,
+                    },
                 )
             finally:
                 if self.context_cost_governor is not None and governor_call_id:

@@ -396,12 +396,16 @@ class CodexCodingAgentShim:
                 "model_request_overrides": request_overrides,
             }
         )
-        self._validate_write_transport_capability(
+        effective_transport = self._validate_write_transport_capability(
             requires_repository_write=requires_repository_write,
             model=str(self.codex_settings.model or ""),
             provider=str(self.codex_settings.provider or ""),
             transport=self.codex_settings.codex_transport,
         )
+        if effective_transport != self.codex_settings.codex_transport:
+            self.codex_settings = self.codex_settings.model_copy(
+                update={"codex_transport": effective_transport}
+            )
         record_current(
             "codex.turn.started",
             {
@@ -587,16 +591,19 @@ class CodexCodingAgentShim:
         model: str,
         provider: str,
         transport: CodexTransport | Any,
-    ) -> None:
+    ) -> CodexTransport | Any:
         """Fail write jobs when the selected stack cannot represent tool/mutation work."""
         if not requires_repository_write:
-            return
+            return transport
         transport_value = getattr(transport, "value", str(transport or ""))
         if transport is CodexTransport.UNSUPPORTED or transport_value in {"", "unsupported"}:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: selected provider has no supported "
                 f"Codex transport (provider={provider!r}, model={model!r}). "
-                "No fallback coding backend was executed."
+                "No fallback coding backend was executed.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
         try:
             from mana_agent.config.model_capabilities import resolve_model_capability
@@ -605,26 +612,53 @@ class CodexCodingAgentShim:
         except Exception as exc:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model capability metadata is unavailable. "
-                f"provider={provider!r} model={model!r}. No fallback was executed."
+                f"provider={provider!r} model={model!r}. No fallback was executed.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             ) from exc
         if not desc.is_known:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model capabilities are unknown "
                 f"(provider={provider!r}, model={model!r}, transport={transport_value!r}). "
-                "Refusing to claim write/tool support without explicit capability metadata."
+                "Refusing to claim write/tool support without explicit capability metadata.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
+            )
+        if transport_value == "direct_responses" and not desc.supports_server_tools:
+            # direct_responses requires Responses API server-tool compatibility.
+            # Check if responses_bridge supports the model.
+            bridge_desc = resolve_model_capability(provider, model, transport="responses_bridge")
+            if bridge_desc.is_known and bridge_desc.supports_tool_calls and bridge_desc.supports_repository_write:
+                return CodexTransport.RESPONSES_BRIDGE
+            raise CodexCapabilityError(
+                f"Write-required Codex turn rejected: model {model!r} does not support server tools on direct_responses transport "
+                f"(provider={provider!r}, transport={transport_value!r}) and has no compatible bridge transport. "
+                "No silent degraded write path was started.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
         if not desc.supports_tool_calls:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model does not declare tool_calling "
                 f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
-                "No silent degraded write path was started."
+                "No silent degraded write path was started.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
         if not desc.supports_repository_write:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model does not declare repository write "
                 f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
-                "No silent degraded write path was started."
+                "No silent degraded write path was started.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
+        return transport
 
     def _repository_has_head(self) -> bool:
         completed = subprocess.run(
@@ -648,52 +682,19 @@ class CodexCodingAgentShim:
         is determined by event_type / semantic_kind, not text content.
         """
         _ = requires_repository_write  # reserved for phase-aware policies
-        full = event.model_dump(mode="json")
-        # Internal observability always keeps full fidelity (including drafts).
-        record_current(event.event_type, full)
-
-        visibility = str(event.visibility or EventVisibility.INTERNAL.value)
-        if not is_user_publishable(visibility):
-            # Do not publish assistant generation / reasoning / raw dumps to chat UI.
-            return
-
-        safe = progress_event_payload(event)
-        # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
-        progress = AgentEvent(
-            event_id=str(safe.get("event_id") or event.event_id),
-            event_type=str(safe.get("event_type") or event.event_type),
-            task_id=event.task_id,
-            backend=event.backend,
-            sequence=event.sequence,
-            status=event.status,
-            title=str(safe.get("title") or ""),
-            summary=str(safe.get("summary") or ""),
-            thread_id=event.thread_id,
-            turn_id=event.turn_id,
-            tool_name=str(safe.get("tool_name") or ""),
-            command=str(safe.get("command") or ""),
-            path=str(safe.get("path") or ""),
-            duration_ms=event.duration_ms,
-            token_usage=event.token_usage,
-            model=event.model,
-            error=str(safe.get("error") or ""),
-            output_preview="",
-            visibility="progress",
-            semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
-            payload={},
-        )
-        publish_coding_event(progress)
+        record_current("coding.event", event.model_dump(mode="json"))
+        publish_coding_event(event)
         if self.session_id and self.repository_id:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
             get_execution_event_hub().publish(
                 {
-                    **progress.model_dump(mode="json"),
-                    "type": progress.event_type,
-                    "event_id": progress.event_id,
+                    **event.model_dump(mode="json"),
+                    "type": event.event_type,
+                    "event_id": event.event_id,
                     "metadata": {
-                        "visibility": progress.visibility,
-                        "semantic_kind": progress.semantic_kind,
+                        "visibility": event.visibility,
+                        "semantic_kind": event.semantic_kind,
                     },
                 },
                 conversation_id=self.session_id,
@@ -702,7 +703,20 @@ class CodexCodingAgentShim:
             )
         if self.event_sink is None:
             return
-        payload = progress.model_dump(mode="json")
+
+        progress = build_coding_progress_event(event)
+        if progress is None:
+            return
+
+        payload = {
+            "progress_kind": progress.progress_kind,
+            "headline": progress.headline,
+            "detail": progress.detail,
+            "status": progress.status,
+            "visibility": progress.visibility,
+            "semantic_kind": progress.semantic_kind,
+            "task_id": event.task_id,
+        }
         try:
             self.event_sink(progress.event_type, payload)
         except TypeError:
@@ -733,6 +747,12 @@ class CodexCodingAgentShim:
                 "auto_execute_terminal_reason": payload.get("auto_execute_terminal_reason"),
                 "changed_files": list(payload.get("changed_files") or []),
                 "status": status,
+                "error_code": payload.get("error_code"),
+                "interruption_reason": payload.get("interruption_reason"),
+                "http_status": payload.get("http_status"),
+                "original_error": payload.get("original_error"),
+                "provider": payload.get("provider"),
+                "transport": payload.get("transport"),
             },
         )
         record_current("coding.terminal", event.model_dump(mode="json"))
@@ -781,10 +801,19 @@ class CodexCodingAgentShim:
             else (result.codex_metadata.as_dict() if hasattr(result.codex_metadata, "as_dict") else {})
         )
         interruption_reason = str(meta.get("interruption_reason") or "")
-        error_code = interruption_reason or ""
+        error_code = interruption_reason or str(meta.get("error_code") or "")
         if not error_code:
             for e in result.errors:
                 for candidate in (
+                    "CODING_PROVIDER_TOOL_PROTOCOL_ERROR",
+                    "CODING_PROVIDER_BAD_REQUEST",
+                    "CODING_PROVIDER_AUTH_ERROR",
+                    "CODING_PROVIDER_PERMISSION_ERROR",
+                    "CODING_PROVIDER_MODEL_NOT_FOUND",
+                    "CODING_PROVIDER_MODEL_RETIRED",
+                    "CODING_PROVIDER_RATE_LIMIT",
+                    "CODING_PROVIDER_PROTOCOL_ERROR",
+                    "CODING_CAPABILITY_ERROR",
                     "CODING_PROVIDER_TIMEOUT",
                     "CODING_TIMEOUT",
                     "MODEL_INTERRUPTED",
@@ -792,6 +821,7 @@ class CodexCodingAgentShim:
                     "DEADLINE_EXPIRED",
                     "PROVIDER_TIMEOUT",
                     "LEASE_LOST_DURING_EXECUTION",
+                    "CODING_AGENT_FAILED",
                 ):
                     if candidate in e:
                         error_code = candidate
@@ -809,6 +839,11 @@ class CodexCodingAgentShim:
             "execution_id": result.task_id,
             "error_code": error_code or None,
             "interruption_reason": interruption_reason or None,
+            "http_status": meta.get("http_status"),
+            "original_error": meta.get("original_error"),
+            "provider": meta.get("provider"),
+            "model": meta.get("model"),
+            "transport": meta.get("transport"),
             "retry_possible": result.status != "completed",
             "resume_available": bool(result.changed_files),
             "checkpoint_available": bool(result.changed_files),

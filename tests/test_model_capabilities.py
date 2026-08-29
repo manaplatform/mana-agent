@@ -492,3 +492,68 @@ def test_cache_invalidation():
     clear_capability_cache()
     desc3 = resolve_model_capability("openai", "gpt-4.1", "direct_responses")
     assert desc3.capability_source == "maintained"
+
+
+def test_server_tools_capability_discrimination(tmp_path: Path):
+    """Verify supports_server_tools is True for native OpenAI and False for OpenRouter Grok/GLM."""
+    openai_desc = resolve_model_capability("openai", "gpt-4.1", "direct_responses")
+    assert openai_desc.supports_server_tools is True
+    assert openai_desc.supports_tool_calls is True
+    assert openai_desc.supports_repository_write is True
+
+    grok_direct = resolve_model_capability("openrouter", "x-ai/grok-4.6", "direct_responses")
+    assert grok_direct.supports_server_tools is False
+    assert grok_direct.supports_tool_calls is True
+    assert grok_direct.supports_repository_write is True
+
+    grok_bridge = resolve_model_capability("openrouter", "x-ai/grok-4.6", "responses_bridge")
+    assert grok_bridge.supports_server_tools is False
+    assert grok_bridge.supports_tool_calls is True
+    assert grok_bridge.supports_repository_write is True
+
+    glm_direct = resolve_model_capability("openrouter", "z-ai/glm-4.5", "direct_responses")
+    assert glm_direct.supports_server_tools is False
+    assert glm_direct.supports_tool_calls is True
+    assert glm_direct.supports_repository_write is True
+
+    glm_bridge = resolve_model_capability("openrouter", "z-ai/glm-4.5", "responses_bridge")
+    assert glm_bridge.supports_server_tools is False
+    assert glm_bridge.supports_tool_calls is True
+    assert glm_bridge.supports_repository_write is True
+
+
+def test_openrouter_grok_and_glm_transport_bridge_switching(tmp_path: Path):
+    """Verify that write turns for Grok and GLM on direct_responses switch to responses_bridge."""
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=CodexSettings(enabled=True),
+        repository_id="test_repo",
+    )
+
+    # Grok on direct_responses switches to responses_bridge
+    effective_grok = shim._validate_write_transport_capability(
+        requires_repository_write=True,
+        model="x-ai/grok-4.6",
+        provider="openrouter",
+        transport=CodexTransport.DIRECT_RESPONSES,
+    )
+    assert effective_grok == CodexTransport.RESPONSES_BRIDGE
+
+    # GLM-4.5 on direct_responses switches to responses_bridge
+    effective_glm = shim._validate_write_transport_capability(
+        requires_repository_write=True,
+        model="z-ai/glm-4.5",
+        provider="openrouter",
+        transport=CodexTransport.DIRECT_RESPONSES,
+    )
+    assert effective_glm == CodexTransport.RESPONSES_BRIDGE
+
+    # OpenAI on direct_responses stays direct_responses
+    effective_openai = shim._validate_write_transport_capability(
+        requires_repository_write=True,
+        model="gpt-4.1",
+        provider="openai",
+        transport=CodexTransport.DIRECT_RESPONSES,
+    )
+    assert effective_openai == CodexTransport.DIRECT_RESPONSES
+

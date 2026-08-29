@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-29
 
+- Fixed Coding Provider Protocol & Error Classification for Grok and Z-AI / GLM Models:
+  - Added explicit capability metadata with `supports_server_tools` across `direct_responses` and `responses_bridge` transports for OpenRouter Grok (`x-ai/grok-4.6`, `x-ai/grok-2-1212`, `x-ai/grok-beta`, `x-ai/grok-vision-beta`, `x-ai/grok-3`, `x-ai/grok-3-mini`) and Z-AI (`z-ai/glm-4.5`, `z-ai/glm-4.5-air`, `z-ai/glm-4.5v`, `z-ai/glm-4-plus`, `z-ai/glm-4-9b-chat`, `z-ai/glm-4-voice`, `z-ai/glm-4`), while setting `supports_server_tools=True` on native OpenAI `direct_responses` models.
+  - Removed loose OpenRouter prefix heuristics in `_resolve_uncached` so unknown models strictly resolve to minimum-safe fail-closed capabilities (`supports_tool_calls=False`, `supports_server_tools=False`, `supports_repository_write=False`).
+  - Added transport validation and automatic switching in `CodexCodingAgentShim._validate_write_transport_capability` from `direct_responses` to `responses_bridge` when a model does not support Responses API server tools, or raising typed `CodexCapabilityError` when incompatible.
+  - Stopped misclassifying failed Codex turns as timeouts in `src/mana_agent/gateway/turn_engine.py` and `src/mana_agent/integrations/codex/result_parser.py`, classifying HTTP 400 server-tool failures as `CODING_PROVIDER_TOOL_PROTOCOL_ERROR`, HTTP 400 invalid requests as `CODING_PROVIDER_BAD_REQUEST`, auth rejections as `CODING_PROVIDER_AUTH_ERROR`, permission errors as `CODING_PROVIDER_PERMISSION_ERROR`, retired models as `CODING_PROVIDER_MODEL_RETIRED`, and real timeouts as `CODING_PROVIDER_TIMEOUT`.
+  - Preserved `provider`, `model`, `transport`, `http_status`, `original_error`, and `error_code` across `CodingTaskResult.codex_metadata`, `CodexCodingAgentShim._result_payload`, `coding.terminal` lifecycle event, and `ChatTurnResult.payload`.
+  - Added regression test suites in `tests/test_model_capabilities.py` and `tests/gateway/test_coding_protocol_errors.py`.
+  - User verification required: `pytest tests/test_model_capabilities.py tests/gateway/test_coding_protocol_errors.py -v`.
+
 - Fixed Grok 4.6, OpenRouter Multi-Provider Model Metadata, Reasoning Policy Resolution, and Chat Model Compatibility:
   - Added authoritative capability descriptors and token limits for `x-ai/grok-4.6` and OpenRouter model families (`anthropic/`, `deepseek/`, `google/`, `qwen/`, `mistralai/`, `meta-llama/`) across `direct_responses` and `responses_bridge` transports.
   - Implemented `ReasoningEffortPolicy` (`DISABLED`, `OPTIONAL`, `REQUIRED`, `REQUIRED_UNCONFIGURABLE`), `ModelRequestPolicy`, and `normalize_reasoning_request_overrides` in `src/mana_agent/config/model_capabilities.py`.

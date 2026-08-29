@@ -12,8 +12,10 @@ from typing import Any
 
 from mana_agent._version import get_version
 from mana_agent.integrations.codex.exceptions import (
+    CodexBadRequestError,
     CodexProtocolError,
     CodexTimeoutError,
+    CodexToolProtocolError,
     CodexUnavailableError,
 )
 from mana_agent.utils.redaction import redact_json_line
@@ -267,7 +269,66 @@ class AsyncCodexAppServer:
             return
         error = payload.get("error")
         if error:
-            future.set_exception(CodexProtocolError(self._format_provider_error(str(error))))
+            error_str = str(error)
+            formatted = self._format_provider_error(error_str)
+            lowered = (formatted + " " + error_str).lower()
+            http_status = None
+            if "400" in lowered or "invalid_request" in lowered:
+                http_status = 400
+                if (
+                    "server-tool" in lowered
+                    or "server tool" in lowered
+                    or "tool" in lowered
+                    or "function" in lowered
+                ):
+                    future.set_exception(
+                        CodexToolProtocolError(
+                            formatted,
+                            provider=self._provider_name,
+                            model=self._model,
+                            http_status=400,
+                            original_error=error_str,
+                        )
+                    )
+                    return
+                future.set_exception(
+                    CodexBadRequestError(
+                        formatted,
+                        provider=self._provider_name,
+                        model=self._model,
+                        http_status=400,
+                        original_error=error_str,
+                    )
+                )
+                return
+            if "401" in lowered or "unauthorized" in lowered:
+                http_status = 401
+                err_code = "CODING_PROVIDER_AUTH_ERROR"
+            elif "403" in lowered or "permission" in lowered:
+                http_status = 403
+                err_code = "CODING_PROVIDER_PERMISSION_ERROR"
+            elif "404" in lowered or "not found" in lowered:
+                http_status = 404
+                err_code = "CODING_PROVIDER_MODEL_NOT_FOUND"
+            elif "410" in lowered or "retired" in lowered:
+                http_status = 410
+                err_code = "CODING_PROVIDER_MODEL_RETIRED"
+            elif "429" in lowered or "rate limit" in lowered:
+                http_status = 429
+                err_code = "CODING_PROVIDER_RATE_LIMIT"
+            else:
+                err_code = "CODING_PROVIDER_PROTOCOL_ERROR"
+
+            future.set_exception(
+                CodexProtocolError(
+                    formatted,
+                    provider=self._provider_name,
+                    model=self._model,
+                    http_status=http_status,
+                    original_error=error_str,
+                    error_code=err_code,
+                )
+            )
             return
         result = payload.get("result")
         future.set_result(dict(result) if isinstance(result, dict) else {"value": result})
