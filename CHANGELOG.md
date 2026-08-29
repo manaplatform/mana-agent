@@ -13,8 +13,8 @@ All notable repository changes should be recorded here.
   - Prevented failed provider turns (`turn/failed`, `systemError`, failed items) from emitting misleading successful `assistant.completed` or assistant-generation completion events.
   - Removed premature unconditional `assistant.started` event emission on initial message ingestion in `ConversationService.send_message()`.
   - Preserved real provider terminal state (`systemError`, failed turns, original error strings, HTTP status, and error codes) through result parser, lane coordinator, execution supervisor, and escrow persistence.
-  - Added regression test suite in `tests/gateway/test_coding_lifecycle_observability.py`.
-  - User verification required: `pytest tests/gateway/test_coding_lifecycle_observability.py tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/gateway/test_lane_coordinator.py -v`.
+  - Corrected `turn_engine.py` error category classification to ensure interrupted turns with partial file mutations are categorized as `interruption` for resume/recovery while keeping non-mutating provider timeouts categorized as `timeout`.
+  - User verification required: `pytest tests/gateway/test_codex_interruption_recovery.py tests/gateway/test_coding_protocol_errors.py tests/gateway/test_coding_lifecycle_observability.py tests/gateway/test_lane_coordinator.py -v`.
 
 - Fixed Coding Provider Protocol & Error Classification for Grok and Z-AI / GLM Models:
   - Added explicit capability metadata with `supports_server_tools` across `direct_responses` and `responses_bridge` transports for OpenRouter Grok (`x-ai/grok-4.6`, `x-ai/grok-2-1212`, `x-ai/grok-beta`, `x-ai/grok-vision-beta`, `x-ai/grok-3`, `x-ai/grok-3-mini`) and Z-AI (`z-ai/glm-4.5`, `z-ai/glm-4.5-air`, `z-ai/glm-4.5v`, `z-ai/glm-4-plus`, `z-ai/glm-4-9b-chat`, `z-ai/glm-4-voice`, `z-ai/glm-4`), while setting `supports_server_tools=True` on native OpenAI `direct_responses` models.

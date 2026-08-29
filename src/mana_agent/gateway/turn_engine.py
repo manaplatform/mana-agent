@@ -1224,7 +1224,9 @@ def process_chat_turn(
             )
             classified_state = "PARTIALLY_COMPLETED" if has_partial else "NOT_STARTED"
             resolved_err_code = str(err_code or ("CODING_TIMEOUT" if has_partial else "CODING_AGENT_FAILED"))
-            if resolved_err_code in {"CODING_PROVIDER_TIMEOUT", "CODING_TIMEOUT"}:
+            if has_partial or resolved_err_code in {"MODEL_INTERRUPTED", "USER_INTERRUPTED"}:
+                error_category = "interruption"
+            elif resolved_err_code in {"CODING_PROVIDER_TIMEOUT", "CODING_TIMEOUT"}:
                 error_category = "timeout"
             elif resolved_err_code in {
                 "CODING_PROVIDER_TOOL_PROTOCOL_ERROR",
@@ -1240,8 +1242,6 @@ def process_chat_turn(
                 error_category = "catalog"
             elif resolved_err_code == "CODING_PROVIDER_RATE_LIMIT":
                 error_category = "rate_limit"
-            elif has_partial or resolved_err_code in {"MODEL_INTERRUPTED", "USER_INTERRUPTED"}:
-                error_category = "interruption"
             else:
                 error_category = "execution"
 
