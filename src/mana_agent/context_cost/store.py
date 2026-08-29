@@ -104,9 +104,11 @@ class AccountingStore:
         return removed
 
     def _write(self, reservation_id: str, record: Mapping[str, Any]) -> None:
+        from mana_agent.utils.tool_results import json_safe_dumps
+
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(reservation_id)
-        serialized = json.dumps(dict(record), sort_keys=True, default=str)
+        serialized = json_safe_dumps(dict(record), sort_keys=True)
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=self.root
         )

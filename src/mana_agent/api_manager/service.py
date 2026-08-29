@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import getpass
+import hashlib
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from mana_agent.api_manager.discovery import ApiOperationDiscovery, ApiRouteDecision
 from mana_agent.api_manager.documentation import DocumentationImporter, SemanticDefinition
@@ -22,6 +24,47 @@ from mana_agent.api_manager.request_builder import ApiRequestBuilder
 from mana_agent.api_manager.models import AuthenticationConfig
 from mana_agent.api_manager.events import publish_api_event
 from mana_agent.config.settings import Settings, mana_home
+
+
+def _discover_canonical_spec_url(raw_text: str, content_type: str, reference_url: str) -> str | None:
+    if not raw_text or not reference_url or urlsplit(reference_url).scheme not in {"http", "https"}:
+        return None
+    link_patterns = [
+        r'<link\s+[^>]*?rel=["\'](?:openapi|service-desc|alternate)["\'][^>]*?href=["\']([^"\']+)["\']',
+        r'<link\s+[^>]*?href=["\']([^"\']+)["\'][^>]*?rel=["\'](?:openapi|service-desc|alternate)["\']',
+        r'spec-url=["\']([^"\']+)["\']',
+        r'data-spec=["\']([^"\']+)["\']',
+        r'url\s*:\s*["\']([^"\']+(?:openapi|swagger|\.ya?ml|\.json)[^"\']*)["\']',
+        r'<a\s+[^>]*?href=["\']([^"\']+(?:openapi|swagger|\.ya?ml|\.json)[^"\']*)["\']',
+    ]
+    for pattern in link_patterns:
+        match = re.search(pattern, raw_text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate and not candidate.startswith(("#", "javascript:", "mailto:")):
+                joined = urljoin(reference_url, candidate)
+                if urlsplit(joined).scheme in {"http", "https"}:
+                    return joined
+    return None
+
+
+def _detect_doc_format(payload: bytes, content_type: str, raw_text: str) -> str:
+    lowered_ct = content_type.lower()
+    if "json" in lowered_ct:
+        if '"openapi"' in raw_text:
+            return "openapi_json"
+        if '"swagger"' in raw_text:
+            return "swagger_json"
+        return "json"
+    if "yaml" in lowered_ct or "yml" in lowered_ct:
+        if "openapi:" in raw_text:
+            return "openapi_yaml"
+        if "swagger:" in raw_text:
+            return "swagger_yaml"
+        return "yaml"
+    if "html" in lowered_ct or "<html" in raw_text.lower():
+        return "html"
+    return "text"
 
 
 class ApiManagerService:
@@ -72,6 +115,32 @@ class ApiManagerService:
         self.builder = ApiRequestBuilder(self.registry)
         self.discovery = ApiOperationDiscovery(self.registry)
         self.human_inbox_service = human_inbox_service
+        self._last_inspections: dict[str, dict[str, Any]] = {}
+        self._inspection_texts: dict[str, str] = {}
+        self._import_results: dict[str, dict[str, Any]] = {}
+        self._import_failures: dict[str, Exception] = {}
+
+    def _import_fingerprint(
+        self,
+        *,
+        name: str,
+        text: str,
+        path: str,
+        url: str,
+        documentation_ref: str,
+        refresh_integration_id: str,
+    ) -> str:
+        canonical = f"{name}|{path}|{url}|{documentation_ref}|{refresh_integration_id}|{hashlib.sha256(text.encode('utf-8')).hexdigest() if text else ''}"
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def get_last_inspection(self, session_id: str = "") -> dict[str, Any] | None:
+        return self._last_inspections.get(session_id) or self._last_inspections.get("*")
+
+    def _record_inspection(self, session_id: str, record: dict[str, Any], full_text: str = "") -> None:
+        self._last_inspections[session_id] = record
+        self._last_inspections["*"] = record
+        if full_text and record.get("documentation_ref"):
+            self._inspection_texts[record["documentation_ref"]] = full_text
 
     def import_documentation(
         self,
@@ -108,6 +177,38 @@ class ApiManagerService:
         selected_sources = sum(bool(item) for item in (text, path, url))
         if selected_sources != 1:
             raise ValueError("Select exactly one documentation source: text, path, url, or documentation_ref.")
+
+        fingerprint = self._import_fingerprint(
+            name=name,
+            text=text,
+            path=path,
+            url=url,
+            documentation_ref=documentation_ref,
+            refresh_integration_id=refresh_integration_id,
+        )
+        if fingerprint in self._import_results and not refresh_integration_id and not ephemeral:
+            cached_result = self._import_results[fingerprint]
+            publish_api_event(
+                "api.documentation.import.completed",
+                {
+                    "integration_id": cached_result["integration"]["integration_id"],
+                    "operation_count": cached_result["operation_count"],
+                    "saved": cached_result["saved"],
+                    "idempotent": True,
+                },
+            )
+            return cached_result
+        if fingerprint in self._import_failures and not refresh_integration_id and not ephemeral:
+            prev_exc = self._import_failures[fingerprint]
+            publish_api_event(
+                "api.documentation.import.failed",
+                {"name": name, "error_code": getattr(prev_exc, "code", "invalid_documentation"), "idempotent": True},
+            )
+            raise prev_exc
+
+        evidence_text = self._inspection_texts.get(documentation_ref) or text
+        evidence_doc_ref = documentation_ref
+
         try:
             if path:
                 integration = self.importer.from_file(
@@ -115,6 +216,8 @@ class ApiManagerService:
                     name=name,
                     source_decision_id=source_decision_id,
                     semantic_definition=semantic_definition,
+                    evidence_text=evidence_text,
+                    evidence_documentation_ref=evidence_doc_ref,
                 )
             elif url:
                 integration = self.importer.from_url(
@@ -122,6 +225,8 @@ class ApiManagerService:
                     name=name,
                     source_decision_id=source_decision_id,
                     semantic_definition=semantic_definition,
+                    evidence_text=evidence_text,
+                    evidence_documentation_ref=evidence_doc_ref,
                 )
             else:
                 integration = self.importer.from_text(
@@ -130,8 +235,11 @@ class ApiManagerService:
                     source_decision_id=source_decision_id,
                     reference=text_reference,
                     semantic_definition=semantic_definition,
+                    evidence_text=evidence_text,
+                    evidence_documentation_ref=evidence_doc_ref,
                 )
         except (ApiManagerError, ValueError, OSError, UnicodeError) as exc:
+            self._import_failures[fingerprint] = exc
             publish_api_event(
                 "api.documentation.import.failed",
                 {"name": name, "error_code": getattr(exc, "code", "invalid_documentation")},
@@ -158,6 +266,7 @@ class ApiManagerService:
             ),
             "integration": integration.model_dump(mode="json", by_alias=True),
         }
+        self._import_results[fingerprint] = result
         publish_api_event(
             "api.documentation.import.completed",
             {
@@ -220,7 +329,11 @@ class ApiManagerService:
         next_offset = bounded_offset + len(preview)
         truncated = next_offset < len(raw_text)
 
-        return {
+        canonical_spec = _discover_canonical_spec_url(raw_text, content_type, reference)
+        format_hint = _detect_doc_format(payload, content_type, raw_text)
+        content_sha256 = hashlib.sha256(payload).hexdigest()
+
+        record = {
             "reference": reference,
             "documentation_ref": artifact.artifact_id,
             "content_type": content_type,
@@ -231,7 +344,13 @@ class ApiManagerService:
             "next_offset": next_offset if truncated else None,
             "truncated": truncated,
             "more_available": truncated,
+            "canonical_spec_url": canonical_spec,
+            "content_sha256": content_sha256,
+            "format": format_hint,
+            "source_url": reference if urlsplit(reference).scheme in {"http", "https"} else "",
         }
+        self._record_inspection(session_id or "api-inspection", record, full_text=raw_text)
+        return record
 
     def list_integrations(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
         return [

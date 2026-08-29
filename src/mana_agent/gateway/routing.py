@@ -15,6 +15,7 @@ import threading
 import uuid
 from typing import Any, Callable, Iterable
 
+from mana_agent.config.model_capabilities import resolve_model_capability
 from mana_agent.config.settings import Settings, mana_home
 from mana_agent.config.catalog_service import ModelCatalogService
 from mana_agent.config.inference_provider import resolve_inference_connection
@@ -329,7 +330,27 @@ class GatewayRoutingAuthority:
         for profile in legacy:
             descriptor = descriptors.get(profile.model_id)
             if descriptor is None:
-                resolved.append(profile)
+                cap_desc = resolve_model_capability(profile.provider, profile.model_id)
+                resolved.append(replace(
+                    profile,
+                    can_patch=cap_desc.supports_repository_write if cap_desc.is_known else False,
+                    can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else True,
+                    can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else True,
+                    can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else True,
+                    supported_tools=(
+                        frozenset({"*"}) if not cap_desc.is_known or (cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
+                        else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
+                        if cap_desc.supports_tool_calls
+                        else frozenset()
+                    ),
+                    capability_descriptor=cap_desc,
+                    configuration={
+                        **profile.configuration,
+                        "capability_confidence": cap_desc.capability_confidence,
+                        "capability_source": cap_desc.capability_source,
+                        "capability_descriptor": cap_desc.to_dict(),
+                    },
+                ))
                 continue
             metadata = dict(descriptor.metadata)
             context_window = descriptor.context_window or profile.context_window
@@ -341,10 +362,11 @@ class GatewayRoutingAuthority:
                 descriptor.context_window is not None
                 and descriptor.max_output_tokens is not None
             )
-            # Apply catalog limits/pricing onto profile fields only. Never merge
-            # the raw /v1/models object (id, object, created, owned_by, …) into
-            # configuration — that dict becomes Codex bridge request_overrides
-            # and NVIDIA rejects those keys as unsupported chat/completions params.
+            cap_desc = resolve_model_capability(
+                profile.provider,
+                profile.model_id,
+                catalog_records=[metadata] if metadata else None,
+            )
             resolved.append(replace(
                 profile,
                 context_window=context_window,
@@ -353,15 +375,28 @@ class GatewayRoutingAuthority:
                 input_cost_per_million=float(metadata.get("input_price_per_million") or 0),
                 output_cost_per_million=float(metadata.get("output_price_per_million") or 0),
                 cached_input_cost_per_million=(float(metadata["cached_input_price_per_million"]) if metadata.get("cached_input_price_per_million") is not None else None),
+                can_patch=cap_desc.supports_repository_write if cap_desc.is_known else False,
+                can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else True,
+                can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else True,
+                can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else True,
+                supported_tools=(
+                    frozenset({"*"}) if not cap_desc.is_known or (cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
+                    else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
+                    if cap_desc.supports_tool_calls
+                    else frozenset()
+                ),
+                capability_descriptor=cap_desc,
                 source_level=("provider-catalog" if complete_capabilities else "provider-catalog-with-configured-unknown-limit"),
                 configuration={
                     **profile.configuration,
                     "token_profile_confidence": "high" if complete_capabilities else "low",
                     "capability_source": (
-                        "provider-catalog"
-                        if complete_capabilities
-                        else "provider-catalog-with-configured-unknown-limit"
+                        cap_desc.capability_source
+                        if cap_desc.is_known
+                        else ("provider-catalog" if complete_capabilities else "provider-catalog-with-configured-unknown-limit")
                     ),
+                    "capability_confidence": cap_desc.capability_confidence,
+                    "capability_descriptor": cap_desc.to_dict(),
                 },
             ))
         return tuple(resolved)

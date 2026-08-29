@@ -131,17 +131,9 @@ def utc_now() -> datetime:
 
 
 def to_jsonable(value: Any) -> Any:
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if is_dataclass(value):
-        return {key: to_jsonable(item) for key, item in asdict(value).items()}
-    if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [to_jsonable(item) for item in value]
-    return value
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
+    return json_safe_tool_payload(value)
 
 
 def parse_dt(value: Any) -> datetime:
@@ -258,7 +250,7 @@ class TaskBoardItem:
     integration_verification: list[str] = field(default_factory=list)
     wiring_required: bool = False
     wiring_reason: str | None = None
-    wiring_outcome: str = "incomplete"
+    wiring_outcome: str = "pending"
     wiring_outcome_reason: str = ""
     reachability_edges: list[dict[str, str]] = field(default_factory=list)
     verification_provenance: dict[str, Any] = field(default_factory=dict)
@@ -301,6 +293,13 @@ class TaskBoardItem:
     verification_commands: list[str] = field(default_factory=list)
     verification_results: list[VerificationResult] = field(default_factory=list)
     memory_status: dict[str, Any] = field(default_factory=dict)
+    task_created_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    worker_claimed_at: datetime | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    task_completed_at: datetime | None = None
+    duration_breakdown: dict[str, int] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -342,6 +341,13 @@ class QueueJob:
     error: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    task_created_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    worker_claimed_at: datetime | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    task_completed_at: datetime | None = None
+    duration_breakdown: dict[str, int] = field(default_factory=dict)
     token_usage: int = 0
     changed_files: list[str] = field(default_factory=list)
     cache_status: str = "unknown"
@@ -636,6 +642,6 @@ class PlanResult:
     integration_verification: list[str] = field(default_factory=list)
     wiring_required: bool = False
     wiring_reason: str | None = None
-    wiring_outcome: str = "incomplete"
+    wiring_outcome: str = "pending"
     wiring_outcome_reason: str = ""
     reachability_edges: list[dict[str, str]] = field(default_factory=list)

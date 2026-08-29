@@ -17,6 +17,9 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
+    safe_payload = json_safe_tool_payload(payload)
     # A session reset can remove a session directory while another worker is
     # finishing its atomic write. Recreate the directory and restage once so a
     # valid new session never fails with a missing ``session.json`` path.
@@ -26,7 +29,7 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                json.dump(safe_payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())

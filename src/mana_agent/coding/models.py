@@ -52,6 +52,7 @@ class CodingTask(BaseModel):
     verification_commands: list[str] = Field(default_factory=list)
     relevant_context: str = ""
     requires_repository_write: bool = True
+    task_created_at: datetime | None = None
 
     @field_validator("task_id", "goal")
     @classmethod
@@ -161,9 +162,65 @@ class CodingTaskResult(BaseModel):
     token_usage: dict[str, int] | None = None
     thread_id: str = ""
     turn_id: str = ""
+    task_created_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    worker_claimed_at: datetime | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    task_completed_at: datetime | None = None
+    duration_breakdown: dict[str, int] = Field(default_factory=dict)
     # Provider-owned lifecycle evidence is forwarded unchanged to the
     # execution supervisor and durable result escrow.
     codex_metadata: Any | None = None
+
+
+def compute_duration_breakdown(
+    *,
+    task_created_at: datetime | str | None = None,
+    scheduled_at: datetime | str | None = None,
+    worker_claimed_at: datetime | str | None = None,
+    provider_started_at: datetime | str | None = None,
+    provider_completed_at: datetime | str | None = None,
+    task_completed_at: datetime | str | None = None,
+) -> dict[str, int]:
+    """Compute separated durations in milliseconds across lifecycle milestones."""
+    def _to_dt(val: datetime | str | None) -> datetime | None:
+        if isinstance(val, datetime):
+            return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+        if isinstance(val, str) and val.strip():
+            try:
+                parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
+        return None
+
+    t_created = _to_dt(task_created_at)
+    t_scheduled = _to_dt(scheduled_at)
+    t_claimed = _to_dt(worker_claimed_at)
+    t_p_start = _to_dt(provider_started_at)
+    t_p_done = _to_dt(provider_completed_at)
+    t_done = _to_dt(task_completed_at)
+
+    def _diff_ms(start: datetime | None, end: datetime | None) -> int:
+        if start is not None and end is not None:
+            return max(0, int((end - start).total_seconds() * 1000))
+        return 0
+
+    breakdown: dict[str, int] = {}
+    if t_created and t_scheduled:
+        breakdown["queue_delay_ms"] = _diff_ms(t_created, t_scheduled)
+    if t_scheduled and t_claimed:
+        breakdown["worker_acquisition_delay_ms"] = _diff_ms(t_scheduled, t_claimed)
+    if t_claimed and t_p_start:
+        breakdown["provider_startup_delay_ms"] = _diff_ms(t_claimed, t_p_start)
+    if t_p_start and t_p_done:
+        breakdown["provider_execution_time_ms"] = _diff_ms(t_p_start, t_p_done)
+    if t_p_done and t_done:
+        breakdown["finalization_time_ms"] = _diff_ms(t_p_done, t_done)
+    if t_created and t_done:
+        breakdown["total_task_duration_ms"] = _diff_ms(t_created, t_done)
+    return breakdown
 
 
 class CodingBackendDecision(BaseModel):
@@ -194,5 +251,6 @@ __all__ = [
     "CodingTask",
     "CodingTaskResult",
     "WorkspaceContext",
+    "compute_duration_breakdown",
     "redact_event_value",
 ]

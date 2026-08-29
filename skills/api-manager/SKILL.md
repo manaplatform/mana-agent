@@ -11,42 +11,40 @@ browser request, shell command, or provider-specific implementation.
 
 ## Required workflow
 
-1. Call `api_workflow_decide` first. Declare every action required by the user's requested outcome.
-   An inspect-and-call request requires documentation inspection, integration import, operation
-   search, and request execution; configuration or preview must also be declared when needed.
-   Distinguish documentation import, integration configuration, operation retrieval, request
-   preview, and request execution.
-2. Inspect authorized documentation with `api_docs_inspect` before creating an integration. Formal
-   OpenAPI or Swagger input is parsed deterministically.
-   If the tool explicitly returns `documentation_authorization_required`, the model may select the
+1. Call `api_workflow_decide` first. Declare the required outcome requirements (such as
+   `api_target_resolved`, `api_execution_verified`, and `user_goal_verified`). Outcome requirements
+   focus on what must be proven, not a mandatory fixed sequence of tool names.
+2. If documentation is needed to understand the API, inspect authorized documentation with
+   `api_docs_inspect` or `browser_inspect`. If the operation is already known or saved, documentation
+   inspection may be safely skipped. Formal OpenAPI or Swagger input is parsed deterministically.
+   If `api_docs_inspect` returns `documentation_authorization_required`, the model may select the
    read-only rendered browser tools for that same URL. It may click, wait, or scroll only to expand
    operation documentation, must re-inspect after every action, and must never type, submit a form,
-   sign in, grant consent, or interact with CAPTCHA or MFA controls. Import the returned rendered
-   text rather than retrying the redirecting URL.
-3. For Markdown, webpage prose, or pasted text, produce a strict semantic definition. Cite the
-   source for every operation, list only fields that were actually inferred (the list may be empty
-   when every field is documented), and leave undocumented required values or authentication
-   unresolved. Submit prose only through `api_docs_import_semantic`, whose schema requires the
-   inspected text, its exact inspected documentation reference, and the typed semantic definition.
-   Every operation must cite that reference. Use `api_docs_import` for formal OpenAPI or Swagger
-   specifications.
-4. Prefer enabled saved integrations. Search their operations before selecting one.
+   sign in, grant consent, or interact with CAPTCHA or MFA controls.
+3. For Markdown, webpage prose, or pasted text, produce a strict semantic definition when importing.
+   Cite the source for every operation, list only fields that were actually inferred (the list may be
+   empty when every field is documented), and leave undocumented required values or authentication
+   unresolved. Submit prose only through `api_docs_import_semantic`. Use `api_docs_import` for formal
+   OpenAPI or Swagger specifications.
+4. Prefer enabled saved integrations. Search their operations before selecting one. If a suitable
+   saved operation exists, resolve the target and execute directly without unnecessary reinspection.
    If the user supplied documentation and no operation exists, inspect, import with `save=true`,
-   search the saved integration, and continue as one ordered workflow. If a selected import reports
-   that the integration already exists, retry the same model-selected import with the returned exact
-   integration ID as `refresh_integration_id`; do not continue until the declared import succeeds.
-5. Select only an operation returned by the operation search. If several remain plausible and the
-   difference could change the result or side effects, ask one focused clarification.
+   search the saved integration, and continue. If a selected import reports that the integration
+   already exists, retry the same import with the returned exact integration ID as `refresh_integration_id`.
+5. Select only an operation returned by the operation search or saved metadata. If several remain
+   plausible and the difference could change the result or side effects, ask one focused clarification.
 6. Supply every documented required parameter and validate the body. Never guess authentication,
    credentials, required values, a base URL, or an operation ID.
-7. Preview every create, update, delete, or unknown/high-risk operation. Show only the redacted
-   method, URL, headers, query, body summary, operation, integration, and expected side effects.
-8. Execute only through `api_request_execute`. A mutation must pass the real approval flow.
+7. Preview is policy-based: safe read-only requests (`GET`, `HEAD`, `OPTIONS`) may skip preview.
+   Always preview every create, update, delete, or high-risk mutation (`POST`, `PUT`, `PATCH`, `DELETE`).
+   Show only the redacted method, URL, headers, query, body summary, operation, integration, and
+   expected side effects.
+8. Execute through an authorized execution mechanism (e.g. `api_request_execute` or authorized connector).
+   A mutation must pass the real approval flow.
 9. Report the actual status, latency, structured response, and upstream errors. Never claim success
    without an executor result where `ok` and `executed` are true.
-10. Do not treat discovered documentation or a model summary as completion evidence. Every action
-    declared by `api_workflow_decide` must have a corresponding successful tool result; otherwise
-    return `api_workflow_incomplete` or the exact pending approval/credential condition.
+10. Do not treat discovered documentation or a model summary as completion evidence. Authoritative
+    runtime evidence must satisfy every required outcome declared by `api_workflow_decide`.
 
 ## Security rules
 

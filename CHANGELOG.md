@@ -2,6 +2,155 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-29
+
+- Fixed Coding Agent Lifecycle Events, Scheduling Observability, and Event Normalization:
+  - Added explicit lifecycle timestamps (`task_created_at`, `scheduled_at`, `worker_claimed_at`, `provider_started_at`, `provider_completed_at`, `task_completed_at`) and separated duration breakdown metrics (`queue_delay_ms`, `worker_acquisition_delay_ms`, `provider_startup_delay_ms`, `provider_execution_time_ms`, `finalization_time_ms`, `total_task_duration_ms`) across `CodingTask`, `CodingTaskResult`, `LaneExecution`, `TaskRecord`, `TaskBoardItem`, `QueueJob`, and `AgentEvent`.
+  - Resolved the ~16-minute gap between task creation and actual provider turn start by isolating queue/scheduler waiting delay from provider execution time, ensuring a 2.5-second provider turn failure is never misreported as a 16-minute provider timeout.
+  - Updated `scheduling_diagnostics()` in `LaneCoordinator` to expose full timestamp breakdowns and discrete phase durations.
+  - Fixed event normalization in `src/mana_agent/integrations/codex/event_adapter.py` and `src/mana_agent/coding/event_visibility.py` so `userMessage` notifications are mapped to request/input lifecycle events (`user.message`, `turn.input`) with `EventSemanticKind.LIFECYCLE`, never `assistant.started` or `assistant.completed`.
+  - Restricted `EventSemanticKind.ASSISTANT_GENERATION` strictly to actual model-produced assistant content, deltas, and tool calls.
+  - Prevented failed provider turns (`turn/failed`, `systemError`, failed items) from emitting misleading successful `assistant.completed` or assistant-generation completion events.
+  - Removed premature unconditional `assistant.started` event emission on initial message ingestion in `ConversationService.send_message()`.
+  - Preserved real provider terminal state (`systemError`, failed turns, original error strings, HTTP status, and error codes) through result parser, lane coordinator, execution supervisor, and escrow persistence.
+  - Corrected `turn_engine.py` error category classification to ensure interrupted turns with partial file mutations are categorized as `interruption` for resume/recovery while keeping non-mutating provider timeouts categorized as `timeout`.
+  - User verification required: `pytest tests/gateway/test_codex_interruption_recovery.py tests/gateway/test_coding_protocol_errors.py tests/gateway/test_coding_lifecycle_observability.py tests/gateway/test_lane_coordinator.py -v`.
+
+- Fixed Coding Provider Protocol & Error Classification for Grok and Z-AI / GLM Models:
+  - Added explicit capability metadata with `supports_server_tools` across `direct_responses` and `responses_bridge` transports for OpenRouter Grok (`x-ai/grok-4.6`, `x-ai/grok-2-1212`, `x-ai/grok-beta`, `x-ai/grok-vision-beta`, `x-ai/grok-3`, `x-ai/grok-3-mini`) and Z-AI (`z-ai/glm-4.5`, `z-ai/glm-4.5-air`, `z-ai/glm-4.5v`, `z-ai/glm-4-plus`, `z-ai/glm-4-9b-chat`, `z-ai/glm-4-voice`, `z-ai/glm-4`), while setting `supports_server_tools=True` on native OpenAI `direct_responses` models.
+  - Removed loose OpenRouter prefix heuristics in `_resolve_uncached` so unknown models strictly resolve to minimum-safe fail-closed capabilities (`supports_tool_calls=False`, `supports_server_tools=False`, `supports_repository_write=False`).
+  - Added transport validation and automatic switching in `CodexCodingAgentShim._validate_write_transport_capability` from `direct_responses` to `responses_bridge` when a model does not support Responses API server tools, or raising typed `CodexCapabilityError` when incompatible.
+  - Stopped misclassifying failed Codex turns as timeouts in `src/mana_agent/gateway/turn_engine.py` and `src/mana_agent/integrations/codex/result_parser.py`, classifying HTTP 400 server-tool failures as `CODING_PROVIDER_TOOL_PROTOCOL_ERROR`, HTTP 400 invalid requests as `CODING_PROVIDER_BAD_REQUEST`, auth rejections as `CODING_PROVIDER_AUTH_ERROR`, permission errors as `CODING_PROVIDER_PERMISSION_ERROR`, retired models as `CODING_PROVIDER_MODEL_RETIRED`, and real timeouts as `CODING_PROVIDER_TIMEOUT`.
+  - Preserved `provider`, `model`, `transport`, `http_status`, `original_error`, and `error_code` across `CodingTaskResult.codex_metadata`, `CodexCodingAgentShim._result_payload`, `coding.terminal` lifecycle event, and `ChatTurnResult.payload`.
+  - Added regression test suites in `tests/test_model_capabilities.py` and `tests/gateway/test_coding_protocol_errors.py`.
+  - User verification required: `pytest tests/test_model_capabilities.py tests/gateway/test_coding_protocol_errors.py -v`.
+
+- Fixed Grok 4.6, OpenRouter Multi-Provider Model Metadata, Reasoning Policy Resolution, and Chat Model Compatibility:
+  - Added authoritative capability descriptors and token limits for `x-ai/grok-4.6` and OpenRouter model families (`anthropic/`, `deepseek/`, `google/`, `qwen/`, `mistralai/`, `meta-llama/`) across `direct_responses` and `responses_bridge` transports.
+  - Implemented `ReasoningEffortPolicy` (`DISABLED`, `OPTIONAL`, `REQUIRED`, `REQUIRED_UNCONFIGURABLE`), `ModelRequestPolicy`, and `normalize_reasoning_request_overrides` in `src/mana_agent/config/model_capabilities.py`.
+  - Prevented sending reasoning disable instructions (`reasoning_effort="none"`, `reasoning={"enabled": false}`, `thinking=False`) to reasoning-required models, and omitted unconfigurable effort parameters for models such as Grok 4.6 and DeepSeek R1.
+  - Updated `create_chat_model` and `CompatibleChatOpenAI` in `src/mana_agent/multi_agent/runtime/compatibility.py` to preserve configured `reasoning_effort` unless explicitly unconfigurable, infer OpenAI providers from standard base URLs, and accurately apply chat completions tool-reasoning normalization.
+  - Fixed `profiles_for_pinned_models` in `src/mana_agent/model_routing/profiles.py` to resolve model capability descriptors before inspecting `reasoning_required`, fixing `UnboundLocalError`.
+  - Ensured explicitly passed `catalog_records` take precedence in `ModelCapabilityRegistry.resolve()`.
+  - Kept NVIDIA-specific DeepSeek chat template kwargs and reasoning shaping strictly scoped to NVIDIA DeepSeek models.
+  - Updated `_mana_model_capability_bridge` to accept flexible positional and keyword arguments (`provider`, `model`, `transport`, `*args`, `**kwargs`) and inspect resolved capabilities and context lengths so OpenRouter models configure appropriate context windows and token limits.
+  - Enhanced gateway lane coordinator recovery in `src/mana_agent/gateway/chat_gateway.py` to evaluate retry budget exhaustion alongside deadline gates in `force_new_task_for_dead` / `force_new_multi_task`, and safely fall back to reserving fresh tasks when same-task retry or replan validation fails.
+  - Added structured diagnostic events (`model.reasoning_policy.resolved`, `codex.request.reasoning_normalized`, `codex.request.override_removed`).
+  - Added regression test suites in `tests/test_model_capabilities.py`, `tests/test_codex_responses_bridge.py`, and `tests/test_codex_coding_visibility.py`.
+  - User verification required: `pytest tests/test_llm_compatibility.py tests/test_model_capabilities.py tests/test_model_routing.py tests/test_tui_user_config.py tests/test_codex_responses_bridge.py tests/test_codex_coding_visibility.py -v`.
+
+## 2026-08-28
+
+- Fixed Windows CI Test Failures in Model Capabilities and Repository Metadata Inspection:
+  - Updated `RepositoryMetadataInspector.inspect()` and `_git_lines()` in `src/mana_agent/model_routing/repository.py` to guard `root.resolve()`, directory existence checks, and git subprocess execution with `(OSError, ValueError, RuntimeError)` handling, preventing `NotADirectoryError: [WinError 267]` on Windows and non-existent root paths.
+  - Guarded git worktree probing in `src/mana_agent/doctor/checks/routing.py` with directory existence check and exception handling.
+  - Replaced hardcoded `Path("/tmp")` in `test_separate_agent_permission_and_model_capability` and `test_exact_deepseek_openrouter_direct_responses_reproduction` in `tests/test_model_capabilities.py` with pytest's `tmp_path` fixture.
+  - Added regression test `test_repository_metadata_inspector_nonexistent_or_non_directory_root` in `tests/test_model_routing.py`.
+  - User verification required: `pytest tests/test_model_capabilities.py tests/test_model_routing.py -v`.
+
+- Resolved Test Suite Regressions Across Gateway, Taskboard, Execution Supervisor, and Model Capabilities:
+  - Updated model capability routing fallbacks in `src/mana_agent/gateway/routing.py` and `router.py` to default non-write capabilities to `True` for read/conversational routing while keeping `can_patch=False` (fail-closed for repo writes), and made `AgentRole.CODING`/`AgentRole.PLANNER` conditional on `--no-coding-agent` in `stack.py`.
+  - Added `wiring_required` and `wiring_reason` to `TaskBoard.create_task()` and updated `_validate_feature_completion`, `project_supervisor_completion`, and `validators.py` to correctly distinguish child wiring tasks from parent feature tasks, allowing `wiring_required=False` tasks to resolve to `not_required` and verified integration tasks to resolve to `completed` or `already_integrated`.
+  - Fixed loopback healthcheck connectivity in `CodexResponsesBridge` by bypassing proxy redirection via `ProxyHandler({})`.
+  - Added `_ImportArgs` schema to `api_docs_import` tool in `api_manager/runtime_tools.py` for LangChain args schema validation and imported `getpass` in `api_manager/service.py`.
+  - Updated API route execution in `chat_gateway.py` to recognize `{"api_execution_verified", "user_goal_verified"}` as awaiting execution approval when preview requires permission, and updated system prompt contracts.
+  - Updated `ExecutionSupervisor.get_verified_execution_result()` to return `EscrowLookupStatus.UNVERIFIED` for tasks pending completion verification before checking terminal flags, and updated budget overrun assertions in `test_result_escrow_recovery.py`.
+  - Full test suite verified green: 2485 passed, 2 skipped, 0 failed.
+  - User verification required: `pytest`.
+
+- Improved Model Routing Failure Diagnostics and Startup Error Handling:
+  - Updated `ModelRouter.route()` in `src/mana_agent/model_routing/router.py` to include detailed candidate rejection reasons (`Rejected candidates: <model> (<reasons>)`) in the `RoutingFailure` message when candidate evaluation rejects all models, making routing failures immediately diagnosable.
+  - Updated `chat_cli.py` to catch `RoutingFailure` alongside `ValueError` during gateway startup and initial model resolution, presenting clean and actionable parameter errors instead of crashing with an unhandled Python traceback.
+  - User verification required: `python -m pytest tests/test_model_routing.py tests/test_model_capabilities.py tests/gateway/test_routing_authority.py -v`.
+
+- Fixed API Workflow Completion Evidence Contract and Removed Legacy Required Actions Authority:
+  - Removed legacy `required_actions` fallback as runtime authority from `_api_workflow_completion_from_trace()` in `src/mana_agent/gateway/chat_gateway.py`.
+  - Removed legacy action normalization validator from `_WorkflowDecision` in `src/mana_agent/api_manager/runtime_tools.py`, requiring explicit `required_outcomes` and adding `migrate_legacy_workflow_decision()` for explicit versioned migrations of historical decision dictionaries.
+  - Ensured read-only API tasks use verified external execution (`api_execution_verified`) and user-goal evidence (`user_goal_verified`) as the primary completion contract without turning optional implementation steps (`documentation_inspection`, `integration_import`, `operation_search`, `request_preview`) into mandatory workflow gates.
+  - Made `missing_outcomes` a canonical field reporting semantic outcomes instead of tool names, while preserving `missing_actions` as a backward-compatibility alias.
+  - Independently evaluated `user_goal_verified` based on upstream payload satisfaction and failure flags.
+  - Preserved mutation risk policies (POST, PUT, PATCH, DELETE require preview/approval before execution verification is credited).
+  - Updated API route execution in `chat_gateway.py` to project normalized workflow evidence (`required_outcomes`, `completed_outcomes`, `missing_outcomes`, `execution_evidence`, `goal_satisfied`, `actual_tool_events`) to durable lane task and taskboard records.
+  - Updated test fixtures in `tests/test_api_manager.py` and `tests/gateway/test_api_manager_route.py`, and added comprehensive regression test cases covering Quran reproduction, saved integrations, docs-only tasks, unexecuted API tasks, mutation preview policy, legacy decision rejection, goal satisfaction verification, and durable task projection.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
+- Fixed Coding Agent Model-Capability Admission Failure and Multi-Transport Resolution:
+  - Resolved `Write-required Codex turn rejected: model capabilities are unknown` by implementing authoritative transport-level capability resolution keyed by `(provider, model, transport)`.
+  - Added `ModelCapabilityDescriptor` and `ModelCapabilityRegistry` in `src/mana_agent/config/model_capabilities.py` representing explicit capability dimensions (`supports_tool_calls`, `supports_repository_read`, `supports_repository_write`, `supports_shell`, `supports_structured_output`, `supports_streaming`, `supports_parallel_tools`, `capability_confidence`, `capability_source`).
+  - Normalized OpenRouter model IDs to preserve organization namespaces (e.g. `deepseek/deepseek-v4-flash`, `anthropic/claude-3.7-sonnet`) and avoid treating OpenRouter models as bare OpenAI-native models.
+  - Updated candidate evaluation in `ModelRouter.route()` and `GatewayRoutingAuthority` to filter unknown or incompatible model candidates before selection, enabling automatic fallback to alternative verified write-capable candidates without failing the user turn.
+  - Enforced fail-closed behavior with typed `NoWriteCapableModelAvailableError` (`no_write_capable_model_available`) containing candidate diagnostics when no candidate is write/tool capable.
+  - Separated agent permissions (`CodingAgent` workspace write permission) from model transport capabilities in `CodexCodingAgentShim._validate_write_transport_capability`.
+  - Added structured routing diagnostic events (`model.capability.resolved`, `model.capability.unknown`, `model.candidate.rejected`, `model.candidate.selected`).
+  - Added regression test suite in `tests/test_model_capabilities.py` covering Cases A, B, C, D, E, exact DeepSeek OpenRouter reproduction, caching/invalidation, and diagnostic events.
+  - User verification required: `python -m pytest tests/test_model_capabilities.py tests/test_model_routing.py tests/gateway/test_routing_authority.py tests/test_openrouter_provider.py tests/test_codex_integration.py -v`.
+
+- Fixed Checkpoint Lifecycle Race and Terminal State Transition Bug:
+  - Resolved `Gateway execution failed: task cannot checkpoint from state failed` by centralizing checkpoint transition authority in `ExecutionSupervisor.can_checkpoint()` and enforcing durable supervisor state over stale in-memory task projections.
+  - Updated `ExecutionSupervisor.checkpoint()` and `LocalExecutionStore.update_task_and_checkpoint()` with atomic compare-and-set semantics that safely skip checkpointing with typed diagnostics (`checkpoint.skipped` event with reason `checkpoint_skipped_terminal_state`) when an execution is already terminal (`failed`, `cancelled`, `completed`, `budget_exhausted`, `recovery_review_required`).
+  - Guaranteed that late/stale callbacks from cleanup handlers, feature integration, verification preparation, or post-processing never overwrite the original task failure reason, result escrow, verification state, or terminal metadata.
+  - Ensured checkpoint failures for active `RUNNING` executions (e.g. invalid lease tokens or uncommitted store writes) continue to surface as real errors.
+  - Enforced strict state machine transitions in `state_machine.py` so that direct `FAILED -> CHECKPOINTING` is rejected and recovery from failed executions strictly follows explicit state transitions (`FAILED -> RETRY_SCHEDULED -> QUEUED -> LEASED -> RUNNING -> CHECKPOINTING`).
+  - Added structured lifecycle instrumentation events (`checkpoint.requested`, `checkpoint.allowed`, `checkpoint.skipped`, `checkpoint.rejected`) with diagnostic metadata (`task_id`, `execution_id`, `current_state`, `expected_state`, `caller`, `checkpoint_boundary`, `terminal_reason`, `attempt_id`).
+  - Updated `LaneCoordinator.checkpoint()` and `chat_gateway.py` to guard checkpoint calls with `can_checkpoint` checks and handle skipped checkpoints without crashing.
+  - Added comprehensive regression test suite in `tests/execution_supervisor/test_checkpoint_lifecycle_races.py` covering failure-before-checkpoint, concurrent failure races, normal checkpoint lifecycle, completed execution late callbacks, recovery transitions, original error preservation, restart reconciliation, running task invalid lease rejection, and lane coordinator terminal handling.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_checkpoint_lifecycle_races.py tests/gateway/test_checkpoint_resume_invariants.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_lane_coordinator.py -v`.
+
+- Made API Workflow Validation Evidence-Based Instead of Tool-Name-Based:
+  - Removed mandatory fixed tool-name sequence requirements (`documentation_inspection`, `request_preview`, `request_execution`) on the `api` route.
+  - Refactored `_WorkflowDecision` schema in `src/mana_agent/api_manager/runtime_tools.py` to declare outcome requirements (`required_outcomes` and `optional_outcomes`) with support for `api_target_resolved`, `api_execution_verified`, `user_goal_verified`, `documentation_understood`, `integration_available`, `operation_resolved`, `request_previewed`, and `approval_obtained`. Added backward compatibility validator and property for legacy `required_actions`.
+  - Refactored `_api_workflow_completion_from_trace` in `src/mana_agent/gateway/chat_gateway.py` to validate outcome-based evidence instead of tool-name sequences, normalizing execution results from any authorized execution capability (`api_request_execute`, browser executors, connectors, HTTP runtimes) into a standard `api_execution_evidence` contract.
+  - Separated `actual_tool_events` (observability trace) from authoritative workflow completion evidence.
+  - Made request preview policy-based rather than universally mandatory: safe read-only operations (`GET`, `HEAD`, `OPTIONS`) may skip preview, while mutations (`POST`, `PUT`, `PATCH`, `DELETE`) continue to enforce preview and approval before execution.
+  - Made documentation inspection optional when the operation/integration is already saved or directly executable. Allowed documentation to be inspected via `api_docs_inspect` or `browser_inspect`.
+  - Updated API route system prompt instructions in `chat_gateway.py`, documentation in `docs/api-manager.md`, and skill instructions in `skills/api-manager/SKILL.md`.
+  - Updated test suite in `tests/test_api_manager.py` and `tests/gateway/test_api_manager_route.py` with comprehensive regression coverage for read-only execution without preview/docs, browser documentation with connector execution, saved integration execution without reinspection, mutation preview enforcement, and tool trace separation.
+  - User verification required: `python -m pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py -v`.
+
+## 2026-08-27
+
+- Fixed Authoritative Result Escrow Recovery, Stale Task Lifecycle Repair, and Single-Writer Coordination:
+  - Traced incident `task_20260827_000001` and confirmed why `result_778a7987-cd61-4e2b-998b-05cc8065ba3e` existed in escrow while the task remained `status=in_progress` due to an interrupted lifecycle transition after durable atomic result write.
+  - Made persisted result escrow authoritative over stale task lifecycle state in `ExecutionSupervisor.get_verified_execution_result`, automatically repairing task record state (`state=COMPLETED`/terminal, `result_id`, `verification_status`, `completion_artefacts`, `finished_at`, `failure_reason`, and `provider_metadata`) and attempt state.
+  - Updated `ExecutionSupervisor.recover()` to scan and reconcile incomplete tasks against authoritative escrow results without failing on unverified or expired states.
+  - Preserved atomic, write-once escrow semantics in `LocalExecutionStore.save_result` while adding safe idempotent reconciliation for concurrent writer races with identical payloads and rejecting conflicting payloads with `EscrowConflictError`.
+  - Updated `ExecutionSupervisor.transition`, `ExecutionSupervisor.record_terminal_result`, and `LaneCoordinator.finish` to ensure single-writer safety and prevent duplicate terminal result generation when an authoritative result already exists.
+  - Enforced separation between recovery of the same execution and genuinely new execution attempts with distinct task/attempt identities.
+  - Added regression test scenarios N through T in `tests/execution_supervisor/test_result_escrow_recovery.py` covering `task_20260827_000001` recovery, crash-after-result-write, terminal failure crash repair, concurrent writer races, duplicate replay idempotency, retry/resume separation, and forbidden direct-model fallback.
+  - User verification required: `python -m pytest tests/execution_supervisor/test_result_escrow_recovery.py tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_chat_gateway.py -v`.
+
+- Fixed API Manager OpenAPI reference resolution, identity host-binding, deterministic import source selection, and workflow idempotency:
+  - Updated `_LocalReferenceResolver` in `mana_agent/api_manager/documentation.py` to classify reference types and recover missing local parameter definitions (e.g. `#/components/parameters/Accept-Encoding`) from inspected documentation evidence while preserving provenance in `recovered_references`.
+  - Configured `UnresolvedSchemaReferenceError` to return structured diagnostic details with `code="openapi_local_ref_unresolved"`, `reference`, `reference_kind`, `reference_name`, `source_reference`, and `recoverable=False`.
+  - Host-bound `source_decision_id` and `session_id` in `mana_agent/api_manager/runtime_tools.py`, normalizing model-provided suffixes (`<id>:api-entry-decision`) to authoritative host IDs while rejecting cross-session or disparate execution references.
+  - Made documentation import source binding deterministic by having the runtime controller supply authoritative sources from inspection evidence and discover canonical OpenAPI spec URLs in HTML/documentation.
+  - Bound narrow `api_*` tools directly without requiring lazy capability discovery (`capability_search`/`capability_load`) during the API route lifecycle in `mana_agent/gateway/chat_gateway.py`.
+  - Added import fingerprinting and result caching in `mana_agent/api_manager/service.py` to guarantee idempotent imports and monotonic workflow completion.
+  - Added regression test suite in `tests/test_api_manager.py` and `tests/gateway/test_api_manager_route.py`.
+  - User verification required: `python -m pytest tests/test_api_manager.py tests/gateway/test_api_manager_route.py -v`.
+
+## 2026-08-26
+
+- Fixed wiring lifecycle finalization across TaskBoard, FeatureIntegrationCoordinator, ChatGateway, and Multi-Agent types:
+  - Propagated wiring child terminal failure to parent tasks with `status=failed`, `wiring_outcome="failed"`, and `wiring_outcome_reason=<child failure reason>`, while preserving parent child task linkage (`child_task_ids` and `required_wiring_task_ids`).
+  - Added terminal resolution for `wiring_outcome` (`pending`, `running`, `completed`, `failed`, `blocked`, `not_required`), ensuring terminal tasks never retain `wiring_outcome="incomplete"`.
+  - Updated completion gates in `TaskBoard._validate_feature_completion`, `TaskBoard.update_status`, `TaskBoard.project_supervisor_completion`, and `validators.py` so that `wiring_required=False` resolves to `wiring_outcome="not_required"`, verified required wiring resolves to `wiring_outcome="completed"`, and wiring failures resolve to `wiring_outcome="failed"`.
+  - Updated `FeatureIntegrationCoordinator.run` and `chat_gateway.py` to treat `CORE_EXECUTION_FAILED` as a deterministic terminal failure on the wiring child and parent instead of blocking forever.
+  - Added regression tests covering child wiring task `CORE_EXECUTION_FAILED` failure propagation, `wiring_required=False` resolution to `not_required`, and successful wiring resolution to `completed`.
+  - User verification required: `python -m pytest tests/gateway/test_feature_integration_lifecycle.py tests/test_multi_agent_core.py tests/gateway/test_chat_gateway.py -v`.
+
+## 2026-08-25
+
+- Added a centralized JSON-safe normalization layer for tool outputs to prevent "Object of type set is not JSON serializable" errors across Gmail/email connectors, execution supervisor, accounting, and chat turn persistence:
+  - Added `json_safe_tool_payload` and `json_safe_dumps` in `mana_agent/utils/tool_results.py` to recursively convert sets/frozensets/tuples into lists (with deterministic sorting for sortable elements) and serialize Pydantic models, dataclasses, enums, and datetimes into JSON-safe structures while preserving standard JSON types.
+  - Updated `redact_secrets` in `mana_agent/utils/redaction.py` to support `set` and `frozenset` collections.
+  - Updated `ToolInvocationTrace.to_dict()` and `AskResponseWithTrace.to_dict()` in `mana_agent/analysis/models.py`, `_serialize_tool_traces` in `mana_agent/gateway/turn_engine.py`, and `AskAgent` in `mana_agent/multi_agent/runtime/ask_agent.py` to ensure tool traces, intermediate payloads, and memory calls are JSON-safe.
+  - Updated `ChatTurnStore` in `mana_agent/gateway/chat_turn_store.py` and `atomic_write_json` in `mana_agent/workspaces/store.py` to sanitize turn response dictionaries and avoid JSON serialization errors on disk.
+  - Updated `ExecutionStore` in `mana_agent/execution_supervisor/store.py`, `ActionRecord` and `EscrowResult` in `mana_agent/execution_supervisor/models.py`, and `AccountingStore` in `mana_agent/context_cost/store.py` to ensure supervised action records, escrow results, and accounting reservations store JSON-serializable payloads.
+  - Updated email runtime tools in `mana_agent/connectors/email/runtime_tools.py` (`email_accounts_list`, `email_search`, `email_read`, `email_thread_read`) and `dumps_tool_result` in `mana_agent/tools/repository.py` to produce JSON-safe payloads.
+  - Added unit and regression tests in `tests/test_tool_results_normalization.py`, `tests/connectors/test_email_core.py`, `tests/gateway/test_chat_turn_store.py`, and `tests/execution_supervisor/test_supervisor_core.py`.
+  - User verification required: `python -m pytest tests/test_tool_results_normalization.py tests/connectors/test_email_core.py tests/gateway/test_chat_turn_store.py tests/execution_supervisor/test_supervisor_core.py -v`.
+
 ## 2026-08-24
 
 - Fixed test regressions and error classification in gateway coding exceptions and interruption recovery tests:

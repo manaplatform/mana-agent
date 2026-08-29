@@ -24,6 +24,7 @@ from mana_agent.multi_agent.runtime.auto_chat import (
     save_auto_chat_state,
 )
 from mana_agent.multi_agent.runtime.agent_session import route_for_turn
+from mana_agent.model_routing.models import RoutingFailure
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
 from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
@@ -877,46 +878,45 @@ def chat(
     )
     try:
         gateway = AgentChatGateway(root, config=gateway_config, settings=settings)
-    except ValueError as exc:
+        stack = gateway.get_stack()
+        ask_service = stack.ask_service
+        chat_service = stack.chat_service
+        coding_agent_instance = stack.coding_agent
+        coding_memory_service = stack.coding_memory_service
+        tool_worker_client = stack.tool_worker_client
+        tools_manager_orchestrator = stack.tools_orchestrator
+        tools_executor_instance = stack.tools_executor
+        coding_agent_is_custom = stack.coding_agent_is_custom
+        effective_model = stack.effective_model or resolve_model_for_role(
+            AgentRole.MAIN,
+            global_model=model or settings.openai_chat_model,
+            routing_authority=stack.routing_authority,
+            session_id=stack.session_id,
+            workspace_id=str(stack.workspace_id or ""),
+            repository_id=str(stack.repository_id or ""),
+        ).resolved_model
+        coding_agent_max_steps = stack.coding_agent_max_steps
+        chat_agent_max_steps = stack.chat_agent_max_steps
+        resolved_k = stack.resolved_k
+        if stack.tools_execution_config is not None:
+            tools_execution_config = stack.tools_execution_config
+        tools_execution_boot_warnings = list(stack.tools_execution_boot_warnings or [])
+        from mana_agent.config.inference_provider import resolve_inference_connection
+
+        inference_connection = resolve_inference_connection(settings, require_api_key=False)
+        effective_base_url = inference_connection.base_url
+        effective_api_key = inference_connection.api_key
+        tool_worker_model_assignment = resolve_model_for_role(
+            AgentRole.TOOL_WORKER,
+            global_model=settings.openai_tool_worker_model or effective_model,
+            routing_authority=stack.routing_authority,
+            session_id=stack.session_id,
+            workspace_id=str(stack.workspace_id or ""),
+            repository_id=str(stack.repository_id or ""),
+        )
+        effective_tool_worker_model = tool_worker_model_assignment.resolved_model
+    except (ValueError, RoutingFailure) as exc:
         raise typer.BadParameter(str(exc)) from exc
-
-    stack = gateway.get_stack()
-    ask_service = stack.ask_service
-    chat_service = stack.chat_service
-    coding_agent_instance = stack.coding_agent
-    coding_memory_service = stack.coding_memory_service
-    tool_worker_client = stack.tool_worker_client
-    tools_manager_orchestrator = stack.tools_orchestrator
-    tools_executor_instance = stack.tools_executor
-    coding_agent_is_custom = stack.coding_agent_is_custom
-    effective_model = stack.effective_model or resolve_model_for_role(
-        AgentRole.MAIN,
-        global_model=model or settings.openai_chat_model,
-        routing_authority=stack.routing_authority,
-        session_id=stack.session_id,
-        workspace_id=str(stack.workspace_id or ""),
-        repository_id=str(stack.repository_id or ""),
-    ).resolved_model
-    coding_agent_max_steps = stack.coding_agent_max_steps
-    chat_agent_max_steps = stack.chat_agent_max_steps
-    resolved_k = stack.resolved_k
-    if stack.tools_execution_config is not None:
-        tools_execution_config = stack.tools_execution_config
-    tools_execution_boot_warnings = list(stack.tools_execution_boot_warnings or [])
-    from mana_agent.config.inference_provider import resolve_inference_connection
-
-    inference_connection = resolve_inference_connection(settings, require_api_key=False)
-    effective_base_url = inference_connection.base_url
-    effective_api_key = inference_connection.api_key
-    tool_worker_model_assignment = resolve_model_for_role(
-        AgentRole.TOOL_WORKER,
-        global_model=settings.openai_tool_worker_model or effective_model,
-        routing_authority=stack.routing_authority,
-        session_id=stack.session_id,
-        workspace_id=str(stack.workspace_id or ""),
-        repository_id=str(stack.repository_id or ""),
-    )
-    effective_tool_worker_model = tool_worker_model_assignment.resolved_model
     chat_log_path = stack.log_path or (
         default_logs_dir(root) / f"mana_agent_{datetime.now().strftime('%Y%m%d')}.log"
     )

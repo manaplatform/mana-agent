@@ -391,24 +391,27 @@ def build_chat_stack(
         # 4) effective main model
         # Preferring CLI/main over a leftover MANA_CODEX_MODEL keeps measured
         # runs on the selected provider/model instead of a silent luna pin.
-        coding_global_model = (
-            str(cfg.coding_model or "").strip()
-            or str(cfg.model or "").strip()
-            or str(getattr(settings, "mana_codex_model", "") or "").strip()
-            or effective_model
-        )
-        coding_model_assignment = resolve_model_for_role(
-            AgentRole.CODING,
-            global_model=coding_global_model,
-            repository=routing_repository,
-            **route_context,
-        )
-        planner_model_assignment = resolve_model_for_role(
-            AgentRole.PLANNER,
-            global_model=settings.openai_coding_planner_model or effective_model,
-            repository=routing_repository,
-            **route_context,
-        )
+        coding_model_assignment = None
+        planner_model_assignment = None
+        if cfg.coding_agent or cfg.coding_agent_instance is not None:
+            coding_global_model = (
+                str(cfg.coding_model or "").strip()
+                or str(cfg.model or "").strip()
+                or str(getattr(settings, "mana_codex_model", "") or "").strip()
+                or effective_model
+            )
+            coding_model_assignment = resolve_model_for_role(
+                AgentRole.CODING,
+                global_model=coding_global_model,
+                repository=routing_repository,
+                **route_context,
+            )
+            planner_model_assignment = resolve_model_for_role(
+                AgentRole.PLANNER,
+                global_model=settings.openai_coding_planner_model or effective_model,
+                repository=routing_repository,
+                **route_context,
+            )
         tool_worker_model_assignment = resolve_model_for_role(
             AgentRole.TOOL_WORKER,
             global_model=settings.openai_tool_worker_model or effective_model,

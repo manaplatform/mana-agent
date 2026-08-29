@@ -26,6 +26,9 @@ _METHOD_TYPES = {
     "turn/completed": "turn.completed",
     "turn/failed": "error",
     "turn/cancelled": "turn.cancelled",
+    "systemError": "error",
+    "item/systemError": "error",
+    "item/error": "error",
     "item/reasoning/summaryTextDelta": "reasoning.update",
     "item/reasoning/summaryPartAdded": "reasoning.update",
     "item/agentMessage/delta": "assistant.delta",
@@ -48,9 +51,18 @@ _ASSISTANT_ITEM_TYPES = frozenset(
     {
         "agentmessage",
         "agent_message",
+        "assistantmessage",
+        "assistant_message",
         "message",
+    }
+)
+
+_USER_ITEM_TYPES = frozenset(
+    {
         "usermessage",
         "user_message",
+        "inputmessage",
+        "input_message",
     }
 )
 
@@ -89,7 +101,7 @@ def adapt_codex_event(
     output = _first_text(payload, "delta", "output", "text") or _first_text(item, "output", "text")
     summary = _summary(payload, item)
     usage = _usage(payload)
-    error = _error(payload) if status == "failed" or event_type == "error" else ""
+    error = _error(payload) or _error(item) if status == "failed" or event_type == "error" else ""
     event_id = _event_id(notification)
 
     semantic_kind, visibility = classify_coding_event(
@@ -100,8 +112,11 @@ def adapt_codex_event(
     # Assistant generation / reasoning stay internal: keep full text on the
     # event for traces, but visibility prevents user-surface publication.
     if semantic_kind is EventSemanticKind.ASSISTANT_GENERATION:
-        # Prefer explicit assistant.* types over misclassified tool.call.*
-        if event_type.startswith("tool.call."):
+        if status == "failed":
+            event_type = "error"
+            semantic_kind = EventSemanticKind.ERROR
+            visibility = EventVisibility.PROGRESS
+        elif event_type.startswith("tool.call."):
             event_type = (
                 "assistant.completed"
                 if event_type.endswith("completed")
@@ -151,7 +166,15 @@ def _item_event_type(method: str, item_type: str) -> str:
         else "update"
     )
     lowered = item_type.lower()
-    if lowered in _ASSISTANT_ITEM_TYPES or "agentmessage" in lowered:
+    if lowered in _USER_ITEM_TYPES or "usermessage" in lowered or "user_message" in lowered:
+        if phase == "started":
+            return "user.message.started"
+        if phase == "completed":
+            return "user.message.completed"
+        return "user.message"
+    if lowered in {"systemerror", "system_error"} or "systemerror" in lowered or "system_error" in lowered:
+        return "error"
+    if lowered in _ASSISTANT_ITEM_TYPES or "agentmessage" in lowered or "assistantmessage" in lowered:
         if phase == "started":
             return "assistant.started"
         if phase == "completed":
@@ -174,14 +197,21 @@ def _item_event_type(method: str, item_type: str) -> str:
 
 def _status(method: str, event_type: str, item: dict[str, Any]) -> str:
     raw = str(item.get("status") or "").lower()
-    if method.endswith("/cancelled") or raw == "cancelled":
+    lowered_method = method.lower()
+    if lowered_method.endswith("/cancelled") or raw == "cancelled":
         return "cancelled"
-    if method.endswith("/failed") or raw in {"failed", "error"}:
+    if (
+        lowered_method.endswith("/failed")
+        or lowered_method in {"systemerror", "error"}
+        or event_type == "error"
+        or raw in {"failed", "error"}
+    ):
         return "failed"
-    if method.endswith("/completed") or event_type.endswith(".completed") or raw in {
-        "completed",
-        "success",
-    }:
+    if (
+        lowered_method.endswith("/completed")
+        or (event_type.endswith(".completed") and not event_type.startswith("error"))
+        or raw in {"completed", "success"}
+    ):
         return "success"
     return "running"
 

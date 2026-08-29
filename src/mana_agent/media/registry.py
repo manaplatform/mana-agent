@@ -24,7 +24,7 @@ def _openrouter_factory(config: MediaModalityConfig, api_key: str) -> MediaProvi
     from mana_agent.config.user_config import load_effective_settings
 
     settings = load_effective_settings(include_env=False)
-    referer = str(settings.get("OPENROUTER_HTTP_REFERER") or "https://github.com/mana-agent/mana-agent")
+    referer = str(settings.get("OPENROUTER_HTTP_REFERER") or "https://github.com/manaplatform/mana-agent")
     title = str(settings.get("OPENROUTER_TITLE") or "Mana-Agent")
     return OpenRouterMediaProvider(
         api_key=api_key,

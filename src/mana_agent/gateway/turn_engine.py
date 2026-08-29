@@ -15,10 +15,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mana_agent.integrations.codex.exceptions import (
+    CodexBadRequestError,
+    CodexCapabilityError,
     CodexError,
     CodexInterruptionError,
     CodexProtocolError,
     CodexTimeoutError,
+    CodexToolProtocolError,
 )
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -664,6 +667,8 @@ def _save_auto_chat_turn_state(
 
 def _serialize_tool_traces(resp: Any) -> list[dict[str, Any]]:
     """Normalize AskResponseWithTrace / list traces into JSON-serializable dicts."""
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
     raw = getattr(resp, "trace", None)
     if raw is None and isinstance(resp, dict):
         raw = resp.get("trace")
@@ -679,21 +684,23 @@ def _serialize_tool_traces(resp: Any) -> list[dict[str, Any]]:
             except Exception:
                 payload = None
             if isinstance(payload, dict):
-                out.append(payload)
+                out.append(json_safe_tool_payload(payload))
                 continue
         if isinstance(item, dict):
-            out.append(dict(item))
+            out.append(json_safe_tool_payload(dict(item)))
             continue
         name = str(getattr(item, "tool_name", None) or getattr(item, "name", "") or "tool")
         out.append(
-            {
-                "tool_name": name,
-                "args_summary": str(getattr(item, "args_summary", "") or "")[:500],
-                "duration_ms": float(getattr(item, "duration_ms", 0.0) or 0.0),
-                "status": str(getattr(item, "status", "ok") or "ok"),
-                "output_preview": str(getattr(item, "output_preview", "") or "")[:4000],
-                "result": getattr(item, "result", None),
-            }
+            json_safe_tool_payload(
+                {
+                    "tool_name": name,
+                    "args_summary": str(getattr(item, "args_summary", "") or "")[:500],
+                    "duration_ms": float(getattr(item, "duration_ms", 0.0) or 0.0),
+                    "status": str(getattr(item, "status", "ok") or "ok"),
+                    "output_preview": str(getattr(item, "output_preview", "") or "")[:4000],
+                    "result": getattr(item, "result", None),
+                }
+            )
         )
     return out
 
@@ -1216,12 +1223,33 @@ def process_chat_turn(
                 isinstance(saved_integration_checkpoint, dict) and saved_integration_checkpoint.get("core_changed_files")
             )
             classified_state = "PARTIALLY_COMPLETED" if has_partial else "NOT_STARTED"
-            resolved_err_code = str(err_code or ("CODING_TIMEOUT" if has_partial else "CODING_PROVIDER_TIMEOUT"))
+            resolved_err_code = str(err_code or ("CODING_TIMEOUT" if has_partial else "CODING_AGENT_FAILED"))
+            if has_partial or resolved_err_code in {"MODEL_INTERRUPTED", "USER_INTERRUPTED"}:
+                error_category = "interruption"
+            elif resolved_err_code in {"CODING_PROVIDER_TIMEOUT", "CODING_TIMEOUT"}:
+                error_category = "timeout"
+            elif resolved_err_code in {
+                "CODING_PROVIDER_TOOL_PROTOCOL_ERROR",
+                "CODING_PROVIDER_BAD_REQUEST",
+                "CODING_PROVIDER_PROTOCOL_ERROR",
+            }:
+                error_category = "protocol"
+            elif resolved_err_code == "CODING_CAPABILITY_ERROR":
+                error_category = "capability"
+            elif resolved_err_code in {"CODING_PROVIDER_AUTH_ERROR", "CODING_PROVIDER_PERMISSION_ERROR"}:
+                error_category = "auth"
+            elif resolved_err_code in {"CODING_PROVIDER_MODEL_NOT_FOUND", "CODING_PROVIDER_MODEL_RETIRED"}:
+                error_category = "catalog"
+            elif resolved_err_code == "CODING_PROVIDER_RATE_LIMIT":
+                error_category = "rate_limit"
+            else:
+                error_category = "execution"
+
             return ChatTurnResult(
                 answer="",
                 error=resolved_err_code,
                 error_code=resolved_err_code,
-                error_category="interruption" if has_partial else "timeout",
+                error_category=error_category,
                 retry_possible=True,
                 resume_available=has_partial,
                 checkpoint_available=has_partial,
@@ -1320,12 +1348,30 @@ def process_chat_turn(
         exc_text = str(exc)
         err_code = getattr(exc, "error_code", None)
         interruption = getattr(exc, "reason", None)
+        http_status = getattr(exc, "http_status", None)
+        orig_err = getattr(exc, "original_error", None) or exc_text
+        provider = getattr(exc, "provider", None)
+        model = getattr(exc, "model", None)
+        transport = getattr(exc, "transport", None)
         err_cat = "execution"
         lowered = exc_text.lower()
-        if isinstance(exc, (CodexTimeoutError, asyncio.TimeoutError)) or (err_code in {"CODING_PROVIDER_TIMEOUT", "CODING_TIMEOUT"}) or ("timed out" in lowered):
+
+        if isinstance(exc, (CodexTimeoutError, asyncio.TimeoutError)) or (err_code in {"CODING_PROVIDER_TIMEOUT", "CODING_TIMEOUT"}):
             err_code = err_code or "CODING_PROVIDER_TIMEOUT"
             err_cat = "timeout"
             interruption = interruption or "CODING_TIMEOUT"
+        elif isinstance(exc, CodexToolProtocolError) or err_code == "CODING_PROVIDER_TOOL_PROTOCOL_ERROR":
+            err_code = "CODING_PROVIDER_TOOL_PROTOCOL_ERROR"
+            err_cat = "protocol"
+        elif isinstance(exc, CodexBadRequestError) or err_code == "CODING_PROVIDER_BAD_REQUEST":
+            err_code = "CODING_PROVIDER_BAD_REQUEST"
+            err_cat = "protocol"
+        elif isinstance(exc, CodexCapabilityError) or err_code == "CODING_CAPABILITY_ERROR":
+            err_code = "CODING_CAPABILITY_ERROR"
+            err_cat = "capability"
+        elif isinstance(exc, CodexProtocolError) or err_code == "CODING_PROVIDER_PROTOCOL_ERROR":
+            err_code = err_code or "CODING_PROVIDER_PROTOCOL_ERROR"
+            err_cat = "protocol"
         elif isinstance(exc, CodexInterruptionError) or (err_code == "MODEL_INTERRUPTED") or ("interrupted" in lowered):
             err_code = err_code or "MODEL_INTERRUPTED"
             err_cat = "interruption"
@@ -1338,8 +1384,15 @@ def process_chat_turn(
             err_code = err_code or "LEASE_LOST_DURING_EXECUTION"
             err_cat = "lease"
             interruption = interruption or "LEASE_LOST_DURING_EXECUTION"
+        elif ("timed out" in lowered or "timeout" in lowered) and not any(
+            marker in lowered for marker in ("http 400", "invalid_request", "server-tool", "tool_choice", "not retrying")
+        ):
+            err_code = "CODING_PROVIDER_TIMEOUT"
+            err_cat = "timeout"
+            interruption = interruption or "CODING_TIMEOUT"
         elif not err_code:
             err_code = "CODING_AGENT_FAILED"
+            err_cat = "execution"
 
         saved_cp = session_state.get("feature_integration_checkpoint")
         has_cp = bool(isinstance(saved_cp, dict) and saved_cp.get("core_changed_files"))
@@ -1361,6 +1414,11 @@ def process_chat_turn(
                 "error_code": err_code,
                 "error_category": err_cat,
                 "interruption_reason": interruption or err_code,
+                "http_status": http_status,
+                "original_error": orig_err,
+                "provider": provider,
+                "model": model,
+                "transport": transport,
                 "retry_possible": True,
                 "resume_available": has_cp,
                 "checkpoint_available": has_cp,

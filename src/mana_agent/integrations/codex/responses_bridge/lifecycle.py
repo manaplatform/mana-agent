@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import uvicorn
 
@@ -53,7 +53,8 @@ class ResponsesBridgeHandle:
             root = root[: -len("/v1")]
         url = root + "/health"
         request = Request(url, method="GET")
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - loopback only
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(request, timeout=timeout_seconds) as response:  # noqa: S310 - loopback only
             body = response.read().decode("utf-8")
         import json
 

@@ -94,9 +94,13 @@ class ChatTurnStore:
         return dict(payload.get("records") or {})
 
     def _save(self, records: dict[str, dict[str, Any]]) -> None:
-        atomic_write_json(self.path, {"schema_version": 1, "records": records})
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
+        atomic_write_json(self.path, {"schema_version": 1, "records": json_safe_tool_payload(records)})
 
     def create_or_get(self, *, conversation_id: str, user_message_id: str, turn_id: str, text: str) -> tuple[ChatTurnRecord, bool]:
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
         fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
         key = f"{conversation_id}:{user_message_id}"
         with self._locked():
@@ -108,14 +112,17 @@ class ChatTurnStore:
                     raise ValueError("user_message_id already belongs to a different message")
                 return record, True
             record = ChatTurnRecord(turn_id=turn_id, conversation_id=conversation_id, user_message_id=user_message_id, message_fingerprint=fingerprint)
-            records[key] = asdict(record)
+            records[key] = json_safe_tool_payload(asdict(record))
             self._save(records)
             return record, False
 
     def update(self, record: ChatTurnRecord) -> ChatTurnRecord:
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
+        record.response = json_safe_tool_payload(record.response)
         key = f"{record.conversation_id}:{record.user_message_id}"
         with self._locked():
             records = self._load()
-            records[key] = asdict(record)
+            records[key] = json_safe_tool_payload(asdict(record))
             self._save(records)
         return record

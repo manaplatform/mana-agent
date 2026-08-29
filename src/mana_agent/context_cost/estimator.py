@@ -10,10 +10,13 @@ from mana_agent.telemetry.tokens import estimate_tokens
 
 
 def estimate_value_tokens(value: Any) -> int:
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
     if isinstance(value, str):
         return estimate_tokens(value)
     try:
-        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        safe_value = json_safe_tool_payload(value)
+        rendered = json.dumps(safe_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError):
         rendered = str(value)
     return estimate_tokens(rendered)

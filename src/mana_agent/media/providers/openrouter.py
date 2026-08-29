@@ -34,7 +34,7 @@ class OpenRouterMediaProvider(OpenAIMediaProvider):
         api_key: str,
         base_url: str = "https://openrouter.ai/api/v1",
         timeout_seconds: int = 120,
-        http_referer: str = "https://github.com/mana-agent/mana-agent",
+        http_referer: str = "https://github.com/manaplatform/mana-agent",
         title: str = "Mana-Agent",
         cache_ttl_seconds: float = 300.0,
     ) -> None:

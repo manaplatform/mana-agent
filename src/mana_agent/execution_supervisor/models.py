@@ -136,6 +136,10 @@ class ActionRecord(StrictModel):
     def infer_effect_scope(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        if "verification_state" in data and data["verification_state"]:
+            from mana_agent.utils.tool_results import json_safe_tool_payload
+
+            data["verification_state"] = json_safe_tool_payload(data["verification_state"])
         if "effect_scope" not in data or not data["effect_scope"]:
             tool = str(data.get("tool_name") or "")
             classification = data.get("classification")
@@ -422,6 +426,11 @@ class EscrowResult(StrictModel):
                     data["verification_status"] = VerificationStatus.PENDING.value
             if not data.get("result_kind"):
                 data["result_kind"] = "chat_result"
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+
+        for key in ("payload", "verification_evidence", "provider_metadata", "error_metadata"):
+            if key in data and data[key]:
+                data[key] = json_safe_tool_payload(data[key])
         return data
 
 
@@ -520,6 +529,13 @@ class TaskRecord(StrictModel):
     updated_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    task_created_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    worker_claimed_at: datetime | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    task_completed_at: datetime | None = None
+    duration_breakdown: dict[str, int] = Field(default_factory=dict)
     heartbeat_at: datetime | None = None
     lease_owner: str = ""
     lease_token: str = ""
@@ -658,6 +674,8 @@ class TaskRecord(StrictModel):
             raise ValueError("a task cannot be its own parent")
         for field_name in (
             "created_at", "updated_at", "started_at", "finished_at",
+            "task_created_at", "scheduled_at", "worker_claimed_at",
+            "provider_started_at", "provider_completed_at", "task_completed_at",
             "heartbeat_at", "lease_expires_at", "retry_not_before", "deadline_at",
             "human_wait_started_at",
         ):

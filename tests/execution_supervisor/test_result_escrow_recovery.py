@@ -492,3 +492,330 @@ def test_scenario_m_resumable_state_recovery(supervisor_runtime):
     assert lookup.is_resumable is True
     assert lookup.requires_action is True
     assert lookup.is_terminal is False
+
+
+def test_scenario_n_trace_task_20260827_000001_stale_in_progress_repaired_from_escrow(supervisor_runtime):
+    """Incident trace: task_20260827_000001 remains status=in_progress while result_778a7987-... exists in escrow.
+
+    Authoritative escrow result must repair stale task lifecycle state on lookup and recovery.
+    """
+    supervisor, clock, tmp_path = supervisor_runtime
+    task_id = "task_20260827_000001"
+    result_id = "result_778a7987-cd61-4e2b-998b-05cc8065ba3e"
+
+    # Simulate task creation and lease start leaving task in RUNNING state
+    task = supervisor.create_task(
+        task_id=task_id,
+        routing_decision_id="decision_trace_1",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+    )
+    supervisor.queue(task.task_id)
+    leased, token = supervisor.acquire_lease(task.task_id, owner="worker-trace")
+    supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
+
+    # Task record on disk is in RUNNING / in_progress state
+    task_record = supervisor.store.get_task(task_id)
+    assert task_record.state == ExecutionState.RUNNING
+    assert not task_record.result_id
+
+    # Simulate durable escrow write that succeeded right before process crash
+    escrow = EscrowResult(
+        result_id=result_id,
+        execution_id=task_id,
+        task_id=task_id,
+        attempt_id=leased.attempt_id,
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "0" * 64,
+        payload={
+            "status": "completed",
+            "chat_result": {
+                "answer": "Authoritative trace output",
+                "status": "completed",
+                "payload": {"execution_id": task_id},
+            },
+        },
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="completed",
+        verification_status=VerificationStatus.PASSED,
+        created_at=clock(),
+        completed_at=clock(),
+    )
+    supervisor.store.save_result(escrow)
+
+    # 1. Authoritative lookup on stale in_progress task returns FOUND with verified outcome
+    lookup = supervisor.get_verified_execution_result(task_id)
+    assert lookup.status == EscrowLookupStatus.FOUND
+    assert lookup.is_terminal is True
+    assert lookup.is_verified is True
+    assert lookup.result is not None
+    assert lookup.result.result_id == result_id
+    assert lookup.result.payload["chat_result"]["answer"] == "Authoritative trace output"
+
+    # 2. Task state in store is repaired from escrow
+    repaired_task = supervisor.store.get_task(task_id)
+    assert repaired_task.state == ExecutionState.COMPLETED
+    assert repaired_task.result_id == result_id
+    assert repaired_task.verification_status == VerificationStatus.PASSED
+
+
+def test_scenario_o_crash_after_result_write_recovery_lifecycle(tmp_path):
+    """Crash immediately after save_result before task state transition is recovered cleanly by supervisor.recover()."""
+    clock = FakeClock()
+    config = ExecutionSupervisorConfig(
+        root=tmp_path / "execution",
+        lease_seconds=10,
+        heartbeat_seconds=2,
+    )
+    supervisor = ExecutionSupervisor(config, clock=clock)
+
+    task = supervisor.create_task(
+        task_id="task_crash_001",
+        routing_decision_id="decision_crash_1",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+    )
+    supervisor.queue(task.task_id)
+    leased, token = supervisor.acquire_lease(task.task_id, owner="worker-crash")
+    supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
+
+    # Result saved to escrow, but process crashes before supervisor updates task record
+    escrow = EscrowResult(
+        result_id="res_crash_001",
+        execution_id=task.task_id,
+        task_id=task.task_id,
+        attempt_id=leased.attempt_id,
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "a" * 64,
+        payload={"answer": "Completed before crash"},
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="completed",
+        verification_status=VerificationStatus.PASSED,
+        created_at=clock(),
+        completed_at=clock(),
+    )
+    supervisor.store.save_result(escrow)
+
+    # Process restarts
+    restarted = ExecutionSupervisor(config, clock=clock, startup_recovery=False)
+    summary = restarted.recover()
+
+    assert task.task_id in summary.recovered
+    recovered_task = restarted.store.get_task(task.task_id)
+    assert recovered_task.state == ExecutionState.COMPLETED
+    assert recovered_task.result_id == "res_crash_001"
+    attempt = restarted.store.get_attempt(leased.attempt_id)
+    assert attempt is not None
+    assert attempt.state == "completed"
+
+
+def test_scenario_p_terminal_failure_crash_repaired_from_escrow(tmp_path):
+    """Terminal failure persisted in escrow repairs stale in-progress task state during recovery."""
+    clock = FakeClock()
+    config = ExecutionSupervisorConfig(
+        root=tmp_path / "execution",
+        lease_seconds=10,
+        heartbeat_seconds=2,
+    )
+    supervisor = ExecutionSupervisor(config, clock=clock)
+
+    task = supervisor.create_task(
+        task_id="task_fail_crash_001",
+        routing_decision_id="decision_fail_1",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+    )
+    supervisor.queue(task.task_id)
+    leased, token = supervisor.acquire_lease(task.task_id, owner="worker-fail")
+    supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
+
+    escrow = EscrowResult(
+        result_id="res_fail_001",
+        execution_id=task.task_id,
+        task_id=task.task_id,
+        attempt_id=leased.attempt_id,
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "b" * 64,
+        payload={"status": "failed", "reason": "unrecoverable sandbox error"},
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="failed",
+        verification_status=VerificationStatus.FAILED,
+        error_metadata={"reason": "unrecoverable sandbox error"},
+        created_at=clock(),
+        completed_at=clock(),
+    )
+    supervisor.store.save_result(escrow)
+
+    restarted = ExecutionSupervisor(config, clock=clock, startup_recovery=False)
+    summary = restarted.recover()
+
+    assert task.task_id in summary.recovered
+    recovered_task = restarted.store.get_task(task.task_id)
+    assert recovered_task.state == ExecutionState.FAILED
+    assert recovered_task.result_id == "res_fail_001"
+    assert recovered_task.failure_reason == "unrecoverable sandbox error"
+
+
+def test_scenario_q_concurrent_writers_and_conflicting_write_race(supervisor_runtime):
+    """Concurrent writers on same execution ID: identical payload reconciles idempotently; conflicting payload raises."""
+    supervisor, clock, tmp_path = supervisor_runtime
+    exec_id = "exec_concurrent_race_1"
+
+    # Writer 1 saves result_1
+    res1 = EscrowResult(
+        result_id="res_writer_1",
+        execution_id=exec_id,
+        task_id=exec_id,
+        attempt_id="att_race_1",
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "c" * 64,
+        payload={"answer": "Canonical consensus answer"},
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="completed",
+        verification_status=VerificationStatus.PASSED,
+    )
+    supervisor.store.save_result(res1)
+
+    # Writer 2 sends identical logical result with different result_id -> Reconciles idempotently without error
+    res2 = EscrowResult(
+        result_id="res_writer_2",
+        execution_id=exec_id,
+        task_id=exec_id,
+        attempt_id="att_race_1",
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "c" * 64,
+        payload={"answer": "Canonical consensus answer"},
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="completed",
+        verification_status=VerificationStatus.PASSED,
+    )
+    supervisor.store.save_result(res2)
+
+    # Authoritative result in index remains res_writer_1
+    idx = supervisor.store.get_result_by_execution_id(exec_id)
+    assert idx is not None
+    assert idx.result_id == "res_writer_1"
+
+    # Writer 3 sends conflicting payload -> Rejected with EscrowConflictError
+    res3 = EscrowResult(
+        result_id="res_writer_3",
+        execution_id=exec_id,
+        task_id=exec_id,
+        attempt_id="att_race_1",
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "c" * 64,
+        payload={"answer": "Conflicting different answer"},
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="completed",
+        verification_status=VerificationStatus.PASSED,
+    )
+    with pytest.raises(EscrowConflictError):
+        supervisor.store.save_result(res3)
+
+
+def test_scenario_r_duplicate_result_replay_is_idempotent(supervisor_runtime):
+    """Replaying save of the exact same result is safe and idempotent."""
+    supervisor, clock, tmp_path = supervisor_runtime
+    res = EscrowResult(
+        result_id="res_replay_exact_1",
+        execution_id="exec_replay_1",
+        task_id="exec_replay_1",
+        attempt_id="att_replay_1",
+        attempt_generation=1,
+        lease_token_hash="sha256:" + "d" * 64,
+        payload={"answer": "Replay outcome"},
+        status=EscrowStatus.AVAILABLE,
+        supervisor_state="completed",
+        verification_status=VerificationStatus.PASSED,
+    )
+    supervisor.store.save_result(res)
+
+    # Replay same save_result call
+    supervisor.store.save_result(res)
+
+    loaded = supervisor.store.get_result("res_replay_exact_1")
+    assert loaded is not None
+    assert loaded.payload["answer"] == "Replay outcome"
+
+
+def test_scenario_s_retry_resumes_distinguish_same_execution_from_new_attempt(supervisor_runtime):
+    """Retries create a new task/attempt identity, leaving prior terminal escrow intact."""
+    supervisor, clock, tmp_path = supervisor_runtime
+
+    # Task 1 executes and fails
+    task1 = supervisor.create_task(
+        task_id="task_attempt_first",
+        routing_decision_id="decision_retry_1",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+    )
+    supervisor.queue(task1.task_id)
+    leased1, token1 = supervisor.acquire_lease(task1.task_id, owner="worker-1")
+    supervisor.start(task1.task_id, attempt_id=leased1.attempt_id, lease_token=token1)
+    supervisor.transition(task1.task_id, ExecutionState.FAILED, reason="transient provider error")
+
+    res1 = supervisor.store.get_result_by_execution_id(task1.task_id)
+    assert res1 is not None
+    assert res1.supervisor_state == "failed"
+
+    # Retry creates a new task identity linked to prior execution
+    task2 = supervisor.create_task(
+        task_id="task_attempt_second",
+        routing_decision_id="decision_retry_2",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+        previous_execution_id=task1.task_id,
+        relation_type="retry",
+    )
+    supervisor.queue(task2.task_id)
+    leased2, token2 = supervisor.acquire_lease(task2.task_id, owner="worker-2")
+    supervisor.start(task2.task_id, attempt_id=leased2.attempt_id, lease_token=token2)
+
+    res2_task = supervisor.submit_result(
+        task2.task_id,
+        attempt_id=leased2.attempt_id,
+        lease_token=token2,
+        payload={"answer": "Retry succeeded"},
+    )
+
+    # Prior escrow result for task1 is untouched
+    res1_check = supervisor.store.get_result_by_execution_id(task1.task_id)
+    assert res1_check is not None
+    assert res1_check.result_id == res1.result_id
+    assert res1_check.supervisor_state == "failed"
+
+    # New escrow result for task2 is separate and successful
+    res2_check = supervisor.store.get_result_by_execution_id(task2.task_id)
+    assert res2_check is not None
+    assert res2_check.result_id == res2_task.result_id
+    assert res2_check.supervisor_state == "completed"
+
+
+def test_scenario_t_forbidden_direct_model_fallback_on_budget_or_coordinator_error(supervisor_runtime):
+    """When budget or coordinator failure occurs, no fallback direct model call is executed."""
+    supervisor, clock, tmp_path = supervisor_runtime
+    task = supervisor.create_task(
+        task_id="task_budget_exceeded",
+        routing_decision_id="decision_budget_1",
+        side_effect_classification=SideEffectClassification.READ_ONLY,
+        workspace_path=tmp_path,
+        token_budget=100,
+    )
+    supervisor.queue(task.task_id)
+    leased, token = supervisor.acquire_lease(task.task_id, owner="worker-budget")
+    supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
+
+    # Overrun budget
+    res_task = supervisor.submit_result(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+        payload={"answer": "exceeded tokens"},
+        token_usage=500,
+    )
+
+    # Task transitions to PENDING_BUDGET_DECISION or BUDGET_EXHAUSTED; no silent fallback to direct model response
+    t = supervisor.store.get_task(task.task_id)
+    assert t.state in {ExecutionState.PENDING_BUDGET_DECISION, ExecutionState.BUDGET_EXHAUSTED}
+    assert t.budget_overrun is not None
+

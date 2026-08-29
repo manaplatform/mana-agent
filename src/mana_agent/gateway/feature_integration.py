@@ -39,7 +39,7 @@ INTERNAL_WORK_PENDING = "INTERNAL_WORK_PENDING"
 EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
 DETERMINISTIC_INTEGRATION_FAILURE = "DETERMINISTIC_INTEGRATION_FAILURE"
 HUMAN_REVIEW_REQUIRED = "HUMAN_REVIEW_REQUIRED"
-_ACCEPTED_OUTCOMES = {"mutation_applied", "already_integrated"}
+_ACCEPTED_OUTCOMES = {"mutation_applied", "already_integrated", "completed"}
 INTEGRATION_STAGES = (
     "CORE_COMPLETE",
     "INTEGRATION_DISCOVERY",
@@ -619,6 +619,20 @@ class FeatureIntegrationCoordinator:
                 "pending_required_work": False,
                 "goal_satisfied": False,
             })
+            if taskboard is not None and taskboard_parent_task_id:
+                child_id = self.ensure_wiring_child(
+                    taskboard,
+                    taskboard_parent_task_id,
+                    request=request,
+                    changed_files=list(result.get("changed_files") or []),
+                    trigger_turn_id=trigger_turn_id,
+                )
+                if child_id:
+                    taskboard.update_status(
+                        child_id,
+                        TaskStatus.FAILED,
+                        reason=error_code,
+                    )
             return FeatureIntegrationResult(
                 result=result,
                 status="failed",
@@ -628,6 +642,14 @@ class FeatureIntegrationCoordinator:
             )
         changed_files = [str(item) for item in result.get("changed_files") or [] if str(item).strip()]
         if not runtime_capability_change:
+            if taskboard is not None and taskboard_parent_task_id:
+                try:
+                    parent = taskboard.get_task(taskboard_parent_task_id)
+                    parent.wiring_required = False
+                    parent.wiring_outcome = "not_required"
+                    taskboard.save()
+                except Exception:
+                    pass
             return FeatureIntegrationResult(result=result, status="completed")
 
         if taskboard is not None and taskboard_parent_task_id:
@@ -1126,6 +1148,16 @@ class FeatureIntegrationCoordinator:
                 workspace_root=root_path,
                 trigger_turn_id=trigger_turn_id,
             )
+            try:
+                parent = taskboard.get_task(parent_task_id)
+                parent.implementation_verified = True
+                parent.integration_verified = True
+                parent.runtime_reachability_verified = True
+                parent.wiring_outcome = "completed"
+                parent.wiring_outcome_reason = "Feature integration lifecycle completed successfully."
+                taskboard.save()
+            except Exception:
+                pass
             return IntegrationAuthority.from_taskboard(taskboard, parent_task_id), ""
 
         return None, FEATURE_INTEGRATION_STATE_INVALID

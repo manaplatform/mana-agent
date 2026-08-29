@@ -29,7 +29,7 @@ class MalformedSpecificationError(ApiManagerError):
 
 
 class UnresolvedSchemaReferenceError(ApiManagerError):
-    code = "unresolved_schema_reference"
+    code = "openapi_local_ref_unresolved"
 
 
 class IntegrationNotFoundError(ApiManagerError):

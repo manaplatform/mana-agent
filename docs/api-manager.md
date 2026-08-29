@@ -38,19 +38,16 @@ Every tool call requires the exact model decision ID and session ID. Invalid or 
 ambiguous operation choices, unresolved authentication, missing required inputs, and failed policy
 checks stop without a fallback tool, host, credential, or operation.
 
-`api_workflow_decide` must be the first API-route tool call. Its typed `required_actions` declare
-which of documentation inspection, integration import/configuration, operation search, preview, and
-execution are necessary. The gateway records completion only when successful tool evidence exists
-for every declared action. A discovered operation without `api_request_execute` evidence therefore
-returns `api_workflow_incomplete`; an exact pending request remains awaiting TUI/dashboard approval.
-If execution itself succeeded but another declared lifecycle action remains incomplete, the route
-keeps its incomplete status while still showing the independently validated, redacted HTTP response.
-Every workflow that declares request execution must also declare and complete operation search and
-a redacted request preview, including read-only calls. Successful execution evidence requires an
-executed upstream result and HTTP status; undeclared supporting actions still fail closed. Calling
-an already-saved suitable integration does not declare documentation inspection or import merely
-because the integration record contains documentation provenance; those actions are required only
-when the current turn actually inspects and imports or refreshes documentation.
+`api_workflow_decide` must be the first API-route tool call. Its typed `required_outcomes` declare
+which outcomes (such as `api_target_resolved`, `api_execution_verified`, and `user_goal_verified`)
+must be proven by authoritative runtime evidence. The gateway records completion when verified evidence
+exists for every required outcome, independent of which specific authorized tool or capability was chosen.
+A discovered operation without authoritative execution evidence returns `api_workflow_incomplete`; an exact
+pending mutation remains awaiting TUI/dashboard approval. Documentation inspection, import, search, and
+preview are capabilities used when needed, not universally mandatory fixed stages. Safe read-only requests
+(`GET`, `HEAD`, `OPTIONS`) may skip preview; mutations (`POST`, `PUT`, `PATCH`, `DELETE`) require preview
+and approval before execution. Calling an already-saved suitable integration executes directly without
+unnecessary documentation reinspection or re-import.
 
 ## Supported documentation
 

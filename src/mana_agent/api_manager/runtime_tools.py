@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -38,25 +39,63 @@ class _Decision(BaseModel):
     session_id: str = Field(default="", min_length=0)
 
 
+ApiWorkflowOutcome = Literal[
+    "api_target_resolved",
+    "api_execution_verified",
+    "user_goal_verified",
+    "documentation_understood",
+    "integration_available",
+    "operation_resolved",
+    "request_previewed",
+    "approval_obtained",
+]
+
+
+def migrate_legacy_workflow_decision(data: dict[str, Any]) -> dict[str, Any]:
+    """Explicit versioned migration for historical API workflow decision dictionaries.
+
+    Migrates historical `required_actions` declarations into modern semantic outcomes
+    (api_execution_verified, user_goal_verified) without turning optional implementation
+    steps into mandatory requirements.
+    """
+    data = dict(data)
+    if "required_outcomes" in data:
+        return data
+    raw_actions = data.pop("required_actions", None) or ()
+    if isinstance(raw_actions, str):
+        raw_actions = [raw_actions]
+    actions_set = set(str(a).strip() for a in raw_actions if str(a).strip())
+    if "request_execution" in actions_set or "api_execution_verified" in actions_set:
+        data["required_outcomes"] = ("api_execution_verified", "user_goal_verified")
+        data["optional_outcomes"] = tuple(
+            item
+            for item in (
+                "documentation_understood" if "documentation_inspection" in actions_set else None,
+                "integration_available" if ("integration_import" in actions_set or "integration_configuration" in actions_set) else None,
+                "operation_resolved" if "operation_search" in actions_set else None,
+                "request_previewed" if "request_preview" in actions_set else None,
+            )
+            if item is not None
+        )
+    elif "documentation_inspection" in actions_set:
+        data["required_outcomes"] = ("documentation_understood",)
+        data["optional_outcomes"] = ()
+    else:
+        data["required_outcomes"] = ("api_execution_verified", "user_goal_verified")
+        data["optional_outcomes"] = ()
+    return data
+
+
 class _WorkflowDecision(_Decision):
     task_intent: str = Field(min_length=1)
-    required_actions: tuple[
-        Literal[
-            "documentation_inspection",
-            "integration_import",
-            "integration_configuration",
-            "operation_search",
-            "request_preview",
-            "request_execution",
-        ],
-        ...,
-    ] = Field(min_length=1)
+    required_outcomes: tuple[ApiWorkflowOutcome, ...] = Field(min_length=1)
+    optional_outcomes: tuple[ApiWorkflowOutcome, ...] = ()
     reason: str = Field(min_length=1)
     safe_to_continue: bool
 
-    @field_validator("required_actions", mode="before")
+    @field_validator("required_outcomes", "optional_outcomes", mode="before")
     @classmethod
-    def _normalize_required_actions(cls, v: Any) -> Any:
+    def _normalize_outcomes(cls, v: Any) -> Any:
         if isinstance(v, str):
             return (v,)
         if isinstance(v, (list, set)):
@@ -64,37 +103,16 @@ class _WorkflowDecision(_Decision):
         return v
 
     @model_validator(mode="after")
-    def validate_action_dependencies(self) -> "_WorkflowDecision":
-        actions = self.required_actions
-        if len(set(actions)) != len(actions):
-            raise ValueError("required_actions must not contain duplicates")
-        canonical_order = {
-            "documentation_inspection": 0,
-            "integration_import": 1,
-            "integration_configuration": 2,
-            "operation_search": 3,
-            "request_preview": 4,
-            "request_execution": 5,
-        }
-        if list(actions) != sorted(actions, key=canonical_order.__getitem__):
-            raise ValueError("required_actions must follow the declared API lifecycle order")
-        if "request_execution" in actions:
-            missing = [
-                action
-                for action in ("operation_search", "request_preview")
-                if action not in actions
-            ]
-            if missing:
-                raise ValueError(
-                    "request_execution requires declared actions: " + ", ".join(missing)
-                )
-        if "request_preview" in actions and "operation_search" not in actions:
-            raise ValueError("request_preview requires a declared operation_search action")
-        if "integration_import" in actions and "documentation_inspection" not in actions:
-            raise ValueError(
-                "integration_import requires a declared documentation_inspection action"
-            )
+    def validate_outcomes(self) -> "_WorkflowDecision":
+        outcomes = (*self.required_outcomes, *self.optional_outcomes)
+        if len(set(outcomes)) != len(outcomes):
+            raise ValueError("workflow outcomes must not contain duplicates")
         return self
+
+    @property
+    def required_actions(self) -> tuple[str, ...]:
+        """Backward compatibility property returning required outcomes as actions."""
+        return self.required_outcomes
 
 
 class _WorkflowTerminal(_Decision):
@@ -105,7 +123,7 @@ class _WorkflowTerminal(_Decision):
         pattern=r"^sha256:[a-f0-9]{64}$",
     )
     reason: str = Field(min_length=1)
-class _Import(_Decision):
+class _ImportArgs(_Decision):
     name: str = Field(min_length=1, max_length=160)
     text: str = Field(default="", max_length=10 * 1024 * 1024)
     path: str = ""
@@ -118,6 +136,8 @@ class _Import(_Decision):
         default="", pattern=r"^(|api_[a-f0-9]{24})$"
     )
 
+
+class _Import(_ImportArgs):
     @model_validator(mode="after")
     def exactly_one_source(self) -> "_Import":
         if sum(bool(item) for item in (self.text, self.path, self.url, self.documentation_ref)) != 1:
@@ -256,14 +276,38 @@ def build_api_manager_langchain_tools(
             or raw_decision_id
             or "api-turn-decision"
         )
-        if (
-            raw_decision_id
-            and bound_context.source_decision_id
-            and raw_decision_id != bound_context.source_decision_id
-        ):
-            raise PermissionError(
-                f"Model-provided source_decision_id {raw_decision_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+        if raw_decision_id and bound_context.source_decision_id:
+            is_valid_suffix = (
+                raw_decision_id == bound_context.source_decision_id
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}:")
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}/")
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}-")
+                or raw_decision_id.startswith(f"{bound_context.source_decision_id}_")
             )
+            if not is_valid_suffix:
+                raise PermissionError(
+                    f"Model-provided source_decision_id {raw_decision_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+                )
+
+        values["session_id"] = authoritative_session_id
+        values["source_decision_id"] = authoritative_decision_id
+
+        if "routing_decision" in values and isinstance(values["routing_decision"], dict):
+            rd_raw_id = str(values["routing_decision"].get("source_decision_id") or "").strip()
+            if rd_raw_id and bound_context.source_decision_id:
+                is_valid_rd_suffix = (
+                    rd_raw_id == bound_context.source_decision_id
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}:")
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}/")
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}-")
+                    or rd_raw_id.startswith(f"{bound_context.source_decision_id}_")
+                )
+                if not is_valid_rd_suffix:
+                    raise PermissionError(
+                        f"Model-provided routing_decision.source_decision_id {rd_raw_id!r} does not match host-bound source decision {bound_context.source_decision_id!r}."
+                    )
+            values["routing_decision"]["source_decision_id"] = authoritative_decision_id
+
         return authoritative_session_id, authoritative_decision_id
 
     def encode(operation: Any, *, session_id: str, source_decision_id: str) -> str:
@@ -273,12 +317,40 @@ def build_api_manager_langchain_tools(
             session_id=session_id,
             source_decision_id=source_decision_id,
         )
-        
 
     def import_docs(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
+
+        last_inspection = manager.get_last_inspection(session_id)
+        if last_inspection is not None:
+            canonical_spec = last_inspection.get("canonical_spec_url")
+            if canonical_spec:
+                values["url"] = str(canonical_spec)
+                values["text"] = ""
+                values["path"] = ""
+                values["documentation_ref"] = ""
+            elif last_inspection.get("url") or (
+                last_inspection.get("reference")
+                and urlsplit(str(last_inspection.get("reference") or "")).scheme in {"http", "https"}
+            ):
+                values["url"] = str(last_inspection.get("url") or last_inspection.get("reference"))
+                values["text"] = ""
+                values["path"] = ""
+                values["documentation_ref"] = ""
+            elif last_inspection.get("path") or (
+                last_inspection.get("reference")
+                and Path(str(last_inspection.get("reference") or "")).is_file()
+            ):
+                values["path"] = str(last_inspection.get("path") or last_inspection.get("reference"))
+                values["text"] = ""
+                values["url"] = ""
+                values["documentation_ref"] = ""
+            elif last_inspection.get("documentation_ref"):
+                values["documentation_ref"] = str(last_inspection["documentation_ref"])
+                values["text"] = ""
+                values["path"] = ""
+                values["url"] = ""
+
         request = _Import(**values)
         return _json(
             lambda: manager.import_documentation(
@@ -301,8 +373,6 @@ def build_api_manager_langchain_tools(
 
     def import_semantic_docs(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
         request = _SemanticImport(**values)
         return _json(
             lambda: manager.import_documentation(
@@ -323,8 +393,6 @@ def build_api_manager_langchain_tools(
 
     def preview(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
         request = _Request(**values)
         if (
             request.routing_decision.source_decision_id
@@ -347,8 +415,6 @@ def build_api_manager_langchain_tools(
 
     def execute(**values: Any) -> str:
         session_id, source_decision_id = _resolve_identities(values)
-        values["session_id"] = session_id
-        values["source_decision_id"] = source_decision_id
         request = _Execute(**values)
         if (
             request.routing_decision.source_decision_id
@@ -479,8 +545,8 @@ def build_api_manager_langchain_tools(
         StructuredTool.from_function(
             name="api_workflow_decide",
             description=(
-                "Record the model's strict ordered API workflow decision. This must be the first "
-                "API-route tool call; completion is validated against its required_actions."
+                "Record the model's API workflow outcome requirements. This must be the first "
+                "API-route tool call; completion is validated against evidence, not tool names."
             ),
             args_schema=_WorkflowDecision,
             func=workflow_decide,
@@ -519,7 +585,7 @@ def build_api_manager_langchain_tools(
                 "documentation must use api_docs_import_semantic so its typed semantic definition "
                 "cannot be omitted. Never executes documentation content."
             ),
-            args_schema=_Import,
+            args_schema=_ImportArgs,
             func=import_docs,
             metadata={"transactional_adapter": "api_integration"},
         ),

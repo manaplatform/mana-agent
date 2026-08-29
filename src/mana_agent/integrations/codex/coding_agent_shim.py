@@ -22,6 +22,7 @@ from mana_agent.coding.event_visibility import (
 )
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.coding.live_events import publish_coding_event
+from mana_agent.config.model_capabilities import normalize_reasoning_request_overrides
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexCapabilityError
@@ -346,7 +347,7 @@ class CodexCodingAgentShim:
             task_type="coding" if requires_repository_write else "planning",
             complexity=Complexity.MEDIUM,
             risk=RiskLevel.MEDIUM if requires_repository_write else RiskLevel.LOW,
-            required_capabilities=frozenset({"patch", "tool_calls"} if requires_repository_write else {"structured_output"}),
+            required_capabilities=frozenset({"patch", "tool_calls", "repository_write"} if requires_repository_write else {"structured_output", "repository_read"}),
             required_tools=frozenset({"repository_read", "repository_write", "test_execution"} if requires_repository_write else {"repository_read"}),
             latency_requirement=LatencyClass.STANDARD,
             budgets=routing_budgets,
@@ -374,6 +375,12 @@ class CodexCodingAgentShim:
             getattr(routing_decision, "model_configuration", None),
             for_http_body=True,
         )
+        request_overrides = normalize_reasoning_request_overrides(
+            routing_decision.provider,
+            routing_decision.selected_model,
+            routed_settings.codex_transport,
+            request_overrides,
+        )
         self.codex_settings = self.codex_settings.model_copy(
             update={
                 "model": routing_decision.selected_model,
@@ -389,12 +396,16 @@ class CodexCodingAgentShim:
                 "model_request_overrides": request_overrides,
             }
         )
-        self._validate_write_transport_capability(
+        effective_transport = self._validate_write_transport_capability(
             requires_repository_write=requires_repository_write,
             model=str(self.codex_settings.model or ""),
             provider=str(self.codex_settings.provider or ""),
             transport=self.codex_settings.codex_transport,
         )
+        if effective_transport != self.codex_settings.codex_transport:
+            self.codex_settings = self.codex_settings.model_copy(
+                update={"codex_transport": effective_transport}
+            )
         record_current(
             "codex.turn.started",
             {
@@ -580,42 +591,74 @@ class CodexCodingAgentShim:
         model: str,
         provider: str,
         transport: CodexTransport | Any,
-    ) -> None:
+    ) -> CodexTransport | Any:
         """Fail write jobs when the selected stack cannot represent tool/mutation work."""
         if not requires_repository_write:
-            return
+            return transport
         transport_value = getattr(transport, "value", str(transport or ""))
         if transport is CodexTransport.UNSUPPORTED or transport_value in {"", "unsupported"}:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: selected provider has no supported "
                 f"Codex transport (provider={provider!r}, model={model!r}). "
-                "No fallback coding backend was executed."
+                "No fallback coding backend was executed.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
-        # Catalog capability after routing. When Mana knows the model and it
-        # lacks tool_calling, refuse the write. Unknown models fail closed for
-        # write turns (no silent degraded path). Bridge conversion still
-        # fail-fasts if Codex tools cannot be represented mid-request.
         try:
-            from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
+            from mana_agent.config.model_capabilities import resolve_model_capability
 
-            caps = normalize_capabilities(provider, model)
+            desc = resolve_model_capability(provider, model, transport=transport_value)
         except Exception as exc:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model capability metadata is unavailable. "
-                f"provider={provider!r} model={model!r}. No fallback was executed."
+                f"provider={provider!r} model={model!r}. No fallback was executed.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             ) from exc
-        if not caps:
+        if not desc.is_known:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model capabilities are unknown "
                 f"(provider={provider!r}, model={model!r}, transport={transport_value!r}). "
-                "Refusing to claim write/tool support without explicit capability metadata."
+                "Refusing to claim write/tool support without explicit capability metadata.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
-        if ModelCapability.TOOL_CALLING not in caps:
+        if transport_value == "direct_responses" and not desc.supports_server_tools:
+            # direct_responses requires Responses API server-tool compatibility.
+            # Check if responses_bridge supports the model.
+            bridge_desc = resolve_model_capability(provider, model, transport="responses_bridge")
+            if bridge_desc.is_known and bridge_desc.supports_tool_calls and bridge_desc.supports_repository_write:
+                return CodexTransport.RESPONSES_BRIDGE
+            raise CodexCapabilityError(
+                f"Write-required Codex turn rejected: model {model!r} does not support server tools on direct_responses transport "
+                f"(provider={provider!r}, transport={transport_value!r}) and has no compatible bridge transport. "
+                "No silent degraded write path was started.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
+            )
+        if not desc.supports_tool_calls:
             raise CodexCapabilityError(
                 "Write-required Codex turn rejected: model does not declare tool_calling "
                 f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
-                "No silent degraded write path was started."
+                "No silent degraded write path was started.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
             )
+        if not desc.supports_repository_write:
+            raise CodexCapabilityError(
+                "Write-required Codex turn rejected: model does not declare repository write "
+                f"capability (provider={provider!r}, model={model!r}, transport={transport_value!r}). "
+                "No silent degraded write path was started.",
+                provider=provider,
+                model=model,
+                transport=transport_value,
+            )
+        return transport
 
     def _repository_has_head(self) -> bool:
         completed = subprocess.run(
@@ -724,6 +767,12 @@ class CodexCodingAgentShim:
                 "auto_execute_terminal_reason": payload.get("auto_execute_terminal_reason"),
                 "changed_files": list(payload.get("changed_files") or []),
                 "status": status,
+                "error_code": payload.get("error_code"),
+                "interruption_reason": payload.get("interruption_reason"),
+                "http_status": payload.get("http_status"),
+                "original_error": payload.get("original_error"),
+                "provider": payload.get("provider"),
+                "transport": payload.get("transport"),
             },
         )
         record_current("coding.terminal", event.model_dump(mode="json"))
@@ -772,10 +821,19 @@ class CodexCodingAgentShim:
             else (result.codex_metadata.as_dict() if hasattr(result.codex_metadata, "as_dict") else {})
         )
         interruption_reason = str(meta.get("interruption_reason") or "")
-        error_code = interruption_reason or ""
+        error_code = interruption_reason or str(meta.get("error_code") or "")
         if not error_code:
             for e in result.errors:
                 for candidate in (
+                    "CODING_PROVIDER_TOOL_PROTOCOL_ERROR",
+                    "CODING_PROVIDER_BAD_REQUEST",
+                    "CODING_PROVIDER_AUTH_ERROR",
+                    "CODING_PROVIDER_PERMISSION_ERROR",
+                    "CODING_PROVIDER_MODEL_NOT_FOUND",
+                    "CODING_PROVIDER_MODEL_RETIRED",
+                    "CODING_PROVIDER_RATE_LIMIT",
+                    "CODING_PROVIDER_PROTOCOL_ERROR",
+                    "CODING_CAPABILITY_ERROR",
                     "CODING_PROVIDER_TIMEOUT",
                     "CODING_TIMEOUT",
                     "MODEL_INTERRUPTED",
@@ -783,6 +841,7 @@ class CodexCodingAgentShim:
                     "DEADLINE_EXPIRED",
                     "PROVIDER_TIMEOUT",
                     "LEASE_LOST_DURING_EXECUTION",
+                    "CODING_AGENT_FAILED",
                 ):
                     if candidate in e:
                         error_code = candidate
@@ -800,6 +859,11 @@ class CodexCodingAgentShim:
             "execution_id": result.task_id,
             "error_code": error_code or None,
             "interruption_reason": interruption_reason or None,
+            "http_status": meta.get("http_status"),
+            "original_error": meta.get("original_error"),
+            "provider": meta.get("provider"),
+            "model": meta.get("model"),
+            "transport": meta.get("transport"),
             "retry_possible": result.status != "completed",
             "resume_available": bool(result.changed_files),
             "checkpoint_available": bool(result.changed_files),

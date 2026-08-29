@@ -143,10 +143,23 @@ def _error_payload(exc: EmailConnectorError, *, verbose: bool = False) -> dict[s
 
 def build_email_langchain_tools() -> list[Any]:
     """Build local tools without contacting Gmail until the model calls one."""
+    from mana_agent.utils.tool_results import json_safe_dumps, json_safe_tool_payload
+
     search_context: dict[tuple[str, str], EmailQuery] = {}
 
     def accounts_list() -> dict[str, object]:
-        return {"accounts": [{**account.model_dump(exclude={"secret_ref"}), "capabilities": _capabilities(account).model_dump()} for account in load_accounts() if account.enabled]}
+        return json_safe_tool_payload(
+            {
+                "accounts": [
+                    {
+                        **account.model_dump(exclude={"secret_ref"}),
+                        "capabilities": _capabilities(account).model_dump(),
+                    }
+                    for account in load_accounts()
+                    if account.enabled
+                ]
+            }
+        )
 
     def search(**kwargs: object) -> str:
         try:
@@ -159,10 +172,32 @@ def build_email_langchain_tools() -> list[Any]:
             for item in result.messages:
                 reference = item.reference(provider=provider.account.provider)
                 search_context[(reference.account_id, reference.provider_message_id)] = query
-                safe.append({"message_id": reference.provider_message_id, "message_ref": reference.model_dump(), "thread_id": item.thread_id, "sender": item.sender.model_dump(), "subject": item.subject, "received_at": item.received_at.isoformat(), "snippet": item.snippet, "attachments": [attachment.model_dump() for attachment in item.attachments]})
-            return untrusted_email_context(json.dumps({"ok": True, "account_id": provider.account.id, "messages": safe, "cursor": result.cursor}))
+                safe.append(
+                    {
+                        "message_id": reference.provider_message_id,
+                        "message_ref": reference.model_dump(),
+                        "thread_id": item.thread_id,
+                        "sender": item.sender.model_dump(),
+                        "subject": item.subject,
+                        "received_at": item.received_at.isoformat(),
+                        "snippet": item.snippet,
+                        "attachments": [
+                            attachment.model_dump() for attachment in item.attachments
+                        ],
+                    }
+                )
+            return untrusted_email_context(
+                json_safe_dumps(
+                    {
+                        "ok": True,
+                        "account_id": provider.account.id,
+                        "messages": safe,
+                        "cursor": result.cursor,
+                    }
+                )
+            )
         except EmailConnectorError as exc:
-            return untrusted_email_context(json.dumps(_error_payload(exc)))
+            return untrusted_email_context(json_safe_dumps(_error_payload(exc)))
 
     def read(**kwargs: object) -> str:
         try:
@@ -170,11 +205,20 @@ def build_email_langchain_tools() -> list[Any]:
             reference = payload.message_ref
             account_id = payload.account_id or (reference.account_id if reference else None)
             provider = _provider(account_id)
-            if reference and (reference.account_id != provider.account.id or reference.provider != provider.account.provider):
-                raise EmailInvalidMessageReferenceError("The message reference belongs to a different email account or provider.", provider=provider.account.provider)
+            if reference and (
+                reference.account_id != provider.account.id
+                or reference.provider != provider.account.provider
+            ):
+                raise EmailInvalidMessageReferenceError(
+                    "The message reference belongs to a different email account or provider.",
+                    provider=provider.account.provider,
+                )
             message_id = (reference.provider_message_id if reference else payload.message_id) or ""
             if not message_id:
-                raise EmailInvalidMessageReferenceError("email_read requires a message_ref returned by email_search or a message_id.", provider=provider.account.provider)
+                raise EmailInvalidMessageReferenceError(
+                    "email_read requires a message_ref returned by email_search or a message_id.",
+                    provider=provider.account.provider,
+                )
             assert_email_permission(provider.account, EmailPermission.READ)
             try:
                 message = _run(provider.get_message(message_id))
@@ -189,13 +233,17 @@ def build_email_langchain_tools() -> list[Any]:
                 try:
                     message = _run(provider.get_message(refreshed_id))
                 except EmailConnectorError as retry_error:
-                    retry_error.diagnostic_context = {**retry_error.diagnostic_context, "refresh_retry_attempted": True, "initial_error_code": first_error.code}
+                    retry_error.diagnostic_context = {
+                        **retry_error.diagnostic_context,
+                        "refresh_retry_attempted": True,
+                        "initial_error_code": first_error.code,
+                    }
                     raise
             body = message.model_dump(exclude={"bcc"})
             body["message_ref"] = message.reference(provider=provider.account.provider).model_dump()
-            return untrusted_email_context(json.dumps({"ok": True, "message": body}, default=str))
+            return untrusted_email_context(json_safe_dumps({"ok": True, "message": body}))
         except EmailConnectorError as exc:
-            return untrusted_email_context(json.dumps(_error_payload(exc)))
+            return untrusted_email_context(json_safe_dumps(_error_payload(exc)))
 
     def thread_read(**kwargs: object) -> str:
         try:
@@ -203,9 +251,9 @@ def build_email_langchain_tools() -> list[Any]:
             provider = _provider(payload.account_id)
             assert_email_permission(provider.account, EmailPermission.READ)
             thread = _run(provider.get_thread(payload.thread_id))
-            return untrusted_email_context(thread.model_dump_json())
+            return untrusted_email_context(json_safe_dumps(thread))
         except EmailConnectorError as exc:
-            return untrusted_email_context(json.dumps(_error_payload(exc)))
+            return untrusted_email_context(json_safe_dumps(_error_payload(exc)))
 
     return [
         StructuredTool.from_function(func=accounts_list, name="email_accounts_list", description="List connected non-secret email accounts."),

@@ -66,7 +66,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CONFIGURED_PROVIDERS": ["openai"],
     "OPENAI_BASE_URL": "https://api.openai.com/v1",
     "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-    "OPENROUTER_HTTP_REFERER": "https://github.com/mana-agent/mana-agent",
+    "OPENROUTER_HTTP_REFERER": "https://github.com/manaplatform/mana-agent",
     "OPENROUTER_TITLE": "Mana-Agent",
     "OPENROUTER_PROVIDER_PREFERENCES": {},
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",

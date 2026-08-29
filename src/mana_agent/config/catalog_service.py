@@ -37,6 +37,12 @@ class ModelCatalogService:
         except Exception as exc:
             raise ProviderValidationError(str(exc)) from exc
         save_model_cache(provider, base_url, model_ids)
+        try:
+            from mana_agent.config.model_capabilities import clear_capability_cache
+
+            clear_capability_cache()
+        except Exception:
+            pass
         return descriptors_from_catalog(provider, model_ids, source="discovered")
 
     def cached(self, *, provider: str, base_url: str) -> list[ModelDescriptor]:

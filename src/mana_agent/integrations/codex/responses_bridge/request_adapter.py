@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from mana_agent.config.model_capabilities import (
+    normalize_reasoning_request_overrides,
+    resolve_model_request_policy,
+)
 from mana_agent.config.nvidia_model_requests import (
     apply_nvidia_chat_completion_shaping,
     is_nvidia_deepseek_model,
@@ -304,6 +308,10 @@ def convert_responses_request_to_chat(
         if body.get(source_key) is not None:
             payload[target_key] = body[source_key]
 
+    policy = resolve_model_request_policy(
+        upstream.provider, model, transport="responses_bridge"
+    )
+
     effort = None
     reasoning = body.get("reasoning")
     if isinstance(reasoning, dict):
@@ -313,11 +321,16 @@ def convert_responses_request_to_chat(
     mapped = normalize_reasoning_effort(
         provider=upstream.provider, model=model, effort=None if effort is None else str(effort)
     )
+    if policy.reasoning_required:
+        if mapped in {"none", "off", "0", "false", "disabled"} or not policy.reasoning_effort_configurable:
+            mapped = None
+
     # Non-DeepSeek hosts may still accept top-level reasoning_effort.
     if mapped is not None and not is_nvidia_deepseek_model(
         provider=upstream.provider, model=model
     ):
-        payload["reasoning_effort"] = mapped
+        if policy.reasoning_effort_configurable:
+            payload["reasoning_effort"] = mapped
     elif mapped is not None:
         # Stash for NVIDIA DeepSeek shaping below.
         payload["reasoning_effort"] = mapped
@@ -363,6 +376,12 @@ def convert_responses_request_to_chat(
                 payload["chat_template_kwargs"] = nested
             else:
                 payload.setdefault(key, value)
+
+    normalized_payload = normalize_reasoning_request_overrides(
+        upstream.provider, model, "responses_bridge", payload
+    )
+    payload.clear()
+    payload.update(normalized_payload)
 
     # DeepSeek V4 on NVIDIA requires chat_template_kwargs; bare reasoning_effort
     # alone can hang, 4xx, or produce empty streams (seen as Codex systemError/410).

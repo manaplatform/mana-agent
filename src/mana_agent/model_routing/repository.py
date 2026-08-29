@@ -30,7 +30,10 @@ class RepositoryMetadataInspector:
         self._cache: dict[Path, _CacheEntry] = {}
 
     def inspect(self, root: Path) -> RepositoryMetadata:
-        resolved = root.resolve()
+        try:
+            resolved = root.resolve()
+        except (OSError, ValueError, RuntimeError):
+            resolved = root
         fingerprint = self._fingerprint(resolved)
         cached = self._cache.get(resolved)
         if cached and cached.fingerprint == fingerprint:
@@ -80,16 +83,24 @@ class RepositoryMetadataInspector:
 
     @staticmethod
     def _git_lines(root: Path, args: list[str]) -> list[str]:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=root,
-            text=True,
-            encoding="utf-8",
-            errors="surrogateescape",
-            capture_output=True,
-            check=False,
-        )
-        return result.stdout.splitlines() if result.returncode == 0 else []
+        try:
+            if not root.is_dir():
+                return []
+        except OSError:
+            return []
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                text=True,
+                encoding="utf-8",
+                errors="surrogateescape",
+                capture_output=True,
+                check=False,
+            )
+            return result.stdout.splitlines() if result.returncode == 0 else []
+        except (OSError, ValueError):
+            return []
 
     def _tracked_files(self, root: Path) -> list[Path]:
         lines = self._git_lines(root, ["ls-files"])

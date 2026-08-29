@@ -667,4 +667,6 @@ def verify_file_created(repo_root: Path, *, path: str, max_lines: int = 20) -> d
 
 
 def dumps_tool_result(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False)
+    from mana_agent.utils.tool_results import json_safe_dumps
+
+    return json_safe_dumps(payload)

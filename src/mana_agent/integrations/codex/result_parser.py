@@ -8,9 +8,12 @@ for failed write turns.
 
 from __future__ import annotations
 
-from typing import Any
-
-from mana_agent.coding.models import CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.coding.models import (
+    CodingTask,
+    CodingTaskResult,
+    WorkspaceContext,
+    compute_duration_breakdown,
+)
 from mana_agent.integrations.codex.text_cleanup import (
     looks_like_freeform_tool_garbage,
     sanitize_assistant_visible_text,
@@ -41,6 +44,13 @@ def parse_codex_result(
     turn_id: str,
     notifications: list[dict[str, Any]],
     changed_files: list[str],
+    task_created_at: Any = None,
+    scheduled_at: Any = None,
+    worker_claimed_at: Any = None,
+    provider_started_at: Any = None,
+    provider_completed_at: Any = None,
+    task_completed_at: Any = None,
+    duration_breakdown: dict[str, int] | None = None,
 ) -> CodingTaskResult:
     commands: list[str] = []
     tests: list[str] = []
@@ -54,6 +64,9 @@ def parse_codex_result(
     test_failures: list[str] = []
     mutation_attempted = False
 
+    parsed_http_status: int | None = None
+    parsed_original_error: str = ""
+
     for notification in notifications:
         method = str(notification.get("method") or "")
         params = notification.get("params")
@@ -61,6 +74,13 @@ def parse_codex_result(
         item = payload.get("item")
         if isinstance(item, dict):
             item_type = str(item.get("type") or "")
+            if item_type in {"systemError", "system_error", "error"}:
+                status = "failed"
+                item_err = str(item.get("message") or item.get("error") or item.get("text") or "systemError")
+                if item_err not in errors:
+                    errors.append(item_err)
+                if not parsed_original_error:
+                    parsed_original_error = item_err
             if item_type in _MUTATION_ITEM_TYPES:
                 mutation_attempted = True
             command = str(item.get("command") or "").strip()
@@ -94,10 +114,59 @@ def parse_codex_result(
                 # Explicit capability degradation when Codex lacks model metadata.
                 if "fallback metadata" in message.lower() or "model metadata" in message.lower():
                     warnings.append("codex_model_metadata_fallback")
-        if method in {"turn/failed", "error"}:
+        if method in {"turn/failed", "error", "systemError"}:
             status = "failed"
             err = _format_turn_failure(payload)
+            parsed_original_error = str(payload.get("message") or payload.get("error") or err)
+            raw_status = payload.get("http_status") or payload.get("status_code")
+            if raw_status is None and isinstance(payload.get("error"), dict):
+                raw_status = payload["error"].get("http_status") or payload["error"].get("status_code")
+            if isinstance(raw_status, int):
+                parsed_http_status = raw_status
+            elif isinstance(raw_status, str) and raw_status.isdigit():
+                parsed_http_status = int(raw_status)
+            elif "400" in err:
+                parsed_http_status = 400
+            elif "401" in err:
+                parsed_http_status = 401
+            elif "403" in err:
+                parsed_http_status = 403
+            elif "404" in err:
+                parsed_http_status = 404
+            elif "410" in err:
+                parsed_http_status = 410
+            elif "429" in err:
+                parsed_http_status = 429
+
             err_code = str(payload.get("error_code") or "")
+            if not err_code:
+                lowered = err.lower()
+                if parsed_http_status == 400 or "400" in lowered or "invalid_request" in lowered:
+                    if (
+                        "server-tool" in lowered
+                        or "server tool" in lowered
+                        or "host tool" in lowered
+                        or "tool" in lowered
+                        or "function" in lowered
+                    ):
+                        err_code = "CODING_PROVIDER_TOOL_PROTOCOL_ERROR"
+                    else:
+                        err_code = "CODING_PROVIDER_BAD_REQUEST"
+                elif parsed_http_status == 401 or "401" in lowered or "unauthorized" in lowered:
+                    err_code = "CODING_PROVIDER_AUTH_ERROR"
+                elif parsed_http_status == 403 or "403" in lowered or "permission" in lowered:
+                    err_code = "CODING_PROVIDER_PERMISSION_ERROR"
+                elif parsed_http_status == 404 or "404" in lowered or "not found" in lowered:
+                    err_code = "CODING_PROVIDER_MODEL_NOT_FOUND"
+                elif parsed_http_status == 410 or "410" in lowered or "retired" in lowered:
+                    err_code = "CODING_PROVIDER_MODEL_RETIRED"
+                elif parsed_http_status == 429 or "429" in lowered or "rate limit" in lowered:
+                    err_code = "CODING_PROVIDER_RATE_LIMIT"
+                elif payload.get("reason") == "timeout" or "timed out" in lowered or "timeout" in lowered:
+                    err_code = "CODING_PROVIDER_TIMEOUT"
+                else:
+                    err_code = "CODING_AGENT_FAILED"
+
             if err_code and err_code not in err:
                 errors.append(f"{err_code}: {err}")
             else:
@@ -159,6 +228,15 @@ def parse_codex_result(
     if not interruption_reason:
         for e in errors:
             for candidate_code in (
+                "CODING_PROVIDER_TOOL_PROTOCOL_ERROR",
+                "CODING_PROVIDER_BAD_REQUEST",
+                "CODING_PROVIDER_AUTH_ERROR",
+                "CODING_PROVIDER_PERMISSION_ERROR",
+                "CODING_PROVIDER_MODEL_NOT_FOUND",
+                "CODING_PROVIDER_MODEL_RETIRED",
+                "CODING_PROVIDER_RATE_LIMIT",
+                "CODING_PROVIDER_PROTOCOL_ERROR",
+                "CODING_CAPABILITY_ERROR",
                 "CODING_PROVIDER_TIMEOUT",
                 "CODING_TIMEOUT",
                 "MODEL_INTERRUPTED",
@@ -166,6 +244,7 @@ def parse_codex_result(
                 "DEADLINE_EXPIRED",
                 "PROVIDER_TIMEOUT",
                 "LEASE_LOST_DURING_EXECUTION",
+                "CODING_AGENT_FAILED",
             ):
                 if candidate_code in e:
                     interruption_reason = candidate_code
@@ -173,11 +252,29 @@ def parse_codex_result(
             if interruption_reason:
                 break
 
+    calculated_breakdown = duration_breakdown or compute_duration_breakdown(
+        task_created_at=task_created_at or getattr(task, "task_created_at", None),
+        scheduled_at=scheduled_at,
+        worker_claimed_at=worker_claimed_at,
+        provider_started_at=provider_started_at,
+        provider_completed_at=provider_completed_at,
+        task_completed_at=task_completed_at,
+    )
     codex_meta = {
         "interruption_reason": interruption_reason,
         "mutation_attempted": mutation_attempted,
         "thread_id": thread_id,
         "turn_id": turn_id,
+        "http_status": parsed_http_status,
+        "original_error": parsed_original_error,
+        "error_code": interruption_reason or "",
+        "task_created_at": str(task_created_at) if task_created_at else None,
+        "scheduled_at": str(scheduled_at) if scheduled_at else None,
+        "worker_claimed_at": str(worker_claimed_at) if worker_claimed_at else None,
+        "provider_started_at": str(provider_started_at) if provider_started_at else None,
+        "provider_completed_at": str(provider_completed_at) if provider_completed_at else None,
+        "task_completed_at": str(task_completed_at) if task_completed_at else None,
+        "duration_breakdown": calculated_breakdown,
     }
 
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
@@ -197,6 +294,13 @@ def parse_codex_result(
         token_usage=usage,
         thread_id=thread_id,
         turn_id=turn_id,
+        task_created_at=task_created_at or getattr(task, "task_created_at", None),
+        scheduled_at=scheduled_at,
+        worker_claimed_at=worker_claimed_at,
+        provider_started_at=provider_started_at,
+        provider_completed_at=provider_completed_at,
+        task_completed_at=task_completed_at,
+        duration_breakdown=calculated_breakdown,
         codex_metadata=codex_meta,
     )
 

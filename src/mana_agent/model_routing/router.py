@@ -11,11 +11,13 @@ from typing import Callable, Iterable
 from mana_agent.context_cost.accounting import ModelContextLimitError, ModelTokenAccountingService, TokenEstimationRequest
 from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver, UnknownModelProfileError
 
+from mana_agent.evals.recorder import record_current
 from mana_agent.model_routing.history import InMemoryRoutingHistory, RoutingHistory
 from mana_agent.model_routing.models import (
     CandidateRejection,
     LatencyClass,
     ModelProfile,
+    NoWriteCapableModelAvailableError,
     RoutingDecision,
     RoutingFailure,
     RoutingOutcome,
@@ -78,16 +80,82 @@ class ModelRouter:
             reasons = self._reject(profile, request, resource)
             if reasons:
                 rejected.append(CandidateRejection(profile.key, tuple(reasons)))
+                desc = getattr(profile, "capability_descriptor", None)
+                transport = getattr(desc, "transport", "") or "direct_responses"
+                record_current(
+                    "model.candidate.rejected",
+                    {
+                        "provider": profile.provider,
+                        "model": profile.model_id,
+                        "transport": transport,
+                        "required_capabilities": sorted(request.required_capabilities),
+                        "resolved_capabilities": desc.to_dict() if desc is not None else {},
+                        "capability_source": desc.capability_source if desc is not None else "unknown",
+                        "rejection_reason": "; ".join(reasons),
+                    },
+                )
                 continue
             item = self._score(profile, request, resource)
             if item.confidence < self.policy.minimum_confidence:
-                rejected.append(CandidateRejection(profile.key, (f"confidence {item.confidence:.3f} is below {self.policy.minimum_confidence:.3f}",)))
+                rejection_reason = f"confidence {item.confidence:.3f} is below {self.policy.minimum_confidence:.3f}"
+                rejected.append(CandidateRejection(profile.key, (rejection_reason,)))
+                desc = getattr(profile, "capability_descriptor", None)
+                transport = getattr(desc, "transport", "") or "direct_responses"
+                record_current(
+                    "model.candidate.rejected",
+                    {
+                        "provider": profile.provider,
+                        "model": profile.model_id,
+                        "transport": transport,
+                        "required_capabilities": sorted(request.required_capabilities),
+                        "resolved_capabilities": desc.to_dict() if desc is not None else {},
+                        "capability_source": desc.capability_source if desc is not None else "unknown",
+                        "rejection_reason": rejection_reason,
+                    },
+                )
                 continue
             scored.append(item)
         if not scored:
-            raise RoutingFailure("No configured model satisfies the routing capability, reliability, latency, and budget constraints. No fallback action was executed.", rejected=tuple(rejected))
+            is_write_task = (
+                "repository_write" in request.required_tools
+                or "patch" in request.required_capabilities
+                or "repository_write" in request.required_capabilities
+            )
+            if is_write_task:
+                diagnostics = {
+                    "required_capabilities": sorted(request.required_capabilities),
+                    "required_tools": sorted(request.required_tools),
+                    "rejected_candidates": [asdict(item) for item in rejected],
+                }
+                raise NoWriteCapableModelAvailableError(
+                    "no_write_capable_model_available: No configured model satisfies the required write and tool "
+                    "capabilities. No fallback action was executed.",
+                    rejected=tuple(rejected),
+                    diagnostics=diagnostics,
+                )
+            rejection_details = "; ".join(
+                f"{item.model} ({', '.join(item.reasons)})" for item in rejected
+            )
+            msg = "No configured model satisfies the routing capability, reliability, latency, and budget constraints."
+            if rejection_details:
+                msg = f"{msg} Rejected candidates: {rejection_details}."
+            msg = f"{msg} No fallback action was executed."
+            raise RoutingFailure(msg, rejected=tuple(rejected))
         scored.sort(key=lambda item: (-item.score, item.estimated_cost is None, item.estimated_cost or 0.0, item.profile.key))
         winner = scored[0]
+        winner_desc = getattr(winner.profile, "capability_descriptor", None)
+        winner_transport = getattr(winner_desc, "transport", "") or "direct_responses"
+        record_current(
+            "model.candidate.selected",
+            {
+                "provider": winner.profile.provider,
+                "model": winner.profile.model_id,
+                "transport": winner_transport,
+                "required_capabilities": sorted(request.required_capabilities),
+                "resolved_capabilities": winner_desc.to_dict() if winner_desc is not None else {},
+                "capability_source": winner_desc.capability_source if winner_desc is not None else "unknown",
+            },
+        )
         verifier, independent = self._select_verifier(request, author=winner.profile, candidates=scored)
         competition, competition_reasons = self._competition_allowed(
             request,
@@ -177,15 +245,40 @@ class ModelRouter:
             reasons.append(resource.reason or "provider resource is unavailable")
         if request.role not in profile.supported_roles and "*" not in profile.supported_roles:
             reasons.append(f"role {request.role!r} is unsupported")
+        is_write_task = (
+            "repository_write" in request.required_tools
+            or "patch" in request.required_capabilities
+            or "repository_write" in request.required_capabilities
+        )
+        desc = getattr(profile, "capability_descriptor", None)
+        if is_write_task and desc is not None and not desc.is_known:
+            reasons.append(
+                f"model capabilities are unknown (provider={profile.provider!r}, model={profile.model_id!r}, transport={desc.transport!r})"
+            )
         missing_tools = request.required_tools - profile.supported_tools
         if request.required_tools and not profile.can_tool_call:
             reasons.append("model cannot call tools")
         elif missing_tools and "*" not in profile.supported_tools:
             reasons.append("required tools are unsupported: " + ", ".join(sorted(missing_tools)))
+        supports_write = (
+            desc.supports_repository_write if desc is not None else profile.can_patch
+        )
+        supports_read = (
+            desc.supports_repository_read
+            if desc is not None
+            else ("repository_read" in profile.supported_tools or "*" in profile.supported_tools)
+        )
         capability_flags = {
-            "patch": profile.can_patch, "structured_output": profile.can_structured_output,
-            "tool_calls": profile.can_tool_call, "verification": profile.can_verify,
+            "patch": profile.can_patch and supports_write,
+            "structured_output": profile.can_structured_output,
+            "tool_calls": profile.can_tool_call,
+            "verification": profile.can_verify,
             "reasoning": bool(profile.reasoning_settings - {"none"}),
+            "repository_write": supports_write,
+            "repository_read": supports_read,
+            "shell": desc.supports_shell if desc is not None else profile.can_tool_call,
+            "streaming": desc.supports_streaming if desc is not None else True,
+            "parallel_tools": desc.supports_parallel_tools if desc is not None else False,
         }
         missing = sorted(item for item in request.required_capabilities if not capability_flags.get(item, False))
         if missing:

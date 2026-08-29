@@ -65,7 +65,7 @@ class ProviderRegistry:
                 default_base_url="https://openrouter.ai/api/v1",
                 api_key_env="OPENROUTER_API_KEY",
                 default_headers=(
-                    ("HTTP-Referer", "https://github.com/mana-agent/mana-agent"),
+                    ("HTTP-Referer", "https://github.com/manaplatform/mana-agent"),
                     ("X-OpenRouter-Title", "Mana-Agent"),
                 ),
                 supports_responses_api=True,

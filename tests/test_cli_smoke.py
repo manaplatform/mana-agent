@@ -459,7 +459,7 @@ def test_chat_zero_tool_response_renders_only_answer(monkeypatch, tmp_path: Path
         ["chat", "--no-agent-tools", "--no-coding-agent", "--no-auto-execute-plan"],
         input="hello world\nquit\n",
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"OUTPUT: {result.output!r}, EXCEPTION: {result.exception!r}"
     assert "Plain answer with no tools." in result.stdout
     assert "Answer" in result.stdout
     assert "Session History" not in result.stdout

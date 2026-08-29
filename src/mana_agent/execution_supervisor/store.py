@@ -51,7 +51,10 @@ _atomic_replace = os.replace
 
 
 def _redact_for_persistence(payload):
-    safe = redact_secrets(payload)
+    from mana_agent.utils.tool_results import json_safe_tool_payload
+
+    normalized = json_safe_tool_payload(payload)
+    safe = redact_secrets(normalized)
 
     def restore_hashes(original, redacted) -> None:
         if isinstance(original, dict) and isinstance(redacted, dict):
@@ -68,8 +71,8 @@ def _redact_for_persistence(payload):
             for source, target in zip(original, redacted):
                 restore_hashes(source, target)
 
-    restore_hashes(payload, safe)
-    return safe
+    restore_hashes(normalized, safe)
+    return json_safe_tool_payload(safe)
 
 
 class ExecutionStore(Protocol):
@@ -86,8 +89,8 @@ class ExecutionStore(Protocol):
         self, task_id: str, updater: Callable[[TaskRecord], AttemptRecord]
     ) -> tuple[TaskRecord, AttemptRecord]: ...
     def update_task_and_checkpoint(
-        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord]
-    ) -> tuple[TaskRecord, CheckpointRecord]: ...
+        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord | None]
+    ) -> tuple[TaskRecord, CheckpointRecord | None]: ...
     def update_task_and_result(
         self, task_id: str, updater: Callable[[TaskRecord], EscrowResult]
     ) -> tuple[TaskRecord, EscrowResult]: ...
@@ -300,18 +303,19 @@ class LocalExecutionStore:
             return task, attempt
 
     def update_task_and_checkpoint(
-        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord]
-    ) -> tuple[TaskRecord, CheckpointRecord]:
+        self, task_id: str, updater: Callable[[TaskRecord], CheckpointRecord | None]
+    ) -> tuple[TaskRecord, CheckpointRecord | None]:
         with self.locked():
             task = self.get_task(task_id)
             version = task.state_version
             checkpoint = updater(task)
-            task.state_version = version + 1
-            self._atomic_write(
-                self.root / "checkpoints" / f"{checkpoint.checkpoint_id}.json",
-                checkpoint.model_dump(mode="json"),
-            )
-            self._atomic_write(self._task_path(task_id), task.model_dump(mode="json"))
+            if checkpoint is not None:
+                task.state_version = version + 1
+                self._atomic_write(
+                    self.root / "checkpoints" / f"{checkpoint.checkpoint_id}.json",
+                    checkpoint.model_dump(mode="json"),
+                )
+                self._atomic_write(self._task_path(task_id), task.model_dump(mode="json"))
             return task, checkpoint
 
     def update_task_and_result(
@@ -468,6 +472,18 @@ class LocalExecutionStore:
                     idx = json.loads(exec_path.read_text(encoding="utf-8"))
                     existing_result_id = idx.get("result_id")
                     if existing_result_id and existing_result_id != result.result_id:
+                        try:
+                            existing_res = self.get_result(existing_result_id)
+                        except (EscrowCorruptError, EscrowIncompatibleVersionError):
+                            existing_res = None
+                        if (
+                            existing_res is not None
+                            and existing_res.attempt_id == result.attempt_id
+                            and existing_res.payload == result.payload
+                            and existing_res.result_kind == result.result_kind
+                        ):
+                            # Idempotent reconciliation of identical logical result from concurrent writer race
+                            return
                         raise EscrowConflictError(
                             f"Conflicting result write for execution {exec_id} (existing result_id={existing_result_id})"
                         )

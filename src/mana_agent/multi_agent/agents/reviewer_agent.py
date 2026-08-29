@@ -88,7 +88,7 @@ class ReviewerAgent(BaseAgent):
             if task.runtime_reachability_verified and task.integration_evidence_records:
                 task.integration_verified = True
                 task.implementation_verified = True
-            if task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
+            if task.wiring_outcome not in {"mutation_applied", "already_integrated", "completed"}:
                 self.reject_weak_evidence(task_id, "INCOMPLETE_FEATURE_WIRING: wiring outcome is unproven")
                 return False
             if (

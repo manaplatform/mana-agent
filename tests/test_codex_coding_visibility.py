@@ -797,13 +797,24 @@ def test_provider_reasoning_kept_separate_from_assistant() -> None:
 
 
 def test_model_metadata_capability_bridge_explicit() -> None:
+    # Keyword arguments with transport
     window, compact, supports = _mana_model_capability_bridge(
         provider="nvidia",
         model="deepseek-ai/deepseek-v4-flash-0731",
+        transport="responses_bridge",
     )
     assert window == 1_000_000
     assert compact is not None and compact < window
     assert supports is True
+
+    # Positional arguments
+    window_p, compact_p, supports_p = _mana_model_capability_bridge(
+        "openrouter",
+        "x-ai/grok-4.6",
+    )
+    assert window_p == 500_000
+    assert compact_p is not None and compact_p < window_p
+    assert supports_p is True
 
     # Unknown model: do not silently claim tool support
     window2, compact2, supports2 = _mana_model_capability_bridge(

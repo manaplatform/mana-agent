@@ -222,3 +222,79 @@ def test_runtime_stale_reference_refreshes_once_but_authentication_does_not_retr
     failure = json.loads(tools["email_read"].invoke({"message_ref": {"account_id": account.id, "provider": "gmail", "provider_message_id": "fresh"}}).split("\n", 1)[1])
     assert failure["error"]["reconnect_required"] is True
     assert provider.searches == 2
+
+
+def test_email_accounts_list_returns_json_safe_granted_permissions(monkeypatch):
+    import json
+    from mana_agent.connectors.email import runtime_tools
+
+    account = EmailAccount(
+        id="gmail-perm-test",
+        provider="gmail",
+        address=EmailAddress(address="test@example.com"),
+        granted_permissions={runtime_tools.EmailPermission.READ, runtime_tools.EmailPermission.METADATA},
+    )
+    monkeypatch.setattr(runtime_tools, "load_accounts", lambda: [account])
+    tools = {tool.name: tool for tool in runtime_tools.build_email_langchain_tools()}
+    result = tools["email_accounts_list"].invoke({})
+    assert isinstance(result, dict)
+    assert isinstance(result["accounts"][0]["granted_permissions"], list)
+    assert set(result["accounts"][0]["granted_permissions"]) == {"email.read", "email.metadata"}
+    # Must be valid for json.dumps without errors
+    serialized = json.dumps(result)
+    assert "email.read" in serialized
+
+
+def test_gmail_search_and_read_with_sets_in_labels_metadata_and_payload(monkeypatch):
+    import json
+    from mana_agent.connectors.email import runtime_tools
+
+    account = EmailAccount(
+        id="gmail-sets",
+        provider="gmail",
+        address=EmailAddress(address="user@example.com"),
+        granted_permissions={runtime_tools.EmailPermission.READ},
+    )
+    # Message containing set structures in labels and headers
+    message = EmailMessage(
+        id="msg-set-1",
+        provider_message_id="msg-set-1",
+        account_id=account.id,
+        sender=EmailAddress(address="sender@example.com"),
+        received_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        subject="Important Update",
+        labels=["INBOX", "UNREAD"],
+        headers={"x-custom": "header-val"},
+    )
+    # Attach extra set-based fields or metadata to simulate connector response with sets
+    message_dict = message.model_dump()
+    message_dict["custom_labels_set"] = {"INBOX", "IMPORTANT", "WORK"}
+    message_dict["metadata_tags"] = frozenset({"tag1", "tag2"})
+
+    class Provider:
+        def __init__(self):
+            self.account = account
+
+        async def search_messages(self, query):
+            return runtime_tools.EmailSearchResult(messages=[message])
+
+        async def get_message(self, message_id):
+            return message
+
+    monkeypatch.setattr(runtime_tools, "_provider", lambda account_id: Provider())
+    tools = {tool.name: tool for tool in runtime_tools.build_email_langchain_tools()}
+
+    search_output = tools["email_search"].invoke({"account_id": account.id, "limit": 1})
+    assert search_output.startswith("UNTRUSTED")
+    parsed_search = json.loads(search_output.split("\n", 1)[1])
+    assert parsed_search["ok"] is True
+    assert len(parsed_search["messages"]) == 1
+
+    # Now read the message
+    ref = parsed_search["messages"][0]["message_ref"]
+    read_output = tools["email_read"].invoke({"message_ref": ref})
+    assert read_output.startswith("UNTRUSTED")
+    parsed_read = json.loads(read_output.split("\n", 1)[1])
+    assert parsed_read["ok"] is True
+    assert parsed_read["message"]["id"] == "msg-set-1"
+

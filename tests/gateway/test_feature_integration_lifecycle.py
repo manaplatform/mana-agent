@@ -1423,3 +1423,93 @@ def test_p09_test_e_supervisor_completed_before_lease_loss_projects_taskboard(tm
     assert board.get_task(child_id).status is TaskStatus.DONE
 
 
+def test_scenario_child_wiring_task_core_execution_failed_propagates_failure_to_parent(tmp_path):
+    """Scenario: child wiring task CORE_EXECUTION_FAILED -> parent is failed, not blocked forever."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+
+    result = coordinator.run(
+        core_result={"status": "failed", "error_code": CORE_EXECUTION_FAILED, "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-fail-core",
+        flow_id="flow-fail-core",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == CORE_EXECUTION_FAILED
+
+    updated_parent = board.get_task(parent.task_id)
+    assert updated_parent.status is TaskStatus.FAILED
+    assert updated_parent.status is not TaskStatus.BLOCKED
+    assert updated_parent.wiring_outcome == "failed"
+    assert updated_parent.wiring_outcome_reason == CORE_EXECUTION_FAILED
+    assert updated_parent.required_wiring_task_ids != []
+
+    child_id = updated_parent.required_wiring_task_ids[0]
+    assert child_id in updated_parent.child_task_ids
+    child = board.get_task(child_id)
+    assert child.status is TaskStatus.FAILED
+    assert child.status is not TaskStatus.BLOCKED
+    assert child.wiring_outcome == "failed"
+    assert child.wiring_outcome_reason == CORE_EXECUTION_FAILED
+
+
+def test_scenario_wiring_not_required_resolves_outcome_to_not_required(tmp_path):
+    """Scenario: wiring_required=false -> wiring_outcome resolves to not_required."""
+    board = TaskBoard(tmp_path / "board")
+    parent = board.create_task(
+        title="Refactor utility",
+        user_request="refactor utility",
+        wiring_required=False,
+    )
+    assert parent.wiring_outcome == "pending"
+
+    board.update_status(parent.task_id, TaskStatus.DONE)
+    updated = board.get_task(parent.task_id)
+    assert updated.status is TaskStatus.DONE
+    assert updated.wiring_outcome == "not_required"
+    assert updated.wiring_outcome != "incomplete"
+
+
+def test_scenario_successful_wiring_resolves_outcome_to_completed(tmp_path):
+    """Scenario: successful wiring -> wiring_outcome resolves to completed."""
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    coordinator = FeatureIntegrationCoordinator()
+    decision = WiringDecision(
+        outcome="already_integrated",
+        edges=_edges(),
+        verification_commands=["python -m pytest tests/unit.py"],
+    )
+
+    result = coordinator.run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider",
+        gateway_task_id="gw-success-wire",
+        flow_id="flow-success-wire",
+        runtime_capability_change=True,
+        taskboard=board,
+        taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor,
+        workspace_root=tmp_path,
+        integration_decision=decision,
+        verification_executor=MockVerificationExecutor(passed=True),
+    )
+
+    assert result.passed
+    updated_parent = board.get_task(parent.task_id)
+    child_id = updated_parent.required_wiring_task_ids[0]
+    child = board.get_task(child_id)
+
+    assert child.status is TaskStatus.DONE
+    assert child.wiring_outcome in {"already_integrated", "completed"}
+    assert updated_parent.status is not TaskStatus.BLOCKED
+    assert updated_parent.wiring_outcome == "completed"
+    assert updated_parent.wiring_outcome != "incomplete"
+
+
+
