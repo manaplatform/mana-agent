@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-29
 
+- Fixed Coding Agent Lifecycle Events, Scheduling Observability, and Event Normalization:
+  - Added explicit lifecycle timestamps (`task_created_at`, `scheduled_at`, `worker_claimed_at`, `provider_started_at`, `provider_completed_at`, `task_completed_at`) and separated duration breakdown metrics (`queue_delay_ms`, `worker_acquisition_delay_ms`, `provider_startup_delay_ms`, `provider_execution_time_ms`, `finalization_time_ms`, `total_task_duration_ms`) across `CodingTask`, `CodingTaskResult`, `LaneExecution`, `TaskRecord`, `TaskBoardItem`, `QueueJob`, and `AgentEvent`.
+  - Resolved the ~16-minute gap between task creation and actual provider turn start by isolating queue/scheduler waiting delay from provider execution time, ensuring a 2.5-second provider turn failure is never misreported as a 16-minute provider timeout.
+  - Updated `scheduling_diagnostics()` in `LaneCoordinator` to expose full timestamp breakdowns and discrete phase durations.
+  - Fixed event normalization in `src/mana_agent/integrations/codex/event_adapter.py` and `src/mana_agent/coding/event_visibility.py` so `userMessage` notifications are mapped to request/input lifecycle events (`user.message`, `turn.input`) with `EventSemanticKind.LIFECYCLE`, never `assistant.started` or `assistant.completed`.
+  - Restricted `EventSemanticKind.ASSISTANT_GENERATION` strictly to actual model-produced assistant content, deltas, and tool calls.
+  - Prevented failed provider turns (`turn/failed`, `systemError`, failed items) from emitting misleading successful `assistant.completed` or assistant-generation completion events.
+  - Removed premature unconditional `assistant.started` event emission on initial message ingestion in `ConversationService.send_message()`.
+  - Preserved real provider terminal state (`systemError`, failed turns, original error strings, HTTP status, and error codes) through result parser, lane coordinator, execution supervisor, and escrow persistence.
+  - Added regression test suite in `tests/gateway/test_coding_lifecycle_observability.py`.
+  - User verification required: `pytest tests/gateway/test_coding_lifecycle_observability.py tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/gateway/test_lane_coordinator.py -v`.
+
 - Fixed Coding Provider Protocol & Error Classification for Grok and Z-AI / GLM Models:
   - Added explicit capability metadata with `supports_server_tools` across `direct_responses` and `responses_bridge` transports for OpenRouter Grok (`x-ai/grok-4.6`, `x-ai/grok-2-1212`, `x-ai/grok-beta`, `x-ai/grok-vision-beta`, `x-ai/grok-3`, `x-ai/grok-3-mini`) and Z-AI (`z-ai/glm-4.5`, `z-ai/glm-4.5-air`, `z-ai/glm-4.5v`, `z-ai/glm-4-plus`, `z-ai/glm-4-9b-chat`, `z-ai/glm-4-voice`, `z-ai/glm-4`), while setting `supports_server_tools=True` on native OpenAI `direct_responses` models.
   - Removed loose OpenRouter prefix heuristics in `_resolve_uncached` so unknown models strictly resolve to minimum-safe fail-closed capabilities (`supports_tool_calls=False`, `supports_server_tools=False`, `supports_repository_write=False`).

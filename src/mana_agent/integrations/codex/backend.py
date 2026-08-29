@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import os
 import subprocess
@@ -143,6 +144,11 @@ class CodexCodingBackend:
         )
         if self._client is None:
             raise CodexUnavailableError("Codex app-server did not start")
+        task_created_at = getattr(task, "task_created_at", None) or datetime.now(timezone.utc)
+        scheduled_at = datetime.now(timezone.utc)
+        worker_claimed_at = datetime.now(timezone.utc)
+        provider_started_at: datetime | None = None
+        provider_completed_at: datetime | None = None
         async with self._run_lock:
             baseline_changes = (
                 await asyncio.to_thread(_git_changed_file_state, workspace.worktree_path)
@@ -176,6 +182,9 @@ class CodexCodingBackend:
                         if not self.settings.supports_responses_api
                         else "direct_responses"
                     ),
+                    "task_created_at": task_created_at.isoformat(),
+                    "scheduled_at": scheduled_at.isoformat(),
+                    "worker_claimed_at": worker_claimed_at.isoformat(),
                 },
             )
             try:
@@ -243,6 +252,7 @@ class CodexCodingBackend:
                         model=self.settings.model or "",
                         payload=governor_decision.snapshot.as_dict(),
                     )
+                provider_started_at = datetime.now(timezone.utc)
                 turn_response = await self._client.request(
                     "turn/start",
                     {
@@ -268,6 +278,9 @@ class CodexCodingBackend:
                     thread_id=thread_id,
                     turn_id=turn_id,
                     model=self.settings.model or "",
+                    payload={
+                        "provider_started_at": provider_started_at.isoformat(),
+                    },
                 )
                 iterator = self._client.notifications(thread_id).__aiter__()
                 deadline = asyncio.get_running_loop().time() + self.settings.task_timeout_seconds
@@ -278,6 +291,7 @@ class CodexCodingBackend:
                     try:
                         notification = await asyncio.wait_for(anext(iterator), timeout=remaining)
                     except StopAsyncIteration:
+                        provider_completed_at = datetime.now(timezone.utc)
                         break
                     event = adapt_codex_event(
                         task.task_id,
@@ -323,6 +337,8 @@ class CodexCodingBackend:
                         )
                     yield event
             except (asyncio.TimeoutError, CodexTimeoutError) as exc:
+                if provider_completed_at is None:
+                    provider_completed_at = datetime.now(timezone.utc)
                 if thread_id and turn_id:
                     try:
                         await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
@@ -346,6 +362,8 @@ class CodexCodingBackend:
                     payload={"error_code": err_code, "error_category": "timeout"},
                 )
             except CodexInterruptionError as exc:
+                if provider_completed_at is None:
+                    provider_completed_at = datetime.now(timezone.utc)
                 if thread_id and turn_id:
                     try:
                         await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
@@ -370,6 +388,8 @@ class CodexCodingBackend:
                     payload={"error_code": err_code, "error_category": "interruption", "interruption_reason": exc.reason},
                 )
             except CodexError as exc:
+                if provider_completed_at is None:
+                    provider_completed_at = datetime.now(timezone.utc)
                 err_code = getattr(exc, "error_code", "") or "CODING_AGENT_FAILED"
                 http_status = getattr(exc, "http_status", None)
                 orig_err = getattr(exc, "original_error", "") or str(exc)
@@ -414,6 +434,9 @@ class CodexCodingBackend:
                     },
                 )
             finally:
+                if provider_completed_at is None and provider_started_at is not None:
+                    provider_completed_at = datetime.now(timezone.utc)
+                task_completed_at = datetime.now(timezone.utc)
                 if self.context_cost_governor is not None and governor_call_id:
                     self.context_cost_governor.record_model_call(
                         governor_call_id,
@@ -443,6 +466,12 @@ class CodexCodingBackend:
                     turn_id=turn_id,
                     notifications=notifications,
                     changed_files=changed_files,
+                    task_created_at=task_created_at,
+                    scheduled_at=scheduled_at,
+                    worker_claimed_at=worker_claimed_at,
+                    provider_started_at=provider_started_at,
+                    provider_completed_at=provider_completed_at,
+                    task_completed_at=task_completed_at,
                 )
 
     async def cancel(self, task_id: str) -> None:

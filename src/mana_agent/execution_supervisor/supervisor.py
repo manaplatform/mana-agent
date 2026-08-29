@@ -398,6 +398,8 @@ class ExecutionSupervisor:
         relation_type: str = "independent",
         previous_task_id: str = "",
         delegated_capsule_revisions: dict[str, int] | None = None,
+        task_created_at: datetime | None = None,
+        scheduled_at: datetime | None = None,
     ) -> TaskRecord:
         if not self.config.enabled:
             raise ExecutionSupervisorError(
@@ -602,6 +604,8 @@ class ExecutionSupervisor:
             relation_type=relation_type,
             previous_task_id=previous_task_id,
             delegated_capsule_revisions=dict(delegated_capsule_revisions or {}),
+            task_created_at=task_created_at,
+            scheduled_at=scheduled_at,
         )
         self.store.create_task(task)
         if parent is not None:
@@ -952,6 +956,38 @@ class ExecutionSupervisor:
 
         def update(task: TaskRecord) -> None:
             task.provider_metadata = {**task.provider_metadata, **incoming}
+            if incoming.get("task_created_at") and not task.task_created_at:
+                try:
+                    task.task_created_at = datetime.fromisoformat(str(incoming["task_created_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if incoming.get("scheduled_at") and not task.scheduled_at:
+                try:
+                    task.scheduled_at = datetime.fromisoformat(str(incoming["scheduled_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if incoming.get("worker_claimed_at") and not task.worker_claimed_at:
+                try:
+                    task.worker_claimed_at = datetime.fromisoformat(str(incoming["worker_claimed_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if incoming.get("provider_started_at"):
+                try:
+                    task.provider_started_at = datetime.fromisoformat(str(incoming["provider_started_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if incoming.get("provider_completed_at"):
+                try:
+                    task.provider_completed_at = datetime.fromisoformat(str(incoming["provider_completed_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if incoming.get("task_completed_at"):
+                try:
+                    task.task_completed_at = datetime.fromisoformat(str(incoming["task_completed_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if incoming.get("duration_breakdown") and isinstance(incoming["duration_breakdown"], dict):
+                task.duration_breakdown = {**task.duration_breakdown, **incoming["duration_breakdown"]}
             task.updated_at = self.clock()
 
         task, _ = self.store.update_task(task_id, update)

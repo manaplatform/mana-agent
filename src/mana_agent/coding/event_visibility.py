@@ -112,12 +112,22 @@ def semantic_kind_for_event_type(event_type: str, *, tool_name: str = "") -> Eve
     et = str(event_type or "").strip().lower()
     tool = str(tool_name or "").strip().lower()
 
+    if (
+        et in {"user.message", "turn.input", "user.input", "message.accepted"}
+        or "usermessage" in tool
+        or "user_message" in tool
+    ):
+        return EventSemanticKind.LIFECYCLE
+    if (
+        et in {"error", "systemerror", "system_error"}
+        or "systemerror" in tool
+        or "system_error" in tool
+    ):
+        return EventSemanticKind.ERROR
     if et in _ASSISTANT_GENERATION_TYPES or "agentmessage" in tool or "agent_message" in tool:
         return EventSemanticKind.ASSISTANT_GENERATION
     if et.startswith(_REASONING_PREFIXES) or "reasoning" in tool:
         return EventSemanticKind.REASONING
-    if et in {"error"}:
-        return EventSemanticKind.ERROR
     if et in {"warning", "provider.warning"}:
         return EventSemanticKind.WARNING
     if et.startswith("usage.") or et == "usage.update":
@@ -136,8 +146,12 @@ def semantic_kind_for_event_type(event_type: str, *, tool_name: str = "") -> Eve
         return EventSemanticKind.COMMAND
     if et.startswith("tool.call."):
         # Only treat as tool execution when the item is not a message/reasoning item.
-        if "agentmessage" in tool or "agent_message" in tool or "usermessage" in tool:
+        if "usermessage" in tool or "user_message" in tool:
+            return EventSemanticKind.LIFECYCLE
+        if "agentmessage" in tool or "agent_message" in tool:
             return EventSemanticKind.ASSISTANT_GENERATION
+        if "systemerror" in tool or "system_error" in tool:
+            return EventSemanticKind.ERROR
         if "reasoning" in tool:
             return EventSemanticKind.REASONING
         if any(marker in tool for marker in _MUTATION_ITEM_MARKERS):
@@ -145,7 +159,20 @@ def semantic_kind_for_event_type(event_type: str, *, tool_name: str = "") -> Eve
         if any(marker in tool for marker in _COMMAND_ITEM_MARKERS):
             return EventSemanticKind.COMMAND
         return EventSemanticKind.TOOL_EXECUTION
-    if et in {"backend.selected", "turn.starting", "turn.started", "turn.finalizing", "turn.completed", "turn.cancelled", "coding.terminal"}:
+    if et in {
+        "backend.selected",
+        "turn.starting",
+        "turn.started",
+        "turn.finalizing",
+        "turn.completed",
+        "turn.cancelled",
+        "coding.terminal",
+        "task.created",
+        "task.scheduled",
+        "worker.claimed",
+        "task.completed",
+        "task.finished",
+    }:
         return EventSemanticKind.LIFECYCLE
     if et.startswith("provider."):
         return EventSemanticKind.PROVIDER

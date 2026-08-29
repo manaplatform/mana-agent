@@ -8,9 +8,12 @@ for failed write turns.
 
 from __future__ import annotations
 
-from typing import Any
-
-from mana_agent.coding.models import CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.coding.models import (
+    CodingTask,
+    CodingTaskResult,
+    WorkspaceContext,
+    compute_duration_breakdown,
+)
 from mana_agent.integrations.codex.text_cleanup import (
     looks_like_freeform_tool_garbage,
     sanitize_assistant_visible_text,
@@ -41,6 +44,13 @@ def parse_codex_result(
     turn_id: str,
     notifications: list[dict[str, Any]],
     changed_files: list[str],
+    task_created_at: Any = None,
+    scheduled_at: Any = None,
+    worker_claimed_at: Any = None,
+    provider_started_at: Any = None,
+    provider_completed_at: Any = None,
+    task_completed_at: Any = None,
+    duration_breakdown: dict[str, int] | None = None,
 ) -> CodingTaskResult:
     commands: list[str] = []
     tests: list[str] = []
@@ -64,6 +74,13 @@ def parse_codex_result(
         item = payload.get("item")
         if isinstance(item, dict):
             item_type = str(item.get("type") or "")
+            if item_type in {"systemError", "system_error", "error"}:
+                status = "failed"
+                item_err = str(item.get("message") or item.get("error") or item.get("text") or "systemError")
+                if item_err not in errors:
+                    errors.append(item_err)
+                if not parsed_original_error:
+                    parsed_original_error = item_err
             if item_type in _MUTATION_ITEM_TYPES:
                 mutation_attempted = True
             command = str(item.get("command") or "").strip()
@@ -97,7 +114,7 @@ def parse_codex_result(
                 # Explicit capability degradation when Codex lacks model metadata.
                 if "fallback metadata" in message.lower() or "model metadata" in message.lower():
                     warnings.append("codex_model_metadata_fallback")
-        if method in {"turn/failed", "error"}:
+        if method in {"turn/failed", "error", "systemError"}:
             status = "failed"
             err = _format_turn_failure(payload)
             parsed_original_error = str(payload.get("message") or payload.get("error") or err)
@@ -235,6 +252,14 @@ def parse_codex_result(
             if interruption_reason:
                 break
 
+    calculated_breakdown = duration_breakdown or compute_duration_breakdown(
+        task_created_at=task_created_at or getattr(task, "task_created_at", None),
+        scheduled_at=scheduled_at,
+        worker_claimed_at=worker_claimed_at,
+        provider_started_at=provider_started_at,
+        provider_completed_at=provider_completed_at,
+        task_completed_at=task_completed_at,
+    )
     codex_meta = {
         "interruption_reason": interruption_reason,
         "mutation_attempted": mutation_attempted,
@@ -243,6 +268,13 @@ def parse_codex_result(
         "http_status": parsed_http_status,
         "original_error": parsed_original_error,
         "error_code": interruption_reason or "",
+        "task_created_at": str(task_created_at) if task_created_at else None,
+        "scheduled_at": str(scheduled_at) if scheduled_at else None,
+        "worker_claimed_at": str(worker_claimed_at) if worker_claimed_at else None,
+        "provider_started_at": str(provider_started_at) if provider_started_at else None,
+        "provider_completed_at": str(provider_completed_at) if provider_completed_at else None,
+        "task_completed_at": str(task_completed_at) if task_completed_at else None,
+        "duration_breakdown": calculated_breakdown,
     }
 
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
@@ -262,6 +294,13 @@ def parse_codex_result(
         token_usage=usage,
         thread_id=thread_id,
         turn_id=turn_id,
+        task_created_at=task_created_at or getattr(task, "task_created_at", None),
+        scheduled_at=scheduled_at,
+        worker_claimed_at=worker_claimed_at,
+        provider_started_at=provider_started_at,
+        provider_completed_at=provider_completed_at,
+        task_completed_at=task_completed_at,
+        duration_breakdown=calculated_breakdown,
         codex_metadata=codex_meta,
     )
 

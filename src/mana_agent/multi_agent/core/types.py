@@ -293,6 +293,13 @@ class TaskBoardItem:
     verification_commands: list[str] = field(default_factory=list)
     verification_results: list[VerificationResult] = field(default_factory=list)
     memory_status: dict[str, Any] = field(default_factory=dict)
+    task_created_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    worker_claimed_at: datetime | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    task_completed_at: datetime | None = None
+    duration_breakdown: dict[str, int] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -334,6 +341,13 @@ class QueueJob:
     error: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    task_created_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    worker_claimed_at: datetime | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    task_completed_at: datetime | None = None
+    duration_breakdown: dict[str, int] = field(default_factory=dict)
     token_usage: int = 0
     changed_files: list[str] = field(default_factory=list)
     cache_status: str = "unknown"

@@ -682,19 +682,52 @@ class CodexCodingAgentShim:
         is determined by event_type / semantic_kind, not text content.
         """
         _ = requires_repository_write  # reserved for phase-aware policies
-        record_current("coding.event", event.model_dump(mode="json"))
-        publish_coding_event(event)
+        full = event.model_dump(mode="json")
+        # Internal observability always keeps full fidelity (including drafts).
+        record_current(event.event_type, full)
+
+        visibility = str(event.visibility or EventVisibility.INTERNAL.value)
+        if not is_user_publishable(visibility):
+            # Do not publish assistant generation / reasoning / raw dumps to chat UI.
+            return
+
+        safe = progress_event_payload(event)
+        # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
+        progress = AgentEvent(
+            event_id=str(safe.get("event_id") or event.event_id),
+            event_type=str(safe.get("event_type") or event.event_type),
+            task_id=event.task_id,
+            backend=event.backend,
+            sequence=event.sequence,
+            status=event.status,
+            title=str(safe.get("title") or ""),
+            summary=str(safe.get("summary") or ""),
+            thread_id=event.thread_id,
+            turn_id=event.turn_id,
+            tool_name=str(safe.get("tool_name") or ""),
+            command=str(safe.get("command") or ""),
+            path=str(safe.get("path") or ""),
+            duration_ms=event.duration_ms,
+            token_usage=event.token_usage,
+            model=event.model,
+            error=str(safe.get("error") or ""),
+            output_preview="",
+            visibility="progress",
+            semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
+            payload={},
+        )
+        publish_coding_event(progress)
         if self.session_id and self.repository_id:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
             get_execution_event_hub().publish(
                 {
-                    **event.model_dump(mode="json"),
-                    "type": event.event_type,
-                    "event_id": event.event_id,
+                    **progress.model_dump(mode="json"),
+                    "type": progress.event_type,
+                    "event_id": progress.event_id,
                     "metadata": {
-                        "visibility": event.visibility,
-                        "semantic_kind": event.semantic_kind,
+                        "visibility": progress.visibility,
+                        "semantic_kind": progress.semantic_kind,
                     },
                 },
                 conversation_id=self.session_id,
@@ -703,20 +736,7 @@ class CodexCodingAgentShim:
             )
         if self.event_sink is None:
             return
-
-        progress = build_coding_progress_event(event)
-        if progress is None:
-            return
-
-        payload = {
-            "progress_kind": progress.progress_kind,
-            "headline": progress.headline,
-            "detail": progress.detail,
-            "status": progress.status,
-            "visibility": progress.visibility,
-            "semantic_kind": progress.semantic_kind,
-            "task_id": event.task_id,
-        }
+        payload = progress.model_dump(mode="json")
         try:
             self.event_sink(progress.event_type, payload)
         except TypeError:

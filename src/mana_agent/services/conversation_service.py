@@ -341,15 +341,6 @@ class ConversationService:
                 message="Model decision routing requested",
                 status="running",
             )
-            self._hub.emit(
-                "assistant.started",
-                title="Assistant response",
-                conversation_id=conversation_id,
-                execution_id=execution_id,
-                repository_id=self.repository_id,
-                status="running",
-                metadata={"message_id": f"assistant_{execution_id}"},
-            )
 
         def event_sink(event_type: str, title: str, **kwargs: Any) -> None:
             if not emit_events:

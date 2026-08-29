@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from mana_agent.coding.models import compute_duration_breakdown
 from mana_agent.compat import process_exists
 from mana_agent.gateway.lanes import (
     ACTIVE_LANE_STATES,
@@ -54,7 +55,9 @@ from mana_agent.execution_supervisor.models import (
     EscrowLookupStatus,
     ExecutionState,
     RecoveryAction,
+    TaskRecord,
     VerifiedExecutionResultLookup,
+    utc_now,
 )
 
 if os.name == "nt":  # pragma: no cover - exercised on Windows CI
@@ -274,6 +277,13 @@ class LaneExecution:
     last_heartbeat: str = field(default_factory=_iso)
     created_at: str = field(default_factory=_iso)
     updated_at: str = field(default_factory=_iso)
+    task_created_at: str = ""
+    scheduled_at: str = ""
+    worker_claimed_at: str = ""
+    provider_started_at: str = ""
+    provider_completed_at: str = ""
+    task_completed_at: str = ""
+    duration_breakdown: dict[str, int] = field(default_factory=dict)
     error: str = ""
     heartbeat_failure: str = ""
     progress_summary: str = ""
@@ -924,9 +934,12 @@ class LaneCoordinator:
                 trigger_turn_id=trigger_turn_id,
                 relation_type=relation_type,
                 previous_task_id=previous_task_id,
+                task_created_at=datetime.fromisoformat(waiter["created_at"].replace("Z", "+00:00")),
+                scheduled_at=datetime.now(timezone.utc),
                 idempotency_key=(f"{session_id}:{user_message_id}" if user_message_id else ""),
             )
             self.execution_supervisor.queue(task_id)
+            scheduled_at_iso = _iso()
             execution = LaneExecution(
                 task_id=task_id,
                 root_task_id=(root_task_id or (self._executions[parent_task_id].root_task_id if parent_task_id else task_id)),
@@ -938,9 +951,17 @@ class LaneCoordinator:
                 routing_decision_id=effective_routing_decision_id, provider=provider, task_type=task_type,
                 trigger_turn_id=trigger_turn_id, relation_type=relation_type, previous_task_id=previous_task_id,
                 user_message_id=user_message_id,
-                lane_history=[{"lane_id": lane_id.value, "state": "queued", "at": _iso()}],
+                task_created_at=waiter["created_at"],
+                scheduled_at=scheduled_at_iso,
+                lane_history=[{"lane_id": lane_id.value, "state": "queued", "at": scheduled_at_iso}],
             )
             self._executions[task_id] = execution
+            tb_task = self.taskboard.get_task_or_none(task_id) if hasattr(self.taskboard, "get_task_or_none") else self.taskboard.get_task(task_id)
+            if tb_task is not None:
+                if hasattr(tb_task, "task_created_at") and not tb_task.task_created_at:
+                    tb_task.task_created_at = datetime.fromisoformat(waiter["created_at"].replace("Z", "+00:00"))
+                if hasattr(tb_task, "scheduled_at") and not tb_task.scheduled_at:
+                    tb_task.scheduled_at = datetime.fromisoformat(scheduled_at_iso.replace("Z", "+00:00"))
             self.taskboard.update_status(task_id, TaskStatus.ROUTED)
             self.taskboard.update_status(task_id, TaskStatus.QUEUED)
             self._persist_locked()
@@ -1001,14 +1022,22 @@ class LaneCoordinator:
         with self._condition:
             execution.state = LaneTaskState.RUNNING
             execution.worker_id = f"gateway:{os.getpid()}:{threading.get_ident()}"
+            execution.worker_claimed_at = _iso()
             execution.heartbeat_failure = ""
             execution.supervisor_attempt_id = supervised.attempt_id
             execution.supervisor_lease_token = lease_token
             execution.last_heartbeat = execution.updated_at = _iso()
             execution.lane_history.append({"lane_id": execution.owning_lane.value, "state": "running", "at": execution.updated_at})
+            def update_claimed(curr: TaskRecord) -> None:
+                curr.worker_claimed_at = datetime.fromisoformat(execution.worker_claimed_at.replace("Z", "+00:00"))
+                curr.updated_at = utc_now()
+            self.execution_supervisor.store.update_task(execution.task_id, update_claimed)
             task_status = self.taskboard.get_task(execution.taskboard_task_id).status
             if task_status in {TaskStatus.QUEUED, TaskStatus.ROUTED, TaskStatus.WAITING_FOR_TOOLS}:
                 self.taskboard.update_status(execution.taskboard_task_id, TaskStatus.IN_PROGRESS)
+            tb_task = self.taskboard.get_task_or_none(execution.taskboard_task_id) if hasattr(self.taskboard, "get_task_or_none") else self.taskboard.get_task(execution.taskboard_task_id)
+            if tb_task is not None and hasattr(tb_task, "worker_claimed_at") and not tb_task.worker_claimed_at:
+                tb_task.worker_claimed_at = datetime.fromisoformat(execution.worker_claimed_at.replace("Z", "+00:00"))
             self._persist_locked()
         self._start_supervisor_heartbeats(execution)
         self.emit("lane.started", task_id=execution.task_id, lane_id=execution.owning_lane)
@@ -1195,6 +1224,52 @@ class LaneCoordinator:
             execution.verification_state.update(dict(verification_state or {}))
             if effective_provider_metadata is not None:
                 self.execution_supervisor.persist_provider_metadata(task_id, effective_provider_metadata)
+            p_started = None
+            p_completed = None
+            if isinstance(effective_provider_metadata, Mapping):
+                p_started = effective_provider_metadata.get("provider_started_at")
+                p_completed = effective_provider_metadata.get("provider_completed_at")
+            if isinstance(verification_state, Mapping):
+                if not p_started:
+                    p_started = verification_state.get("provider_started_at")
+                if not p_completed:
+                    p_completed = verification_state.get("provider_completed_at")
+            if p_started:
+                execution.provider_started_at = str(p_started)
+            if p_completed:
+                execution.provider_completed_at = str(p_completed)
+            execution.task_completed_at = _iso()
+            breakdown = compute_duration_breakdown(
+                task_created_at=execution.task_created_at or execution.created_at,
+                scheduled_at=execution.scheduled_at,
+                worker_claimed_at=execution.worker_claimed_at,
+                provider_started_at=execution.provider_started_at,
+                provider_completed_at=execution.provider_completed_at,
+                task_completed_at=execution.task_completed_at,
+            )
+            execution.duration_breakdown = breakdown
+            def update_timestamps(curr: TaskRecord) -> None:
+                if execution.task_created_at:
+                    curr.task_created_at = datetime.fromisoformat(execution.task_created_at.replace("Z", "+00:00"))
+                if execution.scheduled_at:
+                    curr.scheduled_at = datetime.fromisoformat(execution.scheduled_at.replace("Z", "+00:00"))
+                if execution.worker_claimed_at:
+                    curr.worker_claimed_at = datetime.fromisoformat(execution.worker_claimed_at.replace("Z", "+00:00"))
+                if execution.provider_started_at:
+                    try:
+                        curr.provider_started_at = datetime.fromisoformat(execution.provider_started_at.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+                if execution.provider_completed_at:
+                    try:
+                        curr.provider_completed_at = datetime.fromisoformat(execution.provider_completed_at.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+                if execution.task_completed_at:
+                    curr.task_completed_at = datetime.fromisoformat(execution.task_completed_at.replace("Z", "+00:00"))
+                curr.duration_breakdown = dict(breakdown)
+                curr.updated_at = utc_now()
+            self.execution_supervisor.store.update_task(task_id, update_timestamps)
             execution.error = error
             execution.updated_at = execution.last_heartbeat = _iso()
             accounted_input_tokens = execution.budget.consumed_input_tokens
@@ -1990,12 +2065,39 @@ class LaneCoordinator:
             else:
                 state = execution.state.value
                 reason = ""
+            breakdown = dict(execution.duration_breakdown) if execution is not None else {}
+            if not breakdown and execution is not None:
+                breakdown = compute_duration_breakdown(
+                    task_created_at=execution.task_created_at or execution.created_at,
+                    scheduled_at=execution.scheduled_at,
+                    worker_claimed_at=execution.worker_claimed_at,
+                    provider_started_at=execution.provider_started_at,
+                    provider_completed_at=execution.provider_completed_at,
+                    task_completed_at=execution.task_completed_at,
+                )
             contract = self.contracts[lane_id] if lane_id is not None else None
             return {
                 "scheduler_state": state,
                 "scheduler_reason": reason,
                 "queue_position": queue_position,
                 "blocking_task_ids": [item.task_id for item in blockers if item.task_id != task_id],
+                "timestamps": {
+                    "task_created_at": execution.task_created_at if execution else (waiter.get("created_at") if isinstance(waiter, dict) else None),
+                    "scheduled_at": execution.scheduled_at if execution else None,
+                    "worker_claimed_at": execution.worker_claimed_at if execution else None,
+                    "provider_started_at": execution.provider_started_at if execution else None,
+                    "provider_completed_at": execution.provider_completed_at if execution else None,
+                    "task_completed_at": execution.task_completed_at if execution else None,
+                },
+                "durations_ms": {
+                    "queue_delay_ms": breakdown.get("queue_delay_ms", 0),
+                    "worker_acquisition_delay_ms": breakdown.get("worker_acquisition_delay_ms", 0),
+                    "provider_startup_delay_ms": breakdown.get("provider_startup_delay_ms", 0),
+                    "provider_execution_time_ms": breakdown.get("provider_execution_time_ms", 0),
+                    "finalization_time_ms": breakdown.get("finalization_time_ms", 0),
+                    "total_task_duration_ms": breakdown.get("total_task_duration_ms", 0),
+                },
+                "timing_breakdown": breakdown,
                 "owning_lane": {
                     "id": lane_id.value if lane_id is not None else "",
                     "active_jobs": len(lane_active),
