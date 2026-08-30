@@ -234,7 +234,7 @@ class CodexRuntimeConfigBuilder:
                 model=model,
                 headers=dict(settings.http_headers or {}),
                 request_overrides=request_overrides,
-                transport_max_attempts=1,
+                transport_max_attempts=5,
             )
             if not upstream.base_url:
                 raise CodexConfigurationError(

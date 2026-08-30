@@ -26,7 +26,11 @@ from mana_agent.integrations.codex.responses_bridge.server import (
 from mana_agent.integrations.codex.responses_bridge.stream_adapter import (
     ChatToResponsesStreamAdapter,
 )
-from mana_agent.integrations.provider_failure import ProviderFailureKind
+from mana_agent.integrations.provider_failure import (
+    ProviderFailureKind,
+    RetryOwner,
+    classify_transport_exception,
+)
 
 
 def _upstream(**updates: Any) -> BridgeUpstreamConfig:
@@ -36,7 +40,7 @@ def _upstream(**updates: Any) -> BridgeUpstreamConfig:
         "api_key": "nvapi-test-secret-key",
         "base_url": "https://integrate.api.nvidia.com/v1",
         "model": "deepseek-ai/deepseek-v4-flash-0731",
-        "transport_max_attempts": 1,
+        "transport_max_attempts": 5,
     }
     values.update(updates)
     return BridgeUpstreamConfig(**values)
@@ -45,6 +49,15 @@ def _upstream(**updates: Any) -> BridgeUpstreamConfig:
 @pytest.fixture
 def bridge_token() -> str:
     return "bridge-token"
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    from mana_agent.integrations.provider_failure import PROVIDER_CIRCUIT_BREAKER
+
+    PROVIDER_CIRCUIT_BREAKER._states.clear()
+    yield
+    PROVIDER_CIRCUIT_BREAKER._states.clear()
 
 
 def test_streaming_http_400_returns_error_without_sse_or_reconnect(
@@ -102,9 +115,9 @@ def test_streaming_http_400_returns_error_without_sse_or_reconnect(
     )
     assert "responseStreamDisconnected" not in json.dumps(body)
     assert "Reconnecting" not in json.dumps(body)
-    # Exactly one upstream request — no bridge-level retry multiplication.
+    # Exactly one upstream request — no bridge-level retry multiplication on non-retryable 400.
     assert call_count["n"] == 1
-    assert BRIDGE_TRANSPORT_MAX_ATTEMPTS == 1
+    assert BRIDGE_TRANSPORT_MAX_ATTEMPTS == 5
 
 
 def test_streaming_open_timeout_returns_typed_error_without_starting_sse(
@@ -320,7 +333,7 @@ def test_nested_retry_layers_do_not_multiply(bridge_token: str) -> None:
         "mana_agent.integrations.codex.responses_bridge.server.httpx.AsyncClient",
         _Client,
     ):
-        app = build_bridge_app(upstream=_upstream(), expected_token=bridge_token)
+        app = build_bridge_app(upstream=_upstream(transport_max_attempts=1), expected_token=bridge_token)
         client = TestClient(app)
         # Simulate what would look like nested retries: caller retries 5 times.
         for _ in range(5):
@@ -334,7 +347,7 @@ def test_nested_retry_layers_do_not_multiply(bridge_token: str) -> None:
 
     # Five caller attempts × 1 bridge transport attempt each = 5, not 5×N nested.
     assert call_count["n"] == 5
-    assert BRIDGE_TRANSPORT_MAX_ATTEMPTS == 1
+    assert BRIDGE_TRANSPORT_MAX_ATTEMPTS == 5
 
 
 def test_stream_adapter_tracks_tool_side_effects() -> None:
@@ -386,4 +399,167 @@ def test_health_documents_retry_ownership(bridge_token: str) -> None:
     assert health["ok"] is True
     ownership = health["retry_ownership"]
     assert ownership["bridge_http_retries"] == 0
-    assert ownership["bridge_transport_max_attempts"] == 1
+    assert ownership["bridge_transport_max_attempts"] == 5
+
+
+def test_stream_timeout_before_first_token_retries_and_succeeds(bridge_token: str) -> None:
+    call_count = {"n": 0}
+
+    class _RetryClient(httpx.AsyncClient):
+        async def send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                raise httpx.ReadTimeout("Timed out waiting for stream headers.")
+            lines = [
+                'data: {"choices":[{"delta":{"content":"recovered content"}}]}\n\n',
+                "data: [DONE]\n\n",
+            ]
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content="".join(lines).encode("utf-8"),
+            )
+
+    upstream = _upstream(transport_max_attempts=5)
+    with patch(
+        "mana_agent.integrations.codex.responses_bridge.server.httpx.AsyncClient",
+        _RetryClient,
+    ), patch(
+        "mana_agent.integrations.codex.responses_bridge.server.cancellation_aware_sleep",
+        return_value=True,
+    ):
+        app = build_bridge_app(upstream=upstream, expected_token=bridge_token)
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {bridge_token}"},
+            json={"model": "deepseek-ai/deepseek-v4-flash-0731", "input": "hi", "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            assert "text/event-stream" in (response.headers.get("content-type") or "")
+            text = "".join(response.iter_text())
+
+    assert "response.created" in text
+    assert "response.completed" in text
+    assert "recovered content" in text
+    assert call_count["n"] == 3
+
+
+def test_five_consecutive_stream_timeouts_propagate_terminal_failure(bridge_token: str) -> None:
+    call_count = {"n": 0}
+
+    class _TimeoutClient(httpx.AsyncClient):
+        async def send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            call_count["n"] += 1
+            raise httpx.ReadTimeout("Upstream socket read timeout during startup.")
+
+    upstream = _upstream(transport_max_attempts=5)
+    with patch(
+        "mana_agent.integrations.codex.responses_bridge.server.httpx.AsyncClient",
+        _TimeoutClient,
+    ), patch(
+        "mana_agent.integrations.codex.responses_bridge.server.cancellation_aware_sleep",
+        return_value=True,
+    ):
+        app = build_bridge_app(upstream=upstream, expected_token=bridge_token)
+        client = TestClient(app)
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {bridge_token}"},
+            json={"model": "deepseek-ai/deepseek-v4-flash-0731", "input": "hi", "stream": True},
+        )
+
+    assert response.status_code == 502
+    assert "text/event-stream" not in (response.headers.get("content-type") or "")
+    error = response.json()["error"]
+    assert error["failure_kind"] == ProviderFailureKind.READ_TIMEOUT.value
+    assert error["retryable"] is True
+    assert error["attempts"] == 5
+    assert error["max_attempts"] == 5
+    assert call_count["n"] == 5
+
+
+def test_stream_timeout_after_stream_start_never_retries() -> None:
+    """Mid-stream timeout after token received must emit response.failed and never retry in transport."""
+    adapter = ChatToResponsesStreamAdapter(model="deepseek-ai/deepseek-v4-flash-0731")
+    events = list(adapter.open_events())
+    events.extend(adapter.ingest_chat_chunk({"choices": [{"delta": {"content": "first token"}}]}))
+    assert adapter.received_stream_data is True
+
+    timeout_exc = httpx.ReadTimeout("Socket timed out mid-stream.")
+    failure = classify_transport_exception(
+        timeout_exc,
+        provider="nvidia",
+        model="deepseek-ai/deepseek-v4-flash-0731",
+        received_stream_data=adapter.received_stream_data,
+        tool_side_effects=adapter.tool_side_effects,
+    )
+    assert failure.retry_owner is RetryOwner.CODEX_STREAM
+    events.extend(
+        adapter.close_events(
+            failed=True,
+            error={
+                "code": failure.error_code,
+                "message": failure.safe_message,
+                "type": failure.kind.value,
+                "retryable": failure.retryable,
+            },
+        )
+    )
+    joined = "".join(events)
+    assert "response.created" in joined
+    assert "response.output_text.delta" in joined
+    assert "response.failed" in joined
+    assert "upstream_read_timeout" in joined
+
+
+def test_openrouter_deepseek_v4_flash_stream_start_timeout_recovery(bridge_token: str) -> None:
+    call_count = {"n": 0}
+
+    class _OpenRouterClient(httpx.AsyncClient):
+        async def send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise httpx.ReadTimeout("OpenRouter stream start timed out.")
+            lines = [
+                'data: {"choices":[{"delta":{"content":"openrouter deepseek chunk"}}]}\n\n',
+                "data: [DONE]\n\n",
+            ]
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content="".join(lines).encode("utf-8"),
+            )
+
+    upstream = BridgeUpstreamConfig(
+        provider="openrouter",
+        display_name="OpenRouter",
+        api_key="sk-or-test-key",
+        base_url="https://openrouter.ai/api/v1",
+        model="deepseek/deepseek-v4-flash",
+        transport_max_attempts=5,
+    )
+    with patch(
+        "mana_agent.integrations.codex.responses_bridge.server.httpx.AsyncClient",
+        _OpenRouterClient,
+    ), patch(
+        "mana_agent.integrations.codex.responses_bridge.server.cancellation_aware_sleep",
+        return_value=True,
+    ):
+        app = build_bridge_app(upstream=upstream, expected_token=bridge_token)
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {bridge_token}"},
+            json={"model": "deepseek/deepseek-v4-flash", "input": "solve bug", "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            assert "text/event-stream" in (response.headers.get("content-type") or "")
+            text = "".join(response.iter_text())
+
+    assert "response.created" in text
+    assert "openrouter deepseek chunk" in text
+    assert "response.completed" in text
+    assert call_count["n"] == 2

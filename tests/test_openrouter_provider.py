@@ -8,7 +8,7 @@ import pytest
 from mana_agent.config.catalog_service import ModelCatalogService
 from mana_agent.config.inference_provider import resolve_inference_connection
 from mana_agent.config.model_catalog import ModelCapability, ModelPurpose, filter_models
-from mana_agent.config.provider_registry import PROVIDERS, split_qualified_model_id
+from mana_agent.config.provider_registry import CodexTransport, PROVIDERS, split_qualified_model_id
 from mana_agent.config.session import ConfigurationDraft
 from mana_agent.config.settings import Settings
 from mana_agent.config import user_config
@@ -30,6 +30,8 @@ def test_openrouter_is_first_class_provider() -> None:
     assert provider.display_name == "OpenRouter"
     assert provider.default_base_url == "https://openrouter.ai/api/v1"
     assert provider.api_key_env == "OPENROUTER_API_KEY"
+    assert provider.supports_responses_api is False
+    assert provider.codex_transport is CodexTransport.RESPONSES_BRIDGE
     assert split_qualified_model_id("openrouter/anthropic/claude-sonnet") == ("openrouter", "anthropic/claude-sonnet")
 
 

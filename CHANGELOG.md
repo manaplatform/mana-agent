@@ -2,6 +2,19 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-31
+
+- Fixed OpenRouter streaming startup timeout handling and transport-level retry budget:
+  - Updated `src/mana_agent/integrations/codex/responses_bridge/server.py` to implement bounded transport-level retries (up to 5 attempts) on initial stream startup timeouts (`read_timeout`, connection timeout, transient 429/500/502/503/504) before any stream chunks or tokens have been received (`received_stream_data == False` and `tool_side_effects == False`).
+  - Added bounded exponential backoff with full jitter and cancellation-aware delays between attempts.
+  - Ensured automatic retries are strictly disabled once stream chunks have started or tool/provider side effects have occurred.
+  - Preserved single logical task execution identity across all retries to prevent duplicate result writes or orphaned tasks.
+  - Added structured logging for every retry attempt (attempt, max_attempts=5, failure kind, delay, model, provider) and final failure exhaustion reason.
+  - Configured OpenRouter in `src/mana_agent/config/provider_registry.py` with `codex_transport = CodexTransport.RESPONSES_BRIDGE` and `supports_responses_api = False` so Codex routing properly utilizes the Responses Bridge for OpenRouter chat completions endpoints.
+  - Updated `BridgeUpstreamConfig.transport_max_attempts` default to 5 in `src/mana_agent/integrations/codex/responses_bridge/models.py`.
+  - Added unit and regression tests in `tests/test_codex_responses_bridge_recovery.py`, `tests/test_codex_responses_bridge.py`, and `tests/test_openrouter_provider.py`.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge_recovery.py tests/test_provider_failure.py tests/test_openrouter_provider.py tests/test_codex_responses_bridge.py -v`.
+
 ## 2026-08-30
 
 - Fixed structured output model decision failures for reasoning models and OpenAI-compatible endpoints:

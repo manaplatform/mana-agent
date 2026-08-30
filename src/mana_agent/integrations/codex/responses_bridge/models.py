@@ -81,9 +81,9 @@ class BridgeUpstreamConfig:
     # A provider that never sends response headers otherwise leaves the Codex
     # turn in a misleading "started" state for the full stream timeout.
     stream_open_timeout_seconds: float = 45.0
-    # Bridge owns at most one transport attempt per Codex request. Nested retries
-    # (Codex × bridge × HTTP client) are forbidden — see provider_failure module.
-    transport_max_attempts: int = 1
+    # Bridge transport-level retry budget for initial stream establishment before
+    # any stream chunks are received (see provider_failure module).
+    transport_max_attempts: int = 5
 
     def public_dict(self) -> dict[str, Any]:
         return {
