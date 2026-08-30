@@ -4620,8 +4620,11 @@ class AgentChatGateway:
             # per-task admission envelope. Prior turn consumption must not leave
             # effective remaining at 0 for this session's next message.
             self._stack.context_cost_governor.ensure_admission_budget()
+            retention_metrics = self._workspaces.run_retention_pass()
             state = self._session(session_id)
+            state["_last_retention_metrics"] = retention_metrics
             conversation_id = str(state.get("conversation_id") or session_id)
+
             state["_turn_record"] = turn_record
             state["_turn_store"] = turn_store
             state["_user_message_id"] = user_message_id
@@ -4879,8 +4882,12 @@ class AgentChatGateway:
                     payload={
                         "route": "unsupported",
                         "error_code": getattr(exc, "code", "") or "entry_route_invalid",
+                        "phase": getattr(exc, "phase", "entry_route"),
+                        "provider_call_executed": getattr(exc, "provider_call_executed", False),
+                        "diagnostic_details": getattr(exc, "details", {}),
                     },
                 )
+
             else:
                 record_current(
                     "gateway.entry_route",

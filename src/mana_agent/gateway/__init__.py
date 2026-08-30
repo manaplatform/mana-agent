@@ -76,7 +76,12 @@ __all__ = [
     "RoutingExecutionEnvelope",
     "build_routing_execution_envelope",
     "IntegrationAuthority",
+    "CompactedRoutingContext",
+    "ContextCategory",
+    "ContextCompactor",
+    "ContextComponentBreakdown",
 ]
+
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +113,12 @@ if TYPE_CHECKING:
         PreviousTurnPointers,
         RoutingExecutionEnvelope,
         build_routing_execution_envelope,
+    )
+    from .context_compactor import (
+        CompactedRoutingContext,
+        ContextCategory,
+        ContextCompactor,
+        ContextComponentBreakdown,
     )
     from .lane_coordinator import LaneCoordinator
     from .routing import GatewayRoutingAuthority, GatewayRoutingError
@@ -234,7 +245,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "build_routing_execution_envelope",
     ),
     "IntegrationAuthority": (".feature_integration", "IntegrationAuthority"),
+    "CompactedRoutingContext": (".context_compactor", "CompactedRoutingContext"),
+    "ContextCategory": (".context_compactor", "ContextCategory"),
+    "ContextCompactor": (".context_compactor", "ContextCompactor"),
+    "ContextComponentBreakdown": (".context_compactor", "ContextComponentBreakdown"),
 }
+
 
 
 def __getattr__(name: str) -> Any:

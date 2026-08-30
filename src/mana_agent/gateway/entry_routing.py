@@ -229,9 +229,21 @@ class EntryRoutingOutput(_StrictRoutingOutput):
 class EntryRoutingError(RuntimeError):
     """The model did not return a valid entry-routing decision."""
 
-    def __init__(self, message: str, *, code: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "",
+        phase: str = "entry_route",
+        provider_call_executed: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.phase = phase
+        self.provider_call_executed = provider_call_executed
+        self.details = details or {}
+
 
 
 class EntryRouteRegistry:
@@ -511,9 +523,16 @@ def _routing_correction(validation_error: str) -> str:
 class EntryRouter:
     """Obtain and validate the single entry decision for one gateway turn."""
 
-    def __init__(self, *, llm: Any, registry: EntryRouteRegistry) -> None:
+    def __init__(
+        self,
+        *,
+        llm: Any,
+        registry: EntryRouteRegistry,
+        compactor: Any | None = None,
+    ) -> None:
         self.llm = llm
         self.registry = registry
+        self.compactor = compactor
 
     def route(
         self,
@@ -525,7 +544,9 @@ class EntryRouter:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
-                "Reason: routing model is unavailable."
+                "Reason: routing model is unavailable.",
+                phase="entry_route",
+                provider_call_executed=False,
             )
         routes = self.registry.snapshot()
         atomic_child = bool(getattr(context, "atomic_child", False))
@@ -533,7 +554,38 @@ class EntryRouter:
         disallowed_routes = ["multi_task"] if atomic_child else []
         if disallowed_routes:
             routes = [row for row in routes if row["name"] not in disallowed_routes]
-        effective_envelope = envelope or getattr(context, "envelope", None)
+
+        if self.compactor is None:
+            try:
+                from mana_agent.gateway.context_compactor import ContextCompactor
+
+                self.compactor = ContextCompactor()
+            except Exception:
+                self.compactor = None
+
+        if self.compactor is not None:
+            compaction = self.compactor.compact_routing_context(
+                user_prompt=user_prompt,
+                system_prompt=ENTRY_ROUTER_PROMPT,
+                context=context,
+                envelope=envelope,
+                routes=routes,
+            )
+            if not compaction.is_valid:
+                raise EntryRoutingError(
+                    f"Model decision failed: entry_route. No response was generated. "
+                    f"Reason: Context budget blocked: context_limit_deficit:{compaction.deficit}. "
+                    "No provider call was executed.",
+                    code="context_budget_blocked",
+                    phase="entry_route",
+                    provider_call_executed=False,
+                    details=compaction.diagnostic_details,
+                )
+            context = compaction.bounded_context
+            effective_envelope = compaction.bounded_envelope
+        else:
+            effective_envelope = envelope or getattr(context, "envelope", None)
+
         payload = {
             "user_prompt": str(user_prompt or "").strip(),
             "context": context.to_dict(),
@@ -626,11 +678,22 @@ class EntryRouter:
         except EntryRoutingError:
             raise
         except (ContextBudgetExceeded, ModelContextLimitError) as exc:
-            record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
+            record_current(
+                "model.call.failed",
+                {
+                    "boundary": "entry_router",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "phase": "entry_route",
+                    "provider_call_executed": False,
+                },
+            )
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 f"Reason: {exc}",
                 code="context_budget_blocked",
+                phase="entry_route",
+                provider_call_executed=False,
             ) from exc
         except Exception as exc:
             record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
@@ -638,6 +701,7 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 f"Reason: {exc}"
             ) from exc
+
 
     def _validate(
         self,

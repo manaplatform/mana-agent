@@ -212,6 +212,30 @@ class Settings(BaseSettings):
     mana_context_unknown_model_max_output_tokens: int = Field(
         default=4_096, ge=1, alias="MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS"
     )
+    mana_retention_max_completed_tasks_per_workspace: int = Field(
+        default=50, ge=1, alias="MANA_RETENTION_MAX_COMPLETED_TASKS_PER_WORKSPACE"
+    )
+    mana_retention_max_execution_traces: int = Field(
+        default=100, ge=1, alias="MANA_RETENTION_MAX_EXECUTION_TRACES"
+    )
+    mana_retention_max_provider_events: int = Field(
+        default=200, ge=1, alias="MANA_RETENTION_MAX_PROVIDER_EVENTS"
+    )
+    mana_retention_temp_workspace_ttl_seconds: int = Field(
+        default=604800, ge=60, alias="MANA_RETENTION_TEMP_WORKSPACE_TTL_SECONDS"
+    )
+    mana_retention_stale_cache_ttl_seconds: int = Field(
+        default=259200, ge=60, alias="MANA_RETENTION_STALE_CACHE_TTL_SECONDS"
+    )
+    mana_retention_max_diagnostic_log_bytes: int = Field(
+        default=10485760, ge=1024, alias="MANA_RETENTION_MAX_DIAGNOSTIC_LOG_BYTES"
+    )
+    mana_retention_max_recovery_candidates: int = Field(
+        default=8, ge=1, alias="MANA_RETENTION_MAX_RECOVERY_CANDIDATES"
+    )
+    mana_retention_max_route_history: int = Field(
+        default=10, ge=1, alias="MANA_RETENTION_MAX_ROUTE_HISTORY"
+    )
     mana_routing_benchmark_weights: dict[str, float] | str = Field(
         default_factory=dict, alias="MANA_ROUTING_BENCHMARK_WEIGHTS"
     )

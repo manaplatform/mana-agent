@@ -1177,23 +1177,30 @@ class ExecutionSupervisor:
         stopped = threading.Event()
         failure: list[BaseException] = []
 
+        def _step() -> bool:
+            try:
+                current = self.store.get_task_or_none(task_id)
+                if (
+                    current is None
+                    or current.state in TERMINAL_STATES
+                    or current.state is ExecutionState.WAITING
+                    or current.wall_clock_deadline_exceeded(self.clock())
+                ):
+                    return False
+                self.heartbeat(task_id, attempt_id=attempt_id, lease_token=lease_token)
+                return True
+            except (StaleLeaseError, LeaseConflictError, BudgetExceededError) as exc:
+                current = self.store.get_task_or_none(task_id)
+                if current is not None and current.state in {ExecutionState.RUNNING, ExecutionState.LEASED}:
+                    failure.append(exc)
+                return False
+            except Exception as exc:
+                failure.append(exc)
+                return False
+
         def renew() -> None:
             while not stopped.is_set():
-                try:
-                    current = self.store.get_task_or_none(task_id)
-                    if (
-                        current is None
-                        or stopped.is_set()
-                        or current.state in TERMINAL_STATES
-                        or current.state is ExecutionState.WAITING
-                        or current.wall_clock_deadline_exceeded(self.clock())
-                    ):
-                        return
-                    self.heartbeat(task_id, attempt_id=attempt_id, lease_token=lease_token)
-                except (StaleLeaseError, LeaseConflictError, BudgetExceededError) as exc:
-                    current = self.store.get_task_or_none(task_id)
-                    if current is not None and current.state in {ExecutionState.RUNNING, ExecutionState.LEASED}:
-                        failure.append(exc)
+                if not _step():
                     return
                 if stopped.wait(min(0.02, max(0.005, float(self.config.heartbeat_seconds) / 10))):
                     break
@@ -1205,6 +1212,8 @@ class ExecutionSupervisor:
         finally:
             stopped.set()
             worker.join(timeout=max(1.0, float(self.config.heartbeat_seconds) + 0.5))
+            if not failure:
+                _step()
         if failure:
             raise failure[0]
 

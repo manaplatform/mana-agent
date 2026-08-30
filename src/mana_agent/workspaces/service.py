@@ -26,7 +26,13 @@ from mana_agent.workspaces.models import (
     WorkspaceRecord,
 )
 from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
+from mana_agent.workspaces.retention import (
+    ReferenceAwareGC,
+    RetentionMetrics,
+    RetentionPolicy,
+)
 from mana_agent.workspaces.store import WorkspaceStore
+
 
 
 def _now() -> str:
@@ -145,8 +151,22 @@ def _component_kind(root: Path, component: Path) -> str:
 
 
 class WorkspaceService:
-    def __init__(self, store: WorkspaceStore | None = None) -> None:
+    def __init__(
+        self,
+        store: WorkspaceStore | None = None,
+        *,
+        gc: ReferenceAwareGC | None = None,
+        retention_policy: RetentionPolicy | None = None,
+    ) -> None:
         self.store = store or WorkspaceStore()
+        self.retention_policy = retention_policy or RetentionPolicy()
+        self.gc = gc or ReferenceAwareGC(
+            workspace_store=self.store, policy=self.retention_policy
+        )
+
+    def run_retention_pass(self) -> RetentionMetrics:
+        return self.gc.run_retention_pass()
+
 
     def register_repository(
         self,
