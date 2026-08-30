@@ -2603,7 +2603,14 @@ class ExecutionSupervisor:
             )
         return self.cancel(task_id, reason=reason, propagate=False)
 
-    def cancel(self, task_id: str, *, reason: str, propagate: bool = True) -> list[str]:
+    def cancel(
+        self,
+        task_id: str,
+        *,
+        reason: str = "cancelled",
+        source: str = "ctrl_c",
+        propagate: bool = True,
+    ) -> list[str]:
         root = self.store.get_task(task_id)
         targets: list[TaskRecord] = []
         pending = [root]
@@ -2621,6 +2628,7 @@ class ExecutionSupervisor:
                 def block(task: TaskRecord) -> None:
                     task.cancellation_status = CancellationStatus.BLOCKED_BY_SIDE_EFFECT
                     task.cancellation_reason = reason
+                    task.cancellation_source = source
                     task.updated_at = self.clock()
                 task, _ = self.store.update_task(current.task_id, block)
                 self._emit("cancellation_blocked", task, reason=reason)
@@ -2629,10 +2637,13 @@ class ExecutionSupervisor:
             if current.state != ExecutionState.CANCELLING:
                 self.transition(current.task_id, ExecutionState.CANCELLING, reason=reason)
             def finish(task: TaskRecord) -> None:
+                if task.state in TERMINAL_STATES and task.state != ExecutionState.CANCELLING:
+                    return
                 validate_transition(task.state, ExecutionState.CANCELLED)
                 task.state = ExecutionState.CANCELLED
                 task.cancellation_status = CancellationStatus.COMPLETED
                 task.cancellation_reason = reason
+                task.cancellation_source = source
                 task.finished_at = task.updated_at = self.clock()
                 task.lease_owner = ""
                 task.lease_token = ""
@@ -2669,6 +2680,10 @@ class ExecutionSupervisor:
                         payload={
                             "status": "cancelled",
                             "reason": reason or "cancelled",
+                            "cancellation_reason": reason or "user_interrupt",
+                            "cancellation_source": source,
+                            "cancelled_at": self.clock(),
+                            "execution_id": task.task_id,
                             "recovery_reason": task.recovery_reason,
                             "is_resumable": False,
                             "chat_result": {
@@ -2679,6 +2694,9 @@ class ExecutionSupervisor:
                                     "execution_id": task.task_id,
                                     "lane_task_id": task.task_id,
                                     "status": "cancelled",
+                                    "cancellation_reason": reason or "user_interrupt",
+                                    "cancellation_source": source,
+                                    "cancelled_at": self.clock(),
                                     "terminal_failure": True,
                                     "is_resumable": False,
                                 },
@@ -2687,6 +2705,9 @@ class ExecutionSupervisor:
                         error_metadata={
                             "state": "cancelled",
                             "reason": reason or "cancelled",
+                            "cancellation_reason": reason or "user_interrupt",
+                            "cancellation_source": source,
+                            "cancelled_at": self.clock(),
                             "recovery_reason": task.recovery_reason,
                             "is_resumable": False,
                         },
@@ -2703,7 +2724,8 @@ class ExecutionSupervisor:
                     attempt.finished_at = task.finished_at
                     attempt.failure_reason = reason
                     self.store.save_attempt(attempt)
-            self._emit("task_cancelled", task, reason=reason)
+            self._emit("task_cancelled", task, reason=reason, source=source)
+            self._emit("task.cancelled", task, reason=reason, source=source)
             changed.append(current.task_id)
         if blocked and root.task_id in changed:
             def mark_partial(task: TaskRecord) -> None:
@@ -2713,6 +2735,7 @@ class ExecutionSupervisor:
             self._emit(
                 "cancellation_partially_completed",
                 partial,
+
                 reason=reason,
                 blocked_descendants=blocked,
             )

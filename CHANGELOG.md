@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-30
 
+- Fixed Active Task Cancellation on Ctrl+C and Exit:
+  - Introduced authoritative `ShutdownCoordinator` in `src/mana_agent/gateway/shutdown.py` managing signal handlers (`SIGINT`, `SIGTERM`), double-interrupt safeguards, and interactive session shutdown coordination.
+  - Implemented single authoritative shutdown sequence across runtime: `shutdown requested -> mark shutting_down -> stop accepting new tasks -> identify active task/execution -> request cancellation -> propagate to provider/worker/subagents/tools -> persist terminal task state -> cancel pending retries/timers -> shutdown executors/workers -> close runtime resources -> exit process`.
+  - Updated `ExecutionSupervisor.cancel` to accept cancellation source (`"ctrl_c" | "exit" | "sigterm"`), set `cancellation_source` on `TaskRecord`, populate structured `EscrowResult` payload, enforce write-once terminal result invariants, and emit `task.cancelled`.
+  - Added `QueueManager.cancel_task_jobs` to transition all queued and in-flight jobs belonging to a cancelled task to `QueueJobStatus.CANCELLED`.
+  - Enhanced `CodexCodingAgentShim.cancel` to track active provider backends and invoke `await backend.cancel(task_id)` / `client.interrupt()` upon task cancellation while emitting `provider.cancellation.requested`.
+  - Updated `LaneCoordinator.cancel_task` and `LaneCoordinator.cancel_tree` to emit `task.cancellation.requested` with proper `lane_id` context and propagate cancellation to execution supervisor without double-emitting.
+  - Updated `AgentChatGateway` with `request_shutdown`, `cancel_active`, `_shutting_down` check rejecting incoming turns on shutdown, and automated active task cancellation in `close_session`.
+  - Integrated `ShutdownCoordinator` into CLI (`src/mana_agent/commands/chat_cli.py`) and TUI (`src/mana_agent/tui/app.py`) for graceful shutdown on `Ctrl+C`, `EOFError`, `exit`, `quit`, and TUI unmount.
+  - Added comprehensive regression and integration test suite in `tests/gateway/test_task_cancellation_shutdown.py`.
+  - User verification required: `pytest tests/gateway/test_task_cancellation_shutdown.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/gateway/test_context_budget_retention.py -v`.
+
+
 - Fixed Execution Supervisor `lease_renewal` Timing and Test Renewal Race Condition:
   - Extracted core renewal step logic into `_step()` within `ExecutionSupervisor.lease_renewal` to ensure consistent lease validation and heartbeat execution.
   - Executed a final `_step()` renewal in `finally` upon exiting the `lease_renewal` context manager after joining the background worker thread when no prior failure occurred.

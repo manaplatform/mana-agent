@@ -2494,14 +2494,28 @@ class LaneCoordinator:
     def resume(self, task_id: str) -> LaneExecution:
         return self.transition(task_id, LaneTaskState.QUEUED, reason="resumed by coordinator")
 
-    def cancel_task(self, task_id: str, *, reason: str = "cancelled by coordinator") -> LaneExecution:
+    def cancel_task(
+        self,
+        task_id: str,
+        *,
+        reason: str = "cancelled by coordinator",
+        source: str = "ctrl_c",
+    ) -> LaneExecution:
         execution = self.inspect_task(task_id)
         if execution.state in _CONTROL_TERMINAL_STATES:
             return execution
+        self.emit(
+            "task.cancellation.requested",
+            task_id=task_id,
+            lane_id=execution.owning_lane,
+            reason=reason,
+            source=source,
+        )
         self.transition(task_id, LaneTaskState.CANCELLING, reason=reason)
-        self.execution_supervisor.cancel(task_id, reason=reason, propagate=False)
+
+        self.execution_supervisor.cancel(task_id, reason=reason, source=source, propagate=False)
         self._stop_supervisor_heartbeats(task_id)
-        execution.cancellation_state.update({"requested_at": _iso(), "reason": reason})
+        execution.cancellation_state.update({"requested_at": _iso(), "reason": reason, "source": source})
         result = self.transition(task_id, LaneTaskState.CANCELLED, reason=reason)
         try:
             self.taskboard.update_status(result.taskboard_task_id, TaskStatus.CANCELLED)
@@ -2509,7 +2523,13 @@ class LaneCoordinator:
             pass
         return result
 
-    def cancel_tree(self, task_id: str, *, reason: str = "task tree cancelled") -> tuple[str, ...]:
+    def cancel_tree(
+        self,
+        task_id: str,
+        *,
+        reason: str = "task tree cancelled",
+        source: str = "ctrl_c",
+    ) -> tuple[str, ...]:
         descendants: list[LaneExecution] = []
         pending = [task_id]
         while pending:
@@ -2520,12 +2540,13 @@ class LaneCoordinator:
         cancelled: list[str] = []
         for execution in reversed(descendants):
             if execution.state not in _CONTROL_TERMINAL_STATES:
-                self.cancel_task(execution.task_id, reason=reason)
+                self.cancel_task(execution.task_id, reason=reason, source=source)
                 cancelled.append(execution.task_id)
         if self.inspect_task(task_id).state not in _CONTROL_TERMINAL_STATES:
-            self.cancel_task(task_id, reason=reason)
+            self.cancel_task(task_id, reason=reason, source=source)
             cancelled.append(task_id)
         return tuple(cancelled)
+
 
     def reprioritize(self, task_id: str, priority: LanePriority) -> LaneExecution:
         with self._condition:

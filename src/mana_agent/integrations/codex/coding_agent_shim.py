@@ -130,8 +130,26 @@ class CodexCodingAgentShim:
         )
         self._flow_results: dict[str, dict[str, Any]] = {}
         self._active_flow_id: str | None = None
+        self._active_backend: tuple[str, Any] | None = None
+
+    def cancel(self, task_id: str | None = None) -> bool:
+        """Propagate cancellation to the active Codex backend/turn if in flight."""
+        if self._active_backend is not None:
+            active_task_id, backend = self._active_backend
+            if task_id is None or str(task_id).strip() == str(active_task_id).strip():
+                cancel_func = getattr(backend, "cancel", None)
+                if callable(cancel_func):
+                    try:
+                        record_current("provider.cancellation.requested", {"task_id": active_task_id})
+                        _run_async(backend.cancel(active_task_id))
+                        return True
+                    except Exception:
+                        logger.debug("Failed to cancel active codex turn for %s", active_task_id, exc_info=True)
+                        return False
+        return False
 
     def preview_execution_checklist(
+
         self,
         request: str,
         *,
@@ -517,6 +535,7 @@ class CodexCodingAgentShim:
 
         events: list[AgentEvent] = []
         backend = self._backend_factory()
+        self._active_backend = (task_id, backend)
 
         async def run() -> CodingTaskResult:
             try:
@@ -532,6 +551,21 @@ class CodexCodingAgentShim:
 
         try:
             result = _run_async(run())
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            record_current("codex.turn.cancelled", {"task_id": task_id, "reason": "user_interrupt"})
+            if manager is not None:
+                manager.transition(
+                    self.workspace_task_id or task_id,
+                    WorkspaceStatus.INTERRUPTED,
+                    agent_id="codex",
+                    error="cancelled by user interrupt",
+                )
+            result = CodingTaskResult(
+                task_id=task_id,
+                status="cancelled",
+                summary="Execution was cancelled by user interrupt.",
+                errors=["user_interrupt"],
+            )
         except Exception as exc:
             record_current("codex.turn.failed", {"task_id": task_id, "error_type": type(exc).__name__, "error": str(exc)})
             if manager is not None:
@@ -542,6 +576,9 @@ class CodexCodingAgentShim:
                     error=str(exc),
                 )
             raise
+        finally:
+            if self._active_backend and self._active_backend[0] == task_id:
+                self._active_backend = None
 
         if manager is not None:
             if result.status == "completed":
@@ -560,6 +597,7 @@ class CodexCodingAgentShim:
                     agent_id="codex",
                     error="; ".join(result.errors),
                 )
+
 
         payload = self._result_payload(
             result,

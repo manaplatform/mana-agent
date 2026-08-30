@@ -80,7 +80,11 @@ __all__ = [
     "ContextCategory",
     "ContextCompactor",
     "ContextComponentBreakdown",
+    "CancellationMetadata",
+    "ShutdownCoordinator",
+    "ShutdownSource",
 ]
+
 
 
 
@@ -249,7 +253,11 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ContextCategory": (".context_compactor", "ContextCategory"),
     "ContextCompactor": (".context_compactor", "ContextCompactor"),
     "ContextComponentBreakdown": (".context_compactor", "ContextComponentBreakdown"),
+    "CancellationMetadata": (".shutdown", "CancellationMetadata"),
+    "ShutdownCoordinator": (".shutdown", "ShutdownCoordinator"),
+    "ShutdownSource": (".shutdown", "ShutdownSource"),
 }
+
 
 
 

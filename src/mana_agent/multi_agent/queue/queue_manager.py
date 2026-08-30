@@ -226,13 +226,32 @@ class QueueManager:
     def get_job(self, job_id: str) -> QueueJob:
         return self.jobs[job_id]
 
-    def cancel_job(self, job_id: str) -> None:
+    def cancel_job(self, job_id: str, *, reason: str = "cancelled") -> None:
         job = self.jobs[job_id]
-        job.status = QueueJobStatus.CANCELLED
-        job.updated_at = utc_now()
+        if job.status not in {QueueJobStatus.DONE, QueueJobStatus.FAILED, QueueJobStatus.CANCELLED}:
+            job.status = QueueJobStatus.CANCELLED
+            job.result_summary = reason
+            job.ended_at = job.ended_at or utc_now()
+            job.updated_at = utc_now()
+
+    def cancel_task_jobs(self, task_id: str, *, reason: str = "cancelled") -> list[str]:
+        cancelled_ids: list[str] = []
+        for job in self.jobs.values():
+            if job.task_id == task_id and job.status not in {
+                QueueJobStatus.DONE,
+                QueueJobStatus.FAILED,
+                QueueJobStatus.CANCELLED,
+            }:
+                job.status = QueueJobStatus.CANCELLED
+                job.result_summary = reason
+                job.ended_at = job.ended_at or utc_now()
+                job.updated_at = utc_now()
+                cancelled_ids.append(job.job_id)
+        return cancelled_ids
 
     def jobs_for_task(self, task_id: str) -> list[QueueJob]:
         return [job for job in self.jobs.values() if job.task_id == task_id]
+
 
     def _fingerprint_from_kwargs(self, kwargs: dict[str, Any]) -> str:
         job_type = kwargs.get("job_type")

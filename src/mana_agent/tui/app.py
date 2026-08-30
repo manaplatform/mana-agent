@@ -1662,7 +1662,9 @@ class ManaChatApp(App):
             )
 
     def action_quit(self) -> None:
-        if self.gateway is not None and hasattr(self.gateway, "close_session"):
+        if self.gateway is not None and hasattr(self.gateway, "request_shutdown"):
+            self.gateway.request_shutdown(source="tui_quit", session_id=self._gateway_session_id)
+        elif self.gateway is not None and hasattr(self.gateway, "close_session"):
             self.gateway.close_session(self._gateway_session_id)
         self.exit()
 
@@ -1674,8 +1676,11 @@ class ManaChatApp(App):
         if self._unsubscribe_api_approval_events is not None:
             self._unsubscribe_api_approval_events()
             self._unsubscribe_api_approval_events = None
-        if self.gateway is not None and hasattr(self.gateway, "close_session"):
+        if self.gateway is not None and hasattr(self.gateway, "request_shutdown"):
+            self.gateway.request_shutdown(source="tui_quit", session_id=self._gateway_session_id)
+        elif self.gateway is not None and hasattr(self.gateway, "close_session"):
             self.gateway.close_session(self._gateway_session_id)
+
 
     def watch_status_text(self, value: str) -> None:
         self.refresh_footer()

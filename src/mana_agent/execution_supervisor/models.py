@@ -557,6 +557,7 @@ class TaskRecord(StrictModel):
     recovery_reason: str = ""
     cancellation_status: CancellationStatus | None = None
     cancellation_reason: str = ""
+    cancellation_source: str = ""
     token_usage: int = Field(default=0, ge=0)
     token_budget: int | None = Field(default=None, ge=0)
     estimated_cost: float = Field(default=0.0, ge=0)
