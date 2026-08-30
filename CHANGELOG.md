@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-30
 
+- Fixed `entry_route` Decision Validation and Prompt Guidance for `memory_task_id`:
+  - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to explicitly declare that `memory_task_id` must be empty string `""` for all routes except `memory`, preventing models from incorrectly populating task IDs on non-memory routes.
+  - Added bounded retry correction rules in `_routing_correction` for all `memory_task_id` validation error variants (`memory_task_id is only valid for the memory route`, `memory_task_id is only valid for private capsule retrieval`, `private memory retrieval requires a selected task ID`, and `memory route selected a task that was not offered`).
+  - Updated `EntryRouteContext.to_dict()` to only serialize `memory_task_candidates` when `memory_capsules_enabled=True`, avoiding unselectable candidate pollution in prompt payloads for legacy or non-capsule environments.
+  - Added unit and regression tests in `tests/gateway/test_entry_routing.py`.
+  - User verification required: `pytest tests/gateway/test_entry_routing.py -v`.
+
+
+
 - Fixed Active Task Cancellation on Ctrl+C and Exit:
   - Introduced authoritative `ShutdownCoordinator` in `src/mana_agent/gateway/shutdown.py` managing signal handlers (`SIGINT`, `SIGTERM`), double-interrupt safeguards, and interactive session shutdown coordination.
   - Implemented single authoritative shutdown sequence across runtime: `shutdown requested -> mark shutting_down -> stop accepting new tasks -> identify active task/execution -> request cancellation -> propagate to provider/worker/subagents/tools -> persist terminal task state -> cancel pending retries/timers -> shutdown executors/workers -> close runtime resources -> exit process`.

@@ -99,8 +99,9 @@ class EntryRouteContext:
             "previous_route": self.previous_route,
             "conversation_summary": self.conversation_summary,
             "artifact_evidence": dict(self.artifact_evidence),
-            "memory_task_candidates": [dict(c) for c in self.memory_task_candidates],
+            "memory_task_candidates": [dict(c) for c in self.memory_task_candidates] if self.memory_capsules_enabled else [],
             "memory_capsules_enabled": self.memory_capsules_enabled,
+
             "atomic_child": self.atomic_child,
             "orchestration_parent_task_id": self.orchestration_parent_task_id,
             "authenticated_user_id": self.authenticated_user_id,
@@ -438,6 +439,7 @@ calendar -> ["calendar"], browser -> ["browser"], search -> ["search"], github -
 canvas -> ["canvas"], media -> ["media"],
 memory -> ["memory"], and mcp -> ["mcp"]. capability_error must name the unavailable tool source. Do not use an
 empty array for a request that needs no external information.
+memory_task_id must be empty string "" for all routes except memory. Only populate memory_task_id when route="memory" and memory_capsules_enabled is true.
 
 Return JSON only:
 {
@@ -517,7 +519,28 @@ def _routing_correction(validation_error: str) -> str:
             "from the live route availability tool_contracts and copy all five values exactly. "
             "Do not retain any mismatched values from the previous invalid decision."
         )
+    if "memory_task_id is only valid for the memory route" in validation_error:
+        return (
+            'Return a new complete routing decision with memory_task_id set to empty string "". '
+            'memory_task_id is only valid when route="memory" and memory_capsules_enabled is true.'
+        )
+    if "memory_task_id is only valid for private capsule retrieval" in validation_error:
+        return (
+            'Return a new complete routing decision with memory_task_id set to empty string "". '
+            'Legacy memory does not select a memory_task_id.'
+        )
+    if "private memory retrieval requires a selected task ID" in validation_error:
+        return (
+            'Return a new complete routing decision. route="memory" with memory capsules '
+            'requires selecting one valid task ID from context.memory_task_candidates into memory_task_id.'
+        )
+    if "memory route selected a task that was not offered" in validation_error:
+        return (
+            'Return a new complete routing decision. Select a task ID that is explicitly present '
+            'in context.memory_task_candidates for memory_task_id.'
+        )
     return ""
+
 
 
 class EntryRouter:
