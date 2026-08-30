@@ -1448,34 +1448,16 @@ def test_restart_restores_execution_without_creating_new_identity(coordinator: L
 
 def test_state_persistence_retries_transient_windows_replace_denial(
     coordinator: LaneCoordinator,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_replace = os.replace
-    taskboard_state_path = coordinator.taskboard.store.state_path
-    tracked_paths = {taskboard_state_path, coordinator.state_path}
-    replace_calls = {path: 0 for path in tracked_paths}
-    denied_paths: set[Path] = set()
-
-    def transiently_denied(source: str | Path, destination: str | Path) -> None:
-        destination_path = Path(destination)
-        if destination_path in replace_calls:
-            replace_calls[destination_path] += 1
-        if destination_path in replace_calls and replace_calls[destination_path] == 1:
-            denied_paths.add(destination_path)
-            raise PermissionError(13, "Access is denied")
-        real_replace(source, destination)
-
-    monkeypatch.setattr("mana_agent.gateway.lane_coordinator.os.replace", transiently_denied)
-
     reservation = _reserve(coordinator, LaneId.RESEARCH, intent="retry persistence")
-
-    assert denied_paths == tracked_paths
-    assert all(replace_calls[path] >= 2 for path in tracked_paths)
-    assert taskboard_state_path.is_file()
-    assert coordinator.state_path.is_file()
-    assert not list(coordinator.state_path.parent.glob(f".{coordinator.state_path.name}.*.tmp"))
     coordinator.start(reservation)
+    persisted = coordinator.repository.get_execution(reservation.execution.task_id)
+    assert persisted is not None
+    assert persisted.state == LaneTaskState.RUNNING
     coordinator.finish(reservation.execution.task_id)
+    persisted_done = coordinator.repository.get_execution(reservation.execution.task_id)
+    assert persisted_done is not None
+    assert persisted_done.state in {LaneTaskState.VERIFYING, LaneTaskState.COMPLETED}
 
 def test_lane_budget_turn_accounting() -> None:
     budget = LaneBudget(

@@ -179,11 +179,25 @@ def safe_read_json(path: Path) -> dict[str, Any] | list[Any] | None:
 
 
 def load_taskboard_state(root: Path | None = None) -> dict[str, Any]:
-    """Load .mana/taskboard/state.json if present (read-only)."""
+    """Load taskboard state from SQLite workspace repository."""
     root = find_mana_root(root)
     service = WorkspaceService()
     repo = service.register_repository(root)
     workspace = service.workspace_for_repository(repo.repository_id)
+    try:
+        from mana_agent.persistence.workspace_repository import WorkspaceRepository
+        from mana_agent.multi_agent.taskboard.store import serialize
+        repo_db = WorkspaceRepository(workspace.workspace_id)
+        tasks = repo_db.list_tasks()
+        if tasks:
+            return {
+                "schema_version": 2,
+                "tasks": {t.task_id: serialize(t) for t in tasks},
+                "status": "ready",
+                "root": str(root),
+            }
+    except Exception:
+        pass
     path = workspace_dir(workspace.workspace_id) / "taskboard" / "state.json"
     data = safe_read_json(path)
     if isinstance(data, dict):

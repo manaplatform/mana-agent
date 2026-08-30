@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-31
 
+- Refactored Mana-Agent workspace persistence to versioned SQLite database:
+  - Introduced `WorkspaceDatabase` in `src/mana_agent/persistence/workspace_db.py` with WAL journal mode, NORMAL synchronous mode, foreign key enforcement, 30s busy timeout, schema version tracking, and 21 normalized tables (`tasks`, `task_dependencies`, `task_collections`, `task_events`, `task_handoffs`, `task_verifications`, `task_budgets`, `task_approvals`, `task_integration_evidence`, `discussions`, `decisions`, `messages`, `gateway_executions`, `gateway_handoffs`, `gateway_locks`, `gateway_waiters`, `gateway_turns`, `checkpoints`, `escrow_results`, `schema_migrations`, `workspace_migration_state`) with performance indexes.
+  - Implemented `WorkspaceRepository` in `src/mana_agent/persistence/workspace_repository.py` providing isolated, targeted CRUD and query operations replacing unbounded whole-file directory loading.
+  - Implemented `TaskboardGatewayMigrator` in `src/mana_agent/persistence/migration.py` with restart-safe atomic migration, SHA-256 source checksums, row-count validation, and idempotency guarantees.
+  - Updated `JsonStateStore` / `TaskBoard` in `src/mana_agent/multi_agent/taskboard/` to persist authoritatively into SQLite via `WorkspaceRepository` while maintaining task mapping projection compatibility.
+  - Updated `DecisionRoom`, `DiscussionStore`, and `MessageBus` in `src/mana_agent/multi_agent/communication/` to store and query decisions, discussion threads, and messages in SQLite.
+  - Updated `LaneCoordinator` and `ChatTurnStore` in `src/mana_agent/gateway/` to persist executions, locks, waiters, and turns into SQLite with unique constraint protection and atomic transactions.
+  - Updated `load_taskboard_state` in `src/mana_agent/ui/streamlit_helpers.py` to fetch state directly from the SQLite workspace repository.
+  - Extracted lane domain dataclasses into `src/mana_agent/gateway/lane_models.py` to prevent circular imports between gateway lanes and workspace persistence.
+  - User verification required: `python -m pytest tests/persistence/ tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_turn_store.py tests/test_multi_agent_core.py tests/test_agent_work_queue.py -v`.
+
 - Fixed OpenRouter streaming startup timeout handling and transport-level retry budget:
   - Updated `src/mana_agent/integrations/codex/responses_bridge/server.py` to implement bounded transport-level retries (up to 5 attempts) on initial stream startup timeouts (`read_timeout`, connection timeout, transient 429/500/502/503/504) before any stream chunks or tokens have been received (`received_stream_data == False` and `tool_side_effects == False`).
   - Added bounded exponential backoff with full jitter and cancellation-aware delays between attempts.
