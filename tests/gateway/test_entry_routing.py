@@ -2109,3 +2109,78 @@ def test_entry_router_recovers_json_from_prose_wrapped_structured_output() -> No
         "https://api.open-meteo.com/v1/forecast",
         "https://official-joke-api.appspot.com/random_joke",
     )
+
+
+def test_entry_router_retries_and_corrects_invalid_memory_task_id_on_non_memory_route() -> None:
+    registry = _registry()
+
+    class _RetryInvalidMemoryTaskIdModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, messages: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                # First attempt: incorrectly returns memory_task_id on coding route
+                return SimpleNamespace(
+                    content=json.dumps({
+                        "route": "coding",
+                        "confidence": 0.95,
+                        "reason": "Modify repository files.",
+                        "required_sources": ["repository"],
+                        "memory_task_id": "task-unexpected",
+                        "runtime_capability_change": False,
+                    })
+                )
+            # Second attempt (after correction guidance): returns empty memory_task_id
+            payload_str = messages[-1].content
+            parsed = json.loads(payload_str)
+            assert "validation_error" in parsed
+            assert "memory_task_id is only valid for the memory route" in parsed["validation_error"]
+            assert "memory_task_id" in parsed["correction"]
+            return SimpleNamespace(
+                content=json.dumps({
+                    "route": "coding",
+                    "confidence": 0.95,
+                    "reason": "Modify repository files.",
+                    "required_sources": ["repository"],
+                    "memory_task_id": "",
+                    "runtime_capability_change": False,
+                })
+            )
+
+    model = _RetryInvalidMemoryTaskIdModel()
+    router = EntryRouter(llm=model, registry=registry)
+    decision = router.route(
+        user_prompt="Update the README",
+        context=EntryRouteContext(
+            session_id="session_test",
+            conversation_id="session_test",
+            turn_id="turn_test",
+        ),
+    )
+
+    assert model.calls == 2
+    assert decision.route == "coding"
+    assert decision.memory_task_id == ""
+
+
+def test_entry_route_context_to_dict_filters_memory_task_candidates_when_disabled() -> None:
+    context_disabled = EntryRouteContext(
+        session_id="s1",
+        conversation_id="c1",
+        turn_id="t1",
+        memory_capsules_enabled=False,
+        memory_task_candidates=({"task_id": "task-1"}, {"task_id": "task-2"}),
+    )
+    assert context_disabled.to_dict()["memory_task_candidates"] == []
+
+    context_enabled = EntryRouteContext(
+        session_id="s1",
+        conversation_id="c1",
+        turn_id="t1",
+        memory_capsules_enabled=True,
+        memory_task_candidates=({"task_id": "task-1"}, {"task_id": "task-2"}),
+    )
+    assert len(context_enabled.to_dict()["memory_task_candidates"]) == 2
+

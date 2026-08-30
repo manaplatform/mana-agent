@@ -1223,11 +1223,13 @@ class AgentChatGateway:
 
         self._sessions: dict[str, dict[str, Any]] = {}
         self._active: set[str] = set()
+        self._shutting_down: bool = False
         self._async_turn_lock = asyncio.Lock()
         self._multi_task_route_lock = threading.Lock()
         self._multi_task_budget_lock = threading.Lock()
         self._chat_session_id: str | None = None
         self._history_store = ChatSessionHistory()
+
 
         # Build stack (full coding stack when coding_agent=True)
         try:
@@ -3400,6 +3402,22 @@ class AgentChatGateway:
         if self._chat_session_id == session_id:
             self._chat_session_id = None
 
+    def _emit_lifecycle_event(
+        self,
+        event_type: str,
+        message: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            record_current(event_type, {"message": message, **(metadata or {})})
+        except Exception:
+            pass
+        if callable(self._event_sink):
+            try:
+                self._event_sink(event_type, message, metadata or {})
+            except Exception:
+                logger.debug("Failed to deliver lifecycle event %s", event_type, exc_info=True)
+
     def close_session(
         self, session_id: str | None = None, *, abandoned: bool = False
     ) -> str | None:
@@ -3407,6 +3425,11 @@ class AgentChatGateway:
         sid = str(session_id or self._chat_session_id or "").strip()
         if not sid:
             return None
+        # Cancel any active tasks before tearing down storage and memory
+        try:
+            self.cancel(sid, reason="session closed", source="exit")
+        except Exception:
+            logger.debug("Cancellation during close_session failed for %s", sid, exc_info=True)
         try:
             record = self._workspaces.close_session(
                 sid,
@@ -3426,6 +3449,7 @@ class AgentChatGateway:
         except MemoryError as exc:
             logger.warning("Memory backend close failed: %s", exc)
         return sid
+
 
     close = close_session
 
@@ -3929,7 +3953,13 @@ class AgentChatGateway:
     def status(self, session_id: str) -> str:
         return "running" if session_id in self._active else "ready"
 
-    def cancel(self, session_id: str) -> bool:
+    def cancel(
+        self,
+        session_id: str,
+        *,
+        reason: str = "frontend cancellation requested",
+        source: str = "ctrl_c",
+    ) -> bool:
         computer_cancelled = False
         try:
             from mana_agent.integrations.computer_control.cancellation import (
@@ -3939,17 +3969,76 @@ class AgentChatGateway:
             computer_cancelled = cancel_computer_session(session_id)
         except Exception:
             logger.debug("computer-control cancellation failed", exc_info=True)
+
+        if self._coding_agent is not None and hasattr(self._coding_agent, "cancel"):
+            try:
+                self._coding_agent.cancel()
+            except Exception:
+                logger.debug("coding agent cancel failed", exc_info=True)
+
         active = self._lane_coordinator.list_tasks(
             active_only=True, session_id=session_id
         )
         if not active:
+            self._active.discard(session_id)
             return computer_cancelled
+
         roots = [item for item in active if not item.parent_task_id]
         for task in roots or list(active):
+            if hasattr(self._stack, "queue_manager") and self._stack.queue_manager is not None:
+                try:
+                    self._stack.queue_manager.cancel_task_jobs(task.task_id, reason=reason)
+                except Exception:
+                    pass
             self._lane_coordinator.cancel_tree(
-                task.task_id, reason="frontend cancellation requested"
+                task.task_id, reason=reason, source=source
             )
+        self._active.discard(session_id)
         return True
+
+    def cancel_active(
+        self,
+        session_id: str = "",
+        *,
+        reason: str = "user_interrupt",
+        source: str = "ctrl_c",
+    ) -> bool:
+        sid = str(session_id or self._chat_session_id or "").strip()
+        if not sid:
+            cancelled = False
+            for active_sid in list(self._active):
+                cancelled = self.cancel(active_sid, reason=reason, source=source) or cancelled
+            return cancelled
+        return self.cancel(sid, reason=reason, source=source)
+
+    def request_shutdown(
+        self,
+        *,
+        source: str = "ctrl_c",
+        session_id: str = "",
+        reason: str = "user_interrupt",
+    ) -> bool:
+        """Execute authoritative shutdown sequence."""
+        self._shutting_down = True
+        self._emit_lifecycle_event(
+            "shutdown.requested",
+            f"Shutdown requested via {source}",
+            {"source": source, "reason": reason, "session_id": session_id},
+        )
+        self.cancel_active(session_id=session_id, reason=reason, source=source)
+        self._emit_lifecycle_event(
+            "runtime.shutdown.started",
+            "Runtime shutdown started",
+            {"source": source, "session_id": session_id},
+        )
+        self.close_session(session_id=session_id)
+        self._emit_lifecycle_event(
+            "runtime.shutdown.completed",
+            "Runtime shutdown completed",
+            {"source": source, "session_id": session_id},
+        )
+        return True
+
 
     def list_tasks(
         self, *, session_id: str = "", active_only: bool = False
@@ -4579,8 +4668,22 @@ class AgentChatGateway:
         **options: Any,
     ) -> ChatTurnResult:
         """Run one full chat turn through the gateway-owned engine."""
+        if getattr(self, "_shutting_down", False):
+            return ChatTurnResult(
+                answer="Runtime is shutting down. Task was cancelled.",
+                error="cancelled",
+                mode="cancelled",
+                payload={
+                    "status": "cancelled",
+                    "cancellation_reason": "shutdown",
+                    "cancellation_source": "shutdown",
+                    "terminal_failure": True,
+                    "is_resumable": False,
+                },
+            )
         self._bind_runtime_session(session_id)
         self._active.add(session_id)
+
         turn_id = str(options.pop("turn_id", "") or f"turn_{uuid.uuid4().hex[:20]}")
         user_message_id = str(options.pop("user_message_id", "") or f"msg_{uuid.uuid4().hex[:20]}")
         state = self._session(session_id)
@@ -4620,8 +4723,11 @@ class AgentChatGateway:
             # per-task admission envelope. Prior turn consumption must not leave
             # effective remaining at 0 for this session's next message.
             self._stack.context_cost_governor.ensure_admission_budget()
+            retention_metrics = self._workspaces.run_retention_pass()
             state = self._session(session_id)
+            state["_last_retention_metrics"] = retention_metrics
             conversation_id = str(state.get("conversation_id") or session_id)
+
             state["_turn_record"] = turn_record
             state["_turn_store"] = turn_store
             state["_user_message_id"] = user_message_id
@@ -4879,8 +4985,12 @@ class AgentChatGateway:
                     payload={
                         "route": "unsupported",
                         "error_code": getattr(exc, "code", "") or "entry_route_invalid",
+                        "phase": getattr(exc, "phase", "entry_route"),
+                        "provider_call_executed": getattr(exc, "provider_call_executed", False),
+                        "diagnostic_details": getattr(exc, "details", {}),
                     },
                 )
+
             else:
                 record_current(
                     "gateway.entry_route",

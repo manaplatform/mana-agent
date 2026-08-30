@@ -13,6 +13,7 @@ from .chat_analyze_command import (
     handle_analyze_command,
     is_analyze_command,
 )
+from mana_agent.config.user_config import resolve_local_user_id
 from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
     AutoChatSessionState,
@@ -46,9 +47,9 @@ from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup
 from mana_agent.skills.chat import ChatSkillCoordinator
 from mana_agent.connectors.browser.session import BrowserSessionManager
-from mana_agent.config.user_config import resolve_local_user_id
-from mana_agent.gateway import AgentChatGateway, ChatGatewayConfig
+from mana_agent.gateway import AgentChatGateway, ChatGatewayConfig, ShutdownCoordinator
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+
 from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
 
 
@@ -947,7 +948,11 @@ def chat(
         context_cost_governor=stack.context_cost_governor,
     )
     gateway.create_session(frontend="cli", session_id=chat_ui_state.session_id)
+    shutdown_coordinator = ShutdownCoordinator(gateway=gateway)
+    shutdown_coordinator.register_session(chat_ui_state.session_id)
+    shutdown_coordinator.install_signal_handlers()
     skill_coordinator = ChatSkillCoordinator()
+
     chat_skill_context = skill_coordinator.initialize_session(root)
     if not skill_coordinator.config.chat_enabled:
         chat_skill_context.enabled = False
@@ -2057,6 +2062,7 @@ def chat(
             except (EOFError, KeyboardInterrupt):
                 console.print("\nExiting chat.")
                 logger.info("Chat session ended by user interrupt/EOF")
+                gateway.request_shutdown(source="ctrl_c", session_id=chat_ui_state.session_id)
                 break
 
             # Announce background-index completion once, so the user knows when
@@ -2084,7 +2090,9 @@ def chat(
             if question.lower() in {"exit", "quit", "/exit", "/quit"}:
                 console.print("Goodbye!")
                 logger.info("Chat session ended by user command", extra={"command": question.lower()})
+                gateway.request_shutdown(source="exit", session_id=chat_ui_state.session_id)
                 break
+
             if question.lower() == "/clear":
                 console.clear()
                 console.print("[green]Chat history cleared. Session preserved.[/green]")
@@ -3807,6 +3815,12 @@ def chat(
                 continue
     finally:
         set_active_chat_ui_state(None)
+        if "shutdown_coordinator" in locals() and shutdown_coordinator is not None:
+            try:
+                shutdown_coordinator.restore_signal_handlers()
+                shutdown_coordinator.unregister_session(chat_ui_state.session_id)
+            except Exception:
+                pass
         gateway.close_session(chat_ui_state.session_id)
         if tool_worker_client is not None:
             stop = getattr(tool_worker_client, "stop", None)
@@ -3816,5 +3830,6 @@ def chat(
             tmp_root.cleanup()
         if tmp_base is not None:
             tmp_base.cleanup()
+
     if single_shot_noninteractive and single_shot_exit_code:
         raise typer.Exit(code=int(single_shot_exit_code))

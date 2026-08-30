@@ -2,7 +2,51 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-08-30
+
+- Fixed `entry_route` Decision Validation and Prompt Guidance for `memory_task_id`:
+  - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to explicitly declare that `memory_task_id` must be empty string `""` for all routes except `memory`, preventing models from incorrectly populating task IDs on non-memory routes.
+  - Added bounded retry correction rules in `_routing_correction` for all `memory_task_id` validation error variants (`memory_task_id is only valid for the memory route`, `memory_task_id is only valid for private capsule retrieval`, `private memory retrieval requires a selected task ID`, and `memory route selected a task that was not offered`).
+  - Updated `EntryRouteContext.to_dict()` to only serialize `memory_task_candidates` when `memory_capsules_enabled=True`, avoiding unselectable candidate pollution in prompt payloads for legacy or non-capsule environments.
+  - Added unit and regression tests in `tests/gateway/test_entry_routing.py`.
+  - User verification required: `pytest tests/gateway/test_entry_routing.py -v`.
+
+
+
+- Fixed Active Task Cancellation on Ctrl+C and Exit:
+  - Introduced authoritative `ShutdownCoordinator` in `src/mana_agent/gateway/shutdown.py` managing signal handlers (`SIGINT`, `SIGTERM`), double-interrupt safeguards, and interactive session shutdown coordination.
+  - Implemented single authoritative shutdown sequence across runtime: `shutdown requested -> mark shutting_down -> stop accepting new tasks -> identify active task/execution -> request cancellation -> propagate to provider/worker/subagents/tools -> persist terminal task state -> cancel pending retries/timers -> shutdown executors/workers -> close runtime resources -> exit process`.
+  - Updated `ExecutionSupervisor.cancel` to accept cancellation source (`"ctrl_c" | "exit" | "sigterm"`), set `cancellation_source` on `TaskRecord`, populate structured `EscrowResult` payload, enforce write-once terminal result invariants, and emit `task.cancelled`.
+  - Added `QueueManager.cancel_task_jobs` to transition all queued and in-flight jobs belonging to a cancelled task to `QueueJobStatus.CANCELLED`.
+  - Enhanced `CodexCodingAgentShim.cancel` to track active provider backends and invoke `await backend.cancel(task_id)` / `client.interrupt()` upon task cancellation while emitting `provider.cancellation.requested`.
+  - Updated `LaneCoordinator.cancel_task` and `LaneCoordinator.cancel_tree` to emit `task.cancellation.requested` with proper `lane_id` context and propagate cancellation to execution supervisor without double-emitting.
+  - Updated `AgentChatGateway` with `request_shutdown`, `cancel_active`, `_shutting_down` check rejecting incoming turns on shutdown, and automated active task cancellation in `close_session`.
+  - Integrated `ShutdownCoordinator` into CLI (`src/mana_agent/commands/chat_cli.py`) and TUI (`src/mana_agent/tui/app.py`) for graceful shutdown on `Ctrl+C`, `EOFError`, `exit`, `quit`, and TUI unmount.
+  - Added comprehensive regression and integration test suite in `tests/gateway/test_task_cancellation_shutdown.py`.
+  - User verification required: `pytest tests/gateway/test_task_cancellation_shutdown.py tests/gateway/test_chat_gateway.py tests/gateway/test_lane_coordinator.py tests/gateway/test_context_budget_retention.py -v`.
+
+
+- Fixed Execution Supervisor `lease_renewal` Timing and Test Renewal Race Condition:
+  - Extracted core renewal step logic into `_step()` within `ExecutionSupervisor.lease_renewal` to ensure consistent lease validation and heartbeat execution.
+  - Executed a final `_step()` renewal in `finally` upon exiting the `lease_renewal` context manager after joining the background worker thread when no prior failure occurred.
+  - Ensured operations and simulated-clock unit tests with fast iterations reliably renew leases at the completion timestamp without relying exclusively on asynchronous thread scheduling intervals.
+  - User verification required: `pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_codex_interruption_recovery.py -v`.
+
+- Fixed Context Budget Blocking and Added Durable Workspace/Repository Retention:
+  - Traced and bounded the complete context construction path before `entry_route` (conversation history, routing history, supervisor tasks, workspace records, repository metadata, execution traces, provider events, logs, checkpoints, evidence, tool results).
+  - Implemented `ContextCompactor` in `src/mana_agent/gateway/context_compactor.py` providing a mandatory multi-tier context reduction pass (`relevance filtering -> deduplication -> compaction -> bounded routing capsule -> budget reservation -> entry_route`) before returning `context_budget_blocked`.
+  - Strictly separated operational logs from model context, ensuring raw log dumps and debug traces remain available on disk for diagnostics but never enter model routing prompts (`logs_excluded_tokens` tracked).
+  - Implemented durable retention classes (`KEEP`, `COMPACT`, `DELETE`), `RetentionPolicy`, and `ReferenceAwareGC` in `src/mana_agent/workspaces/retention.py` to safely prune orphaned temporary workspaces, compact excess completed tasks into `TombstoneRecord`s, enforce single canonical repository identities, and roll over oversized diagnostic logs.
+  - Ensured workspaces, executions, and tasks are protected by reference-aware safety checks (never deleted if an active task, execution, checkpoint, or pending recovery references them).
+  - Reserved context space for the current user request, routing response, and system prompt before allocating remaining capacity to historical recovery context.
+  - Enhanced `EntryRoutingError` and `ChatTurnResult` on pre-provider budget blocks to preserve `code="context_budget_blocked"`, record `phase="entry_route"`, explicitly declare `provider_call_executed=False`, and provide structured diagnostic details (`context_limit`, `required_tokens`, `deficit`, `tokens_by_category`, `remaining_oversized_categories`).
+  - Added configurable retention controls to `Settings` in `src/mana_agent/config/settings.py`.
+  - Added full context compaction and retention metrics: `raw_context_tokens`, `compacted_context_tokens`, `context_tokens_saved`, `logs_excluded_tokens`, `stale_records_pruned`, `workspace_records_pruned`, `repository_records_compacted`, `routing_context_deficit_before_compaction`, `routing_context_deficit_after_compaction`.
+  - Added regression test suites in `tests/gateway/test_context_budget_retention.py` and `tests/test_workspace_retention.py`.
+  - User verification required: `pytest tests/gateway/test_context_budget_retention.py tests/test_workspace_retention.py tests/gateway/test_entry_routing.py tests/gateway/test_chat_gateway.py tests/test_workspaces.py -q`.
+
 ## 2026-08-29
+
 
 - Fixed Coding Agent Lifecycle Events, Scheduling Observability, and Event Normalization:
   - Added explicit lifecycle timestamps (`task_created_at`, `scheduled_at`, `worker_claimed_at`, `provider_started_at`, `provider_completed_at`, `task_completed_at`) and separated duration breakdown metrics (`queue_delay_ms`, `worker_acquisition_delay_ms`, `provider_startup_delay_ms`, `provider_execution_time_ms`, `finalization_time_ms`, `total_task_duration_ms`) across `CodingTask`, `CodingTaskResult`, `LaneExecution`, `TaskRecord`, `TaskBoardItem`, `QueueJob`, and `AgentEvent`.
