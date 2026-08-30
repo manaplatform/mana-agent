@@ -4,6 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-30
 
+- Fixed structured output model decision failures for reasoning models and OpenAI-compatible endpoints:
+  - Updated `extract_model_text` in `src/mana_agent/utils/text.py` to strip XML-style reasoning and thinking tags (`<think>`, `<thought>`, `<reasoning>`, `<thought_process>`) so reasoning output does not corrupt extracted JSON decision payloads.
+  - Updated `CheckpointResumeDecider.decide` in `src/mana_agent/gateway/checkpoint_resume.py` to catch structured output parser errors (e.g. `OutputParserException` when `parsed: None` / `refusal: None` is returned) and empty responses from reasoning models (e.g. MiniMax-M3, DeepSeek-R1, OpenRouter/vLLM) and retry direct model invocation (`self.llm.invoke`) before failing.
+  - Added `model_validator` normalization in `CheckpointResumeOutput` and `FollowupClassificationOutput` to safely accept aliased or omitted `reason` fields (e.g., `rationale`, `explanation`, `justification`, `thought`) and generate descriptive non-empty fallbacks based on the model's selected action/category, preventing Pydantic `Field required` missing validation errors.
+  - Applied robust structured output fallback to direct prompt invocation across `src/mana_agent/gateway/followup_classifier.py`, `src/mana_agent/gateway/entry_routing.py`, `src/mana_agent/gateway/feature_integration.py`, `src/mana_agent/execution_supervisor/budget_decision.py`, `src/mana_agent/multi_agent/runtime/multi_task_orchestrator.py`, `src/mana_agent/multi_agent/agents/main_agent.py`, and `src/mana_agent/commands/cli_internal.py`.
+  - Maintained strict model-decision-only execution policy and schema validation: if direct invocation also fails or produces unparseable/invalid output, workflows halt safely with clear actionable errors without falling back to heuristic actions.
+  - Added regression test suites in `tests/gateway/test_checkpoint_resume.py` and `tests/gateway/test_followup_classifier.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
 - Fixed `entry_route` Decision Validation and Prompt Guidance for `memory_task_id`:
   - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to explicitly declare that `memory_task_id` must be empty string `""` for all routes except `memory`, preventing models from incorrectly populating task IDs on non-memory routes.
   - Added bounded retry correction rules in `_routing_correction` for all `memory_task_id` validation error variants (`memory_task_id is only valid for the memory route`, `memory_task_id is only valid for private capsule retrieval`, `private memory retrieval requires a selected task ID`, and `memory route selected a task that was not offered`).

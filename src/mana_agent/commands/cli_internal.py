@@ -1266,16 +1266,22 @@ class _ConfiguredSkillDraftGenerator:
                 "Model decision failed: skill proposal generation. "
                 f"No fallback action was executed. Reason: {exc}"
             ) from exc
-        self.model = create_chat_model(
+        from mana_agent.utils.text import extract_model_text
+
+        self.llm = create_chat_model(
             api_key=connection.api_key,
             model=settings.openai_chat_model,
             base_url=connection.base_url,
             provider=connection.provider,
             default_headers=connection.headers,
             temperature=0,
-        ).with_structured_output(SkillDraft)
+        )
+        structured = getattr(self.llm, "with_structured_output", None)
+        self.model = structured(SkillDraft) if callable(structured) else None
 
     def generate(self, experience, decision):
+        from mana_agent.utils.text import extract_model_text
+
         prompt = (
             "You are Mana-Agent's trusted skill-creator. Produce a complete generalized skill draft from recorded task evidence. "
             "Do not copy repository-specific paths, line numbers, secrets, credentials, or private data. State bounded tools, permissions, safety constraints, deterministic verification, and failure recovery. "
@@ -1283,8 +1289,20 @@ class _ConfiguredSkillDraftGenerator:
             f"Eligibility decision:\n{decision.model_dump_json(indent=2)}\n\n"
             f"Recorded experience:\n{experience.model_dump_json(indent=2)}"
         )
-        result = self.model.invoke(prompt)
-        return result if isinstance(result, SkillDraft) else SkillDraft.model_validate(result)
+        if self.model is not None:
+            try:
+                result = self.model.invoke(prompt)
+                return result if isinstance(result, SkillDraft) else SkillDraft.model_validate(result)
+            except Exception:
+                pass
+        raw = self.llm.invoke(prompt)
+        text = extract_model_text(getattr(raw, "content", raw))
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end >= start:
+            text = text[start : end + 1]
+        return SkillDraft.model_validate_json(text)
 
 
 @skill_app.command("create-from-session")

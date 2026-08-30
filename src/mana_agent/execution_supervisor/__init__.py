@@ -2,7 +2,7 @@
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.budget_decision import (
-    BudgetOverrunDecider,
+    BudgetOverrunFinalizationDecider,
     BudgetOverrunDecisionError,
 )
 from mana_agent.execution_supervisor.models import (
@@ -46,6 +46,6 @@ __all__ = [
     "BudgetOverrunFinalizationDecision",
     "BudgetForecast",
     "BudgetRevision",
-    "BudgetOverrunDecider",
+    "BudgetOverrunFinalizationDecider",
     "BudgetOverrunDecisionError",
 ]

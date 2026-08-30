@@ -12,6 +12,7 @@ from mana_agent.execution_supervisor.models import (
     ExecutionState,
     TaskRecord,
 )
+from mana_agent.utils.text import extract_model_text
 
 
 class BudgetOverrunDecisionError(RuntimeError):
@@ -38,13 +39,31 @@ safe_to_continue=true on both the outer decision and the nested recovery decisio
 """
 
 
-class BudgetOverrunDecider:
+def _coerce_budget_decision(response: Any) -> BudgetOverrunFinalizationDecision:
+    if isinstance(response, BudgetOverrunFinalizationDecision):
+        return response
+    if isinstance(response, dict):
+        return BudgetOverrunFinalizationDecision.model_validate(response)
+    raw = getattr(response, "content", response)
+    text = extract_model_text(raw)
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start : end + 1]
+    return BudgetOverrunFinalizationDecision.model_validate_json(text)
+
+
+class BudgetOverrunFinalizationDecider:
     def __init__(self, llm: Any) -> None:
         self.llm = llm
 
-    def decide(self, task: TaskRecord, *, result_payload: dict[str, Any]) -> BudgetOverrunFinalizationDecision:
-        if task.state is not ExecutionState.PENDING_BUDGET_DECISION:
-            raise BudgetOverrunDecisionError("task is not awaiting a budget-overrun decision")
+    def decide(
+        self,
+        *,
+        task: TaskRecord,
+        result_payload: dict[str, Any],
+    ) -> BudgetOverrunFinalizationDecision:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise BudgetOverrunDecisionError(
                 "Model decision failed: budget_overrun_finalization. No result was finalized. "
@@ -52,9 +71,8 @@ class BudgetOverrunDecider:
             )
         payload = {
             "task_id": task.task_id,
-            "attempt_id": task.attempt_id,
-            "result_id": task.result_id,
-            "budget_overrun": task.budget_overrun,
+            "session_id": task.session_id,
+            "state": task.state.value if isinstance(task.state, ExecutionState) else str(task.state),
             "token_budget": task.token_budget,
             "token_usage": task.token_usage,
             "monetary_budget": task.monetary_budget,
@@ -74,18 +92,26 @@ class BudgetOverrunDecider:
         ]
         try:
             structured = getattr(self.llm, "with_structured_output", None)
+            response = None
+            structured_error = None
             if callable(structured):
-                response = structured(
-                    BudgetOverrunFinalizationDecision, method="json_schema", strict=True
-                ).invoke(messages)
-                return BudgetOverrunFinalizationDecision.model_validate(response)
-            response = self.llm.invoke(messages)
-            return BudgetOverrunFinalizationDecision.model_validate_json(
-                str(getattr(response, "content", response))
-            )
+                try:
+                    response = structured(
+                        BudgetOverrunFinalizationDecision, method="json_schema", strict=True
+                    ).invoke(messages)
+                except Exception as exc:
+                    structured_error = exc
+            if response is None:
+                response = self.llm.invoke(messages)
+            try:
+                return _coerce_budget_decision(response)
+            except Exception as coerce_exc:
+                if callable(structured) and structured_error is None:
+                    direct_response = self.llm.invoke(messages)
+                    return _coerce_budget_decision(direct_response)
+                raise coerce_exc
         except Exception as exc:
             raise BudgetOverrunDecisionError(
                 "Model decision failed: budget_overrun_finalization. No result was finalized. "
                 f"Reason: {exc}"
             ) from exc
-

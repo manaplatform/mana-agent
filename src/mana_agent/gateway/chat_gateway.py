@@ -158,7 +158,7 @@ from mana_agent.execution_supervisor.models import (
     SideEffectClassification,
     TERMINAL_STATES,
 )
-from mana_agent.execution_supervisor.budget_decision import BudgetOverrunDecider
+from mana_agent.execution_supervisor.budget_decision import BudgetOverrunFinalizationDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
 from mana_agent.human_inbox.models import (
     AgentInboxObservation,
@@ -4410,8 +4410,8 @@ class AgentChatGateway:
             step_id=f"budget-overrun-finalization:{uuid.uuid4().hex}",
             execution_kind="budget_overrun_finalization",
         )
-        decision = BudgetOverrunDecider(self._entry_router.llm).decide(
-            task, result_payload=redact_secrets(dict(result.payload))
+        decision = BudgetOverrunFinalizationDecider(self._entry_router.llm).decide(
+            task=task, result_payload=redact_secrets(dict(result.payload))
         )
         execution = self._lane_coordinator.finalize_budget_overrun(decision)
         return {

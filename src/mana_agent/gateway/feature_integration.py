@@ -190,11 +190,23 @@ class FeatureIntegrationDecisionProvider:
 
         try:
             structured = getattr(self.llm, "with_structured_output", None)
+            response = None
+            structured_error = None
             if callable(structured):
-                response = structured(WiringDecision, method="json_schema", strict=True).invoke(messages)
-            else:
+                try:
+                    response = structured(WiringDecision, method="json_schema", strict=True).invoke(messages)
+                except Exception as exc:
+                    structured_error = exc
+            if response is None:
                 response = self.llm.invoke(messages)
-            decision = _coerce_wiring_decision(response)
+            try:
+                decision = _coerce_wiring_decision(response)
+            except Exception as coerce_exc:
+                if callable(structured) and structured_error is None:
+                    direct_response = self.llm.invoke(messages)
+                    decision = _coerce_wiring_decision(direct_response)
+                else:
+                    raise coerce_exc
             return decision
         except Exception:
             return None

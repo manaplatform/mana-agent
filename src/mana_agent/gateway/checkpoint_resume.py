@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
@@ -67,14 +67,44 @@ class CheckpointResumeOutput(BaseModel):
     checkpoint_still_valid: bool
     side_effects_safe_to_repeat: bool
     safe_to_continue: bool
-    reason: str = Field(min_length=1)
+    reason: str = Field(default="", min_length=1)
 
-    @field_validator("reason", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _normalize_reason(cls, v: Any) -> str:
-        if v is None:
-            return ""
-        return str(v).strip()
+    def _normalize_payload(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            if not data.get("reason"):
+                for alias in (
+                    "rationale",
+                    "explanation",
+                    "justification",
+                    "thought",
+                    "summary",
+                    "details",
+                    "why",
+                ):
+                    if data.get(alias):
+                        data["reason"] = str(data.pop(alias)).strip()
+                        break
+            for key in (
+                "rationale",
+                "explanation",
+                "justification",
+                "thought",
+                "summary",
+                "details",
+                "why",
+                "thinking",
+                "reasoning",
+            ):
+                data.pop(key, None)
+            if not data.get("reason") or not str(data.get("reason")).strip():
+                action = data.get("action", "start_fresh")
+                data["reason"] = f"Model decision selected {action}"
+            else:
+                data["reason"] = str(data["reason"]).strip()
+        return data
 
 
 
@@ -234,13 +264,32 @@ class CheckpointResumeDecider:
         invoke_kwargs = {"max_tokens": CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS}
         try:
             structured = getattr(self.llm, "with_structured_output", None)
+            response = None
+            structured_error = None
             if callable(structured):
-                response = structured(
-                    CheckpointResumeOutput, method="json_schema", strict=True
-                ).invoke(messages, **invoke_kwargs)
-            else:
-                response = self.llm.invoke(messages, **invoke_kwargs)
-            output = _coerce_checkpoint_output(response)
+                try:
+                    response = structured(
+                        CheckpointResumeOutput, method="json_schema", strict=True
+                    ).invoke(messages, **invoke_kwargs)
+                except ContextBudgetExceeded:
+                    raise
+                except Exception as exc:
+                    structured_error = exc
+            if response is None:
+                try:
+                    response = self.llm.invoke(messages, **invoke_kwargs)
+                except Exception as exc:
+                    if structured_error is not None and "length" in str(structured_error).lower():
+                        raise structured_error from exc
+                    raise
+            try:
+                output = _coerce_checkpoint_output(response)
+            except Exception as coerce_exc:
+                if callable(structured) and structured_error is None:
+                    direct_response = self.llm.invoke(messages, **invoke_kwargs)
+                    output = _coerce_checkpoint_output(direct_response)
+                else:
+                    raise coerce_exc
         except ContextBudgetExceeded as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
