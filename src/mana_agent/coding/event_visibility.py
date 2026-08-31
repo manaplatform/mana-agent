@@ -64,6 +64,8 @@ _PROGRESS_TYPES = frozenset(
         "turn.cancelled",
         "command.started",
         "command.completed",
+        "command.output",
+        "command.delta",
         "file.changed",
         "patch.applied",
         "test.started",
@@ -195,9 +197,6 @@ def visibility_for_semantic_kind(
         return EventVisibility.INTERNAL
     if kind is EventSemanticKind.PROVIDER and et not in {"provider.warning"}:
         return EventVisibility.INTERNAL
-    # Raw command stdout is internal; command started/completed titles are progress.
-    if kind is EventSemanticKind.COMMAND and et.endswith(".output"):
-        return EventVisibility.INTERNAL
     if et in _TERMINAL_TYPES and et != "turn.started":
         # turn.completed is both progress marker and contributes to terminal assembly;
         # progress is enough for live UI — final answer is separate.
@@ -265,7 +264,17 @@ def progress_event_payload(event: Any) -> dict[str, Any]:
             "model": raw.get("model") or "",
             "thread_id": raw.get("thread_id") or "",
             "turn_id": raw.get("turn_id") or "",
+            "output_preview": "",
         }
+    output_preview = ""
+    if kind in {
+        EventSemanticKind.COMMAND.value,
+        EventSemanticKind.TOOL_EXECUTION.value,
+        EventSemanticKind.VERIFICATION.value,
+    }:
+        raw_preview = raw.get("output_preview") or raw.get("summary") or ""
+        if raw_preview:
+            output_preview = _safe_output_preview(str(raw_preview))
     safe = {
         "event_id": raw.get("event_id"),
         "event_type": raw.get("event_type"),
@@ -285,9 +294,9 @@ def progress_event_payload(event: Any) -> dict[str, Any]:
         "thread_id": raw.get("thread_id") or "",
         "turn_id": raw.get("turn_id") or "",
         "error": raw.get("error") or "",
+        "output_preview": output_preview,
         "token_usage": raw.get("token_usage"),
     }
-    # Drop raw payload / output previews that often carry model or tool dumps.
     return safe
 
 
@@ -301,6 +310,13 @@ def _safe_progress_text(text: str, *, kind: str) -> str:
     cleaned = str(text or "").strip()
     if len(cleaned) > 240:
         return cleaned[:240] + "…"
+    return cleaned
+
+
+def _safe_output_preview(text: str, max_chars: int = 4000) -> str:
+    cleaned = str(text or "").strip()
+    if len(cleaned) > max_chars:
+        return cleaned[:max_chars] + "\n... (output truncated)"
     return cleaned
 
 

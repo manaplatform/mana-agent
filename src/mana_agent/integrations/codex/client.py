@@ -164,6 +164,17 @@ class AsyncCodexAppServer:
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         await self._write({"jsonrpc": "2.0", "method": method, "params": params})
 
+    def clear_notifications(self, thread_id: str) -> None:
+        """Discard any unconsumed queued notifications for thread_id."""
+        key = str(thread_id)
+        if key in self._notifications:
+            queue = self._notifications[key]
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
     async def notifications(self, thread_id: str) -> AsyncIterator[dict[str, Any]]:
         queue = self._notifications[str(thread_id)]
         while True:
@@ -181,6 +192,12 @@ class AsyncCodexAppServer:
         timeout_seconds: float = 2.0,
     ) -> CodexCancellationOutcome:
         """Attempt bounded interruption of an in-flight turn with an explicit typed outcome."""
+        logger.info(
+            "codex_client.interrupt_requested thread_id=%s turn_id=%s timeout=%.2f",
+            thread_id,
+            turn_id,
+            timeout_seconds,
+        )
         if not self.running or self._process is None:
             return CodexCancellationOutcome(
                 acknowledged=False,
@@ -195,6 +212,11 @@ class AsyncCodexAppServer:
                 {"threadId": thread_id, "turnId": turn_id},
                 timeout_seconds=timeout_seconds,
             )
+            logger.info(
+                "codex_client.interrupt_acknowledged thread_id=%s turn_id=%s",
+                thread_id,
+                turn_id,
+            )
             return CodexCancellationOutcome(
                 acknowledged=True,
                 status="acknowledged",
@@ -203,10 +225,10 @@ class AsyncCodexAppServer:
             )
         except CodexTimeoutError as exc:
             logger.warning(
-                "Codex turn/interrupt timed out after %.2fs for thread %s turn %s",
-                timeout_seconds,
+                "codex_client.interrupt_timeout thread_id=%s turn_id=%s error=%s",
                 thread_id,
                 turn_id,
+                exc,
             )
             return CodexCancellationOutcome(
                 acknowledged=False,
@@ -217,7 +239,7 @@ class AsyncCodexAppServer:
             )
         except Exception as exc:
             logger.warning(
-                "Codex turn/interrupt failed for thread %s turn %s: %s",
+                "codex_client.interrupt_failed thread_id=%s turn_id=%s error=%s",
                 thread_id,
                 turn_id,
                 exc,
@@ -256,6 +278,7 @@ class AsyncCodexAppServer:
     async def close(self, *, wait_timeout: float = 1.0) -> None:
         process = self._process
         self._process = None
+        logger.info("codex_client.close_requested pid=%s", getattr(process, "pid", None) if process else None)
         if process is not None and process.returncode is None:
             try:
                 process.terminate()
@@ -279,6 +302,13 @@ class AsyncCodexAppServer:
             if not future.done():
                 future.set_exception(error)
         self._pending.clear()
+        for queue in self._notifications.values():
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        self._notifications.clear()
 
     async def _write(self, payload: dict[str, Any]) -> None:
         process = self._process
@@ -293,21 +323,25 @@ class AsyncCodexAppServer:
         process = self._process
         if process is None or process.stdout is None:
             return
-        while line := await process.stdout.readline():
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            payload = self._sanitize_payload(payload)
-            if "id" in payload and ("result" in payload or "error" in payload):
-                self._resolve_response(payload)
-                continue
-            method = str(payload.get("method") or "")
-            if method:
-                thread_id = self._notification_thread_id(payload)
-                await self._notifications[thread_id].put(payload)
+        logger.info("codex_client.stdout_reader_attached pid=%s", getattr(process, "pid", None))
+        try:
+            while line := await process.stdout.readline():
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                payload = self._sanitize_payload(payload)
+                if "id" in payload and ("result" in payload or "error" in payload):
+                    self._resolve_response(payload)
+                    continue
+                method = str(payload.get("method") or "")
+                if method:
+                    thread_id = self._notification_thread_id(payload)
+                    await self._notifications[thread_id].put(payload)
+        finally:
+            logger.info("codex_client.stdout_reader_eof pid=%s", getattr(process, "pid", None) if process else None)
         if process.returncode is None:
             await process.wait()
         detail = self._stderr[-1] if self._stderr else "process exited"

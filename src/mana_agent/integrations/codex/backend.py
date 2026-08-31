@@ -282,61 +282,105 @@ class CodexCodingBackend:
                         "provider_started_at": provider_started_at.isoformat(),
                     },
                 )
+                first_output_at: datetime | None = None
+                last_output_at: datetime | None = None
+                output_chunks_count: int = 0
+                logger.info(
+                    "codex_stream.attached task_id=%s thread_id=%s turn_id=%s",
+                    task.task_id,
+                    thread_id,
+                    turn_id,
+                )
                 iterator = self._client.notifications(thread_id).__aiter__()
                 deadline = asyncio.get_running_loop().time() + self.settings.task_timeout_seconds
-                while True:
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError
-                    try:
-                        notification = await asyncio.wait_for(anext(iterator), timeout=remaining)
-                    except StopAsyncIteration:
-                        provider_completed_at = datetime.now(timezone.utc)
-                        break
-                    event = adapt_codex_event(
-                        task.task_id,
-                        notification,
-                        sequence=sequence + 1,
-                        model=self.settings.model or "",
-                    )
-                    if event.event_id in seen_event_ids:
-                        continue
-                    seen_event_ids.add(event.event_id)
-                    sequence += 1
-                    notifications.append(notification)
-                    # A provider-level turn/completed notification only means
-                    # Codex has stopped streaming. Mana still has to parse the
-                    # trace, verify the repository outcome, and publish the
-                    # validated terminal answer. Keep the UI in an explicit
-                    # finalizing state until that work is done.
-                    if event.event_type == "turn.completed":
-                        event = event.model_copy(
-                            update={
-                                "event_type": "turn.finalizing",
-                                "status": "running",
-                                "title": "Codex response received — preparing result",
-                            }
-                        )
-                    if event.token_usage:
-                        last_usage = dict(event.token_usage)
-                        hard_reason = self.context_cost_governor.active_hard_limit_reason(
-                            last_usage,
-                            provider=self.settings.provider,
-                            model=self.settings.model or "app-server-default",
-                            context_window=(int(last_usage["context_window"]) if last_usage.get("context_window") is not None else None),
-                        ) if self.context_cost_governor is not None else None
-                        if hard_reason:
-                            await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
-                            raise CodexExecutionError(
-                                f"Codex turn interrupted because the enforce-mode {hard_reason} was reached."
+                try:
+                    while True:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        try:
+                            notification = await asyncio.wait_for(anext(iterator), timeout=remaining)
+                        except StopAsyncIteration:
+                            provider_completed_at = datetime.now(timezone.utc)
+                            logger.info(
+                                "codex_stream.completed task_id=%s thread_id=%s turn_id=%s output_chunks=%d",
+                                task.task_id,
+                                thread_id,
+                                turn_id,
+                                output_chunks_count,
                             )
-                    if event.event_type == "warning" and "approval" in str(notification.get("method") or "").lower():
-                        await self._client.deny_server_request(notification)
-                        raise CodexExecutionError(
-                            "Codex requested approval. Mana-Agent denied the request and did not elevate permissions."
+                            break
+                        event = adapt_codex_event(
+                            task.task_id,
+                            notification,
+                            sequence=sequence + 1,
+                            model=self.settings.model or "",
                         )
-                    yield event
+                        if event.event_id in seen_event_ids:
+                            continue
+                        seen_event_ids.add(event.event_id)
+                        sequence += 1
+                        notifications.append(notification)
+                        if event.output_preview or event.event_type.startswith("command.output"):
+                            if first_output_at is None:
+                                first_output_at = datetime.now(timezone.utc)
+                                logger.info(
+                                    "codex_stream.first_output task_id=%s thread_id=%s turn_id=%s event_id=%s",
+                                    task.task_id,
+                                    thread_id,
+                                    turn_id,
+                                    event.event_id,
+                                )
+                            last_output_at = datetime.now(timezone.utc)
+                            output_chunks_count += 1
+                        # A provider-level turn/completed notification only means
+                        # Codex has stopped streaming. Mana still has to parse the
+                        # trace, verify the repository outcome, and publish the
+                        # validated terminal answer. Keep the UI in an explicit
+                        # finalizing state until that work is done.
+                        if event.event_type == "turn.completed":
+                            event = event.model_copy(
+                                update={
+                                    "event_type": "turn.finalizing",
+                                    "status": "running",
+                                    "title": "Codex response received — preparing result",
+                                }
+                            )
+                        if event.token_usage:
+                            last_usage = dict(event.token_usage)
+                            hard_reason = self.context_cost_governor.active_hard_limit_reason(
+                                last_usage,
+                                provider=self.settings.provider,
+                                model=self.settings.model or "app-server-default",
+                                context_window=(int(last_usage["context_window"]) if last_usage.get("context_window") is not None else None),
+                            ) if self.context_cost_governor is not None else None
+                            if hard_reason:
+                                await self._client.interrupt(thread_id=thread_id, turn_id=turn_id)
+                                raise CodexExecutionError(
+                                    f"Codex turn interrupted because the enforce-mode {hard_reason} was reached."
+                                )
+                        if event.event_type == "warning" and "approval" in str(notification.get("method") or "").lower():
+                            await self._client.deny_server_request(notification)
+                            raise CodexExecutionError(
+                                "Codex requested approval. Mana-Agent denied the request and did not elevate permissions."
+                            )
+                        yield event
+                finally:
+                    logger.info(
+                        "codex_stream.detached task_id=%s thread_id=%s turn_id=%s output_chunks=%d",
+                        task.task_id,
+                        thread_id,
+                        turn_id,
+                        output_chunks_count,
+                    )
             except (asyncio.TimeoutError, CodexTimeoutError) as exc:
+                logger.warning(
+                    "codex_stream.timeout task_id=%s thread_id=%s turn_id=%s output_chunks=%d",
+                    task.task_id,
+                    thread_id,
+                    turn_id,
+                    output_chunks_count,
+                )
                 if provider_completed_at is None:
                     provider_completed_at = datetime.now(timezone.utc)
                 if thread_id and turn_id:
@@ -362,6 +406,14 @@ class CodexCodingBackend:
                     payload={"error_code": err_code, "error_category": "timeout"},
                 )
             except CodexInterruptionError as exc:
+                logger.warning(
+                    "codex_stream.interrupted task_id=%s thread_id=%s turn_id=%s reason=%s output_chunks=%d",
+                    task.task_id,
+                    thread_id,
+                    turn_id,
+                    exc.reason,
+                    output_chunks_count,
+                )
                 if provider_completed_at is None:
                     provider_completed_at = datetime.now(timezone.utc)
                 if thread_id and turn_id:

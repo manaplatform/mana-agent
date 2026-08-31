@@ -4,7 +4,15 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-31
 
-- Fixed `/new` conversation reset and Codex runtime lifecycle management:
+- Fixed Codex console-output loss during command execution and timeout/retry lifecycles:
+  - Updated `EventVisibility` in `src/mana_agent/coding/event_visibility.py` so that `command.output` and `command.delta` events are classified as `EventVisibility.PROGRESS` rather than `INTERNAL`, ensuring live stdout/stderr streams are published to console and UI subscribers.
+  - Updated `progress_event_payload` in `src/mana_agent/coding/event_visibility.py` to preserve sanitized `output_preview` on `COMMAND` and `TOOL_EXECUTION` progress events while strictly withholding raw prose for `ASSISTANT_GENERATION` and `REASONING`.
+  - Updated `_emit_event` in `src/mana_agent/integrations/codex/coding_agent_shim.py` to preserve `output_preview` on forwarded `AgentEvent` payloads, and wrapped subscriber notifications in exception handlers with structured diagnostic logging.
+  - Added structured stream diagnostics in `src/mana_agent/integrations/codex/backend.py` (`codex_stream.attached`, `first_output`, `timeout`, `completed`, `detached`) and guaranteed task mapping cleanup via `_active.pop` in `finally`.
+  - Added `clear_notifications` and queue purging on close/interrupt in `AsyncCodexAppServer` (`src/mana_agent/integrations/codex/client.py`) to prevent leftover notifications from contaminating subsequent turns or retries on the same thread.
+  - Maintained strict separation between command `exitCode == 0` (item-level result) and overall turn/task completion (governed by validated turn completion and repository diff evidence).
+  - Added regression test suite `tests/test_codex_console_output_and_timeout.py` covering normal command output streaming, timeout before first output, timeout after partial output, retry after timeout, session `/new` lifecycle, and exit code 0 lifecycle separation.
+  - User verification required: `python -m pytest tests/test_codex_console_output_and_timeout.py tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/gateway/test_codex_session_lifecycle.py tests/gateway/test_codex_interruption_recovery.py -v`.
   - Refactored `AsyncCodexAppServer` in `src/mana_agent/integrations/codex/client.py` to return a typed `CodexCancellationOutcome` from `interrupt()`, enforce bounded grace periods (default 2.0s), and perform deterministic process termination with SIGKILL escalation on close.
   - Updated `CodexCodingBackend` in `src/mana_agent/integrations/codex/backend.py` to return typed cancellation outcomes, force close the app-server on unacknowledged interrupts, and ensure clean deterministic disposal of child processes, tasks, and runtime contexts.
   - Replaced ad-hoc `_run_async()` thread creation in `CodexCodingAgentShim` (`src/mana_agent/integrations/codex/coding_agent_shim.py`) with a dedicated, stable `_CodexRuntimeRunner` event loop, eliminating cross-loop race conditions and unbounded thread joins.

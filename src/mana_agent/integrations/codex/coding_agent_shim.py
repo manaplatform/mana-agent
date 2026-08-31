@@ -834,7 +834,7 @@ class CodexCodingAgentShim:
             # Do not publish assistant generation / reasoning / raw dumps to chat UI.
             return
 
-        safe = progress_event_payload(event)
+        output_preview = str(safe.get("output_preview") or event.output_preview or "")
         # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
         progress = AgentEvent(
             event_id=str(safe.get("event_id") or event.event_id),
@@ -854,36 +854,61 @@ class CodexCodingAgentShim:
             token_usage=event.token_usage,
             model=event.model,
             error=str(safe.get("error") or ""),
-            output_preview="",
+            output_preview=output_preview,
             visibility="progress",
             semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
             payload={},
         )
-        publish_coding_event(progress)
-        if self.session_id and self.repository_id:
-            from mana_agent.services.execution_event_hub import get_execution_event_hub
-
-            get_execution_event_hub().publish(
-                {
-                    **progress.model_dump(mode="json"),
-                    "type": progress.event_type,
-                    "event_id": progress.event_id,
-                    "metadata": {
-                        "visibility": progress.visibility,
-                        "semantic_kind": progress.semantic_kind,
-                    },
-                },
-                conversation_id=self.session_id,
-                execution_id=event.task_id,
-                repository_id=self.repository_id,
-            )
-        if self.event_sink is None:
-            return
-        payload = progress.model_dump(mode="json")
         try:
-            self.event_sink(progress.event_type, payload)
-        except TypeError:
-            self.event_sink(payload)
+            publish_coding_event(progress)
+        except Exception:
+            logger.debug(
+                "codex_shim.publish_coding_event_failed event_id=%s task_id=%s turn_id=%s",
+                progress.event_id,
+                event.task_id,
+                event.turn_id,
+                exc_info=True,
+            )
+        if self.session_id and self.repository_id:
+            try:
+                from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+                get_execution_event_hub().publish(
+                    {
+                        **progress.model_dump(mode="json"),
+                        "type": progress.event_type,
+                        "event_id": progress.event_id,
+                        "metadata": {
+                            "visibility": progress.visibility,
+                            "semantic_kind": progress.semantic_kind,
+                            "output_preview": progress.output_preview,
+                        },
+                    },
+                    conversation_id=self.session_id,
+                    execution_id=event.task_id,
+                    repository_id=self.repository_id,
+                )
+            except Exception:
+                logger.debug(
+                    "codex_shim.execution_event_hub_publish_failed event_id=%s task_id=%s",
+                    progress.event_id,
+                    event.task_id,
+                    exc_info=True,
+                )
+        if self.event_sink is not None:
+            payload = progress.model_dump(mode="json")
+            try:
+                try:
+                    self.event_sink(progress.event_type, payload)
+                except TypeError:
+                    self.event_sink(payload)
+            except Exception:
+                logger.debug(
+                    "codex_shim.event_sink_publish_failed event_id=%s task_id=%s",
+                    progress.event_id,
+                    event.task_id,
+                    exc_info=True,
+                )
 
     def _emit_terminal_result(
         self,
