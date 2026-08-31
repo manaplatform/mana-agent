@@ -453,10 +453,6 @@ class WorkspaceDatabase:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA busy_timeout = 30000;")
-        if str(self.db_path) != ":memory:":
-            conn.execute("PRAGMA journal_mode = WAL;")
-            conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA temp_store = MEMORY;")
         return conn
 
     @contextmanager
@@ -481,6 +477,10 @@ class WorkspaceDatabase:
             conn.close()
 
     def _init_db(self) -> None:
+        if str(self.db_path) != ":memory:":
+            with self.connect() as conn:
+                conn.execute("PRAGMA journal_mode = WAL;")
+                conn.execute("PRAGMA synchronous = NORMAL;")
         with self.transaction() as conn:
             for stmt in SCHEMA_V1_STATEMENTS:
                 conn.execute(stmt)

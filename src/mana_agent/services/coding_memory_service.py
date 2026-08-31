@@ -16,6 +16,8 @@ import json
 import re
 import sqlite3
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,10 +78,15 @@ class CodingMemoryService:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _ensure_schema(self) -> None:
         """Create/upgrade tables needed for flow, turns, tasks, and decisions."""

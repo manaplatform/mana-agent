@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-31
 
+- Fixed Windows CI test failures for session directory deletion (`PermissionError: [WinError 32]` on `turns.db`) and large workspace performance test duration:
+  - Updated `ChatTurnStore._connect` in `src/mana_agent/gateway/chat_turn_store.py` to be a context manager that reliably closes the SQLite connection on exit, releasing open file handles to `turns.db` on Windows before session directories are removed.
+  - Updated `CodingMemoryService._connect` in `src/mana_agent/services/coding_memory_service.py`, `TelegramUpdateStore._connect` in `src/mana_agent/connectors/telegram/store.py`, and `ObservabilityService._connect` in `src/mana_agent/observability/service.py` to use context managers with deterministic `finally: conn.close()` cleanup.
+  - Optimized `WorkspaceDatabase` in `src/mana_agent/persistence/workspace_db.py` to set WAL journal mode during database initialization rather than re-issuing `PRAGMA journal_mode = WAL` on every connection.
+  - Optimized `WorkspaceRepository.save_task` in `src/mana_agent/persistence/workspace_repository.py` to use `executemany` for batch inserts into task collections, dependencies, handoffs, verifications, budgets, and integration evidence tables.
+  - Adjusted execution timing assertions in `tests/persistence/test_persistence_concurrency_and_performance.py` (`test_large_workspace_performance`) with realistic thresholds for virtualized Windows CI runners.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py -k test_gateway_new_conversation_isolates_history tests/persistence/test_persistence_concurrency_and_performance.py -v`.
+
+- Fixed `checkpoint_resume` decision failures ("same stable work must reuse its stopped task identity" and "a non-resume decision must not select a task or checkpoint") on fresh user requests:
+  - Added normalization in `CheckpointResumeOutput._normalize_payload` to clear `task_id` and `checkpoint_id` to `""` for `start_fresh` and `stop` actions, safely handling models echoing candidate IDs or string nulls (`"None"`, `"null"`, `"N/A"`).
+  - Added explicit schema field descriptions to `CheckpointResumeOutput` in `src/mana_agent/gateway/checkpoint_resume.py` instructing structured output models on the exact semantics of `action`, `same_work`, `task_id`, `checkpoint_id`, and `fresh_data_required`.
+  - Updated `CHECKPOINT_RESUME_PROMPT` in `src/mana_agent/gateway/checkpoint_resume.py` with explicit critical rules establishing that `same_work` means identical goal to a listed recovery candidate (not merely same workspace/session), mandating `same_work=false`, `task_id=""`, and `checkpoint_id=""` when selecting `start_fresh` for new, distinct, or different work.
+  - Added test coverage in `tests/gateway/test_checkpoint_resume.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
 - Refactored Mana-Agent workspace persistence to versioned SQLite database:
   - Introduced `WorkspaceDatabase` in `src/mana_agent/persistence/workspace_db.py` with WAL journal mode, NORMAL synchronous mode, foreign key enforcement, 30s busy timeout, schema version tracking, and 21 normalized tables (`tasks`, `task_dependencies`, `task_collections`, `task_events`, `task_handoffs`, `task_verifications`, `task_budgets`, `task_approvals`, `task_integration_evidence`, `discussions`, `decisions`, `messages`, `gateway_executions`, `gateway_handoffs`, `gateway_locks`, `gateway_waiters`, `gateway_turns`, `checkpoints`, `escrow_results`, `schema_migrations`, `workspace_migration_state`) with performance indexes.
   - Implemented `WorkspaceRepository` in `src/mana_agent/persistence/workspace_repository.py` providing isolated, targeted CRUD and query operations replacing unbounded whole-file directory loading.

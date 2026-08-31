@@ -243,99 +243,116 @@ class WorkspaceRepository:
 
             # Collections: delete old and insert fresh
             conn.execute("DELETE FROM task_collections WHERE task_id = ?;", (task.task_id,))
+            col_rows = []
             for col in COLLECTION_FIELDS:
                 items = getattr(task, col, [])
                 if items:
                     for idx, val in enumerate(items):
                         val_str = str(val).strip()
                         if val_str:
-                            conn.execute(
-                                "INSERT INTO task_collections (task_id, collection_type, item_value, sort_order) VALUES (?, ?, ?, ?);",
-                                (task.task_id, col, val_str, idx),
-                            )
+                            col_rows.append((task.task_id, col, val_str, idx))
+            if col_rows:
+                conn.executemany(
+                    "INSERT INTO task_collections (task_id, collection_type, item_value, sort_order) VALUES (?, ?, ?, ?);",
+                    col_rows,
+                )
 
             # Dependencies
             conn.execute("DELETE FROM task_dependencies WHERE task_id = ?;", (task.task_id,))
+            dep_rows = []
             for dep in task.depends_on:
                 dep_str = str(dep).strip()
                 if dep_str:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO task_dependencies (task_id, dependency_task_id, dependency_type) VALUES (?, ?, 'depends_on');",
-                        (task.task_id, dep_str),
-                    )
+                    dep_rows.append((task.task_id, dep_str, "depends_on"))
             for wiring_dep in task.required_wiring_task_ids:
                 w_str = str(wiring_dep).strip()
                 if w_str:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO task_dependencies (task_id, dependency_task_id, dependency_type) VALUES (?, ?, 'required_wiring');",
-                        (task.task_id, w_str),
-                    )
+                    dep_rows.append((task.task_id, w_str, "required_wiring"))
+            if dep_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO task_dependencies (task_id, dependency_task_id, dependency_type) VALUES (?, ?, ?);",
+                    dep_rows,
+                )
 
             # Handoffs
             conn.execute("DELETE FROM task_handoffs WHERE task_id = ?;", (task.task_id,))
-            for handoff in task.handoff_records:
-                conn.execute(
+            if task.handoff_records:
+                conn.executemany(
                     "INSERT INTO task_handoffs (task_id, from_agent_id, to_agent_id, reason, created_at) VALUES (?, ?, ?, ?, ?);",
-                    (task.task_id, handoff.from_agent_id, handoff.to_agent_id, handoff.reason, _dt_to_iso(handoff.created_at)),
+                    [
+                        (task.task_id, handoff.from_agent_id, handoff.to_agent_id, handoff.reason, _dt_to_iso(handoff.created_at))
+                        for handoff in task.handoff_records
+                    ],
                 )
 
             # Verifications
             conn.execute("DELETE FROM task_verifications WHERE task_id = ?;", (task.task_id,))
-            for v in task.verification_results:
-                conn.execute(
+            if task.verification_results:
+                conn.executemany(
                     """
                     INSERT INTO task_verifications (
                         verification_id, task_id, verified_by_agent_id, commands_run,
                         passed, summary, failures, risks, execution_job_ids, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    (
-                        v.verification_id,
-                        task.task_id,
-                        v.verified_by_agent_id,
-                        json.dumps(v.commands_run, ensure_ascii=False),
-                        1 if v.passed else 0,
-                        v.summary,
-                        json.dumps(v.failures, ensure_ascii=False),
-                        json.dumps(v.risks, ensure_ascii=False),
-                        json.dumps(v.execution_job_ids, ensure_ascii=False),
-                        _dt_to_iso(v.created_at),
-                    ),
+                    [
+                        (
+                            v.verification_id,
+                            task.task_id,
+                            v.verified_by_agent_id,
+                            json.dumps(v.commands_run, ensure_ascii=False),
+                            1 if v.passed else 0,
+                            v.summary,
+                            json.dumps(v.failures, ensure_ascii=False),
+                            json.dumps(v.risks, ensure_ascii=False),
+                            json.dumps(v.execution_job_ids, ensure_ascii=False),
+                            _dt_to_iso(v.created_at),
+                        )
+                        for v in task.verification_results
+                    ],
                 )
 
             # Budgets
             conn.execute("DELETE FROM task_budgets WHERE task_id = ?;", (task.task_id,))
-            for b in task.budget_records:
-                agent_id = str(b.get("agent_id") or b.get("requested_by_agent_id") or "")
-                queue_job_id = str(b.get("queue_job_id") or "")
-                reserved = int(b.get("budget_reserved_tokens") or b.get("budget_reserved") or 0)
-                used = int(b.get("budget_used_tokens") or b.get("budget_used") or 0)
-                conn.execute(
+            if task.budget_records:
+                budget_rows = []
+                for b in task.budget_records:
+                    agent_id = str(b.get("agent_id") or b.get("requested_by_agent_id") or "")
+                    queue_job_id = str(b.get("queue_job_id") or "")
+                    reserved = int(b.get("budget_reserved_tokens") or b.get("budget_reserved") or 0)
+                    used = int(b.get("budget_used_tokens") or b.get("budget_used") or 0)
+                    budget_rows.append(
+                        (task.task_id, agent_id, queue_job_id, reserved, used, json.dumps(json_safe_tool_payload(b), ensure_ascii=False), _dt_to_iso(utc_now()))
+                    )
+                conn.executemany(
                     "INSERT INTO task_budgets (task_id, agent_id, queue_job_id, budget_reserved_tokens, budget_used_tokens, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
-                    (task.task_id, agent_id, queue_job_id, reserved, used, json.dumps(json_safe_tool_payload(b), ensure_ascii=False), _dt_to_iso(utc_now())),
+                    budget_rows,
                 )
 
             # Integration evidence records
             conn.execute("DELETE FROM task_integration_evidence WHERE task_id = ?;", (task.task_id,))
-            for ev in task.integration_evidence_records:
-                conn.execute(
+            if task.integration_evidence_records:
+                conn.executemany(
                     """
                     INSERT INTO task_integration_evidence (
                         task_id, entrypoint, evidence_path, summary, source_references,
                         observable_result, verification_source, reviewer, recorded_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    (
-                        task.task_id,
-                        str(ev.get("entrypoint") or ""),
-                        json.dumps(ev.get("evidence_path") or ev.get("path") or [], ensure_ascii=False),
-                        str(ev.get("summary") or ""),
-                        json.dumps(ev.get("source_references") or [], ensure_ascii=False),
-                        str(ev.get("observable_result") or ""),
-                        str(ev.get("verification_source") or ""),
-                        str(ev.get("reviewer") or ""),
-                        str(ev.get("recorded_at") or _dt_to_iso(utc_now())),
-                    ),
+                    [
+                        (
+                            task.task_id,
+                            str(ev.get("entrypoint") or ""),
+                            json.dumps(ev.get("evidence_path") or ev.get("path") or [], ensure_ascii=False),
+                            str(ev.get("summary") or ""),
+                            json.dumps(ev.get("source_references") or [], ensure_ascii=False),
+                            str(ev.get("observable_result") or ""),
+                            str(ev.get("verification_source") or ""),
+                            str(ev.get("reviewer") or ""),
+                            str(ev.get("recorded_at") or _dt_to_iso(utc_now())),
+                        )
+                        for ev in task.integration_evidence_records
+                    ],
                 )
 
         return task

@@ -871,3 +871,39 @@ def test_checkpoint_resume_handles_omitted_or_aliased_reason_field() -> None:
     assert decision2.safe_to_continue is True
     assert decision2.reason == "new task is unrelated to existing candidates"
 
+
+def test_checkpoint_resume_normalizes_task_id_and_checkpoint_for_start_fresh() -> None:
+    """When a model outputs start_fresh but echoes candidate task_id, it is safely normalized to empty string."""
+    cand = candidate()
+    cand["task_id"] = "task_candidate_123"
+
+    class _EchoingCandidateTaskModel:
+        def with_structured_output(self, _schema, *, method: str, strict: bool):
+            return self
+
+        def invoke(self, _messages, **kwargs):
+            return {
+                "action": "start_fresh",
+                "task_id": "task_candidate_123",
+                "checkpoint_id": "none",
+                "same_work": False,
+                "fresh_data_required": False,
+                "checkpoint_still_valid": False,
+                "side_effects_safe_to_repeat": False,
+                "safe_to_continue": True,
+                "reason": "new unrelated command must start fresh",
+            }
+
+    decider = CheckpointResumeDecider(_EchoingCandidateTaskModel())
+    decision = decider.decide(
+        current_request="start an unrelated feature",
+        route="coding",
+        requires_live_data=False,
+        candidates=[cand],
+    )
+
+    assert decision.action == "start_fresh"
+    assert decision.task_id == ""
+    assert decision.checkpoint_id == ""
+    assert decision.safe_to_continue is True
+
