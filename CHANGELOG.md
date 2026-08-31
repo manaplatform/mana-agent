@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-08-31
 
+- Fixed `/new` conversation reset and Codex runtime lifecycle management:
+  - Refactored `AsyncCodexAppServer` in `src/mana_agent/integrations/codex/client.py` to return a typed `CodexCancellationOutcome` from `interrupt()`, enforce bounded grace periods (default 2.0s), and perform deterministic process termination with SIGKILL escalation on close.
+  - Updated `CodexCodingBackend` in `src/mana_agent/integrations/codex/backend.py` to return typed cancellation outcomes, force close the app-server on unacknowledged interrupts, and ensure clean deterministic disposal of child processes, tasks, and runtime contexts.
+  - Replaced ad-hoc `_run_async()` thread creation in `CodexCodingAgentShim` (`src/mana_agent/integrations/codex/coding_agent_shim.py`) with a dedicated, stable `_CodexRuntimeRunner` event loop, eliminating cross-loop race conditions and unbounded thread joins.
+  - Implemented session-scoped backend runtime reuse in `CodexCodingAgentShim`, avoiding redundant app-server process startup and health checks across turns in the same session while properly recreating the runtime on `/new`, configuration changes, worktree switches, or process failures.
+  - Enforced `thread/start` on the first Codex execution after `/new` or session reset by clearing `resume_thread_id`, while maintaining `thread/resume` across subsequent turns within the same active session.
+  - Refactored `SessionService.replace` and `SessionService.delete` in `src/mana_agent/sessions/service.py` to fence old sessions, execute bounded cancellation and expensive disk/memory cleanup outside the session `RLock`, and wire `BackgroundProcessManager` as default process owner.
+  - Added session generation tokens and session fencing to `AgentChatGateway` in `src/mana_agent/gateway/chat_gateway.py` to discard late events, messages, tool results, and turn finalizations from superseded sessions.
+  - Added unit and gateway test suites in `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` covering bounded interrupt timeouts, forced process termination, `/new` conversation boundaries, thread start enforcement, and session generation fencing.
+  - User verification required: `python -m pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py tests/test_codex_runtime.py tests/test_codex_integration.py tests/gateway/test_chat_gateway.py -v`.
+
+
 - Fixed Windows CI test failures for session directory deletion (`PermissionError: [WinError 32]` on `turns.db`) and large workspace performance test duration:
   - Updated `ChatTurnStore._connect` in `src/mana_agent/gateway/chat_turn_store.py` to be a context manager that reliably closes the SQLite connection on exit, releasing open file handles to `turns.db` on Windows before session directories are removed.
   - Updated `CodingMemoryService._connect` in `src/mana_agent/services/coding_memory_service.py`, `TelegramUpdateStore._connect` in `src/mana_agent/connectors/telegram/store.py`, and `ObservabilityService._connect` in `src/mana_agent/observability/service.py` to use context managers with deterministic `finally: conn.close()` cleanup.

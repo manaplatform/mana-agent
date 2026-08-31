@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
-from mana_agent.integrations.codex.client import AsyncCodexAppServer
+from mana_agent.integrations.codex.client import AsyncCodexAppServer, CodexCancellationOutcome
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.event_adapter import adapt_codex_event
 from mana_agent.integrations.codex.exceptions import (
@@ -474,16 +474,34 @@ class CodexCodingBackend:
                     task_completed_at=task_completed_at,
                 )
 
-    async def cancel(self, task_id: str) -> None:
+    async def cancel(self, task_id: str, *, timeout_seconds: float = 2.0) -> CodexCancellationOutcome:
         active = self._active.get(str(task_id))
         if active is None or self._client is None:
-            raise CodexExecutionError(f"No active Codex task: {task_id}")
-        await self._client.interrupt(thread_id=active[0], turn_id=active[1])
+            return CodexCancellationOutcome(
+                acknowledged=False,
+                status="closed" if self._client is None else "not_found",
+                thread_id=active[0] if active else "",
+                turn_id=active[1] if active else "",
+                error=f"No active Codex task: {task_id}" if active is None else "Codex client is not running",
+            )
+        outcome = await self._client.interrupt(
+            thread_id=active[0],
+            turn_id=active[1],
+            timeout_seconds=timeout_seconds,
+        )
+        if not outcome.acknowledged:
+            await self.close()
+        return outcome
 
-    async def close(self) -> None:
+    async def close(self, *, wait_timeout: float = 1.0) -> None:
         try:
             if self._client is not None:
-                await self._client.close()
+                close_func = getattr(self._client, "close", None)
+                if callable(close_func):
+                    try:
+                        await self._client.close(wait_timeout=wait_timeout)
+                    except TypeError:
+                        await self._client.close()
         finally:
             self._client = None
             self._active.clear()

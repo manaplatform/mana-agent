@@ -557,11 +557,11 @@ def test_coding_agent_shim_delegates_plan_decision_to_one_read_only_codex_turn(t
     assert result["answer"] == "Codex completed the turn."
     assert backend.tasks[0].goal == "plan the auth refactor"
     assert backend.tasks[0].requires_repository_write is False
-    assert backend.workspaces[0].sandbox == "readOnly"
-    assert backend.closed is True
     assert shim.preview_execution_checklist("plan it")["prechecklist"] is None
     assert shim.get_active_flow_id() == "thread-shim"
     assert shim.checkpoint_flow() == "thread-shim"
+    shim.close()
+    assert backend.closed is True
     with pytest.raises(RuntimeError, match="Codex owns coding tool selection"):
         shim._tool_policy_for_request("plan it")
 

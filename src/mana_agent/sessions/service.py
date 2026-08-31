@@ -35,7 +35,15 @@ class SessionService:
         self.workspaces = workspace_service or WorkspaceService()
         self.history = history or ChatSessionHistory()
         self.memory_service = memory_service
-        self.process_manager = process_manager
+        if process_manager is None:
+            try:
+                from mana_agent.background import BackgroundProcessManager
+
+                self.process_manager = BackgroundProcessManager()
+            except Exception:
+                self.process_manager = None
+        else:
+            self.process_manager = process_manager
         self.browser_closer = browser_closer
         self._lock = threading.RLock()
         self._active_by_frontend: dict[str, str] = {}
@@ -115,35 +123,70 @@ class SessionService:
             return record
         return self.workspaces.rename_session(session_id, meaningful[:72])
 
-    def delete(self, session_id: str, *, gateway: Any | None = None) -> None:
-        with self._lock:
-            record = self.workspaces.store.get_session(session_id)
-            if gateway is not None and gateway.status(session_id) == "running":
-                if not gateway.cancel(session_id):
-                    raise SessionBusyError("session has an active turn that could not be cancelled")
-            if self.process_manager is not None:
-                self.process_manager.stop_session_processes(session_id, transient_only=True)
-            if self.browser_closer is not None:
-                self.browser_closer(session_id)
-            self._clear_memory(record)
-            from mana_agent.canvas.store import CanvasStore
+    def _fence_session(self, session_id: str) -> None:
+        tombstone = mana_home() / "runtime" / "session-tombstones" / f"{session_id}.json"
+        atomic_write_json(tombstone, {"session_id": session_id, "deleted": True})
 
-            CanvasStore().delete_session(session_id)
-            self.workspaces.delete_session(session_id)
+    def delete(self, session_id: str, *, gateway: Any | None = None) -> None:
+        record = self.workspaces.store.get_session(session_id)
+        self._fence_session(session_id)
+        if gateway is not None and gateway.status(session_id) == "running":
+            if not gateway.cancel(session_id, reason="session deleted", source="delete"):
+                raise SessionBusyError("session has an active turn that could not be cancelled")
+        if self.process_manager is not None:
+            self.process_manager.stop_session_processes(session_id, transient_only=False)
+        if self.browser_closer is not None:
+            try:
+                self.browser_closer(session_id)
+            except Exception:
+                pass
+        with self._lock:
             for frontend, active in list(self._active_by_frontend.items()):
                 if active == session_id:
                     self._active_by_frontend.pop(frontend, None)
+        self._clear_memory(record)
+        from mana_agent.canvas.store import CanvasStore
+
+        try:
+            CanvasStore().delete_session(session_id)
+        except Exception:
+            pass
+        self.workspaces.delete_session(session_id)
 
     def replace(
         self, session_id: str, *, gateway: Any | None, frontend: str
     ) -> SessionRecord:
         record = self.workspaces.store.get_session(session_id)
-        self.delete(session_id, gateway=gateway)
-        return self.create(record.cwd, workspace_id=record.workspace_id, frontend=frontend)
+        self._fence_session(session_id)
+        if gateway is not None and gateway.status(session_id) == "running":
+            gateway.cancel(session_id, reason="session replaced by /new", source="new")
+        if self.process_manager is not None:
+            self.process_manager.stop_session_processes(session_id, transient_only=False)
+        if self.browser_closer is not None:
+            try:
+                self.browser_closer(session_id)
+            except Exception:
+                pass
+        with self._lock:
+            new_record = self.workspaces.create_session(
+                record.cwd, workspace_id=record.workspace_id
+            )
+            self._active_by_frontend[frontend] = new_record.session_id
+            for f_name, active in list(self._active_by_frontend.items()):
+                if active == session_id:
+                    self._active_by_frontend.pop(f_name, None)
+        self._clear_memory(record)
+        from mana_agent.canvas.store import CanvasStore
+
+        try:
+            CanvasStore().delete_session(session_id)
+        except Exception:
+            pass
+        self.workspaces.delete_session(session_id)
+        return new_record
 
     def _clear_memory(self, record: SessionRecord) -> None:
-        tombstone = mana_home() / "runtime" / "session-tombstones" / f"{record.session_id}.json"
-        atomic_write_json(tombstone, {"session_id": record.session_id, "deleted": True})
+        self._fence_session(record.session_id)
         memory = self.memory_service
         if memory is None or not hasattr(memory, "clear"):
             return
