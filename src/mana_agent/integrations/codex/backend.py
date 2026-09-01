@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import hashlib
+import logging
 import os
 import subprocess
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.integrations.codex.client import AsyncCodexAppServer, CodexCancellationOutcome

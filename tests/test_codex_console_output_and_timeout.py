@@ -49,12 +49,13 @@ from mana_agent.integrations.codex.result_parser import parse_codex_result
 
 def _git_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
-    (path / "app.py").write_text("print('hello')\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-qm", "initial"], cwd=path, check=True)
+    if not (path / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
+        (path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "app.py"], cwd=path, check=True)
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=path, check=True)
 
 
 def _workspace(tmp_path: Path) -> WorkspaceContext:
@@ -98,7 +99,8 @@ class _MockCodexClient:
         if self.delay_before_notifications > 0:
             await asyncio.sleep(self.delay_before_notifications)
         for item in self._notification_queues.get(thread_id, []):
-            delay = item.pop("_delay", 0)
+            params = item.get("params") if isinstance(item.get("params"), dict) else {}
+            delay = item.pop("_delay", 0) or params.pop("_delay", 0)
             if delay:
                 await asyncio.sleep(delay)
             yield item
@@ -214,10 +216,10 @@ def test_codex_timeout_before_first_output(tmp_path: Path) -> None:
     """Verify timeout before any output triggers interruption and clean error event."""
     client = _MockCodexClient()
     # Hang before yielding any notification
-    client.delay_before_notifications = 2.0
+    client.delay_before_notifications = 1.5
 
     backend = CodexCodingBackend(
-        CodexSettings(enabled=True, task_timeout_seconds=0.1),
+        CodexSettings(enabled=True, task_timeout_seconds=1),
         client_factory=lambda *a: client,
     )
 
@@ -274,14 +276,14 @@ def test_codex_timeout_after_partial_output(tmp_path: Path) -> None:
                 "threadId": "th-1",
                 "itemId": "cmd-1",
                 "delta": "    Running unittests\n",
-                "_delay": 0.5,  # will trigger task_timeout_seconds
+                "_delay": 1.5,  # will trigger task_timeout_seconds (1s)
             },
         },
     ]
     client.queue_notifications("thread-mock-1", script)
 
     backend = CodexCodingBackend(
-        CodexSettings(enabled=True, task_timeout_seconds=0.2),
+        CodexSettings(enabled=True, task_timeout_seconds=1),
         client_factory=lambda *a: client,
     )
 
@@ -313,10 +315,10 @@ def test_codex_retry_after_timeout_cleans_state_and_reattaches(tmp_path: Path) -
     """Verify retrying after a timeout establishes a fresh stream without duplicate output."""
     client = _MockCodexClient()
     # Turn 1: hangs and times out
-    client.queue_notifications("thread-mock-1", [{"method": "turn/started", "_delay": 1.0}])
+    client.queue_notifications("thread-mock-1", [{"method": "turn/started", "_delay": 1.5}])
 
     backend = CodexCodingBackend(
-        CodexSettings(enabled=True, task_timeout_seconds=0.1),
+        CodexSettings(enabled=True, task_timeout_seconds=1),
         client_factory=lambda *a: client,
     )
 

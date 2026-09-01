@@ -171,16 +171,27 @@ class CodexCodingAgentShim:
                 cancel_func = getattr(backend, "cancel", None)
                 if callable(cancel_func):
                     try:
-                        outcome = self._runner.run(backend.cancel(active_task_id, timeout_seconds=2.0), timeout=3.0)
+                        try:
+                            coro = backend.cancel(active_task_id, timeout_seconds=2.0)
+                        except TypeError:
+                            coro = backend.cancel(active_task_id)
+                        outcome = self._runner.run(coro, timeout=3.0)
                         if isinstance(outcome, CodexCancellationOutcome) and not outcome.acknowledged:
-                            self._runner.run(backend.close(), timeout=2.0)
+                            close_func = getattr(backend, "close", None)
+                            if callable(close_func):
+                                try:
+                                    self._runner.run(backend.close(), timeout=2.0)
+                                except Exception:
+                                    pass
                         return True
                     except Exception:
                         logger.debug("Failed to cancel active codex turn for %s, forcing close", active_task_id, exc_info=True)
-                        try:
-                            self._runner.run(backend.close(), timeout=2.0)
-                        except Exception:
-                            pass
+                        close_func = getattr(backend, "close", None)
+                        if callable(close_func):
+                            try:
+                                self._runner.run(backend.close(), timeout=2.0)
+                            except Exception:
+                                pass
                         return False
         return False
 
@@ -834,6 +845,7 @@ class CodexCodingAgentShim:
             # Do not publish assistant generation / reasoning / raw dumps to chat UI.
             return
 
+        safe = progress_event_payload(event)
         output_preview = str(safe.get("output_preview") or event.output_preview or "")
         # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
         progress = AgentEvent(
