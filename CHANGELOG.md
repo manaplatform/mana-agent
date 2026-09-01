@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-01
 
+- Fixed `UnboundLocalError: cannot access local variable 'output_chunks_count' where it is not associated with a value` in `CodexCodingBackend.stream`:
+  - Moved the initialization of `output_chunks_count`, `first_output_at`, and `last_output_at` prior to the outer `try:` block in `src/mana_agent/integrations/codex/backend.py`, ensuring exception handlers and timeout logging safely access `output_chunks_count` even when timeouts or errors occur during `thread/start` or `turn/start`.
+  - Added regression test `test_codex_timeout_during_thread_or_turn_start` in `tests/test_codex_console_output_and_timeout.py`.
+  - User verification required: `python -m pytest tests/test_codex_console_output_and_timeout.py tests/test_codex_integration.py -v`.
+
 - Restored the configured SQLite `synchronous=NORMAL` policy for every file-backed workspace connection, preventing short-lived task-save connections from reverting to the slower default on Windows CI.
   - User verification required: `python -m pytest tests/persistence/test_workspace_sqlite_repository.py tests/persistence/test_persistence_concurrency_and_performance.py -q`.
 
